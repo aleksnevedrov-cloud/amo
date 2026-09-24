@@ -1,0 +1,27 @@
+{
+  "name": "@ai-door/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "node ../../scripts/build-app.mjs src/server.ts dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-door/amo": "workspace:*",
+    "@ai-door/db": "workspace:*",
+    "@ai-door/shared": "workspace:*",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "fastify": "^5.12.5",
+    "ioredis": "^5.11.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "jose": "^6.2.12"
+  }
+}

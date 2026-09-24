@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "AI door sales agent",
+    "short_description": "An AI agent that talks to customers as a door salesperson",
+    "description": "The AI agent advises customers using the catalog, calculates prices, reads photos, files and voice messages, creates tasks and hands the conversation over to a manager."
+  },
+  "settings": {
+    "custom": "Status"
+  },
+  "advanced": {
+    "title": "AI sales agent: settings"
+  }
+}
