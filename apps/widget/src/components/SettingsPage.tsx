@@ -3,6 +3,7 @@ import type { Dictionaries, Mode, Status, WidgetApi, WidgetSettings } from '../a
 import { CatalogStatus } from './Catalog.tsx';
 import { Field, linesToList, NumberInput } from './fields.tsx';
 import { Drafts } from './Drafts.tsx';
+import { EmailSettings } from './EmailSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
 import { Knowledge } from './Knowledge.tsx';
@@ -31,6 +32,7 @@ const TABS = [
   ['model', 'Модель'],
   ['where', 'Где работает'],
   ['handoff', 'Передача менеджеру'],
+  ['email', 'Почта'],
   ['catalog', 'Каталог'],
   ['pricing', 'Правила цен'],
   ['knowledge', 'База знаний'],
@@ -40,7 +42,7 @@ const TABS = [
   ['journal', 'Журнал'],
 ] as const;
 type Tab = (typeof TABS)[number][0];
-const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'catalog', 'limits']);
+const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'email', 'catalog', 'limits']);
 
 /** Расширенные настройки виджета (раздел 11.1 ТЗ). */
 export function SettingsPage({ api }: { api: WidgetApi }) {
@@ -65,7 +67,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   const dirty = JSON.stringify(draft) !== JSON.stringify(props.initial);
 
   useEffect(() => {
-    if ((tab === 'where' || tab === 'handoff') && !dict) api.dictionaries().then(setDict, () => undefined);
+    if ((tab === 'where' || tab === 'handoff' || tab === 'email') && !dict) api.dictionaries().then(setDict, () => undefined);
   }, [tab, dict, api]);
 
   const set = <K extends keyof WidgetSettings>(k: K, v: Partial<WidgetSettings[K]>) =>
@@ -350,6 +352,15 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
         </>
       )}
 
+      {tab === 'email' && (
+        <EmailSettings
+          api={api}
+          value={draft.email}
+          dict={dict}
+          saved={JSON.stringify(draft.email) === JSON.stringify(props.initial.email)}
+          onChange={(patch) => set('email', patch)}
+        />
+      )}
       {tab === 'knowledge' && <Knowledge api={api} />}
       {tab === 'pricing' && <PricingEditor api={api} />}
       {tab === 'drafts' && <Drafts api={api} />}

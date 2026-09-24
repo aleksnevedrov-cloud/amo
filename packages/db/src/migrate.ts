@@ -3,11 +3,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTransaction, type Db } from './pool.ts';
 
-const DEFAULT_DIR = fileURLToPath(new URL('../migrations/', import.meta.url));
 const LOCK_KEY = 7_214_001; // advisory lock: одна миграция за раз
 
 /** Применяет по порядку SQL-файлы из migrations/, которых ещё нет в schema_migrations. */
-export async function migrate(db: Db, dir = DEFAULT_DIR): Promise<string[]> {
+export async function migrate(db: Db, dir: string = fileURLToPath(new URL('../migrations/', import.meta.url))): Promise<string[]> {
   return withTransaction(db, async (c) => {
     await c.query('SELECT pg_advisory_xact_lock($1)', [LOCK_KEY]);
     await c.query(

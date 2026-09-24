@@ -144,6 +144,14 @@ export class WidgetApi {
   markUsed = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/used`);
   summary = (leadId: number) => this.call<{ text: string; costRub: number }>('POST', `/widget/v1/leads/${leadId}/summary`);
 
+  emailStatus = () =>
+    this.call<{ enabled: boolean; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }>(
+      'GET',
+      '/widget/v1/email/status',
+    );
+  setEmailPassword = (password: string) => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password });
+  testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
+
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await this.self.$authorizedAjax({
       url: new URL(path, this.baseUrl).toString(),

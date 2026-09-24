@@ -10,6 +10,7 @@ import {
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import { AccountsRepo, createPool, DialogRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
 import { PricingRepo } from '@ai-door/pricing';
 import { KnowledgeRepo } from '@ai-door/knowledge';
@@ -21,10 +22,13 @@ import {
   IMPORT_CHECK_EVERY_MS,
   IMPORT_FEEDS_JOB,
   MAINTENANCE_QUEUE,
+  POLL_MAIL_EVERY_MS,
+  POLL_MAIL_JOB,
   REFRESH_EVERY_MS,
   REFRESH_TOKENS_JOB,
   runImportFeeds,
   runIncoming,
+  runPollMail,
   runRefreshTokens,
 } from './jobs.ts';
 
@@ -46,23 +50,53 @@ const journal = new JournalRepo(db);
 const catalog = new CatalogRepo(db);
 const importer = new CatalogImporter(db);
 const knowledge = new KnowledgeRepo(db);
+const mail = new MailRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
+const amoClient = async (accountId: number) => {
+  const account = await accounts.get(accountId);
+  if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён`);
+  return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
+};
+const emailChannel = new EmailChannel({
+  settings,
+  mail,
+  amo: amoClient,
+  connect: (cfg) => ImapMailbox.connect(cfg),
+  sender: (cfg) => new SmtpSender(cfg),
+});
 
-// Обслуживание: токены и импорт фидов.
+// Очередь входящих — нужна и опросу почты.
+const incoming = new Queue<IncomingJob>(INCOMING_QUEUE, { connection });
+
+// Обслуживание: токены, импорт фидов, опрос почты.
 const maintenance = new Queue(MAINTENANCE_QUEUE, { connection });
 await maintenance.upsertJobScheduler(REFRESH_TOKENS_JOB, { every: REFRESH_EVERY_MS }, { name: REFRESH_TOKENS_JOB });
 await maintenance.upsertJobScheduler(IMPORT_FEEDS_JOB, { every: IMPORT_CHECK_EVERY_MS }, { name: IMPORT_FEEDS_JOB });
+await maintenance.upsertJobScheduler(POLL_MAIL_JOB, { every: POLL_MAIL_EVERY_MS }, { name: POLL_MAIL_JOB });
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
   async (job) => {
     if (job.name === REFRESH_TOKENS_JOB) return runRefreshTokens(tokenService, log);
     if (job.name === IMPORT_FEEDS_JOB) return runImportFeeds({ settings, catalog, importer, journal }, log);
+    if (job.name === POLL_MAIL_JOB) {
+      return runPollMail(
+        {
+          settings,
+          mail,
+          dialog,
+          journal,
+          amo: amoClient,
+          connect: (cfg) => ImapMailbox.connect(cfg),
+          schedule: (j, w) => scheduleLead(incoming, j, w),
+        },
+        log,
+      );
+    }
     throw new Error(`Неизвестная задача ${job.name}`);
   },
   { connection, concurrency: 1 },
 );
 
 // Входящие сообщения клиентов.
-const incoming = new Queue<IncomingJob>(INCOMING_QUEUE, { connection });
 let pipeline: DialogPipeline | null = null;
 if (env.ANTHROPIC_API_KEY) {
   const llm = new AnthropicLlm(env.ANTHROPIC_API_KEY);
@@ -77,6 +111,10 @@ if (env.ANTHROPIC_API_KEY) {
     suggestions: new SuggestionsRepo(db),
     orchestrator: new Orchestrator(llm),
     llm,
+    email: {
+      reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),
+      managerRepliedSince: (a, addrs, since) => emailChannel.managerRepliedSince(a, addrs, since),
+    },
     stt(provider) {
       if (provider === 'yandex' && env.YANDEX_SPEECHKIT_API_KEY && env.YANDEX_FOLDER_ID) {
         return new YandexStt(env.YANDEX_SPEECHKIT_API_KEY, env.YANDEX_FOLDER_ID);

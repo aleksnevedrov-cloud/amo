@@ -1,4 +1,5 @@
 import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@ai-door/tools';
+import { widgetEmailRoutes } from './widget-email.ts';
 import { widgetPhase2Routes } from './widget-phase2.ts';
 import { AmoApiClient, disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@ai-door/amo';
 import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
@@ -274,6 +275,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
       });
 
       widgetPhase2Routes(api, deps, principal, requireAdmin);
+      widgetEmailRoutes(api, deps, principal, requireAdmin);
     },
     { prefix: '/widget/v1' },
   );

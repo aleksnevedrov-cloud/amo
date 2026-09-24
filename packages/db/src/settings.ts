@@ -100,6 +100,35 @@ export const widgetSettingsSchema = z
       })
       .strict()
       .default({}),
+    email: z
+      .object({
+        enabled: z.boolean().default(false),
+        imapHost: z.string().max(200).default(''),
+        imapPort: z.number().int().min(1).max(65535).default(993),
+        imapSecure: z.boolean().default(true),
+        smtpHost: z.string().max(200).default(''),
+        smtpPort: z.number().int().min(1).max(65535).default(465),
+        smtpSecure: z.boolean().default(true),
+        username: z.string().max(200).default(''),
+        /** Адрес отправителя; пусто — как логин. */
+        fromAddress: z.union([z.literal(''), z.string().email()]).default(''),
+        fromName: z.string().max(200).default('РФ-Двери'),
+        inboxFolder: z.string().max(200).default('INBOX'),
+        /** Пусто — определить по специальной метке \\Sent. */
+        sentFolder: z.string().max(200).default(''),
+        saveToSent: z.boolean().default(true),
+        signature: z.string().max(2000).default('С уважением,\nРФ-Двери\nrf-dveri.ru'),
+        /** Отправитель не найден в amo: создать контакт и сделку или пропустить. */
+        unknownSender: z.enum(['create_lead', 'skip']).default('create_lead'),
+        newLeadPipelineId: z.number().int().positive().nullable().default(null),
+        newLeadStatusId: z.number().int().positive().nullable().default(null),
+        /** Защита от петель с автоответчиками. */
+        maxRepliesPerAddressPerDay: z.number().int().min(1).max(100).default(10),
+        /** Адреса и домены, на которые AI не отвечает (поставщики, сервисы). */
+        ignore: z.array(z.string().max(200)).max(200).default([]),
+      })
+      .strict()
+      .default({}),
     stt: z
       .object({
         provider: z.enum(['off', 'yandex', 'openai']).default('off'),
@@ -152,6 +181,15 @@ export class SettingsRepo {
       ]);
       return { version: rows[0].version as number };
     });
+  }
+
+  /** Аккаунты с включённой почтой — для опроса ящиков. */
+  async listWithEmail(): Promise<number[]> {
+    const { rows } = await this.db.query(
+      `SELECT s.account_id FROM widget_settings s JOIN accounts a ON a.id = s.account_id
+        WHERE a.uninstalled_at IS NULL AND (s.settings->'email'->>'enabled')::boolean IS TRUE`,
+    );
+    return rows.map((r) => Number(r.account_id));
   }
 
   /** Аккаунты с включённым AI и заданным фидом — для планового импорта. */

@@ -40,7 +40,7 @@ export function amoFetch(mock: AmoMock): typeof fetch {
   }) as typeof fetch;
 }
 
-export async function setup(opts: { llm?: LlmClient | null } = {}) {
+export async function setup(opts: { llm?: LlmClient | null; mailConnect?: Deps['mailConnect']; mailSender?: Deps['mailSender'] } = {}) {
   const { db, drop } = await freshDb();
   const env = loadEnv({
     NODE_ENV: 'test',
@@ -59,6 +59,8 @@ export async function setup(opts: { llm?: LlmClient | null } = {}) {
     ...createDeps(env, {
       db,
       llm: opts.llm ?? null,
+      ...(opts.mailConnect ? { mailConnect: opts.mailConnect } : {}),
+      ...(opts.mailSender ? { mailSender: opts.mailSender } : {}),
       schedule: async (job, windowMs) => void scheduled.push({ job, windowMs }),
       fetch: amoFetch(amo),
       redis: { ping: async () => 'PONG' },

@@ -99,6 +99,67 @@ export class AmoApiClient {
     return this.request<AmoLead>('GET', `/api/v4/leads/${id}?with=contacts`, undefined, { allow404: true });
   }
 
+  /** Контакты, у которых e-mail совпадает точно (поиск amo — полнотекстовый, поэтому фильтруем). */
+  async findContactsByEmail(email: string): Promise<(AmoContact & { _embedded?: { leads?: { id: number }[] } })[]> {
+    const q = new URLSearchParams({ query: email, with: 'leads', limit: '10' });
+    const res = await this.request<{ _embedded?: { contacts?: (AmoContact & { _embedded?: { leads?: { id: number }[] } })[] } }>(
+      'GET',
+      `/api/v4/contacts?${q}`,
+    );
+    const target = email.toLowerCase();
+    return (res?._embedded?.contacts ?? []).filter((c) => fieldValues(c.custom_fields_values, 'EMAIL').some((v) => v.toLowerCase() === target));
+  }
+
+  async getLeadsByIds(ids: number[]): Promise<AmoLead[]> {
+    if (!ids.length) return [];
+    const q = new URLSearchParams(ids.slice(0, 50).map((id): [string, string] => ['filter[id][]', String(id)]));
+    const res = await this.request<{ _embedded?: { leads?: AmoLead[] } }>('GET', `/api/v4/leads?${q}`);
+    return res?._embedded?.leads ?? [];
+  }
+
+  /** Новая сделка для существующего контакта. */
+  async createLeadForContact(contactId: number, name: string, pipelineId?: number | null, statusId?: number | null): Promise<number> {
+    const res = await this.request<{ _embedded: { leads: { id: number }[] } }>('POST', '/api/v4/leads', [
+      {
+        name,
+        ...(pipelineId ? { pipeline_id: pipelineId } : {}),
+        ...(statusId ? { status_id: statusId } : {}),
+        _embedded: { contacts: [{ id: contactId }] },
+      },
+    ]);
+    const id = res?._embedded.leads[0]?.id;
+    if (!id) throw new AmoError('amo не вернул id сделки');
+    return id;
+  }
+
+  /** Сделка и контакт одним запросом (комплексное добавление). */
+  async createLeadWithContact(a: {
+    leadName: string;
+    contactName: string;
+    email: string;
+    pipelineId?: number | null;
+    statusId?: number | null;
+  }): Promise<{ leadId: number; contactId: number }> {
+    const res = await this.request<{ id: number; contact_id: number }[]>('POST', '/api/v4/leads/complex', [
+      {
+        name: a.leadName,
+        ...(a.pipelineId ? { pipeline_id: a.pipelineId } : {}),
+        ...(a.statusId ? { status_id: a.statusId } : {}),
+        _embedded: {
+          contacts: [
+            {
+              name: a.contactName,
+              custom_fields_values: [{ field_code: 'EMAIL', values: [{ value: a.email, enum_code: 'WORK' }] }],
+            },
+          ],
+        },
+      },
+    ]);
+    const r = res?.[0];
+    if (!r?.id) throw new AmoError('amo не вернул id сделки');
+    return { leadId: r.id, contactId: r.contact_id };
+  }
+
   async getContact(id: number): Promise<AmoContact | null> {
     return this.request<AmoContact>('GET', `/api/v4/contacts/${id}`, undefined, { allow404: true });
   }

@@ -19,7 +19,9 @@ import {
   SuggestionsRepo,
   type Db,
 } from '@ai-door/db';
+import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
 import { PricingRepo } from '@ai-door/pricing';
+import { AmoApiClient } from '@ai-door/amo';
 import { KnowledgeRepo } from '@ai-door/knowledge';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@ai-door/shared';
 import type { Queue } from 'bullmq';
@@ -43,6 +45,11 @@ export interface Deps {
   importer: CatalogImporter;
   knowledge: KnowledgeRepo;
   pricing: PricingRepo;
+  mail: MailRepo;
+  emailChannel: EmailChannel;
+  /** Подключение к ящику и SMTP (подменяются в тестах). */
+  mailConnect(cfg: MailServerConfig): Promise<Mailbox>;
+  mailSender(cfg: MailServerConfig): MailSender;
   memory: MemoryRepo;
   suggestions: SuggestionsRepo;
   /** null — не задан ANTHROPIC_API_KEY. */
@@ -55,7 +62,9 @@ export interface Deps {
 }
 
 export type DepsOverrides = Partial<
-  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge'> & { llm: LlmClient | null }
+  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender'> & {
+    llm: LlmClient | null;
+  }
 >;
 
 export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
@@ -70,7 +79,8 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     redirectUri: amoRedirectUri(env),
     fetch: fetchImpl,
   });
-  const tokens = new PgTokenStore(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
+  const secretBox = new SecretBox(env.TOKEN_ENCRYPTION_KEY);
+  const tokens = new PgTokenStore(db, secretBox);
   const llm = overrides.llm !== undefined ? overrides.llm : env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
 
   let queue: Queue<IncomingJob> | null = null;
@@ -81,15 +91,37 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
       await scheduleLead(queue, job, windowMs);
     });
 
+  const tokenService = new TokenService(tokens, oauth, env.TOKEN_REFRESH_MARGIN_SEC * 1000, alerter);
+  const accounts = new AccountsRepo(db);
+  const settingsRepo = new SettingsRepo(db);
+  const mail = new MailRepo(db, secretBox);
+  const mailConnect = overrides.mailConnect ?? ((cfg: MailServerConfig) => ImapMailbox.connect(cfg));
+  const mailSender = overrides.mailSender ?? ((cfg: MailServerConfig) => new SmtpSender(cfg));
+  const emailChannel = new EmailChannel({
+    settings: settingsRepo,
+    mail,
+    connect: mailConnect,
+    sender: mailSender,
+    amo: async (accountId) => {
+      const a = await accounts.get(accountId);
+      if (!a) throw new Error('Аккаунт не подключён');
+      return new AmoApiClient(a.accountDomain, () => tokenService.getAccessToken(accountId), fetchImpl);
+    },
+  });
+
   return {
     env,
     db,
     redis,
     oauth,
     tokens,
-    tokenService: new TokenService(tokens, oauth, env.TOKEN_REFRESH_MARGIN_SEC * 1000, alerter),
-    accounts: new AccountsRepo(db),
-    settings: new SettingsRepo(db),
+    tokenService,
+    accounts,
+    settings: settingsRepo,
+    mail,
+    emailChannel,
+    mailConnect,
+    mailSender,
     dialog: new DialogRepo(db),
     journal: new JournalRepo(db),
     catalog: new CatalogRepo(db),

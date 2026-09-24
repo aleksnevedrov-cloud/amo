@@ -64,3 +64,41 @@ describe('runIncoming', () => {
     expect(again).toEqual([]);
   });
 });
+
+describe('runPollMail', () => {
+  it('опрашивает только аккаунты с включённой почтой', async () => {
+    const { runPollMail } = await import('../src/jobs.ts');
+    const { MailRepo } = await import('@ai-door/mail');
+    const { SecretBox } = await import('@ai-door/shared');
+    const { randomBytes } = await import('node:crypto');
+    await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { enabled: true, imapHost: 'imap.x.ru', smtpHost: 'smtp.x.ru', username: 'a@x.ru' } }));
+    const mail = new MailRepo(db, new SecretBox(randomBytes(32).toString('hex')));
+    await mail.setPassword(1, 'p', 1);
+    const connected: string[] = [];
+    const res = await runPollMail(
+      {
+        settings: new SettingsRepo(db),
+        mail,
+        dialog: new DialogRepo(db),
+        journal: new JournalRepo(db),
+        amo: async () => {
+          throw new Error('not used');
+        },
+        connect: async (cfg) => {
+          connected.push(cfg.imapHost);
+          return {
+            folderState: async () => ({ uidValidity: '1', maxUid: 5 }),
+            fetchAfter: async () => [],
+            findSentFolder: async () => null,
+            append: async () => undefined,
+            close: async () => undefined,
+          };
+        },
+        schedule: async () => undefined,
+      },
+      log,
+    );
+    expect(connected).toEqual(['imap.x.ru']);
+    expect(res).toEqual([expect.objectContaining({ accountId: 1, received: 0 })]);
+  });
+});

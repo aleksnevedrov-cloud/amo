@@ -97,6 +97,10 @@ export class SuggestionsRepo {
     return rows[0] ? row(rows[0]) : null;
   }
 
+  async markSent(accountId: number, id: number): Promise<void> {
+    await this.db.query(`UPDATE ai_suggestions SET status = 'sent' WHERE account_id = $1 AND id = $2`, [accountId, id]);
+  }
+
   /** Вернуть в «одобрено», если отправка не удалась. */
   async markApprovedAgain(accountId: number, id: number): Promise<void> {
     await this.db.query(`UPDATE ai_suggestions SET status = 'approved' WHERE account_id = $1 AND id = $2 AND status = 'sent'`, [accountId, id]);

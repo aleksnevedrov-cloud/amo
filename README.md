@@ -1,7 +1,7 @@
 # AI-агент продаж дверей — виджет amoCRM
 
 AI-агент ведёт переписку с клиентом в amoCRM как продавец дверей РФ-Двери (rf-dveri.ru).
-ТЗ: v2.0. Текущее состояние: **фаза 2 — Продажи** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md)).
+ТЗ: v2.0. Текущее состояние: **фаза 2 — Продажи** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md)).
 
 ## Состав
 
@@ -15,6 +15,7 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `packages/catalog` | Импорт фида YML, поиск по каталогу |
 | `packages/pricing` | Правила цен, расчёт черновика детализации, импорт/экспорт XLSX |
 | `packages/media` | Расшифровка голосовых (Yandex SpeechKit, Whisper) |
+| `packages/mail` | Почта: опрос ящика (IMAP), ответы (SMTP), привязка писем к сделкам |
 | `packages/knowledge` | База знаний: FAQ, тексты, статьи по URL |
 | `packages/amo` | Клиент amoCRM: OAuth, токены, API v4, Salesbot |
 | `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |

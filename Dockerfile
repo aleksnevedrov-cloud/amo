@@ -15,6 +15,7 @@ COPY packages/tools/package.json packages/tools/
 COPY packages/agent/package.json packages/agent/
 COPY packages/pricing/package.json packages/pricing/
 COPY packages/media/package.json packages/media/
+COPY packages/mail/package.json packages/mail/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .

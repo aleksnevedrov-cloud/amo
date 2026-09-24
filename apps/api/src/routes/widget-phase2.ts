@@ -106,6 +106,25 @@ export function widgetPhase2Routes(
     const b = z.object({ text: z.string().min(1).max(4000).optional() }).parse(req.body ?? {});
     const s = await deps.suggestions.get(p.accountId, id);
     if (!s || s.kind !== 'draft') return reply.code(404).send({ error: 'not_found' });
+
+    // Черновик ответа на письмо — отправляем сразу по почте, бот не нужен.
+    const meta = (s.details as { channel?: string; emailMeta?: Record<string, unknown> }).emailMeta;
+    if ((s.details as { channel?: string }).channel === 'email' && meta) {
+      const decided = await deps.suggestions.decide(p.accountId, id, 'approved', p.userId, b.text);
+      if (!decided) return reply.code(409).send({ error: 'already_decided' });
+      try {
+        await deps.emailChannel.reply(p.accountId, decided.leadId, { from: String(meta.from), ...meta }, decided.text);
+      } catch (err) {
+        await deps.journal.add({ accountId: p.accountId, leadId: decided.leadId, kind: 'error', summary: `Отправка письма: ${(err as Error).message}` });
+        return reply.code(502).send({ error: 'email_failed' });
+      }
+      await deps.suggestions.markSent(p.accountId, id);
+      await deps.dialog.addMessage(p.accountId, decided.leadId, 'ai', decided.text);
+      await deps.dialog.registerTurn(p.accountId, decided.leadId, false);
+      await deps.journal.add({ accountId: p.accountId, leadId: decided.leadId, kind: 'reply', summary: decided.text, details: { draftId: id, approvedBy: p.userId, channel: 'email' } });
+      return { ok: true };
+    }
+
     const { settings } = await deps.settings.get(p.accountId);
     if (!settings.salesbot.senderBotId) return reply.code(409).send({ error: 'no_sender_bot' });
     const decided = await deps.suggestions.decide(p.accountId, id, 'approved', p.userId, b.text);

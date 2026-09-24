@@ -51,6 +51,11 @@ export interface PipelineDeps {
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(provider: WidgetSettings['stt']['provider']): SttProvider | null;
   download?: typeof downloadAttachment;
+  /** Почта: ответы письмом и признак ответа менеджера. */
+  email?: {
+    reply(accountId: number, leadId: number, meta: Record<string, unknown>, text: string): Promise<unknown>;
+    managerRepliedSince(accountId: number, addresses: string[], since: Date): Promise<boolean>;
+  };
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
@@ -110,7 +115,7 @@ export class DialogPipeline {
       return await this.process(t);
     } finally {
       if (t.sendErrors.length) {
-        await this.journal(t, { kind: 'error', summary: 'Не удалось отправить ответ в чат', details: { errors: t.sendErrors } });
+        await this.journal(t, { kind: 'error', summary: 'Не удалось отправить ответ клиенту', details: { errors: t.sendErrors } });
       }
     }
   }
@@ -131,11 +136,15 @@ export class DialogPipeline {
 
     let state = await this.d.dialog.state(accountId, leadId);
     const now = this.d.now?.() ?? new Date();
+    const emails = t.pending.filter((m) => m.channel === 'email');
+    const chats = t.pending.filter((m) => m.channel !== 'email');
     if (!state.paused) {
-      // Менеджер уже пишет клиенту — AI замолкает (раздел 6 ТЗ).
+      // Менеджер уже пишет клиенту — AI замолкает (раздел 6 ТЗ): в чате — события amo, в почте — «Отправленные».
       const since = state.lastAiAt ?? new Date(now.getTime() - MANAGER_LOOKBACK_MS);
-      const outgoing = await access.api.getOutgoingChatEvents(leadId, since);
-      if (outgoing.some((e) => e.created_by > 0)) {
+      const chatManager = chats.length ? (await access.api.getOutgoingChatEvents(leadId, since)).some((e) => e.created_by > 0) : false;
+      const addresses = emails.map((m) => String(m.meta.from ?? '')).filter(Boolean);
+      const mailManager = addresses.length && this.d.email ? await this.d.email.managerRepliedSince(accountId, addresses, since) : false;
+      if (chatManager || mailManager) {
         await this.d.dialog.pause(accountId, leadId, 'manager_message');
         await this.journal(t, { kind: 'pause', summary: 'Менеджер написал клиенту — AI на паузе' });
         state = await this.d.dialog.state(accountId, leadId);
@@ -202,7 +211,7 @@ export class DialogPipeline {
         ctx,
         tools,
         now,
-        dynamic: { memory: memoryText, pricing: pricingCodesHint(rules) },
+        dynamic: { memory: memoryText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
         clientFacts,
       });
     } catch (err) {
@@ -221,9 +230,12 @@ export class DialogPipeline {
       costUsd: result.cost.usd,
       costRub: result.cost.usd * settings.billing.usdRubRate,
     };
+    const lastEmail = emails.at(-1);
     const details = {
       model: result.model,
       delivery,
+      channel: lastEmail && !chats.length ? 'email' : 'chat',
+      ...(lastEmail ? { emailMeta: lastEmail.meta } : {}),
       toolCalls: result.toolCalls,
       sources: result.sources,
       rejections: result.rejections,
@@ -266,7 +278,7 @@ export class DialogPipeline {
     }
 
     const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
-    if (settings.where.typingDelay) await (this.d.sleep ?? defaultSleep)(Math.min(1500 + result.text.length * 25, 8000));
+    if (settings.where.typingDelay && chats.length) await (this.d.sleep ?? defaultSleep)(Math.min(1500 + result.text.length * 25, 8000));
     await this.journal(t, { kind: 'reply', summary: result.text, details, ...cost });
     if (misses >= 2) {
       await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
@@ -357,9 +369,24 @@ export class DialogPipeline {
     return { status: 'handoff', reason };
   }
 
-  /** Отвечает последнему боту пачки, остальные просто продолжает. */
+  /** Отвечает последнему боту пачки (остальные просто продолжает) или письмом на последнее письмо клиента. */
   private async release(t: Turn, messages: string[]): Promise<void> {
-    const withUrl = t.pending.filter((m) => m.returnUrl);
+    const emails = t.pending.filter((m) => m.channel === 'email');
+    const chatsWithUrl = t.pending.filter((m) => m.channel !== 'email' && m.returnUrl);
+    // Ответ письмом, если клиент писал только по почте (в смешанной пачке отвечаем в чат).
+    const lastEmail = emails.at(-1);
+    if (lastEmail && !lastEmail.meta.answered && !chatsWithUrl.length && messages.length) {
+      if (!this.d.email) t.sendErrors.push('Почта не подключена');
+      else {
+        try {
+          await this.d.email.reply(t.accountId, t.leadId, lastEmail.meta, messages.join('\n\n'));
+        } catch (err) {
+          t.sendErrors.push((err as Error).message);
+        }
+      }
+      for (const m of emails) m.meta = { ...m.meta, answered: true };
+    }
+    const withUrl = chatsWithUrl;
     for (const [i, m] of withUrl.entries()) {
       try {
         await this.d.send(t.access, m.returnUrl as string, i === withUrl.length - 1 ? messages : []);

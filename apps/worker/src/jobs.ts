@@ -2,12 +2,15 @@ import type { DialogPipeline, IncomingJob } from '@ai-door/agent';
 import type { TokenService } from '@ai-door/amo';
 import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import type { DialogRepo, JournalRepo, SettingsRepo } from '@ai-door/db';
+import { pollMailbox, type PollDeps, type PollResult } from '@ai-door/mail';
 
 export const MAINTENANCE_QUEUE = 'maintenance';
 export const REFRESH_TOKENS_JOB = 'refresh-tokens';
 export const IMPORT_FEEDS_JOB = 'import-feeds';
 export const REFRESH_EVERY_MS = 30 * 60_000;
 export const IMPORT_CHECK_EVERY_MS = 30 * 60_000;
+export const POLL_MAIL_JOB = 'poll-mail';
+export const POLL_MAIL_EVERY_MS = 60_000;
 
 export interface JobLogger {
   info(obj: object, msg: string): void;
@@ -61,4 +64,16 @@ export async function runIncoming(
     await reschedule(job, settings.where.batchWindowSec * 1000);
   }
   return outcome;
+}
+
+/** Опрос почтовых ящиков всех аккаунтов с включённой почтой. */
+export async function runPollMail(d: PollDeps, log: JobLogger): Promise<PollResult[]> {
+  const results: PollResult[] = [];
+  for (const accountId of await d.settings.listWithEmail()) {
+    const r = await pollMailbox(accountId, d);
+    results.push(r);
+    if (r.error) log.warn(r, 'mail: ошибка опроса ящика');
+    else if (r.received || r.managerReplies) log.info(r, 'mail: опрос ящика');
+  }
+  return results;
 }

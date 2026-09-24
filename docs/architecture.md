@@ -1,4 +1,4 @@
-# Архитектура (фазы 0–2)
+# Архитектура (фазы 0–2 + почта)
 
 ```mermaid
 flowchart LR
@@ -111,3 +111,29 @@ Anthropic, по умолчанию `claude-opus-5` с глубиной расс�
 
 `packages/media`: Yandex SpeechKit (синхронно, до 30 с, OGG Opus) или Whisper. Вложение скачивается с проверкой
 адреса и размера, расшифровка идёт в модель с пометкой «[Голосовое сообщение]». Прочие вложения — фаза 3.
+
+## Почта
+
+`packages/mail`, воркер (задача `poll-mail` раз в минуту), `EmailChannel`.
+
+```mermaid
+flowchart LR
+  MB[(Почтовый ящик)] -- IMAP только чтение --> P[pollMailbox]
+  P -- поиск контакта по e-mail / создание сделки --> AMO[amoCRM]
+  P -- pending_messages channel=email --> Q[Очередь склейки]
+  Q --> DP[DialogPipeline]
+  DP -- ответ --> EC[EmailChannel]
+  EC -- SMTP, Re: в цепочку --> MB
+  EC -- копия в «Отправленные» --> MB
+  EC -- примечание --> AMO
+  MB -- «Отправленные»: письма менеджера --> P
+```
+
+- Позиция чтения — UID и UIDVALIDITY по папке (`mailbox_state`). Первый запуск и смена UIDVALIDITY только
+  запоминают позицию; позиция сохраняется после каждого письма.
+- Фильтры: Auto-Submitted, Precedence, List-*, noreply, свой адрес, исключения, лимит ответов на адрес за сутки
+  (`email_outbound`). Письма AI помечаются `X-AI-Door` и `Auto-Submitted: auto-replied` (RFC 3834).
+- Цитаты прошлой переписки и подпись вырезаются перед отправкой в модель; HTML → текст.
+- Ответ менеджера: письма из «Отправленных» без метки AI → `email_manager_activity` → пауза AI по сделке.
+- Пароль ящика — `mailbox_credentials`, AES-256-GCM тем же ключом, что токены amo. Через API не читается.
+- Адаптеры IMAP (imapflow) и SMTP (nodemailer) проверены тестами на настоящих протоколах (локальные серверы).
