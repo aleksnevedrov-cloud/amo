@@ -16,6 +16,8 @@ export interface PendingMessage {
   leadId: number;
   text: string;
   returnUrl: string | null;
+  attachmentUrl: string | null;
+  attachmentType: string | null;
   receivedAt: Date;
 }
 
@@ -87,10 +89,17 @@ export class DialogRepo {
     return rows.map((r) => ({ role: r.role, text: r.text, createdAt: r.created_at }));
   }
 
-  async enqueue(accountId: number, leadId: number, text: string, returnUrl: string | null): Promise<number> {
+  async enqueue(
+    accountId: number,
+    leadId: number,
+    text: string,
+    returnUrl: string | null,
+    attachment: { url: string; type: string | null } | null = null,
+  ): Promise<number> {
     const { rows } = await this.db.query(
-      'INSERT INTO pending_messages (account_id, lead_id, text, return_url) VALUES ($1, $2, $3, $4) RETURNING id',
-      [accountId, leadId, text, returnUrl],
+      `INSERT INTO pending_messages (account_id, lead_id, text, return_url, attachment_url, attachment_type)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [accountId, leadId, text, returnUrl, attachment?.url ?? null, attachment?.type ?? null],
     );
     return Number(rows[0].id);
   }
@@ -102,7 +111,7 @@ export class DialogRepo {
   async takePending(accountId: number, leadId: number): Promise<PendingMessage[]> {
     return withTransaction(this.db, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, text, return_url, received_at FROM pending_messages
+        `SELECT id, text, return_url, attachment_url, attachment_type, received_at FROM pending_messages
           WHERE account_id = $1 AND lead_id = $2 AND processed_at IS NULL
           ORDER BY id FOR UPDATE SKIP LOCKED`,
         [accountId, leadId],
@@ -116,9 +125,20 @@ export class DialogRepo {
         leadId,
         text: r.text,
         returnUrl: r.return_url,
+        attachmentUrl: r.attachment_url,
+        attachmentType: r.attachment_type,
         receivedAt: r.received_at,
       }));
     });
+  }
+
+  /** Число ответов AI в сделке — для лимита сообщений на сделку. */
+  async aiMessagesCount(accountId: number, leadId: number): Promise<number> {
+    const { rows } = await this.db.query(
+      `SELECT count(*)::int AS n FROM dialog_messages WHERE account_id = $1 AND lead_id = $2 AND role = 'ai'`,
+      [accountId, leadId],
+    );
+    return rows[0].n;
   }
 
   /** Время последнего необработанного сообщения — для продления окна склейки. */

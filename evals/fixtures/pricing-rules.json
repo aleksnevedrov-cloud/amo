@@ -1,0 +1,15 @@
+{
+  "_comment": "ТЕСТОВЫЕ правила цен для тестового каталога (fixtures/catalog.yml). Реальные правила заказчик вносит при обучении.",
+  "sizes": { "standardWidths": [600, 700, 800, 900], "standardHeights": [2000], "nonStandardMarkupPct": 30 },
+  "components": [
+    { "code": "box", "name": "Коробка телескоп", "qtyPerDoor": 2.5, "prices": [ { "series": "Турин", "price": 1700 }, { "series": "Порта", "price": 1200 }, { "series": "Альфа", "price": 900 }, { "series": "Верона", "price": 2100 } ], "defaultPrice": null },
+    { "code": "casing", "name": "Наличник телескоп", "qtyPerDoor": 5, "prices": [ { "series": "Турин", "price": 1200 }, { "series": "Порта", "price": 800 }, { "series": "Альфа", "price": 600 }, { "series": "Верона", "price": 1500 } ], "defaultPrice": null },
+    { "code": "ext_100", "name": "Добор 100мм телескоп", "qtyPerDoor": 0, "inKit": false, "prices": [ { "series": "Турин", "price": 1300 }, { "series": "Порта", "price": 900 } ], "defaultPrice": null }
+  ],
+  "services": [
+    { "code": "delivery_mkad", "name": "Доставка в пределах МКАД", "unit": "fixed", "price": 1500 },
+    { "code": "delivery_km", "name": "Доставка за МКАД", "unit": "per_km", "price": 40, "basePrice": 1500 },
+    { "code": "carry", "name": "Подъём", "unit": "per_door_per_floor", "price": 150 },
+    { "code": "install", "name": "Установка межкомнатной двери", "unit": "per_door", "price": 4500 }
+  ]
+}

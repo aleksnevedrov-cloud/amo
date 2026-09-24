@@ -7,3 +7,6 @@ export * from './crm-handoff.ts';
 export * from './knowledge-search.ts';
 export * from './registry.ts';
 export * from './types.ts';
+export * from './price-calculate.ts';
+export * from './crm-create-task.ts';
+export * from './memory-save.ts';

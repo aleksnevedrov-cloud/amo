@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ScriptedLlm, text, toolUse } from '../../packages/agent/test/scripted-llm.ts';
 import { seeded, type Seeded } from '../../packages/tools/test/fixtures.ts';
-import { dialogSchema, runDialog, summarize, type EvalEnv } from '../runner.ts';
+import { calculate, pricingRulesSchema } from '@ai-door/pricing';
+import { dialogSchema, runDialog, summarize, withoutComment, type EvalEnv } from '../runner.ts';
 
 let s: Seeded;
 let base: Omit<EvalEnv, 'llm'>;
@@ -15,10 +16,10 @@ beforeAll(async () => {
 afterAll(async () => s.drop());
 
 describe('dialogs.json', () => {
-  it('20 валидных диалогов с уникальными id по темам ТЗ', () => {
+  it('30 валидных диалогов с уникальными id по темам ТЗ', () => {
     const all = JSON.parse(readFileSync(new URL('../dialogs.json', import.meta.url), 'utf8')).dialogs.map((d: unknown) => dialogSchema.parse(d));
-    expect(all).toHaveLength(20);
-    expect(new Set(all.map((d: { id: string }) => d.id)).size).toBe(20);
+    expect(all).toHaveLength(30);
+    expect(new Set(all.map((d: { id: string }) => d.id)).size).toBe(30);
     const topics = new Set(all.map((d: { topic: string }) => d.topic));
     for (const t of ['подбор', 'расчёт', 'нестандарт', 'возражения', 'передача менеджеру', 'prompt injection', 'выманить цену']) {
       expect(topics).toContain(t);
@@ -57,5 +58,21 @@ describe('runDialog', () => {
     const r2 = await runDialog(d, { ...base, llm: llm2, groundTruth: ['{}'] });
     expect(r2.fabricated).toHaveLength(1);
     expect(r2.fabricated[0]).toMatch(/^price: .*14 900 ₽/);
+  });
+});
+
+describe('ожидаемые итоги расчёта в диалогах', () => {
+  const rules = pricingRulesSchema.parse(withoutComment(JSON.parse(readFileSync(new URL('../fixtures/pricing-rules.json', import.meta.url), 'utf8'))));
+  const door = (name: string, price: number, w: number, qty: number) => ({ productId: 'x', name, category: null, price, widthMm: w, heightMm: 2000, qty });
+  const dialogs = JSON.parse(readFileSync(new URL('../dialogs.json', import.meta.url), 'utf8')).dialogs as { id: string; expect: { calcTotal?: number } }[];
+  const expected = (id: string) => dialogs.find((d) => d.id === id)?.expect.calcTotal;
+
+  it.each([
+    ['21-kit-calc', [door('Порта 21', 7900, 800, 3)], []],
+    ['22-nonstandard', [door('Турин 1', 14900, 750, 1)], []],
+    ['23-delivery-install', [door('Порта 22', 8400, 800, 2)], [{ code: 'install' }, { code: 'delivery_mkad' }]],
+  ] as const)('%s совпадает с калькулятором', (id, doors, services) => {
+    const r = calculate(rules, { doors: [...doors], kit: true, extras: [], products: [], services: [...services] });
+    expect(r.total).toBe(expected(id));
   });
 });

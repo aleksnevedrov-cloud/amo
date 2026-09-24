@@ -16,6 +16,8 @@
     "@ai-door/catalog": "workspace:*",
     "@ai-door/db": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/media": "workspace:*",
+    "@ai-door/pricing": "workspace:*",
     "@ai-door/shared": "workspace:*",
     "@ai-door/tools": "workspace:*",
     "bullmq": "^5.81.5",

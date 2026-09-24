@@ -133,6 +133,14 @@ export class AmoApiClient {
     return res?._embedded.tasks[0]?.id ?? 0;
   }
 
+  /**
+   * Запуск бота Salesbot по сделке (API v2). Через бота-отправщика уходят одобренные черновики.
+   * Формат запроса сверить с документацией amo при установке.
+   */
+  async runSalesbot(botId: number, leadId: number): Promise<void> {
+    await this.request('POST', '/api/v2/salesbot/run', [{ bot_id: botId, entity_id: leadId, entity_type: 2 }]);
+  }
+
   async setLeadStatus(leadId: number, statusId: number): Promise<void> {
     await this.request('PATCH', `/api/v4/leads/${leadId}`, { status_id: statusId });
   }

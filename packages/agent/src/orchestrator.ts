@@ -4,7 +4,8 @@ import { toolByName, type AgentTool, type HandoffRequest, type Source, type Tool
 import { checkFacts, describeViolations, type FactViolation } from './factcheck.ts';
 import { createWithFallback, type LlmClient } from './llm.ts';
 import { addCost, costOf, ZERO_COST, type Cost } from './pricing.ts';
-import { buildSystem } from './prompt.ts';
+import { buildSystem, type DynamicContext } from './prompt.ts';
+import type { CalcResult } from '@ai-door/pricing';
 
 export interface HistoryMessage {
   role: Role;
@@ -28,6 +29,8 @@ interface Common {
   model: string;
   /** Сколько раз ответ отклонял пост-фильтр. */
   rejections: FactViolation[][];
+  /** Последний расчёт price_calculate в этом ходе — черновик детализации. */
+  calculation?: CalcResult;
 }
 
 export type TurnResult =
@@ -43,6 +46,9 @@ export interface TurnInput {
   ctx: ToolContext;
   tools: readonly AgentTool[];
   now?: Date;
+  dynamic?: DynamicContext;
+  /** Данные клиента из памяти (бюджет, размеры) — допустимые числа для пост-фильтра. */
+  clientFacts?: string[];
 }
 
 const MAX_ITERATIONS = 8;
@@ -73,13 +79,17 @@ export class Orchestrator {
   async runTurn(input: TurnInput): Promise<TurnResult> {
     const { settings, ctx, tools } = input;
     const messages = toApiMessages(input.history, input.incoming);
-    const clientTexts = [...input.history.filter((m) => m.role === 'client').map((m) => m.text), ...input.incoming];
+    const clientTexts = [
+      ...input.history.filter((m) => m.role === 'client').map((m) => m.text),
+      ...input.incoming,
+      ...(input.clientFacts ?? []),
+    ];
     const apiTools: Anthropic.Beta.BetaToolUnion[] = tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema as Anthropic.Beta.BetaTool.InputSchema,
     }));
-    const system = buildSystem(settings, input.now);
+    const system = buildSystem(settings, input.now, input.dynamic);
 
     const common: Common = { toolCalls: [], sources: [], cost: ZERO_COST, model: settings.model.model, rejections: [] };
     const toolResults: string[] = [];
@@ -181,6 +191,7 @@ export class Orchestrator {
       for (const s of out.sources ?? []) {
         if (!common.sources.some((x) => x.type === s.type && x.id === s.id)) common.sources.push(s);
       }
+      if (out.calculation) common.calculation = out.calculation as CalcResult;
       return { json: JSON.stringify(out.content), isError: false, ...(out.handoff ? { handoff: out.handoff } : {}) };
     } catch (err) {
       trace.error = (err as Error).message;

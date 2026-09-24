@@ -187,3 +187,57 @@ describe('JournalRepo', () => {
     expect(await j.spentSummary(9)).toEqual({ todayRub: 3.5, monthRub: 3.5 });
   });
 });
+
+describe('MemoryRepo', () => {
+  it('слияние, резюме, текст для промпта', async () => {
+    const { MemoryRepo, memorySubject, memoryToText } = await import('../src/index.ts');
+    await installAccount(10, new Date(Date.now() + 20 * HOUR));
+    const repo = new MemoryRepo(db);
+    const subj = memorySubject(77, 5);
+    expect(subj).toBe('contact:77');
+    expect(memorySubject(null, 5)).toBe('lead:5');
+    await repo.update(10, subj, { budget_rub: 50000, preferences: { coating: 'эмаль' }, notes: ['ремонт в новостройке'] });
+    await repo.update(10, subj, { preferences: { color: 'белый' }, notes: ['ремонт в новостройке', 'есть кошка'] });
+    await repo.setSummary(10, subj, 'Искал белые двери в эмали');
+    const m = await repo.get(10, subj);
+    expect(m.data.preferences).toEqual({ coating: 'эмаль', color: 'белый' });
+    expect(m.data.notes).toEqual(['ремонт в новостройке', 'есть кошка']);
+    const text = memoryToText(m.data, m.summary);
+    expect(text).toMatch(/Бюджет клиента: 50000 ₽/);
+    expect(text).toMatch(/Резюме прошлых обращений: Искал белые двери/);
+    expect((await repo.get(10, 'contact:999')).data.budget_rub).toBeNull();
+  });
+});
+
+describe('SuggestionsRepo', () => {
+  it('черновик: новый вытесняет прежний, одобрение, отправка, повтор', async () => {
+    const { SuggestionsRepo } = await import('../src/index.ts');
+    await installAccount(11, new Date(Date.now() + 20 * HOUR));
+    const r = new SuggestionsRepo(db);
+    const a = await r.add(11, 1, 'draft', 'Первый');
+    const b = await r.add(11, 1, 'draft', 'Второй');
+    expect((await r.get(11, a))?.status).toBe('expired');
+    expect((await r.pendingDrafts(11)).map((x) => x.id)).toEqual([b]);
+    expect(await r.decide(11, a, 'approved', 5)).toBeNull();
+    const ok = await r.decide(11, b, 'approved', 5, 'Второй, исправленный');
+    expect(ok).toMatchObject({ status: 'approved', text: 'Второй, исправленный', decidedBy: 5 });
+    expect(await r.decide(12, b, 'rejected', 5)).toBeNull();
+    const sent = await r.takeApproved(11, 1);
+    expect(sent?.id).toBe(b);
+    expect(await r.takeApproved(11, 1)).toBeNull();
+    await r.markApprovedAgain(11, b);
+    expect((await r.get(11, b))?.status).toBe('approved');
+    await r.add(11, 1, 'hint', 'Подсказка');
+    expect((await r.listForLead(11, 1)).map((x) => x.kind)).toEqual(['hint', 'draft', 'draft']);
+  });
+
+  it('вложения во входящих и счётчик ответов AI', async () => {
+    const d = new DialogRepo(db);
+    await d.enqueue(11, 2, '', 'https://x/c', { url: 'https://drive/v.ogg', type: 'voice' });
+    expect((await d.takePending(11, 2))[0]).toMatchObject({ attachmentUrl: 'https://drive/v.ogg', attachmentType: 'voice' });
+    await d.addMessage(11, 2, 'ai', 'a');
+    await d.addMessage(11, 2, 'client', 'b');
+    await d.addMessage(11, 2, 'ai', 'c');
+    expect(await d.aiMessagesCount(11, 2)).toBe(2);
+  });
+});

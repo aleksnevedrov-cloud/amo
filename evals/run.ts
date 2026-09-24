@@ -2,8 +2,9 @@
 // Нужны ANTHROPIC_API_KEY и PostgreSQL (TEST_DATABASE_URL). Каталог и база знаний — тестовые (fixtures).
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { AnthropicLlm } from '@ai-door/agent';
+import { pricingRulesSchema } from '@ai-door/pricing';
 import { seeded } from '../packages/tools/test/fixtures.ts';
-import { dialogSchema, runDialog, summarize, type DialogReport } from './runner.ts';
+import { dialogSchema, runDialog, summarize, withoutComment, type DialogReport } from './runner.ts';
 
 const key = process.env.ANTHROPIC_API_KEY;
 if (!key) {
@@ -20,11 +21,12 @@ const catalogDump = await s.db.query('SELECT name, price, old_price, params, des
 const kbDump = await s.db.query('SELECT content FROM knowledge_chunks');
 const groundTruth = [JSON.stringify(catalogDump.rows), JSON.stringify(kbDump.rows)];
 const llm = new AnthropicLlm(key);
+const pricing = pricingRulesSchema.parse(withoutComment(JSON.parse(readFileSync(new URL('fixtures/pricing-rules.json', import.meta.url), 'utf8'))));
 
 const reports: DialogReport[] = [];
 try {
   for (const d of dialogs) {
-    const r = await runDialog(d, { accountId: 1, catalog: s.catalog, knowledge: s.knowledge, llm, groundTruth });
+    const r = await runDialog(d, { accountId: 1, catalog: s.catalog, knowledge: s.knowledge, llm, groundTruth, pricing });
     reports.push(r);
     console.log(`${r.passed ? '✓' : '✗'} ${r.id} [${r.final}${r.handoffReason ? `:${r.handoffReason}` : ''}] ${r.failures.join('; ')}`);
   }
@@ -41,3 +43,4 @@ console.log(
 );
 console.log(`Отчёт: ${file.pathname}`);
 process.exit(summary.passed === summary.total && summary.fabricated === 0 ? 0 : 1);
+

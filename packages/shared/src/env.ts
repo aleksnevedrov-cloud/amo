@@ -33,6 +33,11 @@ export const envSchema = z.object({
   /** Ключ Anthropic API. Без него AI не отвечает, песочница сообщает об ошибке. */
   ANTHROPIC_API_KEY: z.string().optional(),
 
+  /** Распознавание голосовых: Yandex SpeechKit (данные в РФ) или OpenAI Whisper. */
+  YANDEX_SPEECHKIT_API_KEY: z.string().optional(),
+  YANDEX_FOLDER_ID: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+
   TELEGRAM_ALERT_BOT_TOKEN: z.string().optional(),
   TELEGRAM_ALERT_CHAT_ID: z.string().optional(),
 });

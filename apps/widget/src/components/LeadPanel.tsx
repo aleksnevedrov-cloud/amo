@@ -1,6 +1,8 @@
 import { useCallback, useState } from 'react';
 import type { WidgetApi } from '../api.ts';
+import { Calculation } from './Calculation.tsx';
 import { dateTime, kindLabel, modeLabel, rub } from './StatusBadge.tsx';
+import { SuggestionCard } from './Suggestions.tsx';
 import { s } from './styles.ts';
 import { errorMessage, useLoad } from './useLoad.ts';
 
@@ -10,6 +12,7 @@ export function LeadPanel({ api, leadId }: { api: WidgetApi; leadId: number }) {
   const [state, reload] = useLoad(load);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
 
   if (state.status === 'loading') return <div style={{ ...s.root, ...s.muted }}>Загрузка…</div>;
   if (state.status === 'error') {
@@ -36,6 +39,18 @@ export function LeadPanel({ api, leadId }: { api: WidgetApi; leadId: number }) {
     }
   };
   const active = p.ai.enabled && p.ai.mode !== 'off';
+  const makeSummary = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      setSummary((await api.summary(leadId)).text);
+      reload();
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div style={s.root}>
@@ -56,6 +71,14 @@ export function LeadPanel({ api, leadId }: { api: WidgetApi; leadId: number }) {
         {p.ai.paused && p.ai.pauseReason && <div style={{ ...s.muted, ...s.small }}>{pauseReasonText(p.ai.pauseReason)}</div>}
         {actionError && <div style={s.error}>{actionError}</div>}
       </div>
+      {p.hints.length > 0 && (
+        <div style={{ ...s.block, ...s.col }}>
+          <div style={s.label}>Черновики и подсказки</div>
+          {p.hints.map((h) => (
+            <SuggestionCard key={h.id} api={api} item={h} onDone={reload} />
+          ))}
+        </div>
+      )}
       <div style={s.block}>
         <div style={s.label}>Найденные товары</div>
         {p.products.length === 0 ? (
@@ -71,8 +94,17 @@ export function LeadPanel({ api, leadId }: { api: WidgetApi; leadId: number }) {
         )}
       </div>
       <div style={s.block}>
-        <div style={s.label}>Подсказки и расчёты</div>
-        <div style={s.muted}>Появятся в фазе 2</div>
+        <div style={s.label}>Расчёт</div>
+        {p.calculations[0] ? <Calculation c={p.calculations[0]} /> : <div style={s.muted}>Расчётов нет</div>}
+      </div>
+      <div style={s.block}>
+        <div style={{ ...s.row, justifyContent: 'space-between' }}>
+          <span style={s.label}>Резюме диалога</span>
+          <button type="button" style={s.buttonGhost} disabled={busy} onClick={makeSummary}>
+            Резюме
+          </button>
+        </div>
+        {summary && <div style={{ ...s.small, whiteSpace: 'pre-wrap' }}>{summary}</div>}
       </div>
       <div style={s.block}>
         <div style={{ ...s.row, justifyContent: 'space-between' }}>

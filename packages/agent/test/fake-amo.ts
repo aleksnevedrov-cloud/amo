@@ -23,6 +23,7 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
     state.calls.push({ method, path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
     if (url.pathname.startsWith('/api/v4/leads/') && method === 'GET' && !url.pathname.endsWith('/notes')) {
+      if (state.lead) state.lead = { ...state.lead, id: Number(url.pathname.split('/').pop()) };
       return state.lead ? json(state.lead) : new Response('', { status: 404 });
     }
     if (url.pathname === '/api/v4/events') return state.events.length ? json({ _embedded: { events: state.events } }) : new Response(null, { status: 204 });

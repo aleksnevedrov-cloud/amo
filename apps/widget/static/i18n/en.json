@@ -11,6 +11,7 @@
     "title": "AI sales agent: settings"
   },
   "salesbot": {
-    "ai_reply": "AI salesperson: reply to customer"
+    "ai_reply": "AI salesperson: reply to customer",
+    "ai_send": "AI salesperson: send approved draft"
   }
 }

@@ -1,6 +1,7 @@
 import { fieldValues, type AmoApiClient } from '@ai-door/amo';
 import { maskPii } from '@ai-door/shared';
-import type { CrmPort, LeadContext } from './types.ts';
+import { memorySchema, mergeMemory, type ClientMemory, type MemoryPatch } from '@ai-door/db';
+import type { CrmPort, LeadContext, MemoryPort } from './types.ts';
 
 /** CRM-порт поверх amo API. Телефоны и e-mail в LLM не передаются (152-ФЗ). */
 export class AmoCrm implements CrmPort {
@@ -34,6 +35,23 @@ export class AmoCrm implements CrmPort {
   async addNote(text: string): Promise<void> {
     await this.api.addLeadNote(this.leadId, text);
   }
+
+  async createTask(t: { text: string; taskTypeId: number; deadlineMin: number }): Promise<void> {
+    // Без responsible_user_id amo ставит задачу ответственному по сделке.
+    await this.api.createTask({
+      text: t.text,
+      taskTypeId: t.taskTypeId,
+      completeTill: new Date(Date.now() + t.deadlineMin * 60_000),
+      leadId: this.leadId,
+    });
+  }
+
+  /** Основной контакт сделки — ключ памяти клиента. */
+  async mainContactId(): Promise<number | null> {
+    const lead = await this.api.getLead(this.leadId);
+    const ref = lead?._embedded?.contacts?.find((c) => c.is_main) ?? lead?._embedded?.contacts?.[0];
+    return ref?.id ?? null;
+  }
 }
 
 /** CRM-порт песочницы: тестовая сделка, примечания копятся в памяти. */
@@ -58,7 +76,25 @@ export class SandboxCrm implements CrmPort {
     };
   }
 
+  readonly tasks: { text: string; taskTypeId: number; deadlineMin: number }[] = [];
+
   async addNote(text: string): Promise<void> {
     this.notes.push(text);
+  }
+
+  async createTask(t: { text: string; taskTypeId: number; deadlineMin: number }): Promise<void> {
+    this.tasks.push(t);
+  }
+}
+
+/** Память в оперативной памяти — для песочницы и тестов. */
+export class InMemoryMemory implements MemoryPort {
+  private data: ClientMemory = memorySchema.parse({});
+  async get() {
+    return this.data;
+  }
+  async update(patch: MemoryPatch) {
+    this.data = mergeMemory(this.data, patch);
+    return this.data;
   }
 }

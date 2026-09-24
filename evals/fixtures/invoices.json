@@ -1,0 +1,70 @@
+{
+  "_comment": "Обезличенные примеры расчётов из накладных РФ-Двери (без ФИО и телефонов). Правила — выведены из этих накладных для тестов; реальные правила заказчик вносит при обучении.",
+  "rules": {
+    "sizes": { "standardWidths": [550, 600, 700, 800, 900], "standardHeights": [2000], "nonStandardMarkupPct": 30 },
+    "components": [
+      { "code": "box", "name": "Коробка телескоп", "qtyPerDoor": 2.5, "prices": [
+        { "series": "Стэфани", "price": 1224 }, { "series": "Лаура", "price": 1700 }, { "series": "Б18", "price": 1170 }, { "series": "Марсель", "price": 1800 } ] },
+      { "code": "casing", "name": "Наличник телескоп", "qtyPerDoor": 5, "prices": [
+        { "series": "Стэфани", "price": 1464 }, { "series": "Лаура", "price": 1200 }, { "series": "Б18", "price": 816 }, { "series": "Марсель", "price": 1500 } ] },
+      { "code": "ext_100", "name": "Добор 100мм телескоп", "qtyPerDoor": 0, "inKit": false, "prices": [
+        { "series": "Стэфани", "price": 960 }, { "series": "Лаура", "price": 1300 }, { "series": "Б18", "price": 912 } ] },
+      { "code": "ext_150", "name": "Добор 150мм телескоп", "qtyPerDoor": 0, "inKit": false, "prices": [
+        { "series": "Стэфани", "price": 1120 }, { "series": "Марсель", "price": 2100 } ] },
+      { "code": "ext_200", "name": "Добор 200мм телескоп", "qtyPerDoor": 0, "inKit": false, "prices": [ { "series": "Стэфани", "price": 1432 } ] }
+    ],
+    "services": [
+      { "code": "delivery_mkad", "name": "Доставка в пределах МКАД", "unit": "fixed", "price": 0 },
+      { "code": "delivery_object", "name": "Доставка до объекта", "unit": "fixed", "price": 4000 },
+      { "code": "delivery_17km", "name": "Доставка 17км за МКАД", "unit": "fixed", "price": 6720 },
+      { "code": "carry", "name": "Занос", "unit": "per_door_per_floor", "price": 500 },
+      { "code": "lift_agreed", "name": "Подъем по согласованию", "unit": "fixed", "price": 0 }
+    ]
+  },
+  "cases": [
+    {
+      "id": "89222",
+      "doors": [
+        { "name": "Межкомнатная дверь Стэфани-22 ПГ (Белая эмаль)", "price": 11250, "widthMm": 600, "heightMm": 2000, "qty": 2 },
+        { "name": "Межкомнатная дверь Стэфани-22 ПГ (Белая эмаль)", "price": 11250, "widthMm": 800, "heightMm": 2000, "qty": 2 },
+        { "name": "Межкомнатная дверь Стэфани-22 ПГ (Белая эмаль)", "price": 11250, "widthMm": 750, "heightMm": 2000, "qty": 1 }
+      ],
+      "extras": [ { "code": "ext_100", "qty": 5 }, { "code": "ext_150", "qty": 8 }, { "code": "ext_200", "qty": 3 } ],
+      "products": [ { "name": "Книжка по аналогии Стефани 22 С механизмами. комплект", "price": 76840, "qty": 1 }, { "name": "Добор прибивной на книжку 100мм", "price": 1920, "qty": 2 } ],
+      "services": [ { "code": "delivery_mkad" }, { "code": "lift_agreed" } ],
+      "managerTotal": 210873,
+      "note": "Скриншот «Детализации сделки»: 75 см — нестандарт, 11 250 × 1,3 = 14 625 ₽"
+    },
+    {
+      "id": "89190",
+      "doors": [ { "name": "Лаура ДУБ Капри", "price": 19500, "widthMm": 800, "heightMm": 2000, "qty": 4 } ],
+      "extras": [ { "code": "ext_100", "qty": 12 } ],
+      "products": [],
+      "services": [ { "code": "delivery_object" } ],
+      "managerTotal": 138600
+    },
+    {
+      "id": "87583",
+      "doors": [
+        { "name": "Межкомнатная дверь Б18 с матовым стеклом покрытие ПВХ Сандал белый", "price": 11680, "widthMm": 800, "heightMm": 2000, "qty": 4 },
+        { "name": "Межкомнатная дверь Б18 с матовым стеклом покрытие ПВХ Сандал белый", "price": 11680, "widthMm": 900, "heightMm": 2000, "qty": 1 },
+        { "name": "Межкомнатная дверь Б18 с матовым стеклом покрытие ПВХ Сандал белый", "price": 11680, "widthMm": 700, "heightMm": 2000, "qty": 1 }
+      ],
+      "extras": [ { "code": "ext_100", "qty": 8 } ],
+      "products": [],
+      "services": [ { "code": "delivery_17km" }, { "code": "carry", "floor": 1 } ],
+      "managerTotal": 125330,
+      "managerDiscount": 3796,
+      "note": "Скидку 3 796 ₽ менеджер дал вручную; AI скидок не даёт"
+    },
+    {
+      "id": "88959",
+      "doors": [ { "name": "Межкомнатная дверь Марсель ПО (Венге) Сатинат бронза, пескоструй", "price": 24000, "widthMm": 550, "heightMm": 2000, "qty": 2 } ],
+      "extras": [ { "code": "ext_150", "qty": 6 } ],
+      "products": [],
+      "services": [],
+      "managerLines": { "Коробка телескоп": 6, "Наличник телескоп": 9 },
+      "note": "Двустворчатая дверь: менеджер поставил 6 коробок и 9 наличников вместо 5 и 10 по правилу «на дверь» — нужно отдельное правило для двустворчатых"
+    }
+  ]
+}

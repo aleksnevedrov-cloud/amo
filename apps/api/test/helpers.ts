@@ -32,6 +32,10 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith('/api/v4/leads/pipelines')) {
       return json(200, { _embedded: { pipelines: [{ id: 1, name: 'Продажи', _embedded: { statuses: [{ id: 10, name: 'Новая' }] } }] } });
     }
+    if (url.endsWith('/api/v2/salesbot/run')) return json(200, {});
+    if (url.includes('/salesbot/') && url.includes('/continue/')) return json(200, {});
+    if (/\/api\/v4\/leads\/\d+\/notes$/.test(url)) return json(200, { _embedded: { notes: [{ id: 1 }] } });
+    if (/\/api\/v4\/leads\/\d+/.test(url)) return json(200, { id: 1, name: 'x', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
     return json(404, {});
   }) as typeof fetch;
 }

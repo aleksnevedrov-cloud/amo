@@ -9,7 +9,9 @@ import {
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, JournalRepo, PgTokenStore, SettingsRepo } from '@ai-door/db';
+import { AccountsRepo, createPool, DialogRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { WhisperStt, YandexStt } from '@ai-door/media';
+import { PricingRepo } from '@ai-door/pricing';
 import { KnowledgeRepo } from '@ai-door/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@ai-door/shared';
 import { Queue, Worker } from 'bullmq';
@@ -63,13 +65,25 @@ const maintenanceWorker = new Worker(
 const incoming = new Queue<IncomingJob>(INCOMING_QUEUE, { connection });
 let pipeline: DialogPipeline | null = null;
 if (env.ANTHROPIC_API_KEY) {
+  const llm = new AnthropicLlm(env.ANTHROPIC_API_KEY);
   pipeline = new DialogPipeline({
     settings,
     dialog,
     journal,
     catalog,
     knowledge,
-    orchestrator: new Orchestrator(new AnthropicLlm(env.ANTHROPIC_API_KEY)),
+    pricing: new PricingRepo(db),
+    memory: new MemoryRepo(db),
+    suggestions: new SuggestionsRepo(db),
+    orchestrator: new Orchestrator(llm),
+    llm,
+    stt(provider) {
+      if (provider === 'yandex' && env.YANDEX_SPEECHKIT_API_KEY && env.YANDEX_FOLDER_ID) {
+        return new YandexStt(env.YANDEX_SPEECHKIT_API_KEY, env.YANDEX_FOLDER_ID);
+      }
+      if (provider === 'openai' && env.OPENAI_API_KEY) return new WhisperStt(env.OPENAI_API_KEY);
+      return null;
+    },
     async amo(accountId): Promise<AmoAccess> {
       const account = await accounts.get(accountId);
       if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён`);

@@ -2,7 +2,8 @@ import { checkFacts, Orchestrator, type HistoryMessage, type LlmClient, type Tur
 import type { CatalogRepo } from '@ai-door/catalog';
 import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
-import { PHASE1_TOOLS, SandboxCrm } from '@ai-door/tools';
+import type { PricingRules } from '@ai-door/pricing';
+import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@ai-door/tools';
 import { z } from 'zod';
 
 const oneOrMany = z.union([z.string(), z.array(z.string())]).transform((v) => (Array.isArray(v) ? v : [v]));
@@ -19,6 +20,12 @@ export const dialogSchema = z.object({
     mustNotMention: z.array(z.string()).optional(),
     mustContain: z.array(z.string()).optional(),
     mustNotContain: z.array(z.string()).optional(),
+    /** Итог price_calculate в диалоге. */
+    calcTotal: z.number().optional(),
+    /** Хотя бы одна задача указанного типа. */
+    anyTask: z.array(z.string()).optional(),
+    /** Поля памяти клиента после диалога. */
+    memory: z.record(z.unknown()).optional(),
   }),
 });
 export type Dialog = z.infer<typeof dialogSchema>;
@@ -45,6 +52,7 @@ export interface EvalEnv {
   knowledge: KnowledgeRepo;
   llm: LlmClient;
   settings?: WidgetSettings;
+  pricing?: PricingRules | null;
   /** Полный дамп данных (каталог + база знаний) для независимой сверки. */
   groundTruth: string[];
 }
@@ -52,6 +60,9 @@ export interface EvalEnv {
 export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> {
   const settings = env.settings ?? widgetSettingsSchema.parse({ enabled: true, mode: 'auto' });
   const orchestrator = new Orchestrator(env.llm);
+  const crm = new SandboxCrm();
+  const memory = new InMemoryMemory();
+  let calcTotal: number | null = null;
   const history: HistoryMessage[] = [];
   const sources = new Set<string>();
   const latencyMs: number[] = [];
@@ -65,9 +76,11 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
       settings,
       history,
       incoming: [turn],
-      ctx: { accountId: env.accountId, catalog: env.catalog, knowledge: env.knowledge, crm: new SandboxCrm() },
-      tools: PHASE1_TOOLS,
+      ctx: { accountId: env.accountId, catalog: env.catalog, knowledge: env.knowledge, crm, memory, pricing: env.pricing ?? null },
+      tools: PHASE2_TOOLS,
+      dynamic: { pricing: pricingCodesHint(env.pricing) },
     });
+    if (last.calculation) calcTotal = last.calculation.total;
     latencyMs.push(Date.now() - started);
     costUsd += last.cost.usd;
     rejections += last.rejections.length;
@@ -101,6 +114,18 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
   for (const t of e.mustContain ?? []) if (!lower.includes(t.toLowerCase())) failures.push(`в ответе нет «${t}»`);
   for (const t of e.mustNotContain ?? []) if (lower.includes(t.toLowerCase())) failures.push(`в ответе есть «${t}»`);
 
+  if (e.calcTotal !== undefined && calcTotal !== e.calcTotal) failures.push(`итог расчёта ${calcTotal}, ожидался ${e.calcTotal}`);
+  if (e.anyTask) {
+    const kinds = crm.tasks.map((x) => x.text);
+    if (!e.anyTask.some((k) => kinds.some((t) => t.startsWith(`AI: ${TASK_LABEL[k] ?? k}`)))) {
+      failures.push(`нет задачи ${e.anyTask.join('/')}`);
+    }
+  }
+  if (e.memory) {
+    const m = (await memory.get()) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(e.memory)) if (JSON.stringify(m[k]) !== JSON.stringify(v)) failures.push(`память ${k}=${JSON.stringify(m[k])}, ожидалось ${JSON.stringify(v)}`);
+  }
+
   // Независимая сверка: любая цена/срок в ответах должны существовать в каталоге, базе знаний или словах клиента.
   const fabricated = checkFacts({
     reply: aiText,
@@ -126,6 +151,13 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
   };
 }
 
+const TASK_LABEL: Record<string, string> = {
+  callback: 'Перезвонить клиенту',
+  send_offer: 'Отправить КП',
+  check_availability: 'Проверить наличие',
+  measure: 'Согласовать замер',
+};
+
 export function summarize(reports: DialogReport[]) {
   const lat = reports.flatMap((r) => r.latencyMs).sort((a, b) => a - b);
   const p95 = lat.length ? lat[Math.min(lat.length - 1, Math.ceil(lat.length * 0.95) - 1)] : 0;
@@ -137,4 +169,11 @@ export function summarize(reports: DialogReport[]) {
     costUsd: reports.reduce((n, r) => n + r.costUsd, 0),
     p95LatencyMs: p95,
   };
+}
+
+/** Убирает служебный «_comment» из JSON-фикстуры перед строгой схемой. */
+export function withoutComment<T extends Record<string, unknown>>(o: T): Omit<T, '_comment'> {
+  const rest: Record<string, unknown> = { ...o };
+  delete rest._comment;
+  return rest as Omit<T, '_comment'>;
 }

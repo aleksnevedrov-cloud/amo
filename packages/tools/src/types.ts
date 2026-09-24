@@ -1,5 +1,7 @@
 import type { CatalogRepo } from '@ai-door/catalog';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
+import type { PricingRules } from '@ai-door/pricing';
+import type { ClientMemory, MemoryPatch } from '@ai-door/db';
 import type { z } from 'zod';
 
 export interface LeadContext {
@@ -37,6 +39,17 @@ export type HandoffReason = (typeof HANDOFF_REASONS)[number];
 export interface CrmPort {
   getContext(): Promise<LeadContext | null>;
   addNote(text: string): Promise<void>;
+  /** Задача ответственному по сделке (или указанному в настройках). */
+  createTask(t: { text: string; taskTypeId: number; deadlineMin: number }): Promise<void>;
+}
+
+export const TASK_KINDS = ['callback', 'send_offer', 'check_availability', 'measure', 'other'] as const;
+export type TaskKind = (typeof TASK_KINDS)[number];
+
+/** Память клиента для инструментов. */
+export interface MemoryPort {
+  get(): Promise<ClientMemory>;
+  update(patch: MemoryPatch): Promise<ClientMemory>;
 }
 
 export interface ToolContext {
@@ -44,6 +57,11 @@ export interface ToolContext {
   catalog: CatalogRepo;
   knowledge: KnowledgeRepo;
   crm: CrmPort;
+  /** Правила расчёта аккаунта; null — не настроены. */
+  pricing?: PricingRules | null;
+  memory?: MemoryPort;
+  /** Типы и сроки задач из настроек. */
+  tasks?: Partial<Record<TaskKind, { taskTypeId: number; deadlineMin: number }>>;
 }
 
 export interface Source {
@@ -62,6 +80,8 @@ export interface ToolOutcome {
   sources?: Source[];
   /** Запрошена передача менеджеру — ход завершается. */
   handoff?: HandoffRequest;
+  /** Черновик детализации, посчитанный в этом ходе. */
+  calculation?: unknown;
 }
 
 export interface AgentTool<S extends z.ZodTypeAny = z.ZodTypeAny> {

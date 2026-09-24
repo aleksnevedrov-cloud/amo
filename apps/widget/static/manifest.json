@@ -36,6 +36,10 @@
     "ai_reply": {
       "name": "salesbot.ai_reply",
       "settings": {}
+    },
+    "ai_send": {
+      "name": "salesbot.ai_send",
+      "settings": {}
     }
   }
 }

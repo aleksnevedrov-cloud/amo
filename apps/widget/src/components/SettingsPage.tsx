@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Dictionaries, Mode, Status, WidgetApi, WidgetSettings } from '../api.ts';
 import { CatalogStatus } from './Catalog.tsx';
 import { Field, linesToList, NumberInput } from './fields.tsx';
+import { Drafts } from './Drafts.tsx';
 import { Journal } from './Journal.tsx';
+import { PricingEditor } from './PricingEditor.tsx';
 import { Knowledge } from './Knowledge.tsx';
 import { Sandbox } from './Sandbox.tsx';
 import { ConnectionBadge, modeLabel, rub } from './StatusBadge.tsx';
@@ -15,6 +17,14 @@ const MODELS = [
   { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 (дешевле)' },
 ];
 
+const TASK_KINDS = [
+  ['callback', 'Перезвонить'],
+  ['send_offer', 'Отправить КП / расчёт'],
+  ['check_availability', 'Проверить наличие'],
+  ['measure', 'Согласовать замер'],
+  ['other', 'Другое'],
+] as const;
+
 const TABS = [
   ['status', 'Статус'],
   ['behavior', 'Поведение'],
@@ -22,8 +32,10 @@ const TABS = [
   ['where', 'Где работает'],
   ['handoff', 'Передача менеджеру'],
   ['catalog', 'Каталог'],
+  ['pricing', 'Правила цен'],
   ['knowledge', 'База знаний'],
   ['limits', 'Лимиты'],
+  ['drafts', 'Черновики'],
   ['sandbox', 'Песочница'],
   ['journal', 'Журнал'],
 ] as const;
@@ -108,7 +120,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               Включён
             </label>
           </Field>
-          <Field label="Режим" hint="В фазе 1 клиенту пишет только «Автоматический». Полуавтоматический и «Только подсказки» — в фазе 2.">
+          <Field label="Режим" hint="Автоматический — AI пишет клиенту сам. Полуавтоматический — AI готовит черновик, менеджер одобряет. Только подсказки — AI подсказывает менеджеру в карточке сделки.">
             <select style={s.select} value={draft.mode} onChange={(e) => set('mode', e.target.value as Mode)}>
               {MODES.map((m) => (
                 <option key={m} value={m}>
@@ -241,6 +253,22 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Склейка сообщений, сек" hint="AI ждёт столько секунд новых сообщений клиента и отвечает на всю серию.">
             <NumberInput value={draft.where.batchWindowSec} min={0} max={120} onChange={(v) => set('where', { batchWindowSec: v ?? 8 })} />
           </Field>
+          <Field label="Подсказки на паузе" hint="Когда менеджер ведёт диалог, AI готовит подсказки ответа в карточке сделки.">
+            <label style={s.row}>
+              <input type="checkbox" checked={draft.hints.whenPaused} onChange={(e) => set('hints', { whenPaused: e.target.checked })} />
+              Готовить подсказки
+            </label>
+          </Field>
+          <Field label="Бот-отправщик (ID бота Salesbot)" hint="Нужен для режима «Полуавто»: через него уходят одобренные черновики. См. инструкцию по установке.">
+            <NumberInput nullable value={draft.salesbot.senderBotId} onChange={(v) => set('salesbot', { senderBotId: v })} />
+          </Field>
+          <Field label="Голосовые сообщения" hint="Ключ провайдера задаётся на сервере.">
+            <select style={s.select} value={draft.stt.provider} onChange={(e) => set('stt', { provider: e.target.value as WidgetSettings['stt']['provider'] })}>
+              <option value="off">Не расшифровывать</option>
+              <option value="yandex">Yandex SpeechKit (данные в РФ)</option>
+              <option value="openai">OpenAI Whisper</option>
+            </select>
+          </Field>
           <Field label="Имитация набора">
             <label style={s.row}>
               <input type="checkbox" checked={draft.where.typingDelay} onChange={(e) => set('where', { typingDelay: e.target.checked })} />
@@ -281,6 +309,26 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               ))}
             </select>
           </Field>
+          <Field label="Задачи, которые AI ставит сам" hint="Тип задачи amo и срок в минутах. Задача уходит ответственному по сделке.">
+            <div style={s.col}>
+              {TASK_KINDS.map(([kind, label]) => {
+                const cur = draft.tasks[kind] ?? { taskTypeId: 1, deadlineMin: 60 };
+                return (
+                  <div key={kind} style={s.row}>
+                    <span style={{ width: 170 }}>{label}</span>
+                    <select style={s.select} value={cur.taskTypeId} onChange={(e) => setDraft((d) => ({ ...d, tasks: { ...d.tasks, [kind]: { ...cur, taskTypeId: Number(e.target.value) } } }))}>
+                      {(dict?.taskTypes ?? [{ id: cur.taskTypeId, name: `Тип ${cur.taskTypeId}` }]).map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                    <NumberInput value={cur.deadlineMin} min={5} onChange={(v) => setDraft((d) => ({ ...d, tasks: { ...d.tasks, [kind]: { ...cur, deadlineMin: v ?? 60 } } }))} />
+                  </div>
+                );
+              })}
+            </div>
+          </Field>
           <Field label="Когда AI передаёт диалог">
             <div style={{ ...s.small, ...s.muted }}>
               Менеджер написал клиенту · клиент просит человека, жалуется · скидка, нестандарт, юрлицо, опт, возврат, рекламация ·
@@ -303,11 +351,23 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
       )}
 
       {tab === 'knowledge' && <Knowledge api={api} />}
+      {tab === 'pricing' && <PricingEditor api={api} />}
+      {tab === 'drafts' && <Drafts api={api} />}
 
       {tab === 'limits' && (
         <>
-          <Field label="Дневной лимит, ₽" hint="Пусто — без лимита. При превышении AI перестаёт отвечать до конца суток.">
+          <Field label="Дневной лимит, ₽" hint="Пусто — без лимита.">
             <NumberInput nullable value={draft.limits.dailyRub} min={1} onChange={(v) => set('limits', { dailyRub: v })} />
+          </Field>
+          <Field label="При превышении дневного лимита">
+            <select style={s.select} value={draft.limits.onExceed} onChange={(e) => set('limits', { onExceed: e.target.value as WidgetSettings['limits']['onExceed'] })}>
+              <option value="stop">AI не отвечает до конца суток</option>
+              <option value="hints">Только подсказки менеджеру</option>
+              <option value="handoff">Передавать диалог менеджеру</option>
+            </select>
+          </Field>
+          <Field label="Лимит ответов AI в одной сделке" hint="Пусто — без лимита. При достижении — передача менеджеру.">
+            <NumberInput nullable value={draft.limits.maxAiMessagesPerLead} min={1} onChange={(v) => set('limits', { maxAiMessagesPerLead: v })} />
           </Field>
           <Field label="Курс доллара для учёта расходов, ₽">
             <NumberInput value={draft.billing.usdRubRate} min={1} onChange={(v) => set('billing', { usdRubRate: v ?? 90 })} />

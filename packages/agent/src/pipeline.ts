@@ -1,10 +1,31 @@
 import type { AmoApiClient } from '@ai-door/amo';
 import type { CatalogRepo } from '@ai-door/catalog';
-import type { DialogRepo, JournalRepo, PendingMessage, SettingsRepo, WidgetSettings } from '@ai-door/db';
+import {
+  memorySubject,
+  memoryToText,
+  type DialogRepo,
+  type JournalEntry,
+  type JournalRepo,
+  type MemoryRepo,
+  type PendingMessage,
+  type SettingsRepo,
+  type SuggestionsRepo,
+  type WidgetSettings,
+} from '@ai-door/db';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
-import { AmoCrm, PHASE1_TOOLS, type HandoffReason } from '@ai-door/tools';
-import { LlmUnavailableError } from './llm.ts';
-import type { Orchestrator, TurnResult } from './orchestrator.ts';
+import { downloadAttachment, isAudio, type SttProvider } from '@ai-door/media';
+import type { PricingRepo } from '@ai-door/pricing';
+import {
+  AmoCrm,
+  PHASE2_TOOLS,
+  pricingCodesHint,
+  type AgentTool,
+  type HandoffReason,
+  type ToolContext,
+} from '@ai-door/tools';
+import { LlmUnavailableError, type LlmClient } from './llm.ts';
+import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
+import { formatCalculation, summarizeDialog } from './summary.ts';
 
 export interface AmoAccess {
   api: AmoApiClient;
@@ -18,10 +39,18 @@ export interface PipelineDeps {
   journal: JournalRepo;
   catalog: CatalogRepo;
   knowledge: KnowledgeRepo;
+  pricing: PricingRepo;
+  memory: MemoryRepo;
+  suggestions: SuggestionsRepo;
   orchestrator: Orchestrator;
+  /** Для резюме диалога. */
+  llm: LlmClient;
   amo(accountId: number): Promise<AmoAccess>;
   /** Ответ в чат через Salesbot (continue). Пустой список — просто продолжить бота. */
   send(access: AmoAccess, returnUrl: string, messages: string[]): Promise<void>;
+  /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
+  stt?(provider: WidgetSettings['stt']['provider']): SttProvider | null;
+  download?: typeof downloadAttachment;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
@@ -30,9 +59,11 @@ export type PipelineOutcome =
   | { status: 'empty' }
   | { status: 'skipped'; reason: string }
   | { status: 'replied'; text: string }
+  | { status: 'drafted'; id: number }
+  | { status: 'hinted'; id: number }
   | { status: 'handoff'; reason: HandoffReason };
 
-const REASON_TEXT: Record<HandoffReason, string> = {
+export const REASON_TEXT: Record<HandoffReason, string> = {
   client_request: 'Клиент просит связаться с менеджером',
   complaint: 'Жалоба / недовольство клиента',
   discount: 'Вопрос о скидке',
@@ -44,146 +75,268 @@ const REASON_TEXT: Record<HandoffReason, string> = {
   other: 'Нужен менеджер',
 };
 
+/** Куда идёт ответ AI: клиенту, в черновик на одобрение или подсказкой менеджеру. */
+type Delivery = 'send' | 'draft' | 'hint';
+
+/** В режиме подсказок AI ничего не меняет в CRM — только читает. */
+const READ_ONLY = new Set(['catalog_search', 'catalog_get_product', 'knowledge_search', 'crm_get_context', 'price_calculate']);
+
 /** Сколько смотреть назад, если AI ещё не отвечал в сделке. */
 const MANAGER_LOOKBACK_MS = 7 * 24 * 3600_000;
+
+interface Turn {
+  accountId: number;
+  leadId: number;
+  settings: WidgetSettings;
+  access: AmoAccess;
+  pending: PendingMessage[];
+  texts: string[];
+  sendErrors: string[];
+}
 
 export class DialogPipeline {
   constructor(private readonly d: PipelineDeps) {}
 
   /** Обрабатывает накопившуюся серию сообщений клиента по сделке. */
   async processLead(accountId: number, leadId: number): Promise<PipelineOutcome> {
+    const pending = await this.d.dialog.takePending(accountId, leadId);
+    if (!pending.length) return { status: 'empty' };
+    const { settings } = await this.d.settings.get(accountId);
+    const access = await this.d.amo(accountId);
+    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [] };
     try {
-      return await this.process(accountId, leadId);
+      t.texts = await this.incomingTexts(t);
+      for (const text of t.texts) await this.d.dialog.addMessage(accountId, leadId, 'client', text);
+      return await this.process(t);
     } finally {
-      await this.flushSendErrors(accountId, leadId);
+      if (t.sendErrors.length) {
+        await this.journal(t, { kind: 'error', summary: 'Не удалось отправить ответ в чат', details: { errors: t.sendErrors } });
+      }
     }
   }
 
-  private async process(accountId: number, leadId: number): Promise<PipelineOutcome> {
-    const pending = await this.d.dialog.takePending(accountId, leadId);
-    if (!pending.length) return { status: 'empty' };
-    for (const m of pending) await this.d.dialog.addMessage(accountId, leadId, 'client', m.text);
-
-    const { settings } = await this.d.settings.get(accountId);
-    const access = await this.d.amo(accountId);
-    const skip = async (reason: string, summary: string): Promise<PipelineOutcome> => {
-      await this.release(access, pending, []);
-      await this.d.journal.add({ accountId, leadId, kind: 'skipped', summary, details: { reason } });
-      return { status: 'skipped', reason };
-    };
-
-    if (!settings.enabled || settings.mode === 'off') return skip('disabled', 'AI выключен');
-    // Фаза 1: клиенту пишет только режим «Автоматический». Полуавто и подсказки — фаза 2.
-    if (settings.mode !== 'auto') return skip('mode', `Режим «${settings.mode}» — ответ клиенту не отправляется`);
-
-    const state = await this.d.dialog.state(accountId, leadId);
-    if (state.paused) return skip('paused', `AI на паузе: ${state.pauseReason ?? ''}`);
+  private async process(t: Turn): Promise<PipelineOutcome> {
+    const { settings, access, accountId, leadId } = t;
+    if (!settings.enabled || settings.mode === 'off') return this.skip(t, 'disabled', 'AI выключен');
 
     const lead = await access.api.getLead(leadId);
-    if (!lead) return skip('no_lead', 'Сделка не найдена');
+    if (!lead) return this.skip(t, 'no_lead', 'Сделка не найдена');
     if (settings.where.pipelineIds && !settings.where.pipelineIds.includes(lead.pipeline_id)) {
-      return skip('pipeline', 'Воронка не входит в список работы AI');
+      return this.skip(t, 'pipeline', 'Воронка не входит в список работы AI');
     }
     if (settings.where.disabledStatusIds.includes(lead.status_id)) {
       await this.d.dialog.pause(accountId, leadId, 'status_without_ai');
-      return skip('status', 'Этап сделки — «без AI»');
+      return this.skip(t, 'status', 'Этап сделки — «без AI»');
     }
 
-    // Менеджер уже пишет клиенту — AI замолкает (раздел 6 ТЗ).
+    let state = await this.d.dialog.state(accountId, leadId);
     const now = this.d.now?.() ?? new Date();
-    const since = state.lastAiAt ?? new Date(now.getTime() - MANAGER_LOOKBACK_MS);
-    const outgoing = await access.api.getOutgoingChatEvents(leadId, since);
-    if (outgoing.some((e) => e.created_by > 0)) {
-      await this.d.dialog.pause(accountId, leadId, 'manager_message');
-      await this.d.journal.add({ accountId, leadId, kind: 'pause', summary: 'Менеджер написал клиенту — AI на паузе' });
-      return skip('manager', 'Менеджер ведёт диалог');
+    if (!state.paused) {
+      // Менеджер уже пишет клиенту — AI замолкает (раздел 6 ТЗ).
+      const since = state.lastAiAt ?? new Date(now.getTime() - MANAGER_LOOKBACK_MS);
+      const outgoing = await access.api.getOutgoingChatEvents(leadId, since);
+      if (outgoing.some((e) => e.created_by > 0)) {
+        await this.d.dialog.pause(accountId, leadId, 'manager_message');
+        await this.journal(t, { kind: 'pause', summary: 'Менеджер написал клиенту — AI на паузе' });
+        state = await this.d.dialog.state(accountId, leadId);
+      }
+    }
+
+    let delivery: Delivery = settings.mode === 'auto' ? 'send' : settings.mode === 'semi' ? 'draft' : 'hint';
+    if (state.paused) {
+      if (!settings.hints.whenPaused) {
+        return this.skip(t, state.pauseReason === 'manager_message' ? 'manager' : 'paused', `AI на паузе: ${state.pauseReason ?? ''}`);
+      }
+      delivery = 'hint';
     }
 
     if (settings.limits.dailyRub !== null) {
       const spent = await this.d.journal.spentTodayRub(accountId);
       if (spent >= settings.limits.dailyRub) {
-        return skip('limit', `Дневной лимит ${settings.limits.dailyRub} ₽ исчерпан (${spent.toFixed(2)} ₽)`);
+        const note = `Дневной лимит ${settings.limits.dailyRub} ₽ исчерпан (${spent.toFixed(2)} ₽)`;
+        if (settings.limits.onExceed === 'stop' || delivery === 'hint') return this.skip(t, 'limit', note);
+        if (settings.limits.onExceed === 'handoff') return this.handoff(t, 'other', note);
+        delivery = 'hint';
+      }
+    }
+    if (delivery !== 'hint' && settings.limits.maxAiMessagesPerLead !== null) {
+      const count = await this.d.dialog.aiMessagesCount(accountId, leadId);
+      if (count >= settings.limits.maxAiMessagesPerLead) {
+        return this.handoff(t, 'other', `Достигнут лимит ответов AI в сделке (${count}).`);
       }
     }
 
-    const history = (await this.d.dialog.history(accountId, leadId, 40)).map((m) => ({ role: m.role, text: m.text }));
-    // Новые сообщения уже в истории — отдаём историю без них и их отдельно.
-    const past = history.slice(0, history.length - pending.length);
-    const ctx = {
+    // Контекст: память клиента по основному контакту, правила цен.
+    const contactRef = lead._embedded?.contacts?.find((c) => c.is_main) ?? lead._embedded?.contacts?.[0];
+    const subject = memorySubject(contactRef?.id ?? null, leadId);
+    const [mem, { rules }] = await Promise.all([this.d.memory.get(accountId, subject), this.d.pricing.get(accountId)]);
+    const memoryText = memoryToText(mem.data, mem.summary);
+    const clientFacts = [
+      mem.data.budget_rub ? String(mem.data.budget_rub) : '',
+      ...mem.data.openings.map((o) => `${o.width_mm ?? ''} ${o.height_mm ?? ''} ${o.wall_mm ?? ''} ${o.qty ?? ''}`),
+    ].filter((x) => x.trim());
+    const tools: readonly AgentTool[] = delivery === 'hint' ? PHASE2_TOOLS.filter((x) => READ_ONLY.has(x.name)) : PHASE2_TOOLS;
+    const ctx: ToolContext = {
       accountId,
       catalog: this.d.catalog,
       knowledge: this.d.knowledge,
       crm: new AmoCrm(access.api, leadId),
+      pricing: rules,
+      tasks: settings.tasks,
+      memory: {
+        get: async () => (await this.d.memory.get(accountId, subject)).data,
+        update: (patch) => this.d.memory.update(accountId, subject, patch),
+      },
     };
+
+    const history = (await this.d.dialog.history(accountId, leadId, 40)).map((m) => ({ role: m.role, text: m.text }));
+    // Новые сообщения уже в истории — отдаём историю без них и их отдельно.
+    const past = history.slice(0, history.length - t.texts.length);
 
     let result: TurnResult;
     try {
       result = await this.d.orchestrator.runTurn({
         settings,
         history: past,
-        incoming: pending.map((m) => m.text),
+        incoming: t.texts,
         ctx,
-        tools: PHASE1_TOOLS,
+        tools,
         now,
+        dynamic: { memory: memoryText, pricing: pricingCodesHint(rules) },
+        clientFacts,
       });
     } catch (err) {
       const unavailable = err instanceof LlmUnavailableError;
-      await this.d.journal.add({
-        accountId,
-        leadId,
+      await this.journal(t, {
         kind: 'error',
         summary: unavailable ? 'LLM недоступна (основная и резервная модели)' : `Ошибка AI: ${(err as Error).message}`,
       });
-      return this.handoff(access, settings, accountId, leadId, pending, 'no_answer', 'AI временно недоступен. Клиент ждёт ответа.');
+      if (delivery === 'hint') return this.skip(t, 'error', 'Подсказка не подготовлена: ошибка AI');
+      return this.handoff(t, 'no_answer', 'AI временно недоступен. Клиент ждёт ответа.');
     }
 
-    const cost = { costUsd: result.cost.usd, costRub: result.cost.usd * settings.billing.usdRubRate };
+    const cost = {
+      inputTokens: result.cost.inputTokens,
+      outputTokens: result.cost.outputTokens,
+      costUsd: result.cost.usd,
+      costRub: result.cost.usd * settings.billing.usdRubRate,
+    };
     const details = {
       model: result.model,
+      delivery,
       toolCalls: result.toolCalls,
       sources: result.sources,
       rejections: result.rejections,
-      incoming: pending.map((m) => m.text),
+      incoming: t.texts,
+      ...(result.calculation ? { calculation: result.calculation } : {}),
     };
-    const tokens = { inputTokens: result.cost.inputTokens, outputTokens: result.cost.outputTokens, ...cost };
+
+    if (result.calculation && delivery !== 'hint') {
+      await this.d.memory.update(accountId, subject, {
+        last_calculation: { total_rub: result.calculation.total, complete: result.calculation.complete, at: now.toISOString() },
+      });
+      await access.api.addLeadNote(leadId, formatCalculation(result.calculation)).catch(() => undefined);
+    }
 
     if (result.kind === 'handoff') {
-      await this.d.journal.add({ accountId, leadId, kind: 'handoff', summary: REASON_TEXT[result.handoff.reason], details, ...tokens });
-      return this.handoff(access, settings, accountId, leadId, pending, result.handoff.reason, result.handoff.summary);
+      if (delivery === 'hint') {
+        const id = await this.d.suggestions.add(accountId, leadId, 'hint', `AI рекомендует передать диалог менеджеру: ${REASON_TEXT[result.handoff.reason]}. ${result.handoff.summary}`, details);
+        await this.journal(t, { kind: 'hint', summary: `Подсказка: ${REASON_TEXT[result.handoff.reason]}`, details, ...cost });
+        await this.release(t, []);
+        return { status: 'hinted', id };
+      }
+      await this.journal(t, { kind: 'handoff', summary: REASON_TEXT[result.handoff.reason], details, ...cost });
+      return this.handoff(t, result.handoff.reason, result.handoff.summary, [], { history: [...past, ...t.texts.map((x) => ({ role: 'client' as const, text: x }))], memoryText, subject });
     }
     if (result.kind === 'blocked') {
-      await this.d.journal.add({ accountId, leadId, kind: 'blocked', summary: `Ответ не отправлен: ${result.reason}`, details, ...tokens });
-      return this.handoff(access, settings, accountId, leadId, pending, 'no_answer', `AI не смог дать проверенный ответ (${result.reason}).`);
+      await this.journal(t, { kind: 'blocked', summary: `Ответ не отправлен: ${result.reason}`, details, ...cost });
+      if (delivery !== 'send') {
+        await this.release(t, []);
+        return { status: 'skipped', reason: 'blocked' };
+      }
+      return this.handoff(t, 'no_answer', `AI не смог дать проверенный ответ (${result.reason}).`);
+    }
+
+    if (delivery === 'hint' || delivery === 'draft') {
+      const id = await this.d.suggestions.add(accountId, leadId, delivery, result.text, details);
+      await this.journal(t, { kind: delivery, summary: result.text, details, ...cost });
+      if (delivery === 'draft') await this.d.dialog.registerTurn(accountId, leadId, result.missed);
+      await this.release(t, []);
+      return delivery === 'draft' ? { status: 'drafted', id } : { status: 'hinted', id };
     }
 
     const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
     if (settings.where.typingDelay) await (this.d.sleep ?? defaultSleep)(Math.min(1500 + result.text.length * 25, 8000));
-    await this.d.journal.add({ accountId, leadId, kind: 'reply', summary: result.text, details, ...tokens });
-
+    await this.journal(t, { kind: 'reply', summary: result.text, details, ...cost });
     if (misses >= 2) {
       await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
-      return this.handoff(access, settings, accountId, leadId, pending, 'no_answer', 'AI дважды подряд не нашёл ответа.', [result.text]);
+      return this.handoff(t, 'no_answer', 'AI дважды подряд не нашёл ответа.', [result.text]);
     }
-    await this.release(access, pending, [result.text]);
+    await this.release(t, [result.text]);
     await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
     return { status: 'replied', text: result.text };
   }
 
-  /** Передача менеджеру: пауза, задача, резюме, этап (опционально), фраза клиенту. */
+  /** Тексты входящих: голосовые расшифровываются, прочие вложения помечаются (раздел 5, шаг 4). */
+  private async incomingTexts(t: Turn): Promise<string[]> {
+    const out: string[] = [];
+    for (const m of t.pending) {
+      if (!m.attachmentUrl) {
+        out.push(m.text);
+        continue;
+      }
+      if (!isAudio(m.attachmentType)) {
+        out.push([m.text, '(клиент отправил файл или фото — разбор вложений появится позже, попросите описать словами)'].filter(Boolean).join('\n'));
+        continue;
+      }
+      const stt = this.d.stt?.(t.settings.stt.provider) ?? null;
+      if (!stt) {
+        out.push([m.text, '(клиент отправил голосовое сообщение; расшифровка выключена — попросите написать текстом)'].filter(Boolean).join('\n'));
+        continue;
+      }
+      try {
+        const file = await (this.d.download ?? downloadAttachment)(m.attachmentUrl);
+        const text = await stt.transcribe(file.bytes, file.mime);
+        out.push(text ? `[Голосовое сообщение] ${text}` : '(голосовое сообщение без распознанной речи)');
+        await this.journal(t, { kind: 'note', summary: `Голосовое расшифровано (${stt.name})`, details: { text } });
+      } catch (err) {
+        out.push('(клиент отправил голосовое сообщение, расшифровать не удалось — попросите написать текстом)');
+        await this.journal(t, { kind: 'error', summary: `Расшифровка голосового: ${(err as Error).message}` });
+      }
+    }
+    return out;
+  }
+
+  private async skip(t: Turn, reason: string, summary: string): Promise<PipelineOutcome> {
+    await this.release(t, []);
+    await this.journal(t, { kind: 'skipped', summary, details: { reason } });
+    return { status: 'skipped', reason };
+  }
+
+  /** Передача менеджеру: пауза, задача, резюме (раздел 10), этап (опционально), фраза клиенту. */
   private async handoff(
-    access: AmoAccess,
-    settings: WidgetSettings,
-    accountId: number,
-    leadId: number,
-    pending: PendingMessage[],
+    t: Turn,
     reason: HandoffReason,
     summary: string,
     before: string[] = [],
+    ctx?: { history: HistoryMessage[]; memoryText: string | null; subject: string },
   ): Promise<PipelineOutcome> {
+    const { accountId, leadId, settings, access } = t;
     await this.d.dialog.pause(accountId, leadId, `handoff:${reason}`);
-    const phrase = settings.behavior.handoffPhrase;
     const h = settings.handoff;
     const now = this.d.now?.() ?? new Date();
+
+    let note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n${summary}`;
+    if (ctx) {
+      try {
+        const s = await summarizeDialog(this.d.llm, settings, { history: ctx.history, memoryText: ctx.memoryText });
+        note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n\n${s.text}`;
+        await this.d.memory.setSummary(accountId, ctx.subject, s.text);
+        await this.journal(t, { kind: 'summary', summary: s.text, costUsd: s.cost.usd, costRub: s.cost.usd * settings.billing.usdRubRate, inputTokens: s.cost.inputTokens, outputTokens: s.cost.outputTokens });
+      } catch {
+        // Резюме не критично: остаётся краткое от агента.
+      }
+    }
     const steps = await Promise.allSettled([
       access.api.createTask({
         text: `AI: ${REASON_TEXT[reason]}. ${summary}`.slice(0, 1000),
@@ -192,49 +345,35 @@ export class DialogPipeline {
         taskTypeId: h.taskTypeId,
         ...(h.responsibleUserId ? { responsibleUserId: h.responsibleUserId } : {}),
       }),
-      access.api.addLeadNote(leadId, `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n${summary}`),
+      access.api.addLeadNote(leadId, note),
       h.statusId ? access.api.setLeadStatus(leadId, h.statusId) : Promise.resolve(),
     ]);
     const failed = steps.filter((s) => s.status === 'rejected').map((s) => String((s as PromiseRejectedResult).reason));
-    await this.release(access, pending, [...before, phrase]);
-    await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase);
-    await this.d.journal.add({
-      accountId,
-      leadId,
-      kind: 'handoff',
-      summary: `Передано менеджеру: ${REASON_TEXT[reason]}`,
-      details: { reason, summary, errors: failed },
-    });
+    // В «Полуавто» клиенту ничего не уходит без одобрения — фраза передачи тоже.
+    const phrase = settings.mode === 'auto' ? [settings.behavior.handoffPhrase] : [];
+    await this.release(t, [...before, ...phrase]);
+    if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
+    await this.journal(t, { kind: 'handoff', summary: `Передано менеджеру: ${REASON_TEXT[reason]}`, details: { reason, summary, errors: failed } });
     return { status: 'handoff', reason };
   }
 
   /** Отвечает последнему боту пачки, остальные просто продолжает. */
-  private async release(access: AmoAccess, pending: PendingMessage[], messages: string[]): Promise<void> {
-    const sink = this.sendErrors.get(key(pending)) ?? [];
-    const withUrl = pending.filter((m) => m.returnUrl);
+  private async release(t: Turn, messages: string[]): Promise<void> {
+    const withUrl = t.pending.filter((m) => m.returnUrl);
     for (const [i, m] of withUrl.entries()) {
       try {
-        await this.d.send(access, m.returnUrl as string, i === withUrl.length - 1 ? messages : []);
+        await this.d.send(t.access, m.returnUrl as string, i === withUrl.length - 1 ? messages : []);
       } catch (err) {
-        sink.push((err as Error).message);
-        this.sendErrors.set(key(pending), sink);
+        t.sendErrors.push((err as Error).message);
       }
     }
+    // Повторно не отвечаем тем же ботам.
+    for (const m of withUrl) m.returnUrl = null;
   }
 
-  /** Ошибки отправки по сделке (воркер обрабатывает сделки параллельно). */
-  private readonly sendErrors = new Map<string, string[]>();
-
-  /** Ошибки отправки в Salesbot за последний processLead (для журнала). */
-  private async flushSendErrors(accountId: number, leadId: number): Promise<void> {
-    const k = `${accountId}:${leadId}`;
-    const errors = this.sendErrors.get(k);
-    if (!errors?.length) return;
-    this.sendErrors.delete(k);
-    await this.d.journal.add({ accountId, leadId, kind: 'error', summary: 'Не удалось отправить ответ в чат', details: { errors } });
+  private journal(t: Turn, e: Omit<JournalEntry, 'accountId' | 'leadId'>) {
+    return this.d.journal.add({ accountId: t.accountId, leadId: t.leadId, ...e });
   }
 }
-
-const key = (pending: PendingMessage[]) => `${pending[0]?.accountId}:${pending[0]?.leadId}`;
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

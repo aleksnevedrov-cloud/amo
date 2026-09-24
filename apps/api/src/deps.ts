@@ -13,10 +13,13 @@ import {
   createPool,
   DialogRepo,
   JournalRepo,
+  MemoryRepo,
   PgTokenStore,
   SettingsRepo,
+  SuggestionsRepo,
   type Db,
 } from '@ai-door/db';
+import { PricingRepo } from '@ai-door/pricing';
 import { KnowledgeRepo } from '@ai-door/knowledge';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@ai-door/shared';
 import type { Queue } from 'bullmq';
@@ -39,8 +42,12 @@ export interface Deps {
   catalog: CatalogRepo;
   importer: CatalogImporter;
   knowledge: KnowledgeRepo;
+  pricing: PricingRepo;
+  memory: MemoryRepo;
+  suggestions: SuggestionsRepo;
   /** null — не задан ANTHROPIC_API_KEY. */
   orchestrator: Orchestrator | null;
+  llm: LlmClient | null;
   schedule: ScheduleLead;
   alerter: Alerter;
   fetch: typeof fetch;
@@ -88,7 +95,11 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     catalog: new CatalogRepo(db),
     importer: overrides.importer ?? new CatalogImporter(db),
     knowledge: overrides.knowledge ?? new KnowledgeRepo(db),
+    pricing: new PricingRepo(db),
+    memory: new MemoryRepo(db),
+    suggestions: new SuggestionsRepo(db),
     orchestrator: llm ? new Orchestrator(llm) : null,
+    llm,
     schedule,
     alerter,
     fetch: fetchImpl,

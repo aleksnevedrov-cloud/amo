@@ -1,4 +1,8 @@
-import type { WidgetSettings } from '@ai-door/db';
+import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@ai-door/db';
+import type { CalcResult, PricingRules } from '@ai-door/pricing';
+
+export type { CalcResult, PricingRules };
+export type Suggestion = Omit<DbSuggestion, 'createdAt' | 'decidedAt'> & { createdAt: string; decidedAt: string | null };
 import type { AmoWidgetSelf } from './amo.ts';
 
 export type { WidgetSettings };
@@ -44,9 +48,9 @@ export interface JournalItem {
 export interface LeadPanel {
   leadId: number;
   ai: { enabled: boolean; mode: Mode; paused: boolean; pauseReason: string | null; pausedAt: string | null };
-  hints: unknown[];
+  hints: Suggestion[];
   products: Source[];
-  calculations: unknown[];
+  calculations: CalcResult[];
   log: { id: number; kind: string; summary: string; costRub: number; createdAt: string }[];
   costRub: number;
 }
@@ -70,6 +74,9 @@ export interface SandboxResult {
   sources: Source[];
   rejections: { kind: string; fragment: string }[][];
   notes: string[];
+  tasks: { text: string; taskTypeId: number; deadlineMin: number }[];
+  memory: ClientMemory;
+  calculation: CalcResult | null;
   model: string;
   cost: { usd: number; rub: number; inputTokens: number; outputTokens: number };
 }
@@ -118,6 +125,24 @@ export class WidgetApi {
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
   sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings) =>
     this.call<SandboxResult>('POST', '/widget/v1/sandbox', settings ? { messages, settings } : { messages });
+
+  pricing = () => this.call<{ rules: PricingRules; version: number }>('GET', '/widget/v1/pricing');
+  savePricing = (rules: PricingRules) => this.call<{ rules: PricingRules; version: number }>('PUT', '/widget/v1/pricing', rules);
+  importPricing = (fileBase64: string) =>
+    this.call<{ rules: PricingRules; saved: boolean }>('POST', '/widget/v1/pricing/import', { file: fileBase64 });
+  exportPricing = () => this.call<{ file: string; name: string }>('GET', '/widget/v1/pricing/export');
+  testPricing = (body: {
+    doors: { product_id: string; width_mm?: number; height_mm?: number; qty: number }[];
+    services?: { code: string; km?: number; floor?: number }[];
+    extras?: { code: string; qty: number }[];
+    rules?: PricingRules;
+  }) => this.call<{ result: CalcResult; text: string }>('POST', '/widget/v1/pricing/test', body);
+  suggestions = (leadId?: number) =>
+    this.call<{ items: Suggestion[] }>('GET', `/widget/v1/suggestions${leadId ? `?leadId=${leadId}` : ''}`);
+  approve = (id: number, text?: string) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/approve`, text ? { text } : {});
+  reject = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/reject`);
+  markUsed = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/used`);
+  summary = (leadId: number) => this.call<{ text: string; costRub: number }>('POST', `/widget/v1/leads/${leadId}/summary`);
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await this.self.$authorizedAjax({

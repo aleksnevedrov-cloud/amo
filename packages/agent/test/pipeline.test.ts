@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { DialogRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type WidgetSettingsInput } from '@ai-door/db';
+import { DialogRepo, JournalRepo, MemoryRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema, type WidgetSettingsInput } from '@ai-door/db';
+import { PricingRepo } from '@ai-door/pricing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seeded, type Seeded } from '../../tools/test/fixtures.ts';
 import { Orchestrator } from '../src/orchestrator.ts';
@@ -25,17 +26,23 @@ async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], settin
   const fake = fakeAmo(amo);
   const dialog = new DialogRepo(s.db);
   const journal = new JournalRepo(s.db);
+  const suggestions = new SuggestionsRepo(s.db);
+  const memory = new MemoryRepo(s.db);
   const pipeline = new DialogPipeline({
     settings: new SettingsRepo(s.db),
     dialog,
     journal,
     catalog: s.catalog,
     knowledge: s.knowledge,
+    pricing: new PricingRepo(s.db),
+    memory,
+    suggestions,
     orchestrator: new Orchestrator(llm),
+    llm,
     amo: async () => fake.access,
     send: fake.send,
   });
-  return { llm, fake, dialog, journal, pipeline };
+  return { llm, fake, dialog, journal, pipeline, suggestions, memory };
 }
 
 const journalKinds = async (j: JournalRepo) => (await j.list(ACC, { leadId: lead })).map((r) => r.kind).reverse();
@@ -62,7 +69,7 @@ describe('DialogPipeline', () => {
   });
 
   it('AI замолкает после сообщения менеджера', async () => {
-    const t = await setup([], {}, { events: [{ id: 'e1', type: 'outgoing_chat_message', entity_id: 0, created_by: 555, created_at: 0 }] });
+    const t = await setup([], { hints: { whenPaused: false } }, { events: [{ id: 'e1', type: 'outgoing_chat_message', entity_id: 0, created_by: 555, created_at: 0 }] });
     await t.dialog.enqueue(ACC, lead, 'Ну что там?', 'https://test.amocrm.ru/c/3');
     expect(await t.pipeline.processLead(ACC, lead)).toEqual({ status: 'skipped', reason: 'manager' });
     expect(t.llm.requests).toHaveLength(0);
@@ -71,7 +78,7 @@ describe('DialogPipeline', () => {
 
     // Следующее сообщение клиента — AI всё ещё молчит.
     await t.dialog.enqueue(ACC, lead, 'Алло?', null);
-    expect(await t.pipeline.processLead(ACC, lead)).toEqual({ status: 'skipped', reason: 'paused' });
+    expect(await t.pipeline.processLead(ACC, lead)).toEqual({ status: 'skipped', reason: 'manager' });
     expect(await journalKinds(t.journal)).toEqual(['pause', 'skipped', 'skipped']);
   });
 

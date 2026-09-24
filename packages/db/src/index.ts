@@ -5,3 +5,5 @@ export * from './migrate.ts';
 export * from './pool.ts';
 export * from './settings.ts';
 export * from './tokens.ts';
+export * from './memory.ts';
+export * from './suggestions.ts';

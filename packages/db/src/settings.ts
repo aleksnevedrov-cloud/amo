@@ -72,6 +72,37 @@ export const widgetSettingsSchema = z
       .object({
         /** Дневной лимит расходов на LLM, ₽; null — без лимита. */
         dailyRub: z.number().positive().nullable().default(null),
+        /** Что делать при превышении дневного лимита. */
+        onExceed: z.enum(['stop', 'handoff', 'hints']).default('stop'),
+        /** Лимит ответов AI в одной сделке; null — без лимита. */
+        maxAiMessagesPerLead: z.number().int().positive().nullable().default(null),
+      })
+      .strict()
+      .default({}),
+    /** Типы задач, которые AI ставит сам (crm.create_task): тип amo и срок. */
+    tasks: z
+      .record(
+        z.enum(['callback', 'send_offer', 'check_availability', 'measure', 'other']),
+        z.object({ taskTypeId: z.number().int().positive(), deadlineMin: z.number().int().min(5).max(30 * 24 * 60) }).strict(),
+      )
+      .default({}),
+    hints: z
+      .object({
+        /** Готовить подсказки менеджеру, когда AI на паузе (раздел 6 ТЗ). */
+        whenPaused: z.boolean().default(true),
+      })
+      .strict()
+      .default({}),
+    salesbot: z
+      .object({
+        /** Бот-отправщик: через него уходят одобренные черновики (режим «Полуавто»). */
+        senderBotId: z.number().int().positive().nullable().default(null),
+      })
+      .strict()
+      .default({}),
+    stt: z
+      .object({
+        provider: z.enum(['off', 'yandex', 'openai']).default('off'),
       })
       .strict()
       .default({}),

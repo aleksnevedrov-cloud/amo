@@ -1,4 +1,5 @@
-import { PHASE1_TOOLS, SandboxCrm } from '@ai-door/tools';
+import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@ai-door/tools';
+import { widgetPhase2Routes } from './widget-phase2.ts';
 import { AmoApiClient, disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@ai-door/amo';
 import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
 import { amoRedirectUri } from '@ai-door/shared';
@@ -115,11 +116,13 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
       api.get('/leads/:leadId/panel', async (req) => {
         const { leadId } = leadParams.parse(req.params);
         const accountId = principal(req).accountId;
-        const [{ settings }, state, log] = await Promise.all([
+        const [{ settings }, state, log, suggestions] = await Promise.all([
           deps.settings.get(accountId),
           deps.dialog.state(accountId, leadId),
           deps.journal.list(accountId, { leadId, limit: 30 }),
+          deps.suggestions.listForLead(accountId, leadId, 10),
         ]);
+        const lastCalc = log.find((e) => (e.details as { calculation?: unknown }).calculation);
         const lastReply = log.find((e) => e.kind === 'reply' || e.kind === 'handoff');
         const sources = ((lastReply?.details as { sources?: { type: string }[] } | undefined)?.sources ?? []);
         return {
@@ -131,9 +134,9 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
             pauseReason: state.pauseReason,
             pausedAt: state.pausedAt,
           },
-          hints: [],
+          hints: suggestions.filter((x) => x.status === 'pending'),
           products: sources.filter((s) => s.type === 'product'),
-          calculations: [],
+          calculations: lastCalc ? [(lastCalc.details as { calculation: unknown }).calculation] : [],
           log: log.map((e) => ({ id: e.id, kind: e.kind, summary: e.summary, costRub: e.costRub, createdAt: e.createdAt })),
           costRub: log.reduce((sum, e) => sum + e.costRub, 0),
         };
@@ -227,12 +230,15 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
           settings = draft.data;
         }
         const crm = new SandboxCrm();
+        const memory = new InMemoryMemory();
+        const { rules } = await deps.pricing.get(p.accountId);
         const result = await deps.orchestrator.runTurn({
           settings,
           history: b.data.messages.slice(0, -1),
           incoming: [last.text],
-          ctx: { accountId: p.accountId, catalog: deps.catalog, knowledge: deps.knowledge, crm },
-          tools: PHASE1_TOOLS,
+          ctx: { accountId: p.accountId, catalog: deps.catalog, knowledge: deps.knowledge, crm, memory, pricing: rules, tasks: settings.tasks },
+          tools: PHASE2_TOOLS,
+          dynamic: { pricing: pricingCodesHint(rules) },
         });
         const costRub = result.cost.usd * settings.billing.usdRubRate;
         await deps.journal.add({
@@ -259,10 +265,15 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
           sources: result.sources,
           rejections: result.rejections,
           notes: crm.notes,
+          tasks: crm.tasks,
+          memory: await memory.get(),
+          calculation: result.calculation ?? null,
           model: result.model,
           cost: { usd: result.cost.usd, rub: costRub, inputTokens: result.cost.inputTokens, outputTokens: result.cost.outputTokens },
         };
       });
+
+      widgetPhase2Routes(api, deps, principal, requireAdmin);
     },
     { prefix: '/widget/v1' },
   );

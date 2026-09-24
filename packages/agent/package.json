@@ -17,6 +17,8 @@
     "@ai-door/catalog": "workspace:*",
     "@ai-door/db": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/media": "workspace:*",
+    "@ai-door/pricing": "workspace:*",
     "@ai-door/shared": "workspace:*",
     "@ai-door/tools": "workspace:*",
     "@anthropic-ai/sdk": "^0.128.0",

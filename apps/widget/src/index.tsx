@@ -7,18 +7,19 @@ import { SettingsStatus } from './components/SettingsStatus.tsx';
 
 declare const __API_URL__: string;
 
-export function salesbotSteps(apiUrl: string): string {
+/**
+ * Шаги Salesbot для обработчика виджета:
+ *  ai_reply — входящее сообщение клиента уходит AI;
+ *  ai_send — бот-отправщик забирает одобренный черновик (режим «Полуавто»).
+ */
+export function salesbotSteps(apiUrl: string, handler: string = 'ai_reply'): string {
+  const data =
+    handler === 'ai_send'
+      ? { lead_id: '{{lead.id}}', kind: 'send' }
+      : { lead_id: '{{lead.id}}', message: '{{message_text}}' };
   return JSON.stringify([
     {
-      question: [
-        {
-          handler: 'widget_request',
-          params: {
-            url: new URL('/salesbot/v1/hook', apiUrl).toString(),
-            data: { lead_id: '{{lead.id}}', message: '{{message_text}}' },
-          },
-        },
-      ],
+      question: [{ handler: 'widget_request', params: { url: new URL('/salesbot/v1/hook', apiUrl).toString(), data } }],
     },
   ]);
 }
@@ -93,7 +94,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
      * widget_request отправляет сообщение клиента на бэкенд, бот ждёт continue с ответом AI.
      * Плейсхолдеры {{lead.id}} и {{message_text}} — по документации Salesbot; сверить при установке.
      */
-    onSalesbotDesignerSave: () => salesbotSteps(apiUrl),
+    onSalesbotDesignerSave: (handlerCode?: unknown) => salesbotSteps(apiUrl, typeof handlerCode === 'string' ? handlerCode : 'ai_reply'),
 
     destroy: safe(() => {
       for (const root of roots.values()) root.unmount();

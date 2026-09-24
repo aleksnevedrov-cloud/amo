@@ -10,7 +10,11 @@ export type JournalKind =
   | 'error'
   | 'note'
   | 'import'
-  | 'sandbox';
+  | 'sandbox'
+  | 'draft'
+  | 'hint'
+  | 'summary'
+  | 'task';
 
 export interface JournalEntry {
   accountId: number;

@@ -13,6 +13,7 @@
     "@ai-door/catalog": "workspace:*",
     "@ai-door/db": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/pricing": "workspace:*",
     "@ai-door/tools": "workspace:*",
     "pg": "^8.23.0",
     "zod": "^3.25.76"
