@@ -10,10 +10,12 @@ export async function freshDb(): Promise<{ db: Db; drop: () => Promise<void> }> 
   const schema = `t_${randomBytes(6).toString('hex')}`;
   const admin = new pg.Client({ connectionString: TEST_DATABASE_URL });
   await admin.connect();
+  // Расширения ставятся в public один раз: параллельные тесты не должны создавать их в своих схемах.
+  await admin.query('CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public').catch(() => undefined);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await admin.end();
   const url = new URL(TEST_DATABASE_URL);
-  url.searchParams.set('options', `-c search_path=${schema}`);
+  url.searchParams.set('options', `-c search_path=${schema},public`);
   const db = createPool(url.toString());
   await migrate(db);
   return {

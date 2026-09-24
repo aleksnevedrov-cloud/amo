@@ -1,7 +1,29 @@
+import {
+  AnthropicLlm,
+  createIncomingQueue,
+  Orchestrator,
+  scheduleLead,
+  type IncomingJob,
+  type LlmClient,
+} from '@ai-door/agent';
 import { AmoOAuth, TokenService } from '@ai-door/amo';
-import { AccountsRepo, createPool, PgTokenStore, SettingsRepo, type Db } from '@ai-door/db';
+import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
+import {
+  AccountsRepo,
+  createPool,
+  DialogRepo,
+  JournalRepo,
+  PgTokenStore,
+  SettingsRepo,
+  type Db,
+} from '@ai-door/db';
+import { KnowledgeRepo } from '@ai-door/knowledge';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@ai-door/shared';
+import type { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
+
+/** Постановка сделки в очередь обработки. */
+export type ScheduleLead = (job: IncomingJob, windowMs: number) => Promise<void>;
 
 export interface Deps {
   env: Env;
@@ -12,14 +34,27 @@ export interface Deps {
   tokenService: TokenService;
   accounts: AccountsRepo;
   settings: SettingsRepo;
+  dialog: DialogRepo;
+  journal: JournalRepo;
+  catalog: CatalogRepo;
+  importer: CatalogImporter;
+  knowledge: KnowledgeRepo;
+  /** null — не задан ANTHROPIC_API_KEY. */
+  orchestrator: Orchestrator | null;
+  schedule: ScheduleLead;
   alerter: Alerter;
   fetch: typeof fetch;
   close(): Promise<void>;
 }
 
-export function createDeps(env: Env, overrides: Partial<Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db'>> = {}): Deps {
+export type DepsOverrides = Partial<
+  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge'> & { llm: LlmClient | null }
+>;
+
+export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
   const db = overrides.db ?? createPool(env.DATABASE_URL);
-  const redis = overrides.redis ?? new Redis(env.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: 1 });
+  let redisConn: Redis | null = null;
+  const redis = overrides.redis ?? (redisConn = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null }));
   const fetchImpl = overrides.fetch ?? fetch;
   const alerter = overrides.alerter ?? new TelegramAlerter(env.TELEGRAM_ALERT_BOT_TOKEN, env.TELEGRAM_ALERT_CHAT_ID);
   const oauth = new AmoOAuth({
@@ -29,6 +64,16 @@ export function createDeps(env: Env, overrides: Partial<Pick<Deps, 'fetch' | 're
     fetch: fetchImpl,
   });
   const tokens = new PgTokenStore(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
+  const llm = overrides.llm !== undefined ? overrides.llm : env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
+
+  let queue: Queue<IncomingJob> | null = null;
+  const schedule: ScheduleLead =
+    overrides.schedule ??
+    (async (job, windowMs) => {
+      queue ??= createIncomingQueue(redisConn ?? new Redis(env.REDIS_URL, { maxRetriesPerRequest: null }));
+      await scheduleLead(queue, job, windowMs);
+    });
+
   return {
     env,
     db,
@@ -38,11 +83,19 @@ export function createDeps(env: Env, overrides: Partial<Pick<Deps, 'fetch' | 're
     tokenService: new TokenService(tokens, oauth, env.TOKEN_REFRESH_MARGIN_SEC * 1000, alerter),
     accounts: new AccountsRepo(db),
     settings: new SettingsRepo(db),
+    dialog: new DialogRepo(db),
+    journal: new JournalRepo(db),
+    catalog: new CatalogRepo(db),
+    importer: overrides.importer ?? new CatalogImporter(db),
+    knowledge: overrides.knowledge ?? new KnowledgeRepo(db),
+    orchestrator: llm ? new Orchestrator(llm) : null,
+    schedule,
     alerter,
     fetch: fetchImpl,
     async close() {
+      await queue?.close();
       await db.end();
-      if ('quit' in redis && typeof redis.quit === 'function') await redis.quit();
+      if (redisConn) await redisConn.quit();
     },
   };
 }

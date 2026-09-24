@@ -30,6 +30,9 @@ export const envSchema = z.object({
   /** Обновлять access-токен, если до истечения осталось меньше N секунд. */
   TOKEN_REFRESH_MARGIN_SEC: z.coerce.number().int().positive().default(6 * 3600),
 
+  /** Ключ Anthropic API. Без него AI не отвечает, песочница сообщает об ошибке. */
+  ANTHROPIC_API_KEY: z.string().optional(),
+
   TELEGRAM_ALERT_BOT_TOKEN: z.string().optional(),
   TELEGRAM_ALERT_CHAT_ID: z.string().optional(),
 });

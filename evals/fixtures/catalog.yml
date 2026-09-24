@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- ТЕСТОВЫЕ ДАННЫЕ: товары и цены вымышленные, для тестов и eval. Не каталог rf-dveri.ru. -->
+<yml_catalog date="2026-09-24 10:00">
+<shop>
+<name>РФ-Двери (тест)</name>
+<company>Тестовый магазин</company>
+<url>https://rf-dveri.ru</url>
+<currencies><currency id="RUR" rate="1"/></currencies>
+<categories>
+<category id="1">Двери</category>
+<category id="2" parentId="1">Межкомнатные двери</category>
+<category id="3" parentId="2">Эмаль</category>
+<category id="4" parentId="2">Экошпон</category>
+<category id="5" parentId="2">ПВХ</category>
+<category id="6" parentId="2">Массив</category>
+<category id="7" parentId="1">Входные двери</category>
+<category id="8" parentId="1">Фурнитура</category>
+</categories><offers>
+<offer id="1001" available="true">
+<url>https://rf-dveri.ru/catalog/test-1001/</url><price>14900</price><currencyId>RUR</currencyId>
+<categoryId>3</categoryId><picture>https://rf-dveri.ru/images/test-1001.jpg</picture>
+<name>Дверь межкомнатная Турин 1 эмаль белая</name><vendor>РФ-Двери</vendor><vendorCode>TUR-1-W</vendorCode>
+<description><![CDATA[<p>Гладкое полотно под эмаль, скрытая кромка. Подходит для современного и скандинавского интерьера.</p>]]></description>
+<param name="Покрытие">эмаль</param>
+<param name="Цвет">белый</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800, 900</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1002" available="true">
+<url>https://rf-dveri.ru/catalog/test-1002/</url><price>16500</price><oldprice>17900</oldprice><currencyId>RUR</currencyId>
+<categoryId>3</categoryId><picture>https://rf-dveri.ru/images/test-1002.jpg</picture>
+<name>Дверь межкомнатная Турин 2 эмаль слоновая кость</name><vendor>РФ-Двери</vendor><vendorCode>TUR-2-I</vendorCode>
+<description><![CDATA[<p>Классическая филёнка, эмаль в 3 слоя.</p>]]></description>
+<param name="Покрытие">эмаль</param>
+<param name="Цвет">слоновая кость</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">матовое стекло</param>
+</offer>
+<offer id="1003" available="false">
+<url>https://rf-dveri.ru/catalog/test-1003/</url><price>19800</price><currencyId>RUR</currencyId>
+<categoryId>3</categoryId><picture>https://rf-dveri.ru/images/test-1003.jpg</picture>
+<name>Дверь межкомнатная Неаполь эмаль графит</name><vendor>РФ-Двери</vendor><vendorCode>NEA-G</vendorCode>
+<description><![CDATA[<p>Тёмная эмаль, фрезеровка в стиле неоклассика.</p>]]></description>
+<param name="Покрытие">эмаль</param>
+<param name="Цвет">графит</param>
+<param name="Ширина полотна" unit="мм">700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1004" available="true">
+<url>https://rf-dveri.ru/catalog/test-1004/</url><price>7900</price><currencyId>RUR</currencyId>
+<categoryId>4</categoryId><picture>https://rf-dveri.ru/images/test-1004.jpg</picture>
+<name>Дверь межкомнатная Порта 21 экошпон дуб бежевый</name><vendor>РФ-Двери</vendor><vendorCode>POR-21-OB</vendorCode>
+<description><![CDATA[<p>Недорогая практичная дверь, покрытие экошпон устойчиво к царапинам.</p>]]></description>
+<param name="Покрытие">экошпон</param>
+<param name="Цвет">дуб бежевый</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800, 900</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1005" available="true">
+<url>https://rf-dveri.ru/catalog/test-1005/</url><price>8400</price><currencyId>RUR</currencyId>
+<categoryId>4</categoryId><picture>https://rf-dveri.ru/images/test-1005.jpg</picture>
+<name>Дверь межкомнатная Порта 22 экошпон венге</name><vendor>РФ-Двери</vendor><vendorCode>POR-22-V</vendorCode>
+<description><![CDATA[<p>Экошпон с текстурой дерева.</p>]]></description>
+<param name="Покрытие">экошпон</param>
+<param name="Цвет">венге</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">стекло сатинат</param>
+</offer>
+<offer id="1006" available="true">
+<url>https://rf-dveri.ru/catalog/test-1006/</url><price>9200</price><oldprice>9900</oldprice><currencyId>RUR</currencyId>
+<categoryId>4</categoryId><picture>https://rf-dveri.ru/images/test-1006.jpg</picture>
+<name>Дверь межкомнатная Порта 50 экошпон грей</name><vendor>РФ-Двери</vendor><vendorCode>POR-50-GR</vendorCode>
+<description><![CDATA[<p>Серый экошпон, горизонтальная текстура.</p>]]></description>
+<param name="Покрытие">экошпон</param>
+<param name="Цвет">грей</param>
+<param name="Ширина полотна" unit="мм">700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1007" available="true">
+<url>https://rf-dveri.ru/catalog/test-1007/</url><price>6200</price><currencyId>RUR</currencyId>
+<categoryId>5</categoryId><picture>https://rf-dveri.ru/images/test-1007.jpg</picture>
+<name>Дверь межкомнатная Альфа ПВХ белый ясень</name><vendor>РФ-Двери</vendor><vendorCode>ALF-WA</vendorCode>
+<description><![CDATA[<p>Плёнка ПВХ, влагостойкая — подходит для ванной.</p>]]></description>
+<param name="Покрытие">ПВХ</param>
+<param name="Цвет">белый ясень</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1008" available="false">
+<url>https://rf-dveri.ru/catalog/test-1008/</url><price>6200</price><currencyId>RUR</currencyId>
+<categoryId>5</categoryId><picture>https://rf-dveri.ru/images/test-1008.jpg</picture>
+<name>Дверь межкомнатная Альфа ПВХ орех</name><vendor>РФ-Двери</vendor><vendorCode>ALF-NUT</vendorCode>
+<description><![CDATA[<p>Плёнка ПВХ.</p>]]></description>
+<param name="Покрытие">ПВХ</param>
+<param name="Цвет">орех</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1009" available="true">
+<url>https://rf-dveri.ru/catalog/test-1009/</url><price>24500</price><currencyId>RUR</currencyId>
+<categoryId>6</categoryId><picture>https://rf-dveri.ru/images/test-1009.jpg</picture>
+<name>Дверь межкомнатная Верона массив сосны</name><vendor>РФ-Двери</vendor><vendorCode>VER-PINE</vendorCode>
+<description><![CDATA[<p>Цельный массив сосны, экологичный материал.</p>]]></description>
+<param name="Покрытие">массив сосны, лак</param>
+<param name="Цвет">натуральный</param>
+<param name="Ширина полотна" unit="мм">600, 700, 800, 900</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="1010" available="true">
+<url>https://rf-dveri.ru/catalog/test-1010/</url><price>38900</price><currencyId>RUR</currencyId>
+<categoryId>6</categoryId><picture>https://rf-dveri.ru/images/test-1010.jpg</picture>
+<name>Дверь межкомнатная Верона массив дуба</name><vendor>РФ-Двери</vendor><vendorCode>VER-OAK</vendorCode>
+<description><![CDATA[<p>Массив дуба, покрытие маслом с воском.</p>]]></description>
+<param name="Покрытие">массив дуба, масло</param>
+<param name="Цвет">дуб натуральный</param>
+<param name="Ширина полотна" unit="мм">700, 800</param>
+<param name="Высота полотна" unit="мм">2000</param>
+<param name="Остекление">без стекла</param>
+</offer>
+<offer id="2001" available="true">
+<url>https://rf-dveri.ru/catalog/test-2001/</url><price>42000</price><oldprice>45000</oldprice><currencyId>RUR</currencyId>
+<categoryId>7</categoryId><picture>https://rf-dveri.ru/images/test-2001.jpg</picture>
+<name>Входная дверь Страж Термо</name><vendor>РФ-Двери</vendor><vendorCode>STR-T</vendorCode>
+<description><![CDATA[<p>Для частного дома, терморазрыв исключает промерзание.</p>]]></description>
+<param name="Тип">входная металлическая</param>
+<param name="Терморазрыв">да</param>
+<param name="Толщина полотна" unit="мм">100</param>
+<param name="Замки">2 замка, 3 класс взломостойкости</param>
+<param name="Отделка">МДФ белый / металл антрацит</param>
+<param name="Размер" unit="мм">860x2050, 960x2050</param>
+</offer>
+<offer id="2002" available="true">
+<url>https://rf-dveri.ru/catalog/test-2002/</url><price>26900</price><currencyId>RUR</currencyId>
+<categoryId>7</categoryId><picture>https://rf-dveri.ru/images/test-2002.jpg</picture>
+<name>Входная дверь Страж Сити</name><vendor>РФ-Двери</vendor><vendorCode>STR-C</vendorCode>
+<description><![CDATA[<p>Для квартиры.</p>]]></description>
+<param name="Тип">входная металлическая</param>
+<param name="Терморазрыв">нет</param>
+<param name="Толщина полотна" unit="мм">80</param>
+<param name="Замки">2 замка, 2 класс взломостойкости</param>
+<param name="Отделка">МДФ венге / порошковая окраска</param>
+<param name="Размер" unit="мм">860x2050, 960x2050</param>
+</offer>
+<offer id="3001" available="true">
+<url>https://rf-dveri.ru/catalog/test-3001/</url><price>1450</price><currencyId>RUR</currencyId>
+<categoryId>8</categoryId><picture>https://rf-dveri.ru/images/test-3001.jpg</picture>
+<name>Ручка дверная Флора хром</name><vendor>РФ-Двери</vendor><vendorCode>FLO-CR</vendorCode>
+<description><![CDATA[<p>Комплект ручек с розетками.</p>]]></description>
+<param name="Тип">ручка на розетке</param>
+<param name="Цвет">хром</param>
+</offer>
+<offer id="3002" available="true">
+<url>https://rf-dveri.ru/catalog/test-3002/</url><price>2900</price><currencyId>RUR</currencyId>
+<categoryId>8</categoryId><picture>https://rf-dveri.ru/images/test-3002.jpg</picture>
+<name>Петли скрытые Invisible 60 кг (2 шт.)</name><vendor>РФ-Двери</vendor><vendorCode>INV-60</vendorCode>
+<description><![CDATA[<p>Для дверей со скрытой кромкой.</p>]]></description>
+<param name="Тип">скрытые петли</param>
+<param name="Нагрузка" unit="кг">60</param>
+</offer>
+<offer id="3003" available="true">
+<url>https://rf-dveri.ru/catalog/test-3003/</url><price>2600</price><currencyId>RUR</currencyId>
+<categoryId>8</categoryId><picture>https://rf-dveri.ru/images/test-3003.jpg</picture>
+<name>Коробка дверная экошпон дуб бежевый (комплект)</name><vendor>РФ-Двери</vendor><vendorCode>BOX-OB</vendorCode>
+<description><![CDATA[<p>Комплект коробки 2,5 стойки.</p>]]></description>
+<param name="Тип">коробка</param>
+<param name="Цвет">дуб бежевый</param>
+</offer>
+<offer id="3004" available="true">
+<url>https://rf-dveri.ru/catalog/test-3004/</url><price>1300</price><currencyId>RUR</currencyId>
+<categoryId>8</categoryId><picture>https://rf-dveri.ru/images/test-3004.jpg</picture>
+<name>Наличник экошпон дуб бежевый (2,5 шт.)</name><vendor>РФ-Двери</vendor><vendorCode>NAL-OB</vendorCode>
+<description><![CDATA[<p>Комплект наличников на одну сторону.</p>]]></description>
+<param name="Тип">наличник</param>
+<param name="Цвет">дуб бежевый</param>
+</offer>
+</offers></shop></yml_catalog>

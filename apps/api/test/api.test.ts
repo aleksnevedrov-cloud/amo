@@ -141,7 +141,7 @@ describe('API виджета', () => {
     });
     expect(ok.statusCode).toBe(200);
     const got = await ctx.app.inject({ url: '/widget/v1/settings', headers: { 'x-auth-token': user } });
-    expect(got.json().settings).toEqual({ enabled: true, mode: 'auto' });
+    expect(got.json().settings).toMatchObject({ enabled: true, mode: 'auto', model: { model: 'claude-opus-5' } });
     const { rows } = await ctx.deps.db.query('SELECT count(*)::int AS n FROM settings_audit WHERE account_id = 31337');
     expect(rows[0].n).toBe(1);
   });

@@ -5,6 +5,7 @@ import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify';
 import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';
 import { oauthRoutes } from './routes/oauth.ts';
+import { salesbotRoutes } from './routes/salesbot.ts';
 import { widgetRoutes } from './routes/widget.ts';
 
 export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
@@ -24,7 +25,7 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
       cb(null, normalizeAccountDomain(origin, deps.env.AMO_ALLOWED_DOMAINS) !== null);
     },
     allowedHeaders: ['content-type', 'x-auth-token'],
-    methods: ['GET', 'PUT', 'POST'],
+    methods: ['GET', 'PUT', 'POST', 'DELETE'],
   });
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
 
@@ -37,5 +38,6 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
   healthRoutes(app, deps);
   oauthRoutes(app, deps);
   widgetRoutes(app, deps);
+  salesbotRoutes(app, deps);
   return app;
 }

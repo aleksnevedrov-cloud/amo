@@ -1,0 +1,23 @@
+{
+  "name": "@ai-door/evals",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "eval": "tsx run.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-door/agent": "workspace:*",
+    "@ai-door/catalog": "workspace:*",
+    "@ai-door/db": "workspace:*",
+    "@ai-door/knowledge": "workspace:*",
+    "@ai-door/tools": "workspace:*",
+    "pg": "^8.23.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

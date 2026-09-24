@@ -9,6 +9,11 @@ COPY apps/widget/package.json apps/widget/
 COPY packages/shared/package.json packages/shared/
 COPY packages/amo/package.json packages/amo/
 COPY packages/db/package.json packages/db/
+COPY packages/catalog/package.json packages/catalog/
+COPY packages/knowledge/package.json packages/knowledge/
+COPY packages/tools/package.json packages/tools/
+COPY packages/agent/package.json packages/agent/
+COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm --filter @ai-door/api --filter @ai-door/worker run build \

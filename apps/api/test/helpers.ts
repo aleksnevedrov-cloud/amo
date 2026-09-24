@@ -3,6 +3,8 @@ import { loadEnv } from '@ai-door/shared';
 import { SignJWT } from 'jose';
 import { freshDb } from '../../../packages/db/test/setup.ts';
 import { buildApp } from '../src/app.ts';
+import type { LlmClient } from '@ai-door/agent';
+import type { IncomingJob } from '@ai-door/agent';
 import { createDeps, type Deps } from '../src/deps.ts';
 
 export const CLIENT_ID = '8b4f5e3a-2c1d-4e5f-9a8b-7c6d5e4f3a2b';
@@ -26,11 +28,15 @@ export function amoFetch(mock: AmoMock): typeof fetch {
       return json(200, { token_type: 'Bearer', expires_in: 86400, access_token: 'ACCESS', refresh_token: 'REFRESH' });
     }
     if (url.endsWith('/api/v4/account')) return json(200, { id: 31337, name: 'РФ-Двери', subdomain: 'aleksnevedrov' });
+    if (url.endsWith('/api/v4/account?with=task_types')) return json(200, { _embedded: { task_types: [{ id: 1, name: 'Связаться' }] } });
+    if (url.endsWith('/api/v4/leads/pipelines')) {
+      return json(200, { _embedded: { pipelines: [{ id: 1, name: 'Продажи', _embedded: { statuses: [{ id: 10, name: 'Новая' }] } }] } });
+    }
     return json(404, {});
   }) as typeof fetch;
 }
 
-export async function setup() {
+export async function setup(opts: { llm?: LlmClient | null } = {}) {
   const { db, drop } = await freshDb();
   const env = loadEnv({
     NODE_ENV: 'test',
@@ -44,9 +50,12 @@ export async function setup() {
   });
   const amo: AmoMock = { calls: [], tokenStatus: 200 };
   const alerts: string[] = [];
+  const scheduled: { job: IncomingJob; windowMs: number }[] = [];
   const deps: Deps = {
     ...createDeps(env, {
       db,
+      llm: opts.llm ?? null,
+      schedule: async (job, windowMs) => void scheduled.push({ job, windowMs }),
       fetch: amoFetch(amo),
       redis: { ping: async () => 'PONG' },
       alerter: { alert: async (m) => void alerts.push(m) },
@@ -54,7 +63,7 @@ export async function setup() {
     close: async () => undefined,
   };
   const app = await buildApp(deps);
-  return { app, deps, amo, alerts, close: async () => (await app.close(), await drop()) };
+  return { app, deps, amo, alerts, scheduled, close: async () => (await app.close(), await drop()) };
 }
 
 export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_SECRET) {
@@ -72,5 +81,13 @@ export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_S
     .setAudience(PUBLIC_URL)
     .setIssuedAt()
     .setExpirationTime('30m')
+    .sign(new TextEncoder().encode(key));
+}
+
+export function botToken(claims: Record<string, unknown> = { account_id: 31337, subdomain: 'aleksnevedrov' }, key = CLIENT_SECRET) {
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: 'HS512' })
+    .setIssuedAt()
+    .setExpirationTime('5m')
     .sign(new TextEncoder().encode(key));
 }

@@ -2,7 +2,16 @@ import { randomBytes } from 'node:crypto';
 import { AmoOAuth, TokenService } from '@ai-door/amo';
 import { SecretBox } from '@ai-door/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { AccountsRepo, migrate, PgTokenStore, SettingsRepo, type Db } from '../src/index.ts';
+import {
+  AccountsRepo,
+  DialogRepo,
+  JournalRepo,
+  migrate,
+  PgTokenStore,
+  SettingsRepo,
+  widgetSettingsSchema,
+  type Db,
+} from '../src/index.ts';
 import { freshDb } from './setup.ts';
 
 let db: Db;
@@ -94,10 +103,12 @@ describe('SettingsRepo', () => {
   it('возвращает значения по умолчанию, сохраняет и пишет аудит', async () => {
     await installAccount(6, new Date(Date.now() + 20 * HOUR));
     const repo = new SettingsRepo(db);
-    expect(await repo.get(6)).toEqual({ settings: { enabled: false, mode: 'off' }, version: 0 });
+    const initial = await repo.get(6);
+    expect(initial.version).toBe(0);
+    expect(initial.settings).toMatchObject({ enabled: false, mode: 'off', model: { model: 'claude-opus-5' } });
 
-    await repo.save(6, 100, { enabled: true, mode: 'off' });
-    const { version } = await repo.save(6, 101, { enabled: true, mode: 'auto' });
+    await repo.save(6, 100, widgetSettingsSchema.parse({ enabled: true, mode: 'off' }));
+    const { version } = await repo.save(6, 101, widgetSettingsSchema.parse({ enabled: true, mode: 'auto' }));
     expect(version).toBe(2);
     expect((await repo.get(6)).settings.mode).toBe('auto');
 
@@ -105,6 +116,74 @@ describe('SettingsRepo', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].before).toBeNull();
     expect(Number(rows[1].user_id)).toBe(101);
-    expect(rows[1].before).toEqual({ enabled: true, mode: 'off' });
+    expect(rows[1].before).toMatchObject({ enabled: true, mode: 'off' });
+  });
+});
+
+describe('widgetSettingsSchema', () => {
+  it('старые настройки фазы 0 дополняются значениями по умолчанию', () => {
+    const s = widgetSettingsSchema.parse({ enabled: true, mode: 'auto' });
+    expect(s.where).toEqual({ pipelineIds: null, disabledStatusIds: [], batchWindowSec: 8, typingDelay: false });
+    expect(s.limits.dailyRub).toBeNull();
+  });
+
+  it('отклоняет неизвестные поля и некорректный URL фида', () => {
+    expect(() => widgetSettingsSchema.parse({ foo: 1 })).toThrow();
+    expect(() => widgetSettingsSchema.parse({ catalog: { feedUrl: 'not a url' } })).toThrow();
+  });
+});
+
+describe('SettingsRepo.listWithFeeds', () => {
+  it('возвращает только аккаунты с фидом', async () => {
+    await installAccount(7, new Date(Date.now() + 20 * HOUR));
+    await new SettingsRepo(db).save(7, 1, widgetSettingsSchema.parse({ catalog: { feedUrl: 'https://rf-dveri.ru/feed.xml' } }));
+    const list = await new SettingsRepo(db).listWithFeeds();
+    expect(list).toEqual([{ accountId: 7, feedUrl: 'https://rf-dveri.ru/feed.xml', everyHours: 24 }]);
+  });
+});
+
+describe('DialogRepo', () => {
+  it('пауза, возврат и счётчик промахов', async () => {
+    await installAccount(8, new Date(Date.now() + 20 * HOUR));
+    const d = new DialogRepo(db);
+    expect((await d.state(8, 1)).paused).toBe(false);
+    await d.pause(8, 1, 'manager_message');
+    expect(await d.state(8, 1)).toMatchObject({ paused: true, pauseReason: 'manager_message' });
+    expect(await d.registerTurn(8, 1, true)).toBe(1);
+    expect(await d.registerTurn(8, 1, true)).toBe(2);
+    expect(await d.registerTurn(8, 1, false)).toBe(0);
+    await d.resume(8, 1);
+    expect(await d.state(8, 1)).toMatchObject({ paused: false, pauseReason: null, misses: 0 });
+  });
+
+  it('история в хронологическом порядке с лимитом', async () => {
+    const d = new DialogRepo(db);
+    for (const t of ['1', '2', '3']) await d.addMessage(8, 2, 'client', t);
+    expect((await d.history(8, 2, 2)).map((m) => m.text)).toEqual(['2', '3']);
+  });
+
+  it('очередь входящих: пачка забирается один раз', async () => {
+    const d = new DialogRepo(db);
+    await d.enqueue(8, 3, 'Здравствуйте', 'https://x/1');
+    await d.enqueue(8, 3, 'Нужна дверь', 'https://x/2');
+    expect(await d.lastPendingAt(8, 3)).toBeInstanceOf(Date);
+    const [a, b] = await Promise.all([d.takePending(8, 3), d.takePending(8, 3)]);
+    const all = [...a, ...b];
+    expect(all.map((m) => m.text)).toEqual(['Здравствуйте', 'Нужна дверь']);
+    expect(await d.takePending(8, 3)).toEqual([]);
+    expect(await d.lastPendingAt(8, 3)).toBeNull();
+  });
+});
+
+describe('JournalRepo', () => {
+  it('пишет, фильтрует и считает расход', async () => {
+    await installAccount(9, new Date(Date.now() + 20 * HOUR));
+    const j = new JournalRepo(db);
+    await j.add({ accountId: 9, leadId: 1, kind: 'reply', summary: 'ответ', costRub: 1.5, costUsd: 0.016 });
+    await j.add({ accountId: 9, leadId: 2, kind: 'handoff', summary: 'передача', costRub: 2 });
+    expect((await j.list(9)).map((r) => r.kind)).toEqual(['handoff', 'reply']);
+    expect((await j.list(9, { leadId: 1 }))[0]).toMatchObject({ summary: 'ответ', costRub: 1.5, leadId: 1 });
+    expect(await j.spentTodayRub(9)).toBe(3.5);
+    expect(await j.spentSummary(9)).toEqual({ todayRub: 3.5, monthRub: 3.5 });
   });
 });

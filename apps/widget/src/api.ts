@@ -1,28 +1,96 @@
+import type { WidgetSettings } from '@ai-door/db';
 import type { AmoWidgetSelf } from './amo.ts';
 
-export type Mode = 'auto' | 'semi' | 'hints' | 'off';
+export type { WidgetSettings };
+export type Mode = WidgetSettings['mode'];
 
-export interface WidgetSettings {
-  enabled: boolean;
-  mode: Mode;
+export interface CatalogStats {
+  products: number;
+  lastImport: { status: string; startedAt: string; finishedAt: string | null; products: number | null; error: string | null } | null;
 }
 
 export interface Status {
   accountId: number;
+  isAdmin: boolean;
   connected: boolean;
   tokenExpiresAt: string | null;
   tokenError: string | null;
   enabled: boolean;
   mode: Mode;
+  llmConfigured: boolean;
+  spend: { todayRub: number; monthRub: number };
+  dailyLimitRub: number | null;
+  catalog: CatalogStats;
+}
+
+export interface Source {
+  type: 'product' | 'knowledge';
+  id: string;
+  title: string;
+  url?: string | null;
+  date?: string;
+}
+
+export interface JournalItem {
+  id: number;
+  leadId: number | null;
+  kind: string;
+  summary: string;
+  details: Record<string, unknown>;
+  costRub: number;
+  createdAt: string;
 }
 
 export interface LeadPanel {
   leadId: number;
-  ai: { mode: Mode; paused: boolean };
+  ai: { enabled: boolean; mode: Mode; paused: boolean; pauseReason: string | null; pausedAt: string | null };
   hints: unknown[];
-  products: unknown[];
+  products: Source[];
   calculations: unknown[];
-  log: unknown[];
+  log: { id: number; kind: string; summary: string; costRub: number; createdAt: string }[];
+  costRub: number;
+}
+
+export interface ToolCall {
+  name: string;
+  specName: string;
+  input: unknown;
+  ok: boolean;
+  empty: boolean;
+  error?: string;
+  durationMs: number;
+}
+
+export interface SandboxResult {
+  kind: 'reply' | 'handoff' | 'blocked';
+  text: string | null;
+  handoff: { reason: string; summary: string } | null;
+  blockedReason: string | null;
+  toolCalls: ToolCall[];
+  sources: Source[];
+  rejections: { kind: string; fragment: string }[][];
+  notes: string[];
+  model: string;
+  cost: { usd: number; rub: number; inputTokens: number; outputTokens: number };
+}
+
+export interface KnowledgeItem {
+  id: number;
+  kind: 'faq' | 'text' | 'url' | 'file';
+  title: string;
+  source: string | null;
+  createdAt: string;
+  chunks: number;
+}
+
+export type KnowledgeInput =
+  | { kind: 'faq'; question: string; answer: string }
+  | { kind: 'text'; title: string; content: string }
+  | { kind: 'url'; url: string };
+
+export interface Dictionaries {
+  pipelines: { id: number; name: string; statuses: { id: number; name: string }[] }[];
+  taskTypes: { id: number; name: string }[];
 }
 
 export class WidgetApi {
@@ -31,21 +99,25 @@ export class WidgetApi {
     private readonly baseUrl: string,
   ) {}
 
-  status() {
-    return this.call<Status>('GET', '/widget/v1/status');
-  }
-
-  settings() {
-    return this.call<{ settings: WidgetSettings; version: number }>('GET', '/widget/v1/settings');
-  }
-
-  saveSettings(settings: WidgetSettings) {
-    return this.call<{ settings: WidgetSettings; version: number }>('PUT', '/widget/v1/settings', settings);
-  }
-
-  leadPanel(leadId: number) {
-    return this.call<LeadPanel>('GET', `/widget/v1/leads/${leadId}/panel`);
-  }
+  status = () => this.call<Status>('GET', '/widget/v1/status');
+  settings = () => this.call<{ settings: WidgetSettings; version: number }>('GET', '/widget/v1/settings');
+  saveSettings = (settings: WidgetSettings) =>
+    this.call<{ settings: WidgetSettings; version: number }>('PUT', '/widget/v1/settings', settings);
+  dictionaries = () => this.call<Dictionaries>('GET', '/widget/v1/amo/dictionaries');
+  leadPanel = (leadId: number) => this.call<LeadPanel>('GET', `/widget/v1/leads/${leadId}/panel`);
+  pause = (leadId: number) => this.call<{ ok: true }>('POST', `/widget/v1/leads/${leadId}/pause`);
+  resume = (leadId: number) => this.call<{ ok: true }>('POST', `/widget/v1/leads/${leadId}/resume`);
+  journal = (q: { leadId?: number; kind?: string; before?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]));
+    return this.call<{ items: JournalItem[] }>('GET', `/widget/v1/journal${qs.size ? `?${qs}` : ''}`);
+  };
+  catalog = () => this.call<CatalogStats>('GET', '/widget/v1/catalog');
+  importCatalog = () => this.call<{ started: boolean }>('POST', '/widget/v1/catalog/import');
+  knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
+  addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
+  removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
+  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings) =>
+    this.call<SandboxResult>('POST', '/widget/v1/sandbox', settings ? { messages, settings } : { messages });
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await this.self.$authorizedAjax({

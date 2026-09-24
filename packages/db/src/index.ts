@@ -1,4 +1,6 @@
 export * from './accounts.ts';
+export * from './dialog.ts';
+export * from './journal.ts';
 export * from './migrate.ts';
 export * from './pool.ts';
 export * from './settings.ts';

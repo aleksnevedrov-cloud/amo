@@ -7,6 +7,22 @@ import { SettingsStatus } from './components/SettingsStatus.tsx';
 
 declare const __API_URL__: string;
 
+export function salesbotSteps(apiUrl: string): string {
+  return JSON.stringify([
+    {
+      question: [
+        {
+          handler: 'widget_request',
+          params: {
+            url: new URL('/salesbot/v1/hook', apiUrl).toString(),
+            data: { lead_id: '{{lead.id}}', message: '{{message_text}}' },
+          },
+        },
+      ],
+    },
+  ]);
+}
+
 type Callbacks = Record<string, (...args: unknown[]) => unknown>;
 
 /**
@@ -71,6 +87,13 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
     }),
 
     onSave: () => true,
+
+    /**
+     * Шаг виджета в конструкторе Salesbot. Возвращает JSON шагов бота:
+     * widget_request отправляет сообщение клиента на бэкенд, бот ждёт continue с ответом AI.
+     * Плейсхолдеры {{lead.id}} и {{message_text}} — по документации Salesbot; сверить при установке.
+     */
+    onSalesbotDesignerSave: () => salesbotSteps(apiUrl),
 
     destroy: safe(() => {
       for (const root of roots.values()) root.unmount();

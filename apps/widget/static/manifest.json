@@ -6,14 +6,22 @@
     "version": "0.1.0",
     "interface_version": 2,
     "init_once": false,
-    "locale": ["ru", "en"],
+    "locale": [
+      "ru",
+      "en"
+    ],
     "installation": true,
     "support": {
       "link": "https://rf-dveri.ru",
       "email": "support@rf-dveri.ru"
     }
   },
-  "locations": ["settings", "advanced_settings", "lcard-1"],
+  "locations": [
+    "settings",
+    "advanced_settings",
+    "lcard-1",
+    "salesbot_designer"
+  ],
   "advanced": {
     "title": "advanced.title"
   },
@@ -22,6 +30,12 @@
       "name": "settings.custom",
       "type": "custom",
       "required": false
+    }
+  },
+  "salesbot_designer": {
+    "ai_reply": {
+      "name": "salesbot.ai_reply",
+      "settings": {}
     }
   }
 }

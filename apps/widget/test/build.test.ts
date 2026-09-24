@@ -27,12 +27,20 @@ describe('архив виджета', () => {
     const m = JSON.parse(text('manifest.json'));
     expect(m.widget.interface_version).toBe(2);
     expect(m.widget.locale).toEqual(['ru', 'en']);
-    expect(m.locations).toEqual(expect.arrayContaining(['settings', 'advanced_settings', 'lcard-1']));
+    expect(m.locations).toEqual(expect.arrayContaining(['settings', 'advanced_settings', 'lcard-1', 'salesbot_designer']));
+    expect(m.widget.version).toBe('0.2.0');
   });
 
   it('все ключи перевода из манифеста есть в ru и en', () => {
     const m = JSON.parse(text('manifest.json'));
-    const keys = [m.widget.name, m.widget.description, m.widget.short_description, m.advanced.title, m.settings.custom.name];
+    const keys = [
+      m.widget.name,
+      m.widget.description,
+      m.widget.short_description,
+      m.advanced.title,
+      m.settings.custom.name,
+      ...Object.values(m.salesbot_designer as Record<string, { name: string }>).map((h) => h.name),
+    ];
     for (const lang of ['ru', 'en']) {
       const dict = JSON.parse(text(`i18n/${lang}.json`));
       for (const k of keys) {
@@ -63,7 +71,7 @@ describe('архив виджета', () => {
     const self = { get_settings: () => ({ widget_code: 'x' }) };
     Ctor.call(self);
     const cbs = (self as unknown as { callbacks: Record<string, unknown> }).callbacks;
-    for (const name of ['init', 'render', 'bind_actions', 'settings', 'advancedSettings', 'onSave', 'destroy']) {
+    for (const name of ['init', 'render', 'bind_actions', 'settings', 'advancedSettings', 'onSave', 'destroy', 'onSalesbotDesignerSave']) {
       expect(cbs[name], name).toBeTypeOf('function');
     }
     expect(Object.keys(sandbox)).not.toContain('__aiDoorWidget');

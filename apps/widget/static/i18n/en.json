@@ -9,5 +9,8 @@
   },
   "advanced": {
     "title": "AI sales agent: settings"
+  },
+  "salesbot": {
+    "ai_reply": "AI salesperson: reply to customer"
   }
 }
