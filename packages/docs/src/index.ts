@@ -4,6 +4,7 @@ export * from './gost.ts';
 export * from './kit.ts';
 export * from './match.ts';
 export * from './ocr.ts';
+export * from './ocr-tesseract.ts';
 export * from './pii.ts';
 export * from './render.ts';
 export * from './schema.ts';

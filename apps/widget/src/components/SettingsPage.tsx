@@ -273,7 +273,8 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           </Field>
           <Field label="Файлы и фото клиентов" hint="Фото, сканы и PDF без текста распознаются в Yandex Vision (серверы в РФ); в Claude уходит только текст без контактов. Ключ задаётся на сервере.">
             <select style={s.select} value={draft.vision.provider} onChange={(e) => set('vision', { provider: e.target.value as WidgetSettings['vision']['provider'] })}>
-              <option value="yandex">Yandex Vision (данные в РФ)</option>
+              <option value="yandex">Yandex Vision (данные в РФ; без ключа — Tesseract)</option>
+              <option value="tesseract">Tesseract на нашем сервере (бесплатно, хуже на рукописном, только картинки)</option>
               <option value="off">Не распознавать сканы и фото</option>
             </select>
             <label style={s.row}>

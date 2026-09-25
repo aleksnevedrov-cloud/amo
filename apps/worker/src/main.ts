@@ -10,7 +10,7 @@ import {
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
-import { DocumentService, YandexVision } from '@ai-door/docs';
+import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
 import { PricingRepo } from '@ai-door/pricing';
@@ -58,14 +58,18 @@ const amoClient = async (accountId: number) => {
   return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
 };
 const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
-// Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ), структура — Claude.
+// Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
+let tesseract: TesseractOcr | null = null;
 const docs = new DocumentService({
   llm,
   catalog,
   documents: new DocumentsRepo(db),
   ocr(provider) {
+    if (provider === 'off') return null;
     const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
-    return provider === 'yandex' && key && env.YANDEX_FOLDER_ID ? new YandexVision(key, env.YANDEX_FOLDER_ID) : null;
+    if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID);
+    // Без ключа Yandex — Tesseract на сервере (бесплатно, только картинки).
+    return (tesseract ??= new TesseractOcr());
   },
 });
 const emailChannel = new EmailChannel({

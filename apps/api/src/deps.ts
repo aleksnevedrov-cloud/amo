@@ -20,7 +20,7 @@ import {
   SuggestionsRepo,
   type Db,
 } from '@ai-door/db';
-import { DocumentService, YandexVision, type OcrProvider } from '@ai-door/docs';
+import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
 import { PricingRepo } from '@ai-door/pricing';
 import { AmoApiClient } from '@ai-door/amo';
@@ -69,7 +69,7 @@ export interface Deps {
 export type DepsOverrides = Partial<
   Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender'> & {
     llm: LlmClient | null;
-    ocr: (provider: 'off' | 'yandex') => OcrProvider | null;
+    ocr: (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null;
   }
 >;
 
@@ -155,11 +155,16 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
   };
 }
 
-/** OCR по настройке аккаунта: Yandex Vision, если задан ключ (свой или от SpeechKit). */
-export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch): (provider: 'off' | 'yandex') => OcrProvider | null {
+/**
+ * OCR по настройке аккаунта: Yandex Vision, если задан ключ (свой или от SpeechKit);
+ * без ключа и при явном выборе — Tesseract на нашем сервере (один воркер на процесс).
+ */
+export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch): (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null {
+  let tesseract: TesseractOcr | null = null;
   return (provider) => {
+    if (provider === 'off') return null;
     const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
     if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID, fetchImpl);
-    return null;
+    return (tesseract ??= new TesseractOcr());
   };
 }

@@ -158,7 +158,7 @@ export function DocumentView({ r }: { r: DocumentResult }) {
       )}
       <div style={{ ...s.muted, ...s.small, marginTop: 6 }}>
         {r.noted ? 'Примечание добавлено в сделку. ' : ''}
-        {r.ocr ? `Распознано: ${r.ocr === 'yandex' ? 'Yandex Vision' : r.ocr}. ` : ''}
+        {r.ocr ? `Распознано: ${r.ocr === 'yandex' ? 'Yandex Vision' : r.ocr === 'tesseract' ? 'Tesseract (на сервере)' : r.ocr}. ` : ''}
         {r.piiRemoved ? `Персональных данных скрыто: ${r.piiRemoved}. ` : ''}
       </div>
     </div>

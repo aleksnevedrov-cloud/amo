@@ -148,8 +148,11 @@ export const widgetSettingsSchema = z
     /** Разбор файлов и фото (фаза 3). */
     vision: z
       .object({
-        /** OCR сканов и фото: Yandex Vision (данные в РФ) или выключено. */
-        provider: z.enum(['off', 'yandex']).default('yandex'),
+        /**
+         * OCR сканов и фото: Yandex Vision (данные в РФ; без ключа — Tesseract на нашем сервере),
+         * Tesseract (бесплатно, только картинки, хуже на рукописном) или выключено.
+         */
+        provider: z.enum(['off', 'yandex', 'tesseract']).default('yandex'),
         /** Фото без текста (дверь, проём, интерьер) показывать модели Claude. */
         photosToClaude: z.boolean().default(true),
         /** Разбирать вложения из чатов и писем автоматически (иначе — только кнопкой в сделке). */

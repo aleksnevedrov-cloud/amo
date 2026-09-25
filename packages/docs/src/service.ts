@@ -85,7 +85,7 @@ export class DocumentService {
     let image: { bytes: Uint8Array; mime: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' } | undefined;
     if (extracted.needsOcr) {
       const ocr = this.d.ocr(settings.vision.provider);
-      if (!ocr) throw new DocumentError(extracted.format === 'image' ? 'Распознавание фото выключено (настройка «Распознавание файлов»)' : 'В PDF нет текста, а распознавание сканов выключено');
+      if (!ocr) throw new DocumentError(extracted.format === 'image' ? 'Распознавание фото выключено (настройка «Файлы и фото клиентов»)' : 'В PDF нет текста, а распознавание сканов выключено');
       try {
         const r = await ocr.recognize(input.bytes, mimeFor(extracted, input.mime));
         ocrName = r.provider;

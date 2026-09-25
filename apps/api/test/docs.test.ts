@@ -64,10 +64,13 @@ describe('разбор файла из карточки сделки', () => {
     expect(res.json()).toMatchObject({ error: 'document', message: expect.stringContaining('не поддерживается') });
   });
 
-  it('фото без OCR-ключа — 422 с подсказкой про настройку', async () => {
+  it('OCR выключен в настройках — 422 с подсказкой про настройку', async () => {
+    const { settings } = await ctx.deps.settings.get(31337);
+    await ctx.deps.settings.save(31337, 1, { ...settings, vision: { ...settings.vision, provider: 'off' } });
     const res = await ctx.app.inject({ method: 'POST', url: '/widget/v1/leads/702/documents', headers: await headers(), payload: { name: 'IMG.jpg', mime: 'image/jpeg', file: Buffer.from([0xff, 0xd8]).toString('base64') } });
     expect(res.statusCode).toBe(422);
     expect(res.json().message).toContain('выключено');
+    await ctx.deps.settings.save(31337, 1, settings);
   });
 
   it('пустой или битый файл — 400', async () => {
