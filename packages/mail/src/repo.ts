@@ -102,4 +102,24 @@ export class MailRepo {
     );
     return rows.length > 0;
   }
+
+  /** Письмо ждёт, пока почта amo создаст сделку. */
+  async addWaiting(accountId: number, w: { from: string; fromName: string; subject: string; text: string; meta: Record<string, unknown> }): Promise<void> {
+    await this.db.query(
+      'INSERT INTO email_waiting (account_id, from_address, from_name, subject, text, meta) VALUES ($1, $2, $3, $4, $5, $6)',
+      [accountId, w.from.toLowerCase(), w.fromName, w.subject, w.text, w.meta],
+    );
+  }
+
+  async listWaiting(accountId: number): Promise<{ id: number; from: string; fromName: string; subject: string; text: string; meta: Record<string, unknown>; receivedAt: Date }[]> {
+    const { rows } = await this.db.query(
+      'SELECT id, from_address, from_name, subject, text, meta, received_at FROM email_waiting WHERE account_id = $1 ORDER BY id LIMIT 100',
+      [accountId],
+    );
+    return rows.map((r) => ({ id: Number(r.id), from: r.from_address, fromName: r.from_name, subject: r.subject, text: r.text, meta: r.meta, receivedAt: r.received_at }));
+  }
+
+  async removeWaiting(accountId: number, id: number): Promise<void> {
+    await this.db.query('DELETE FROM email_waiting WHERE account_id = $1 AND id = $2', [accountId, id]);
+  }
 }

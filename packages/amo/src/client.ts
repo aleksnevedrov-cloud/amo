@@ -75,14 +75,15 @@ export class AmoApiClient {
   }
 
   /** Воронки и этапы — для выбора в настройках виджета. */
-  async getPipelines(): Promise<{ id: number; name: string; statuses: { id: number; name: string }[] }[]> {
+  async getPipelines(): Promise<{ id: number; name: string; statuses: { id: number; name: string; unsorted?: boolean }[] }[]> {
     const res = await this.request<{
-      _embedded?: { pipelines?: { id: number; name: string; _embedded?: { statuses?: { id: number; name: string }[] } }[] };
+      _embedded?: { pipelines?: { id: number; name: string; _embedded?: { statuses?: { id: number; name: string; type?: number }[] } }[] };
     }>('GET', '/api/v4/leads/pipelines');
     return (res?._embedded?.pipelines ?? []).map((p) => ({
       id: p.id,
       name: p.name,
-      statuses: (p._embedded?.statuses ?? []).map((st) => ({ id: st.id, name: st.name })),
+      // type = 1 — этап «Неразобранное».
+      statuses: (p._embedded?.statuses ?? []).map((st) => ({ id: st.id, name: st.name, ...(st.type === 1 ? { unsorted: true } : {}) })),
     }));
   }
 

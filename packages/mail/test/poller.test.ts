@@ -76,6 +76,9 @@ function fakeAmo(opts: { contacts?: unknown[]; leads?: unknown[] } = {}) {
     if (url.pathname === '/api/v4/leads' && method === 'GET') return json({ _embedded: { leads: opts.leads ?? [] } });
     if (url.pathname === '/api/v4/leads/complex') return json([{ id: 501, contact_id: 601 }]);
     if (url.pathname === '/api/v4/leads' && method === 'POST') return json({ _embedded: { leads: [{ id: 502 }] } });
+    if (url.pathname === '/api/v4/leads/pipelines') {
+      return json({ _embedded: { pipelines: [{ id: 1, name: 'Продажи', _embedded: { statuses: [{ id: 11, name: 'Неразобранное', type: 1 }, { id: 10, name: 'Первичный контакт', type: 0 }] } }] } });
+    }
     if (url.pathname.endsWith('/notes')) return json({ _embedded: { notes: [{ id: 1 }] } });
     return json({});
   }) as typeof fetch;
@@ -133,7 +136,7 @@ describe('pollMailbox', () => {
   });
 
   it('неизвестный отправитель — контакт и сделка в выбранной воронке', async () => {
-    const t = await setup({ newLeadPipelineId: 5, newLeadStatusId: 55 });
+    const t = await setup({ unknownSender: 'create_lead', newLeadPipelineId: 5, newLeadStatusId: 55 });
     await t.mb.put('INBOX', { from: { name: 'Ольга', address: 'olga@new.ru' }, subject: 'Входная дверь' });
     expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
     const complex = t.amo.calls.find((c) => c.path === '/api/v4/leads/complex');
@@ -207,9 +210,54 @@ describe('pollMailbox', () => {
   });
 });
 
+describe('почта уже подключена к amo: ждём сделку от amo', () => {
+  beforeEach(async () => {
+    await db.query('DELETE FROM email_waiting');
+  });
+
+  it('новый адрес: ждём, пока amo создаст заявку и менеджер примет её в работу', async () => {
+    const amoState: { contacts?: unknown[]; leads?: unknown[] } = {};
+    const t = await setup({}, amoState);
+    await t.mb.put('INBOX', { from: { name: 'Ольга', address: 'olga@new.ru' }, subject: 'Входная дверь' });
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ received: 1, waiting: 1, queued: 0 });
+    expect(t.amo.calls.some((c) => c.path.includes('/leads/complex'))).toBe(false);
+
+    // Пока amo не создал сделку — письмо ждёт.
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 0 });
+    // Почта amo создала заявку в «Неразобранном» — это ещё не сделка, AI ждёт.
+    amoState.contacts = [{ id: 90, name: 'Ольга', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'olga@new.ru' }] }], _embedded: { leads: [{ id: 700 }] } }];
+    amoState.leads = [{ id: 700, status_id: 11, pipeline_id: 1 }];
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 0 });
+    // Менеджер принял заявку — AI отвечает в сделке.
+    amoState.leads = [{ id: 700, status_id: 10, pipeline_id: 1 }];
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
+    const pending = await new DialogRepo(db).takePending(1, 700);
+    expect(pending[0]).toMatchObject({ channel: 'email', meta: { from: 'olga@new.ru', subject: 'Входная дверь' } });
+    expect(await mail.listWaiting(1)).toEqual([]);
+  });
+
+  it('amo не создал сделку за отведённое время — письмо пропускается', async () => {
+    const t = await setup({ waitForAmoMin: 1 });
+    await t.mb.put('INBOX', { from: { name: '', address: 'late@new.ru' } });
+    await pollMailbox(1, t.deps);
+    await db.query(`UPDATE email_waiting SET received_at = now() - interval '5 minutes'`);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ skipped: 1, queued: 0 });
+    expect(await mail.listWaiting(1)).toEqual([]);
+  });
+
+  it('по истечении ожидания можно создать сделку самим', async () => {
+    const t = await setup({ waitForAmoMin: 1, afterWait: 'create_lead' });
+    await t.mb.put('INBOX', { from: { name: 'Пётр', address: 'petr@new.ru' } });
+    await pollMailbox(1, t.deps);
+    await db.query(`UPDATE email_waiting SET received_at = now() - interval '5 minutes'`);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
+    expect(t.amo.calls.some((c) => c.path === '/api/v4/leads/complex')).toBe(true);
+  });
+});
+
 describe('EmailChannel', () => {
   it('отвечает в цепочку, кладёт копию в «Отправленные», пишет примечание и журнал отправки', async () => {
-    await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { ...EMAIL, fromName: 'РФ-Двери' } }));
+    await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { ...EMAIL, fromName: 'РФ-Двери', noteInLead: true } }));
     const mb = new FakeMailbox();
     const amo = fakeAmo();
     const sent: OutgoingEmail[] = [];
@@ -231,6 +279,20 @@ describe('EmailChannel', () => {
     expect(mb.appended[0]?.folder).toBe('Отправленные');
     expect(await mail.isOurMessage(1, messageId)).toBe(true);
     expect(amo.calls.some((c) => c.path === '/api/v4/leads/301/notes')).toBe(true);
+  });
+
+  it('без примечания, если почта подключена к amo (по умолчанию)', async () => {
+    await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: EMAIL }));
+    const amo = fakeAmo();
+    const ch = new EmailChannel({
+      settings: new SettingsRepo(db),
+      mail,
+      amo: async () => amo.api,
+      connect: async () => new FakeMailbox(),
+      sender: () => ({ send: async (m) => composeRaw(m), verify: async () => undefined }),
+    });
+    await ch.reply(1, 302, { from: 'ivan@client.ru', subject: 'Двери' }, 'Ответ');
+    expect(amo.calls).toHaveLength(0);
   });
 
   it('без пароля или при выключенной почте — ошибка', async () => {

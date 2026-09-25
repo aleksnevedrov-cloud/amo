@@ -155,12 +155,21 @@ export function EmailSettings(props: {
           </label>
         </div>
       </Field>
-      <Field label="Письмо от нового адреса (нет в amo)">
+      <Field
+        label="Письмо от адреса без сделки"
+        hint="AI отвечает только клиентам в сделках. Заявки в «Неразобранном» сделкой не считаются — AI ответит, когда менеджер примет заявку."
+      >
         <select style={s.select} value={e.unknownSender} onChange={(ev) => onChange({ unknownSender: ev.target.value as Email['unknownSender'] })}>
-          <option value="create_lead">Создать контакт и сделку</option>
+          <option value="wait_for_amo">Почта подключена к amo: ждать, пока появится сделка</option>
           <option value="skip">Не отвечать</option>
+          <option value="create_lead">Создать контакт и сделку (почта не подключена к amo)</option>
         </select>
       </Field>
+      {e.unknownSender === 'wait_for_amo' && (
+        <Field label="Сколько ждать сделку, минут" hint="Если за это время менеджер не принял заявку, AI на это письмо не отвечает.">
+          <NumberInput value={e.waitForAmoMin} min={1} max={240} onChange={(v) => onChange({ waitForAmoMin: v ?? 60 })} />
+        </Field>
+      )}
       {e.unknownSender === 'create_lead' && (
         <Field label="Этап для новых сделок из почты" hint="Пусто — первый этап основной воронки.">
           <select
@@ -180,10 +189,16 @@ export function EmailSettings(props: {
           </select>
         </Field>
       )}
+      <Field label="Примечание с ответом AI в сделке" hint="Не нужно, если почта подключена к amo: ответ и так виден в переписке сделки.">
+        <label style={s.row}>
+          <input type="checkbox" checked={e.noteInLead} onChange={(ev) => onChange({ noteInLead: ev.target.checked })} />
+          Дублировать ответ примечанием
+        </label>
+      </Field>
       <Field label="Не больше ответов AI на один адрес в сутки" hint="Защита от переписки с автоответчиками.">
         <NumberInput value={e.maxRepliesPerAddressPerDay} min={1} max={100} onChange={(v) => onChange({ maxRepliesPerAddressPerDay: v ?? 10 })} />
       </Field>
-      <Field label="Не отвечать адресам и доменам" hint="По одному на строку: поставщики, сервисы, коллеги (supplier.ru, boss@rf-dveri.ru).">
+      <Field label="Не отвечать адресам и доменам" hint="Дополнительно к правилу «только клиентам в сделках», по одному на строку (supplier.ru, boss@rf-dveri.ru).">
         <textarea style={s.textarea} value={e.ignore.join('\n')} onChange={(ev) => onChange({ ignore: linesToList(ev.target.value) })} />
       </Field>
     </>

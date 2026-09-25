@@ -20,6 +20,8 @@ export interface PollResult {
   received: number;
   queued: number;
   skipped: number;
+  /** Ждут, пока почта amo создаст сделку. */
+  waiting: number;
   managerReplies: number;
   error?: string;
 }
@@ -47,7 +49,7 @@ export const ourAddress = (e: WidgetSettings['email']) => (e.fromAddress || e.us
  * позицию — старая переписка не обрабатывается.
  */
 export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollResult> {
-  const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, managerReplies: 0 };
+  const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0 };
   const { settings } = await d.settings.get(accountId);
   const e = settings.email;
   if (!e.enabled || !e.imapHost || !e.username) return res;
@@ -57,11 +59,11 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
   let box: Mailbox | null = null;
   try {
     box = await d.connect(serverConfig(e, password));
+    // Сначала — письма, которые ждали сделку от amo.
+    for (const r of await retryWaiting(accountId, settings, d)) res[r] += 1;
     await readFolder(box, accountId, e.inboxFolder, d, async (msg) => {
       res.received += 1;
-      const r = await handleIncoming(accountId, msg, settings, d);
-      if (r === 'queued') res.queued += 1;
-      else res.skipped += 1;
+      res[await handleIncoming(accountId, msg, settings, d)] += 1;
     });
     const sent = e.sentFolder || (await box.findSentFolder());
     if (sent) {
@@ -100,7 +102,9 @@ async function readFolder(box: Mailbox, accountId: number, folder: string, d: Po
   }
 }
 
-async function handleIncoming(accountId: number, msg: IncomingEmail, settings: WidgetSettings, d: PollDeps): Promise<'queued' | 'skipped'> {
+type Outcome = 'queued' | 'skipped' | 'waiting';
+
+async function handleIncoming(accountId: number, msg: IncomingEmail, settings: WidgetSettings, d: PollDeps): Promise<Outcome> {
   const e = settings.email;
   const from = msg.from;
   if (!from || msg.automated || msg.fromAiDoor) return 'skipped';
@@ -109,32 +113,79 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
     await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address}: достигнут лимит ответов на адрес за сутки` });
     return 'skipped';
   }
-  const api = await d.amo(accountId);
-  const link = await linkEmailToLead(api, from, msg.subject, e);
-  if ('skip' in link) {
-    await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address} не обработано: ${link.skip}` });
-    return 'skipped';
-  }
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
   if (msg.attachments.length) {
     parts.push(`(во вложении: ${msg.attachments.map((a) => a.filename ?? a.contentType).join(', ')} — разбор вложений появится позже)`);
   }
-  await d.dialog.enqueue(accountId, link.leadId, parts.join('\n'), null, null, {
-    channel: 'email',
-    meta: {
-      from: from.address,
-      fromName: from.name,
-      subject: msg.subject,
-      messageId: msg.messageId,
-      references: msg.references,
-    },
-  });
+  const letter: Letter = {
+    from: from.address,
+    fromName: from.name,
+    subject: msg.subject,
+    text: parts.join('\n'),
+    meta: { from: from.address, fromName: from.name, subject: msg.subject, messageId: msg.messageId, references: msg.references },
+  };
+  const api = await d.amo(accountId);
+  const link = await linkEmailToLead(api, from, msg.subject, e);
+  if ('notFound' in link) {
+    // Почта подключена к amo: сделку создаст amo — ответим, когда она появится.
+    await d.mail.addWaiting(accountId, letter);
+    await d.journal.add({ accountId, kind: 'note', summary: `Письмо от ${from.address}: ждём, пока amo создаст сделку` });
+    return 'waiting';
+  }
+  if ('skip' in link) {
+    await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address} не обработано: ${link.skip}` });
+    return 'skipped';
+  }
+  await enqueueLetter(accountId, link.leadId, letter, link.created, settings, d);
+  return 'queued';
+}
+
+interface Letter {
+  from: string;
+  fromName: string;
+  subject: string;
+  text: string;
+  meta: Record<string, unknown>;
+}
+
+async function enqueueLetter(
+  accountId: number,
+  leadId: number,
+  l: Letter,
+  created: 'none' | 'lead' | 'contact_and_lead',
+  settings: WidgetSettings,
+  d: PollDeps,
+) {
+  await d.dialog.enqueue(accountId, leadId, l.text, null, null, { channel: 'email', meta: l.meta });
   await d.journal.add({
     accountId,
-    leadId: link.leadId,
+    leadId,
     kind: 'note',
-    summary: `Письмо от ${from.address}: «${msg.subject}»${link.created === 'none' ? '' : link.created === 'lead' ? ' — создана сделка' : ' — созданы контакт и сделка'}`,
+    summary: `Письмо от ${l.from}: «${l.subject}»${created === 'none' ? '' : created === 'lead' ? ' — создана сделка' : ' — созданы контакт и сделка'}`,
   });
-  await d.schedule({ accountId, leadId: link.leadId }, settings.where.batchWindowSec * 1000);
-  return 'queued';
+  await d.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
+}
+
+/** Повторный поиск сделки для ожидающих писем; по истечении ожидания — действие из настроек. */
+async function retryWaiting(accountId: number, settings: WidgetSettings, d: PollDeps): Promise<Outcome[]> {
+  const e = settings.email;
+  const waiting = await d.mail.listWaiting(accountId);
+  if (!waiting.length) return [];
+  const api = await d.amo(accountId);
+  const out: Outcome[] = [];
+  for (const w of waiting) {
+    const expired = Date.now() - w.receivedAt.getTime() > e.waitForAmoMin * 60_000;
+    const action = expired ? (e.afterWait === 'create_lead' ? 'create' : 'skip') : 'report';
+    const link = await linkEmailToLead(api, { address: w.from, name: w.fromName }, w.subject, e, action);
+    if ('notFound' in link) continue;
+    await d.mail.removeWaiting(accountId, w.id);
+    if ('skip' in link) {
+      await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${w.from}: amo не создал сделку за ${e.waitForAmoMin} мин — AI не отвечает` });
+      out.push('skipped');
+      continue;
+    }
+    await enqueueLetter(accountId, link.leadId, w, link.created, settings, d);
+    out.push('queued');
+  }
+  return out;
 }

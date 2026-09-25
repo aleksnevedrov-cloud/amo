@@ -54,8 +54,11 @@ export class EmailChannel {
         await box?.close().catch(() => undefined);
       }
     }
-    const api = await this.d.amo(accountId);
-    await api.addLeadNote(leadId, `[AI] Ответ по почте на ${meta.from} («${mail.subject}»):\n\n${text}`).catch(() => undefined);
+    // Если почта подключена к amo, ответ и так виден в сделке (из «Отправленных») — примечание по настройке.
+    if (e.noteInLead) {
+      const api = await this.d.amo(accountId);
+      await api.addLeadNote(leadId, `[AI] Ответ по почте на ${meta.from} («${mail.subject}»):\n\n${text}`).catch(() => undefined);
+    }
     return { messageId: mail.messageId };
   }
 

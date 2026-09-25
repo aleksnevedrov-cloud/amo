@@ -118,8 +118,18 @@ export const widgetSettingsSchema = z
         sentFolder: z.string().max(200).default(''),
         saveToSent: z.boolean().default(true),
         signature: z.string().max(2000).default('С уважением,\nРФ-Двери\nrf-dveri.ru'),
-        /** Отправитель не найден в amo: создать контакт и сделку или пропустить. */
-        unknownSender: z.enum(['create_lead', 'skip']).default('create_lead'),
+        /**
+         * Отправитель не найден в amo:
+         *  wait_for_amo — почта уже подключена к amo: ждать, пока amo сам создаст сделку, и ответить в ней;
+         *  create_lead — создать контакт и сделку; skip — не отвечать.
+         */
+        unknownSender: z.enum(['wait_for_amo', 'create_lead', 'skip']).default('wait_for_amo'),
+        /** Сколько ждать сделку от amo (включая принятие заявки из «Неразобранного»), минут. */
+        waitForAmoMin: z.number().int().min(1).max(240).default(60),
+        /** Если amo так и не создал сделку. */
+        afterWait: z.enum(['skip', 'create_lead']).default('skip'),
+        /** Дублировать ответ AI примечанием в сделке (не нужно, если почта подключена к amo). */
+        noteInLead: z.boolean().default(false),
         newLeadPipelineId: z.number().int().positive().nullable().default(null),
         newLeadStatusId: z.number().int().positive().nullable().default(null),
         /** Защита от петель с автоответчиками. */
