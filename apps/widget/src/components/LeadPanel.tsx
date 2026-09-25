@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { WidgetApi } from '../api.ts';
 import { Calculation } from './Calculation.tsx';
+import { Documents } from './Documents.tsx';
 import { dateTime, kindLabel, modeLabel, rub } from './StatusBadge.tsx';
 import { SuggestionCard } from './Suggestions.tsx';
 import { s } from './styles.ts';
@@ -93,6 +94,7 @@ export function LeadPanel({ api, leadId }: { api: WidgetApi; leadId: number }) {
           </div>
         )}
       </div>
+      <Documents api={api} leadId={leadId} />
       <div style={s.block}>
         <div style={s.label}>Расчёт</div>
         {p.calculations[0] ? <Calculation c={p.calculations[0]} /> : <div style={s.muted}>Расчётов нет</div>}

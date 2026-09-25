@@ -28,7 +28,7 @@ describe('архив виджета', () => {
     expect(m.widget.interface_version).toBe(2);
     expect(m.widget.locale).toEqual(['ru', 'en']);
     expect(m.locations).toEqual(expect.arrayContaining(['settings', 'advanced_settings', 'lcard-1', 'salesbot_designer']));
-    expect(m.widget.version).toBe('0.4.0');
+    expect(m.widget.version).toBe('0.5.0');
   });
 
   it('все ключи перевода из манифеста есть в ru и en', () => {

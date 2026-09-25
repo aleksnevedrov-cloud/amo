@@ -8,3 +8,4 @@ coverage/
 *.zip
 .DS_Store
 evals/results/
+evals/documents/files/

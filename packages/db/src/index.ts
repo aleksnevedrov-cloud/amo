@@ -7,3 +7,4 @@ export * from './settings.ts';
 export * from './tokens.ts';
 export * from './memory.ts';
 export * from './suggestions.ts';
+export * from './documents.ts';

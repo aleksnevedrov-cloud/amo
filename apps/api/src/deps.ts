@@ -12,6 +12,7 @@ import {
   AccountsRepo,
   createPool,
   DialogRepo,
+  DocumentsRepo,
   JournalRepo,
   MemoryRepo,
   PgTokenStore,
@@ -19,6 +20,7 @@ import {
   SuggestionsRepo,
   type Db,
 } from '@ai-door/db';
+import { DocumentService, YandexVision, type OcrProvider } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
 import { PricingRepo } from '@ai-door/pricing';
 import { AmoApiClient } from '@ai-door/amo';
@@ -52,6 +54,9 @@ export interface Deps {
   mailSender(cfg: MailServerConfig): MailSender;
   memory: MemoryRepo;
   suggestions: SuggestionsRepo;
+  documents: DocumentsRepo;
+  /** Разбор файлов (фаза 3); без ключа LLM бросает понятную ошибку. */
+  docs: DocumentService;
   /** null — не задан ANTHROPIC_API_KEY. */
   orchestrator: Orchestrator | null;
   llm: LlmClient | null;
@@ -64,6 +69,7 @@ export interface Deps {
 export type DepsOverrides = Partial<
   Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender'> & {
     llm: LlmClient | null;
+    ocr: (provider: 'off' | 'yandex') => OcrProvider | null;
   }
 >;
 
@@ -109,6 +115,10 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     },
   });
 
+  const catalog = new CatalogRepo(db);
+  const documents = new DocumentsRepo(db);
+  const docs = new DocumentService({ llm, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
+
   return {
     env,
     db,
@@ -124,12 +134,14 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     mailSender,
     dialog: new DialogRepo(db),
     journal: new JournalRepo(db),
-    catalog: new CatalogRepo(db),
+    catalog,
     importer: overrides.importer ?? new CatalogImporter(db),
     knowledge: overrides.knowledge ?? new KnowledgeRepo(db),
     pricing: new PricingRepo(db),
     memory: new MemoryRepo(db),
     suggestions: new SuggestionsRepo(db),
+    documents,
+    docs,
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     schedule,
@@ -140,5 +152,14 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
       await db.end();
       if (redisConn) await redisConn.quit();
     },
+  };
+}
+
+/** OCR по настройке аккаунта: Yandex Vision, если задан ключ (свой или от SpeechKit). */
+export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch): (provider: 'off' | 'yandex') => OcrProvider | null {
+  return (provider) => {
+    const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
+    if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID, fetchImpl);
+    return null;
   };
 }

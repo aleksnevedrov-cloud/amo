@@ -36,6 +36,8 @@ export const envSchema = z.object({
   /** Распознавание голосовых: Yandex SpeechKit (данные в РФ) или OpenAI Whisper. */
   YANDEX_SPEECHKIT_API_KEY: z.string().optional(),
   YANDEX_FOLDER_ID: z.string().optional(),
+  /** OCR сканов и фото (Yandex Vision). Пусто — используется ключ SpeechKit (один сервисный аккаунт). */
+  YANDEX_VISION_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 
   TELEGRAM_ALERT_BOT_TOKEN: z.string().optional(),

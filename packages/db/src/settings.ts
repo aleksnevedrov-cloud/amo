@@ -145,6 +145,22 @@ export const widgetSettingsSchema = z
       })
       .strict()
       .default({}),
+    /** Разбор файлов и фото (фаза 3). */
+    vision: z
+      .object({
+        /** OCR сканов и фото: Yandex Vision (данные в РФ) или выключено. */
+        provider: z.enum(['off', 'yandex']).default('yandex'),
+        /** Фото без текста (дверь, проём, интерьер) показывать модели Claude. */
+        photosToClaude: z.boolean().default(true),
+        /** Разбирать вложения из чатов и писем автоматически (иначе — только кнопкой в сделке). */
+        autoParse: z.boolean().default(true),
+        /** Записывать разбор примечанием в сделку. */
+        noteInLead: z.boolean().default(true),
+        /** Лимит файлов в сутки на аккаунт — защита от расхода. */
+        maxFilesPerDay: z.number().int().min(1).max(1000).default(100),
+      })
+      .strict()
+      .default({}),
     billing: z
       .object({
         usdRubRate: z.number().positive().default(90),

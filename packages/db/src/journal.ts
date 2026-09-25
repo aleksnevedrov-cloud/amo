@@ -14,7 +14,8 @@ export type JournalKind =
   | 'draft'
   | 'hint'
   | 'summary'
-  | 'task';
+  | 'task'
+  | 'document';
 
 export interface JournalEntry {
   accountId: number;

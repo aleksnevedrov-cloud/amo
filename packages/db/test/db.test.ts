@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   AccountsRepo,
   DialogRepo,
+  DocumentsRepo,
   JournalRepo,
   migrate,
   PgTokenStore,
@@ -239,5 +240,21 @@ describe('SuggestionsRepo', () => {
     await d.addMessage(11, 2, 'client', 'b');
     await d.addMessage(11, 2, 'ai', 'c');
     expect(await d.aiMessagesCount(11, 2)).toBe(2);
+  });
+});
+
+describe('DocumentsRepo', () => {
+  it('хранит результат разбора без файла, считает за день, отдаёт по сделке', async () => {
+    await installAccount(1201, new Date(Date.now() + HOUR));
+    const repo = new DocumentsRepo(db);
+    const base = { accountId: 1201, leadId: 5, source: 'widget' as const, filename: 'замер.jpg', mime: 'image/jpeg', sizeBytes: 100, format: 'image', ocr: 'yandex', kind: 'measurement', data: { title: 'Замер', openings: [{ width_mm: 838 }] }, textChars: 120, piiRemoved: 2, model: 'claude-opus-5', costUsd: 0.01, createdBy: 7 };
+    const id = await repo.add(base);
+    await repo.add({ ...base, leadId: 6, kind: 'request' });
+    expect(await repo.countToday(1201)).toBe(2);
+    expect(await repo.countToday(1202)).toBe(0);
+    const got = await repo.get(1201, id);
+    expect(got).toMatchObject({ id, leadId: 5, kind: 'measurement', ocr: 'yandex', piiRemoved: 2, costUsd: 0.01, createdBy: 7, data: { title: 'Замер' } });
+    expect((await repo.listForLead(1201, 5)).map((d) => d.id)).toEqual([id]);
+    expect(await repo.get(1202, id)).toBeNull();
   });
 });

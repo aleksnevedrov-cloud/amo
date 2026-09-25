@@ -1,0 +1,17 @@
+{
+  "_comment": "Приёмка фазы 3: 10+ реальных файлов заказчика. Сами файлы не в репозитории (evals/documents/files/, в .gitignore) — здесь только обезличенные ожидания по началу имени файла.",
+  "files": [
+    { "id": "15bf4ba4", "what": "КП №6 (docx): двери CPL в алюминиевом коробе, таблица характеристик", "format": "docx", "needsOcr": false, "contains": ["ДГ 2100*900", "CPL", "RAL 9003"], "minMarkings": 4, "kind": "request", "minPositions": 4 },
+    { "id": "2cd8a919", "what": "Спецификация дверей (pdf с текстом): алюминиевые блоки ДАВ, EI30", "format": "pdf", "needsOcr": false, "pages": 2, "contains": ["Спецификация дверей", "EI30", "2100х1000"], "minMarkings": 3, "kind": "request", "minPositions": 4 },
+    { "id": "364a7fc2", "what": "ТЗ 25-1051/14 (скан pdf, 14 стр.) — нужен OCR", "format": "pdf", "needsOcr": true, "pages": 14, "kind": "request", "requiresOcr": true },
+    { "id": "436b32dd", "what": "Ведомость (pdf-чертёж): маркировки ГОСТ 475-2016, ДВ 1 Рп 23,8х10", "format": "pdf", "needsOcr": false, "contains": ["ГОСТ 475-2016", "ДВ 1 Рп"], "minMarkings": 8, "kind": "request", "minPositions": 5 },
+    { "id": "47ba3ee6", "what": "Каталог (pdf-баннер без текста) — рекламный материал", "format": "pdf", "needsOcr": true, "kind": "catalog", "requiresOcr": true },
+    { "id": "66c9b683", "what": "Спецификация (xlsx): 22 позиции ДВ/ДВП/ДСВ/ДПС/ДСН", "format": "xlsx", "needsOcr": false, "contains": ["ДПС 01", "EI30", "ГОСТ 475-2016"], "minMarkings": 15, "kind": "request", "minPositions": 20 },
+    { "id": "7885c01b", "what": "Запрос КП по 223-ФЗ (docx): AquaDoor + короб/наличники/фурнитура", "format": "docx", "needsOcr": false, "contains": ["AquaDoor", "223 ФЗ"], "notContains": ["7709093255"], "minPiiRemoved": 1, "kind": "request", "customerType": "b2b", "minPositions": 3 },
+    { "id": "9a57af11", "what": "Спецификация по секциям (xlsx): ~150 дверей, RAL 9010", "format": "xlsx", "needsOcr": false, "contains": ["RAL 9010", "Двери распашные"], "kind": "request", "minPositions": 10 },
+    { "id": "9fdabbd9", "what": "Заявка ЯГРЭС (xlsx): деревянные распашные RAL 7004", "format": "xlsx", "needsOcr": false, "contains": ["RAL 7004", "ГОСТ 475-2016", "900х2100"], "kind": "request", "minPositions": 10 },
+    { "id": "a898d652", "what": "Запрос №526972 (xlsx): 8 шт. ДАВ 2100×1050", "format": "xlsx", "needsOcr": false, "contains": ["ДАВ", "2100Х1050"], "minMarkings": 1, "kind": "request", "customerType": "b2b", "minPositions": 1 },
+    { "id": "d8de437b", "what": "Приложение 1 к акту (pdf): отчёт замерщика, 4 проёма, адрес объекта", "format": "pdf", "needsOcr": false, "pages": 9, "contains": ["Замеры проёмов", "Одностворчатая"], "notContains": ["Люберцы"], "minPiiRemoved": 1, "kind": "measurement", "minOpenings": 4 },
+    { "id": "e322acbe", "what": "Спецификация Д13–Д26 по этажам (xlsx): ДПВ/ДСВ/ДАВ с наличниками и доборами", "format": "xlsx", "needsOcr": false, "contains": ["ДПВ", "2100х700"], "minMarkings": 3, "kind": "request", "minPositions": 10 }
+  ]
+}

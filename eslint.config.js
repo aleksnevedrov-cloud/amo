@@ -13,7 +13,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.mjs', '**/scripts/**', '**/*.config.*', 'evals/run.ts'],
+    files: ['**/*.mjs', '**/scripts/**', '**/*.config.*', 'evals/run.ts', 'evals/documents/*.ts'],
     languageOptions: { globals: globals.node },
     rules: { 'no-console': 'off' },
   },

@@ -95,6 +95,71 @@ export type KnowledgeInput =
   | { kind: 'text'; title: string; content: string }
   | { kind: 'url'; url: string };
 
+export interface DocOpening {
+  room: string | null;
+  label: string | null;
+  width_mm: number | null;
+  height_mm: number | null;
+  wall_mm: number | null;
+  leaf_width_mm: number | null;
+  qty: number | null;
+  double: boolean | null;
+  side: 'left' | 'right' | null;
+  note: string | null;
+}
+
+export interface DocPosition {
+  name: string;
+  marking: string | null;
+  width_mm: number | null;
+  height_mm: number | null;
+  qty: number | null;
+  unit: string | null;
+  price_rub: number | null;
+  material: string | null;
+  color: string | null;
+  fireproof: boolean | null;
+  note: string | null;
+}
+
+export interface DocumentResult {
+  id: number;
+  kind: 'measurement' | 'request' | 'estimate' | 'catalog' | 'photo' | 'other';
+  data: {
+    kind: string;
+    title: string;
+    summary: string;
+    customer_type: 'b2c' | 'b2b' | 'unknown';
+    openings: DocOpening[];
+    positions: DocPosition[];
+    requirements: string[];
+    questions: string[];
+    photo: { subject: string; door_type: string | null; color: string | null; style: string | null; note: string | null } | null;
+  };
+  matches: { index: number; products: { id: string; name: string; price: number | null; url: string | null }[]; flags: string[] }[];
+  kit: {
+    lines: { opening: string; double: boolean; qty: number; leaf_width_mm: number | null; leaf_height_mm: number | null; nonstandard: boolean; boxes: number; casings: number; extensions: number; extension_width_mm: number | null }[];
+    totals: { doors: number; boxes: number; casings: number; extensions: number };
+  } | null;
+  note: string;
+  noted: boolean;
+  ocr: string | null;
+  piiRemoved: number;
+  costRub: number;
+}
+
+export interface DocumentListItem {
+  id: number;
+  filename: string | null;
+  kind: string;
+  source: string;
+  title: string;
+  summary: string;
+  openings: number;
+  positions: number;
+  createdAt: string;
+}
+
 export interface Dictionaries {
   pipelines: { id: number; name: string; statuses: { id: number; name: string }[] }[];
   taskTypes: { id: number; name: string }[];
@@ -143,6 +208,10 @@ export class WidgetApi {
   reject = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/reject`);
   markUsed = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/used`);
   summary = (leadId: number) => this.call<{ text: string; costRub: number }>('POST', `/widget/v1/leads/${leadId}/summary`);
+
+  leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);
+  analyzeDocument = (leadId: number, body: { name: string; mime: string; file: string; hint?: 'measurement' | 'request' | 'photo' }) =>
+    this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/documents`, body);
 
   emailStatus = () =>
     this.call<{ enabled: boolean; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }>(

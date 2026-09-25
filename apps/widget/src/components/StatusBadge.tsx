@@ -33,5 +33,10 @@ const KIND_LABEL: Record<string, string> = {
   note: 'Примечание',
   import: 'Импорт каталога',
   sandbox: 'Песочница',
+  draft: 'Черновик',
+  hint: 'Подсказка',
+  summary: 'Резюме',
+  task: 'Задача',
+  document: 'Разбор файла',
 };
 export const kindLabel = (k: string) => KIND_LABEL[k] ?? k;

@@ -13,7 +13,21 @@ export interface PollDeps {
   amo(accountId: number): Promise<AmoApiClient>;
   connect(cfg: MailServerConfig): Promise<Mailbox>;
   schedule(job: { accountId: number; leadId: number }, windowMs: number): Promise<void>;
+  /** Разбор вложений письма (фаза 3). */
+  documents?: {
+    analyze(input: { accountId: number; leadId: null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings }): Promise<{
+      id: number;
+      kind: string;
+      text: string;
+      memoryOpenings: unknown[];
+      costUsd: number;
+      model: string;
+    }>;
+  };
 }
+
+/** Вложений из одного письма разбираем не больше. */
+const MAX_ATTACHMENTS = 5;
 
 export interface PollResult {
   accountId: number;
@@ -114,15 +128,33 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
     return 'skipped';
   }
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
+  const openings: unknown[] = [];
   if (msg.attachments.length) {
-    parts.push(`(во вложении: ${msg.attachments.map((a) => a.filename ?? a.contentType).join(', ')} — разбор вложений появится позже)`);
+    const docs = d.documents && settings.vision.autoParse ? d.documents : null;
+    for (const a of msg.attachments.slice(0, MAX_ATTACHMENTS)) {
+      const name = a.filename ?? a.contentType;
+      if (!docs) {
+        parts.push(`(во вложении файл «${name}» — разбор вложений выключен)`);
+        continue;
+      }
+      try {
+        const r = await docs.analyze({ accountId, leadId: null, source: 'email', filename: name, mime: a.contentType, bytes: new Uint8Array(a.content), settings });
+        parts.push(r.text);
+        openings.push(...r.memoryOpenings);
+        await d.journal.add({ accountId, kind: 'document', summary: `Разобрано вложение «${name}» из письма от ${from.address} (${r.kind})`, details: { documentId: r.id, model: r.model }, costUsd: r.costUsd, costRub: r.costUsd * settings.billing.usdRubRate });
+      } catch (err) {
+        parts.push(`(во вложении файл «${name}», разобрать не удалось: ${(err as Error).message})`);
+        await d.journal.add({ accountId, kind: 'error', summary: `Вложение «${name}» из письма от ${from.address}: ${(err as Error).message}` });
+      }
+    }
+    if (msg.attachments.length > MAX_ATTACHMENTS) parts.push(`(ещё ${msg.attachments.length - MAX_ATTACHMENTS} вложений не разобрано)`);
   }
   const letter: Letter = {
     from: from.address,
     fromName: from.name,
     subject: msg.subject,
     text: parts.join('\n'),
-    meta: { from: from.address, fromName: from.name, subject: msg.subject, messageId: msg.messageId, references: msg.references },
+    meta: { from: from.address, fromName: from.name, subject: msg.subject, messageId: msg.messageId, references: msg.references, ...(openings.length ? { openings } : {}) },
   };
   const api = await d.amo(accountId);
   const link = await linkEmailToLead(api, from, msg.subject, e);

@@ -15,7 +15,7 @@ export interface IncomingEmail {
   automated: boolean;
   /** Письмо отправлено нашим AI (заголовок X-AI-Door). */
   fromAiDoor: boolean;
-  attachments: { filename: string | null; contentType: string; size: number }[];
+  attachments: { filename: string | null; contentType: string; size: number; content: Buffer }[];
 }
 
 const MAX_TEXT = 8000;
@@ -86,7 +86,7 @@ export async function parseEmail(source: Buffer | string): Promise<IncomingEmail
     date: m.date ?? null,
     automated: isAutomated(m.headers, fromAddress),
     fromAiDoor: m.headers.has('x-ai-door'),
-    attachments: m.attachments.map((a) => ({ filename: a.filename ?? null, contentType: a.contentType, size: a.size })),
+    attachments: m.attachments.map((a) => ({ filename: a.filename ?? null, contentType: a.contentType, size: a.size, content: a.content })),
   };
 }
 

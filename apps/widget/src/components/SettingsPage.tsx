@@ -271,6 +271,27 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               <option value="openai">OpenAI Whisper</option>
             </select>
           </Field>
+          <Field label="Файлы и фото клиентов" hint="Фото, сканы и PDF без текста распознаются в Yandex Vision (серверы в РФ); в Claude уходит только текст без контактов. Ключ задаётся на сервере.">
+            <select style={s.select} value={draft.vision.provider} onChange={(e) => set('vision', { provider: e.target.value as WidgetSettings['vision']['provider'] })}>
+              <option value="yandex">Yandex Vision (данные в РФ)</option>
+              <option value="off">Не распознавать сканы и фото</option>
+            </select>
+            <label style={s.row}>
+              <input type="checkbox" checked={draft.vision.autoParse} onChange={(e) => set('vision', { autoParse: e.target.checked })} />
+              Разбирать вложения из чатов и писем автоматически
+            </label>
+            <label style={s.row}>
+              <input type="checkbox" checked={draft.vision.photosToClaude} onChange={(e) => set('vision', { photosToClaude: e.target.checked })} />
+              Фото двери или проёма без текста показывать Claude (описание модели и цвета)
+            </label>
+            <label style={s.row}>
+              <input type="checkbox" checked={draft.vision.noteInLead} onChange={(e) => set('vision', { noteInLead: e.target.checked })} />
+              Записывать разбор примечанием в сделку
+            </label>
+          </Field>
+          <Field label="Лимит файлов в сутки" hint="Защита от лишнего расхода на распознавание.">
+            <NumberInput value={draft.vision.maxFilesPerDay} min={1} max={1000} onChange={(v) => set('vision', { maxFilesPerDay: v ?? 100 })} />
+          </Field>
           <Field label="Имитация набора">
             <label style={s.row}>
               <input type="checkbox" checked={draft.where.typingDelay} onChange={(e) => set('where', { typingDelay: e.target.checked })} />

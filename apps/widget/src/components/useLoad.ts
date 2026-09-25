@@ -19,5 +19,8 @@ export function errorMessage(err: unknown): string {
   const status = (err as { status?: number } | null)?.status;
   if (status === 401) return 'Нет доступа к серверу AI-агента. Переустановите интеграцию.';
   if (status === 0) return 'Сервер AI-агента недоступен.';
+  // Понятные ошибки сервера (например, «Формат не поддерживается») показываем как есть.
+  const message = (err as { responseJSON?: { message?: unknown } } | null)?.responseJSON?.message;
+  if (typeof message === 'string' && message) return message;
   return 'Не удалось загрузить данные AI-агента.';
 }

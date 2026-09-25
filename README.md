@@ -1,7 +1,7 @@
 # AI-агент продаж дверей — виджет amoCRM
 
 AI-агент ведёт переписку с клиентом в amoCRM как продавец дверей РФ-Двери (rf-dveri.ru).
-ТЗ: v2.0. Текущее состояние: **фаза 2 — Продажи** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md)).
+ТЗ: v2.0. Текущее состояние: **фаза 3 — Вложения** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md), [фаза 3](docs/phase-3-report.md)).
 
 ## Состав
 
@@ -15,12 +15,13 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `packages/catalog` | Импорт фида YML, поиск по каталогу |
 | `packages/pricing` | Правила цен, расчёт черновика детализации, импорт/экспорт XLSX |
 | `packages/media` | Расшифровка голосовых (Yandex SpeechKit, Whisper) |
+| `packages/docs` | Разбор файлов клиентов: PDF/XLSX/DOCX, OCR сканов и фото (Yandex Vision), чистка ПДн, ГОСТ-маркировки, структура через Claude, комплект по замеру |
 | `packages/mail` | Почта: опрос ящика (IMAP), ответы (SMTP), привязка писем к сделкам |
 | `packages/knowledge` | База знаний: FAQ, тексты, статьи по URL |
 | `packages/amo` | Клиент amoCRM: OAuth, токены, API v4, Salesbot |
 | `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
 | `packages/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
-| `evals` | 30 эталонных диалогов и прогон на реальной модели; обезличенные примеры накладных |
+| `evals` | 30 эталонных диалогов и прогон на реальной модели; обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
 | `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md) |
 
 ## Разработка

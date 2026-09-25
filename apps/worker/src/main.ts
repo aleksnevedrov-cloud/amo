@@ -9,7 +9,8 @@ import {
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { DocumentService, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
 import { PricingRepo } from '@ai-door/pricing';
@@ -56,6 +57,17 @@ const amoClient = async (accountId: number) => {
   if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён`);
   return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
 };
+const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
+// Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ), структура — Claude.
+const docs = new DocumentService({
+  llm,
+  catalog,
+  documents: new DocumentsRepo(db),
+  ocr(provider) {
+    const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
+    return provider === 'yandex' && key && env.YANDEX_FOLDER_ID ? new YandexVision(key, env.YANDEX_FOLDER_ID) : null;
+  },
+});
 const emailChannel = new EmailChannel({
   settings,
   mail,
@@ -87,6 +99,7 @@ const maintenanceWorker = new Worker(
           amo: amoClient,
           connect: (cfg) => ImapMailbox.connect(cfg),
           schedule: (j, w) => scheduleLead(incoming, j, w),
+          documents: docs,
         },
         log,
       );
@@ -98,8 +111,7 @@ const maintenanceWorker = new Worker(
 
 // Входящие сообщения клиентов.
 let pipeline: DialogPipeline | null = null;
-if (env.ANTHROPIC_API_KEY) {
-  const llm = new AnthropicLlm(env.ANTHROPIC_API_KEY);
+if (llm) {
   pipeline = new DialogPipeline({
     settings,
     dialog,
@@ -111,6 +123,7 @@ if (env.ANTHROPIC_API_KEY) {
     suggestions: new SuggestionsRepo(db),
     orchestrator: new Orchestrator(llm),
     llm,
+    documents: docs,
     email: {
       reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),
       managerRepliedSince: (a, addrs, since) => emailChannel.managerRepliedSince(a, addrs, since),

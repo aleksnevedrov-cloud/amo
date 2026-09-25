@@ -166,6 +166,46 @@ describe('pollMailbox', () => {
     expect(t.amo.calls).toHaveLength(0);
   });
 
+  it('вложения разбираются: факты — в текст письма, проёмы — в meta, разбор — в журнал', async () => {
+    const t = await setup({}, knownContact);
+    const inputs: { filename: string; mime: string; bytes: number; source: string }[] = [];
+    t.deps.documents = {
+      async analyze(input) {
+        inputs.push({ filename: input.filename, mime: input.mime, bytes: input.bytes.byteLength, source: input.source });
+        if (input.filename.endsWith('.dwg')) throw new Error('Формат не поддерживается: план.dwg');
+        return { id: 9, kind: 'measurement', text: `[Файл «${input.filename}»: Замерный лист] Один проём.`, memoryOpenings: [{ room: 'Кухня', width_mm: 805, height_mm: 2060 }], costUsd: 0.01, model: 'claude-opus-5' };
+      },
+    };
+    await t.mb.put('INBOX', {
+      subject: 'Замер',
+      text: 'Прилагаю замер',
+      attachments: [
+        { filename: 'замер.pdf', contentType: 'application/pdf', content: Buffer.from('%PDF-1.4 fake') },
+        { filename: 'план.dwg', contentType: 'application/octet-stream', content: Buffer.from('dwg') },
+      ],
+    } as unknown as Partial<OutgoingEmail>);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
+    expect(inputs).toEqual([
+      { filename: 'замер.pdf', mime: 'application/pdf', bytes: 13, source: 'email' },
+      { filename: 'план.dwg', mime: 'application/acad', bytes: 3, source: 'email' },
+    ]);
+    const [pending] = await new DialogRepo(db).takePending(1, 301);
+    expect(pending?.text).toContain('Прилагаю замер\n[Файл «замер.pdf»: Замерный лист] Один проём.');
+    expect(pending?.text).toContain('файл «план.dwg», разобрать не удалось: Формат не поддерживается');
+    expect(pending?.meta.openings).toEqual([{ room: 'Кухня', width_mm: 805, height_mm: 2060 }]);
+    const { rows } = await db.query("SELECT kind, summary FROM ai_journal WHERE account_id = 1 AND kind IN ('document', 'error') ORDER BY id");
+    expect(rows.map((r) => r.kind)).toEqual(['document', 'error']);
+    expect(rows[0].summary).toContain('Разобрано вложение «замер.pdf»');
+  });
+
+  it('без разбора вложений — пометка в тексте письма', async () => {
+    const t = await setup({}, knownContact);
+    await t.mb.put('INBOX', { attachments: [{ filename: 'смета.xlsx', contentType: 'application/vnd.ms-excel', content: Buffer.from('x') }] } as unknown as Partial<OutgoingEmail>);
+    await pollMailbox(1, t.deps);
+    const [pending] = await new DialogRepo(db).takePending(1, 301);
+    expect(pending?.text).toContain('(во вложении файл «смета.xlsx» — разбор вложений выключен)');
+  });
+
   it('лимит ответов на адрес за сутки', async () => {
     const t = await setup({ maxRepliesPerAddressPerDay: 1 }, knownContact);
     await mail.logOutbound(1, 301, 'ivan@client.ru', '<x@rf-dveri.ru>');

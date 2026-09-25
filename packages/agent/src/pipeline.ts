@@ -56,9 +56,25 @@ export interface PipelineDeps {
     reply(accountId: number, leadId: number, meta: Record<string, unknown>, text: string): Promise<unknown>;
     managerRepliedSince(accountId: number, addresses: string[], since: Date): Promise<boolean>;
   };
+  /** Разбор вложений (фаза 3): фото, сканы, PDF/XLSX/DOCX → факты для агента и примечание менеджеру. */
+  documents?: DocumentAnalyzer;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
+
+export interface DocumentAnalyzer {
+  analyze(input: {
+    accountId: number;
+    leadId: number;
+    source: 'chat';
+    filename: string;
+    mime: string;
+    bytes: Uint8Array;
+    settings: WidgetSettings;
+  }): Promise<{ id: number; kind: string; text: string; note: string; memoryOpenings: MemoryOpening[]; costUsd: number; model: string }>;
+}
+
+type MemoryOpening = { room?: string; width_mm?: number; height_mm?: number; wall_mm?: number; qty?: number };
 
 export type PipelineOutcome =
   | { status: 'empty' }
@@ -97,6 +113,8 @@ interface Turn {
   pending: PendingMessage[];
   texts: string[];
   sendErrors: string[];
+  /** Проёмы из разобранных замерных листов — в память клиента. */
+  openings: MemoryOpening[];
 }
 
 export class DialogPipeline {
@@ -108,7 +126,7 @@ export class DialogPipeline {
     if (!pending.length) return { status: 'empty' };
     const { settings } = await this.d.settings.get(accountId);
     const access = await this.d.amo(accountId);
-    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [] };
+    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [] };
     try {
       t.texts = await this.incomingTexts(t);
       for (const text of t.texts) await this.d.dialog.addMessage(accountId, leadId, 'client', text);
@@ -178,6 +196,9 @@ export class DialogPipeline {
     // Контекст: память клиента по основному контакту, правила цен.
     const contactRef = lead._embedded?.contacts?.find((c) => c.is_main) ?? lead._embedded?.contacts?.[0];
     const subject = memorySubject(contactRef?.id ?? null, leadId);
+    // Проёмы из вложений (чат — разобраны здесь, почта — при опросе ящика) сохраняем до ответа.
+    const fromEmail = emails.flatMap((m) => (Array.isArray(m.meta.openings) ? (m.meta.openings as MemoryOpening[]) : []));
+    if (t.openings.length || fromEmail.length) await this.d.memory.update(accountId, subject, { openings: [...t.openings, ...fromEmail].slice(0, 50) });
     const [mem, { rules }] = await Promise.all([this.d.memory.get(accountId, subject), this.d.pricing.get(accountId)]);
     const memoryText = memoryToText(mem.data, mem.summary);
     const clientFacts = [
@@ -298,7 +319,7 @@ export class DialogPipeline {
         continue;
       }
       if (!isAudio(m.attachmentType)) {
-        out.push([m.text, '(клиент отправил файл или фото — разбор вложений появится позже, попросите описать словами)'].filter(Boolean).join('\n'));
+        out.push(await this.attachmentText(t, m));
         continue;
       }
       const stt = this.d.stt?.(t.settings.stt.provider) ?? null;
@@ -317,6 +338,26 @@ export class DialogPipeline {
       }
     }
     return out;
+  }
+
+  /** Файл или фото из чата: разбор (фаза 3) или пометка, если разбор недоступен. */
+  private async attachmentText(t: Turn, m: PendingMessage): Promise<string> {
+    const url = m.attachmentUrl as string;
+    const filename = decodeURIComponent(new URL(url, 'https://x').pathname.split('/').pop() ?? '') || 'файл';
+    if (!this.d.documents || !t.settings.vision.autoParse) {
+      return [m.text, `(клиент отправил файл «${filename}» — разбор вложений выключен, попросите описать словами)`].filter(Boolean).join('\n');
+    }
+    try {
+      const file = await (this.d.download ?? downloadAttachment)(url);
+      const r = await this.d.documents.analyze({ accountId: t.accountId, leadId: t.leadId, source: 'chat', filename, mime: file.mime, bytes: file.bytes, settings: t.settings });
+      t.openings.push(...r.memoryOpenings);
+      await this.journal(t, { kind: 'document', summary: `Разобран файл «${filename}» (${r.kind})`, details: { documentId: r.id, model: r.model, text: r.text }, costUsd: r.costUsd, costRub: r.costUsd * t.settings.billing.usdRubRate });
+      if (t.settings.vision.noteInLead) await t.access.api.addLeadNote(t.leadId, r.note).catch(() => undefined);
+      return [m.text, r.text].filter(Boolean).join('\n');
+    } catch (err) {
+      await this.journal(t, { kind: 'error', summary: `Разбор файла «${filename}»: ${(err as Error).message}` });
+      return [m.text, `(клиент отправил файл «${filename}», разобрать не удалось — попросите описать словами или передайте менеджеру)`].filter(Boolean).join('\n');
+    }
   }
 
   private async skip(t: Turn, reason: string, summary: string): Promise<PipelineOutcome> {
