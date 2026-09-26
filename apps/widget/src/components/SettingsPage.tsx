@@ -7,7 +7,9 @@ import { EmailSettings } from './EmailSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
 import { Knowledge } from './Knowledge.tsx';
+import { Analytics } from './Analytics.tsx';
 import { Sandbox } from './Sandbox.tsx';
+import { Versions } from './Versions.tsx';
 import { ConnectionBadge, modeLabel, rub } from './StatusBadge.tsx';
 import { s } from './styles.ts';
 import { errorMessage, useLoad } from './useLoad.ts';
@@ -40,6 +42,8 @@ const TABS = [
   ['drafts', 'Черновики'],
   ['sandbox', 'Песочница'],
   ['journal', 'Журнал'],
+  ['analytics', 'Аналитика'],
+  ['versions', 'Версии'],
 ] as const;
 type Tab = (typeof TABS)[number][0];
 const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'email', 'catalog', 'limits']);
@@ -61,10 +65,17 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   const { api, status } = props;
   const [tab, setTab] = useState<Tab>('status');
   const [draft, setDraft] = useState(props.initial);
+  // Сохранённое состояние: после отката подтягивается без перемонтирования формы.
+  const [base, setBase] = useState(props.initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dict, setDict] = useState<Dictionaries | null>(null);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(props.initial);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(base);
+  const onRestored = async () => {
+    const { settings } = await api.settings();
+    setBase(settings);
+    setDraft(settings);
+  };
 
   useEffect(() => {
     if ((tab === 'where' || tab === 'handoff' || tab === 'email') && !dict) api.dictionaries().then(setDict, () => undefined);
@@ -122,6 +133,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               Включён
             </label>
           </Field>
+          {props.status.isAdmin && <PurgeAccount api={api} />}
           <Field label="Режим" hint="Автоматический — AI пишет клиенту сам. Полуавтоматический — AI готовит черновик, менеджер одобряет. Только подсказки — AI подсказывает менеджеру в карточке сделки.">
             <select style={s.select} value={draft.mode} onChange={(e) => set('mode', e.target.value as Mode)}>
               {MODES.map((m) => (
@@ -370,7 +382,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Обновлять каждые, часов">
             <NumberInput value={draft.catalog.importEveryHours} min={1} max={168} onChange={(v) => set('catalog', { importEveryHours: v ?? 24 })} />
           </Field>
-          <CatalogStatus api={api} hasFeed={Boolean(props.initial.catalog.feedUrl)} />
+          <CatalogStatus api={api} hasFeed={Boolean(base.catalog.feedUrl)} />
         </>
       )}
 
@@ -379,7 +391,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           api={api}
           value={draft.email}
           dict={dict}
-          saved={JSON.stringify(draft.email) === JSON.stringify(props.initial.email)}
+          saved={JSON.stringify(draft.email) === JSON.stringify(base.email)}
           onChange={(patch) => set('email', patch)}
         />
       )}
@@ -410,6 +422,8 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
 
       {tab === 'sandbox' && <Sandbox api={api} draft={dirty ? draft : undefined} />}
       {tab === 'journal' && <Journal api={api} />}
+      {tab === 'analytics' && <Analytics api={api} />}
+      {tab === 'versions' && <Versions api={api} isAdmin={props.status.isAdmin} onRestored={() => void onRestored()} />}
 
       {SETTINGS_TABS.has(tab) && (
         <div style={{ ...s.row, marginTop: 16 }}>
@@ -421,5 +435,28 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
         </div>
       )}
     </div>
+  );
+}
+
+/** Удаление всех данных аккаунта на сервере AI-агента (по запросу; чек-лист Маркетплейса). */
+function PurgeAccount({ api }: { api: WidgetApi }) {
+  const [msg, setMsg] = useState<string | null>(null);
+  const purge = async () => {
+    const typed = window.prompt('Будут удалены все данные AI-агента по этому аккаунту: настройки, переписка, память клиентов, журнал, разборы файлов. Это необратимо. Введите УДАЛИТЬ, чтобы подтвердить.');
+    if (typed !== 'УДАЛИТЬ') return;
+    try {
+      await api.purgeAccount();
+      setMsg('Данные удалены. Чтобы пользоваться AI-агентом снова, переустановите интеграцию.');
+    } catch (err) {
+      setMsg(errorMessage(err));
+    }
+  };
+  return (
+    <Field label="Данные аккаунта" hint="Удаление всех данных на сервере AI-агента по запросу владельца аккаунта.">
+      <button type="button" style={s.buttonGhost} onClick={() => void purge()}>
+        Удалить все данные
+      </button>
+      {msg && <div style={s.small}>{msg}</div>}
+    </Field>
   );
 }

@@ -122,7 +122,7 @@ describe('справочники amo', () => {
   it('воронки, этапы и типы задач', async () => {
     const res = await ctx.app.inject({ url: '/widget/v1/amo/dictionaries', headers: { 'x-auth-token': await widgetToken() } });
     expect(res.json()).toEqual({
-      pipelines: [{ id: 1, name: 'Продажи', statuses: [{ id: 10, name: 'Новая' }] }],
+      pipelines: [{ id: 1, name: 'Продажи', statuses: [{ id: 10, name: 'Новая', sort: 10 }] }],
       taskTypes: [{ id: 1, name: 'Связаться' }],
     });
   });

@@ -112,3 +112,14 @@ describe('вложения из чата (фаза 3)', () => {
     expect((await t.memory.get(ACC, 'contact:88')).data.openings).toEqual([{ room: 'Кухня', width_mm: 805, height_mm: 2060 }]);
   });
 });
+
+describe('аналитика: стартовый этап', () => {
+  it('при первом контакте AI запоминается воронка и этап сделки', async () => {
+    const starts: unknown[] = [];
+    const t = await setup([text('Здравствуйте!')], {}, null);
+    const pipeline = new DialogPipeline({ ...t, outcomes: { start: async (...a: unknown[]) => void starts.push(a) } } as unknown as ConstructorParameters<typeof DialogPipeline>[0]);
+    await t.dialog.enqueue(ACC, lead, 'Привет', 'https://test.amocrm.ru/c/9');
+    await pipeline.processLead(ACC, lead);
+    expect(starts).toEqual([[ACC, lead, 1, 10]]);
+  });
+});

@@ -1,4 +1,5 @@
 export * from './analyze.ts';
+export * from './dwg.ts';
 export * from './extract.ts';
 export * from './gost.ts';
 export * from './kit.ts';

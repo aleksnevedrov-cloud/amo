@@ -178,6 +178,20 @@ export type WidgetSettingsInput = z.input<typeof widgetSettingsSchema>;
 
 export const defaultSettings = (): WidgetSettings => widgetSettingsSchema.parse({});
 
+export interface SettingsVersion {
+  id: number;
+  userId: number | null;
+  changedAt: Date;
+  /** Какие разделы настроек изменились относительно предыдущей версии. */
+  changed: string[];
+}
+
+/** Разделы верхнего уровня, отличающиеся между двумя снимками (по JSON). */
+export function changedSections(before: Record<string, unknown> | null, after: Record<string, unknown>): string[] {
+  const keys = new Set([...Object.keys(before ?? {}), ...Object.keys(after)]);
+  return [...keys].filter((k) => JSON.stringify(before?.[k] ?? null) !== JSON.stringify(after[k] ?? null)).sort();
+}
+
 export class SettingsRepo {
   constructor(private readonly db: Db) {}
 
@@ -210,6 +224,42 @@ export class SettingsRepo {
       ]);
       return { version: rows[0].version as number };
     });
+  }
+
+  /** История изменений (версии настроек, раздел 11.1 ТЗ). Новые — первыми. */
+  async history(accountId: number, limit = 50): Promise<SettingsVersion[]> {
+    const { rows } = await this.db.query(
+      'SELECT id, user_id, changed_at, before, after FROM settings_audit WHERE account_id = $1 ORDER BY id DESC LIMIT $2',
+      [accountId, limit],
+    );
+    return rows.map((r) => ({
+      id: Number(r.id),
+      userId: r.user_id === null ? null : Number(r.user_id),
+      changedAt: r.changed_at as Date,
+      changed: changedSections(r.before as Record<string, unknown> | null, r.after as Record<string, unknown>),
+    }));
+  }
+
+  async version(accountId: number, id: number): Promise<(SettingsVersion & { settings: WidgetSettings }) | null> {
+    const { rows } = await this.db.query('SELECT id, user_id, changed_at, before, after FROM settings_audit WHERE account_id = $1 AND id = $2', [accountId, id]);
+    const r = rows[0];
+    if (!r) return null;
+    const parsed = widgetSettingsSchema.safeParse(r.after);
+    if (!parsed.success) return null;
+    return {
+      id: Number(r.id),
+      userId: r.user_id === null ? null : Number(r.user_id),
+      changedAt: r.changed_at as Date,
+      changed: changedSections(r.before as Record<string, unknown> | null, r.after as Record<string, unknown>),
+      settings: parsed.data,
+    };
+  }
+
+  /** Откат: сохраняет снимок версии как новую версию (история не теряется). */
+  async restore(accountId: number, userId: number, id: number): Promise<{ version: number } | null> {
+    const v = await this.version(accountId, id);
+    if (!v) return null;
+    return this.save(accountId, userId, v.settings);
   }
 
   /** Аккаунты с включённой почтой — для опроса ящиков. */

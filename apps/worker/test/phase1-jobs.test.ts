@@ -102,3 +102,41 @@ describe('runPollMail', () => {
     expect(res).toEqual([expect.objectContaining({ accountId: 1, received: 0 })]);
   });
 });
+
+describe('runRefreshOutcomes', () => {
+  it('перепроверяет этапы сделок по воронке: вперёд, выиграна, удалена', async () => {
+    const { OutcomesRepo } = await import('@ai-door/db');
+    const { runRefreshOutcomes } = await import('../src/jobs.ts');
+    const { AmoApiClient } = await import('@ai-door/amo');
+    const outcomes = new OutcomesRepo(db);
+    await outcomes.start(1, 501, 1, 10);
+    await outcomes.start(1, 502, 1, 20);
+    await outcomes.start(1, 503, 1, 10);
+    await outcomes.start(1, 504, 1, 10);
+    const f = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+      if (url.pathname === '/api/v4/leads/pipelines') {
+        return json({ _embedded: { pipelines: [{ id: 1, name: 'Продажи', _embedded: { statuses: [{ id: 10, name: 'Новая', sort: 10 }, { id: 20, name: 'Замер', sort: 20 }, { id: 142, name: 'Успех', sort: 10000 }] } }] } });
+      }
+      if (url.pathname === '/api/v4/leads') {
+        return json({ _embedded: { leads: [
+          { id: 501, status_id: 20, pipeline_id: 1 },
+          { id: 502, status_id: 10, pipeline_id: 1 },
+          { id: 503, status_id: 142, pipeline_id: 1 },
+        ] } });
+      }
+      return json({});
+    }) as typeof fetch;
+    const api = new AmoApiClient('a1.amocrm.ru', async () => 'T', f, async () => undefined);
+    const r = await runRefreshOutcomes({ outcomes, amo: async () => api }, log, { recheckMs: 0 });
+    expect(r).toEqual({ checked: 3, advanced: 2, errors: 0 });
+    const { rows } = await db.query('SELECT lead_id, advanced, won, lost FROM dialog_outcomes WHERE account_id = 1 ORDER BY lead_id');
+    expect(rows.map((x) => [Number(x.lead_id), x.advanced, x.won, x.lost])).toEqual([
+      [501, true, false, false],
+      [502, false, false, false],
+      [503, true, true, false],
+      [504, false, false, true],
+    ]);
+  });
+});

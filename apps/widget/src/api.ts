@@ -160,6 +160,40 @@ export interface DocumentListItem {
   createdAt: string;
 }
 
+export interface AnalyticsSummary {
+  from: string;
+  to: string;
+  dialogs: number;
+  replies: number;
+  drafts: number;
+  hints: number;
+  handoffs: number;
+  documents: number;
+  errors: number;
+  costRub: number;
+  avgCostPerDialogRub: number;
+  outcomes: { tracked: number; advanced: number; won: number; lost: number; conversionPct: number | null };
+  handoffReasons: { reason: string; count: number }[];
+  byDay: { day: string; dialogs: number; replies: number; handoffs: number; costRub: number }[];
+}
+
+export interface BillingMonth {
+  month: string;
+  costRub: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  dialogs: number;
+  replies: number;
+}
+
+export interface SettingsVersion {
+  id: number;
+  userId: number | null;
+  changedAt: string;
+  changed: string[];
+}
+
 export interface Dictionaries {
   pipelines: { id: number; name: string; statuses: { id: number; name: string }[] }[];
   taskTypes: { id: number; name: string }[];
@@ -208,6 +242,13 @@ export class WidgetApi {
   reject = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/reject`);
   markUsed = (id: number) => this.call<{ ok: true }>('POST', `/widget/v1/suggestions/${id}/used`);
   summary = (leadId: number) => this.call<{ text: string; costRub: number }>('POST', `/widget/v1/leads/${leadId}/summary`);
+
+  analytics = (days: number) => this.call<AnalyticsSummary>('GET', `/widget/v1/analytics?days=${days}`);
+  billing = () => this.call<{ months: BillingMonth[] }>('GET', '/widget/v1/billing');
+  settingsHistory = () => this.call<{ items: SettingsVersion[] }>('GET', '/widget/v1/settings/history');
+  settingsVersion = (id: number) => this.call<SettingsVersion & { settings: WidgetSettings }>('GET', `/widget/v1/settings/history/${id}`);
+  restoreSettings = (id: number) => this.call<{ version: number }>('POST', `/widget/v1/settings/history/${id}/restore`);
+  purgeAccount = () => this.call<{ ok: true }>('POST', '/widget/v1/account/purge', { confirm: 'УДАЛИТЬ' });
 
   leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);
   analyzeDocument = (leadId: number, body: { name: string; mime: string; file: string; hint?: 'measurement' | 'request' | 'photo' }) =>

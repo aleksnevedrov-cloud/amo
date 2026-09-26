@@ -58,6 +58,8 @@ export interface PipelineDeps {
   };
   /** Разбор вложений (фаза 3): фото, сканы, PDF/XLSX/DOCX → факты для агента и примечание менеджеру. */
   documents?: DocumentAnalyzer;
+  /** Аналитика (фаза 4): стартовый этап сделки при первом контакте AI. */
+  outcomes?: { start(accountId: number, leadId: number, pipelineId: number, statusId: number): Promise<void> };
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
@@ -151,6 +153,7 @@ export class DialogPipeline {
       await this.d.dialog.pause(accountId, leadId, 'status_without_ai');
       return this.skip(t, 'status', 'Этап сделки — «без AI»');
     }
+    await this.d.outcomes?.start(accountId, leadId, lead.pipeline_id, lead.status_id).catch(() => undefined);
 
     let state = await this.d.dialog.state(accountId, leadId);
     const now = this.d.now?.() ?? new Date();

@@ -1,10 +1,11 @@
 import ExcelJS from 'exceljs';
 import mammoth from 'mammoth';
 import { extractText, getDocumentProxy } from 'unpdf';
+import { dwg2dxf, DwgError, dxfToText, type DwgConverter } from './dwg.ts';
 
 /** Что удалось вытащить из файла без внешних сервисов. */
 export interface Extracted {
-  format: 'pdf' | 'xlsx' | 'docx' | 'image' | 'text' | 'unsupported';
+  format: 'pdf' | 'xlsx' | 'docx' | 'image' | 'text' | 'dwg' | 'dxf' | 'unsupported';
   /** Текст (таблицы — строками через табуляцию). */
   text: string;
   pages: number;
@@ -28,14 +29,32 @@ export function detectFormat(mime: string, filename = ''): Extracted['format'] {
   if (m.includes('spreadsheetml') || ext === 'xlsx' || ext === 'xlsm') return 'xlsx';
   if (m.includes('wordprocessingml') || ext === 'docx') return 'docx';
   if (/^image\/(jpeg|png|webp|heic|heif)$/.test(m) || /^(jpe?g|png|webp|heic|heif)$/.test(ext)) return 'image';
+  if (m === 'application/acad' || m === 'image/vnd.dwg' || m === 'application/x-dwg' || ext === 'dwg') return 'dwg';
+  if (m === 'application/dxf' || m === 'image/vnd.dxf' || ext === 'dxf') return 'dxf';
   if (m.startsWith('text/') || ['txt', 'csv', 'md'].includes(ext)) return 'text';
   return 'unsupported';
 }
 
-export async function extract(bytes: Uint8Array, mime: string, filename = ''): Promise<Extracted> {
+export interface ExtractOptions {
+  /** DWG → DXF; по умолчанию — LibreDWG dwg2dxf на сервере. */
+  dwg?: DwgConverter;
+}
+
+export async function extract(bytes: Uint8Array, mime: string, filename = '', opts: ExtractOptions = {}): Promise<Extracted> {
   if (bytes.byteLength > MAX_FILE_BYTES) throw new ExtractError('Файл больше 20 МБ');
   const format = detectFormat(mime, filename);
   switch (format) {
+    case 'dwg': {
+      let dxf: string;
+      try {
+        dxf = await (opts.dwg ?? dwg2dxf)(bytes);
+      } catch (err) {
+        throw new ExtractError(err instanceof DwgError ? err.message : `Конвертация DWG: ${(err as Error).message}`);
+      }
+      return { format, text: cap(dxfToText(dxf)), pages: 1, needsOcr: false };
+    }
+    case 'dxf':
+      return { format, text: cap(dxfToText(new TextDecoder('utf-8').decode(bytes))), pages: 1, needsOcr: false };
     case 'pdf':
       return extractPdf(bytes);
     case 'xlsx':

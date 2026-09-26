@@ -7,7 +7,8 @@
     "eval": "tsx run.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval:docs": "tsx documents/run-docs.ts"
+    "eval:docs": "tsx documents/run-docs.ts",
+    "perf": "tsx perf.ts"
   },
   "dependencies": {
     "@ai-door/agent": "workspace:*",
@@ -18,7 +19,8 @@
     "@ai-door/tools": "workspace:*",
     "pg": "^8.23.0",
     "zod": "^3.25.76",
-    "@ai-door/docs": "workspace:*"
+    "@ai-door/docs": "workspace:*",
+    "@ai-door/amo": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1"

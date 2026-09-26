@@ -59,9 +59,15 @@ describe('разбор файла из карточки сделки', () => {
   });
 
   it('неподдерживаемый формат — понятная ошибка 422 и запись в журнале', async () => {
-    const res = await ctx.app.inject({ method: 'POST', url: '/widget/v1/leads/701/documents', headers: await headers(), payload: { name: 'план.dwg', mime: 'application/x-dwg', file: Buffer.from('dwg').toString('base64') } });
+    const res = await ctx.app.inject({ method: 'POST', url: '/widget/v1/leads/701/documents', headers: await headers(), payload: { name: 'архив.zip', mime: 'application/zip', file: Buffer.from('zip').toString('base64') } });
     expect(res.statusCode).toBe(422);
     expect(res.json()).toMatchObject({ error: 'document', message: expect.stringContaining('не поддерживается') });
+    // DWG без конвертера на сервере — понятная подсказка.
+    process.env.DWG2DXF_BIN = '/nonexistent/dwg2dxf';
+    const dwg = await ctx.app.inject({ method: 'POST', url: '/widget/v1/leads/701/documents', headers: await headers(), payload: { name: 'план.dwg', mime: 'application/acad', file: Buffer.from('AC1027').toString('base64') } });
+    delete process.env.DWG2DXF_BIN;
+    expect(dwg.statusCode).toBe(422);
+    expect(dwg.json().message).toContain('LibreDWG');
   });
 
   it('OCR выключен в настройках — 422 с подсказкой про настройку', async () => {

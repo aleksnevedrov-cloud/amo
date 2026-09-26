@@ -49,4 +49,13 @@ export class AccountsRepo {
       uninstalledAt: r.uninstalled_at,
     };
   }
+
+  /**
+   * Удаление всех данных аккаунта по запросу (чек-лист Маркетплейса): каскадом уходят токены,
+   * настройки, диалоги, память, журнал, документы, почта. Возвращает false, если аккаунта нет.
+   */
+  async purge(id: number): Promise<boolean> {
+    const { rowCount } = await this.db.query('DELETE FROM accounts WHERE id = $1', [id]);
+    return (rowCount ?? 0) > 0;
+  }
 }

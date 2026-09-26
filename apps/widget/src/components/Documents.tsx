@@ -21,7 +21,7 @@ const FLAG: Record<string, string> = {
   not_found: 'в каталоге не найдено',
 };
 
-const ACCEPT = '.pdf,.xlsx,.xlsm,.docx,.jpg,.jpeg,.png,.webp,.txt,.csv';
+const ACCEPT = '.pdf,.xlsx,.xlsm,.docx,.jpg,.jpeg,.png,.webp,.txt,.csv,.dwg,.dxf';
 const size = (w: number | null, h: number | null) => (w || h ? `${w ?? '?'}×${h ?? '?'}` : '—');
 
 /** Блок «Файлы» в карточке сделки: кнопка «Разобрать файл», результат, история разборов (фаза 3). */
@@ -57,7 +57,7 @@ export function Documents({ api, leadId }: { api: WidgetApi; leadId: number }) {
           <input type="file" accept={ACCEPT} disabled={busy} style={{ display: 'none' }} onChange={(e) => void analyze(e.target.files?.[0])} />
         </label>
       </div>
-      <div style={{ ...s.muted, ...s.small }}>Замерный лист, фото, PDF, Excel, Word — результат попадёт в примечание сделки и в память клиента.</div>
+      <div style={{ ...s.muted, ...s.small }}>Замерный лист, фото, PDF, Excel, Word, чертёж DWG/DXF — результат попадёт в примечание сделки и в память клиента.</div>
       {error && <div style={s.error}>{error}</div>}
       {result && <DocumentView r={result} />}
       {list.status === 'ready' && (list.data?.items?.length ?? 0) > 0 && (

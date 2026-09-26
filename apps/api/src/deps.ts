@@ -10,11 +10,13 @@ import { AmoOAuth, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import {
   AccountsRepo,
+  AnalyticsRepo,
   createPool,
   DialogRepo,
   DocumentsRepo,
   JournalRepo,
   MemoryRepo,
+  OutcomesRepo,
   PgTokenStore,
   SettingsRepo,
   SuggestionsRepo,
@@ -55,6 +57,8 @@ export interface Deps {
   memory: MemoryRepo;
   suggestions: SuggestionsRepo;
   documents: DocumentsRepo;
+  outcomes: OutcomesRepo;
+  analytics: AnalyticsRepo;
   /** Разбор файлов (фаза 3); без ключа LLM бросает понятную ошибку. */
   docs: DocumentService;
   /** null — не задан ANTHROPIC_API_KEY. */
@@ -142,6 +146,8 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     suggestions: new SuggestionsRepo(db),
     documents,
     docs,
+    outcomes: new OutcomesRepo(db),
+    analytics: new AnalyticsRepo(db),
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     schedule,

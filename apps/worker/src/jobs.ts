@@ -1,7 +1,8 @@
 import type { DialogPipeline, IncomingJob } from '@ai-door/agent';
 import type { TokenService } from '@ai-door/amo';
 import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import type { DialogRepo, JournalRepo, SettingsRepo } from '@ai-door/db';
+import type { AmoApiClient } from '@ai-door/amo';
+import { classifyOutcome, type DialogRepo, type JournalRepo, type OutcomesRepo, type SettingsRepo } from '@ai-door/db';
 import { pollMailbox, type PollDeps, type PollResult } from '@ai-door/mail';
 
 export const MAINTENANCE_QUEUE = 'maintenance';
@@ -11,6 +12,11 @@ export const REFRESH_EVERY_MS = 30 * 60_000;
 export const IMPORT_CHECK_EVERY_MS = 30 * 60_000;
 export const POLL_MAIL_JOB = 'poll-mail';
 export const POLL_MAIL_EVERY_MS = 60_000;
+export const REFRESH_OUTCOMES_JOB = 'refresh-outcomes';
+export const REFRESH_OUTCOMES_EVERY_MS = 6 * 3600_000;
+/** Как долго следим за сделкой после диалога с AI и как часто перепроверяем. */
+export const OUTCOME_WINDOW_DAYS = 60;
+export const OUTCOME_RECHECK_MS = 4 * 3600_000;
 
 export interface JobLogger {
   info(obj: object, msg: string): void;
@@ -76,4 +82,46 @@ export async function runPollMail(d: PollDeps, log: JobLogger): Promise<PollResu
     else if (r.received || r.managerReplies) log.info(r, 'mail: опрос ящика');
   }
   return results;
+}
+
+/**
+ * Аналитика (фаза 4): перепроверяет этапы сделок, где AI общался, — ушла ли сделка вперёд по воронке,
+ * выиграна или проиграна. Порядок этапов берётся из воронок аккаунта.
+ */
+export async function runRefreshOutcomes(
+  d: { outcomes: OutcomesRepo; amo(accountId: number): Promise<AmoApiClient> },
+  log: JobLogger,
+  opts: { recheckMs?: number; windowDays?: number; batch?: number } = {},
+): Promise<{ checked: number; advanced: number; errors: number }> {
+  const recheckMs = opts.recheckMs ?? OUTCOME_RECHECK_MS;
+  const windowDays = opts.windowDays ?? OUTCOME_WINDOW_DAYS;
+  const res = { checked: 0, advanced: 0, errors: 0 };
+  for (const accountId of await d.outcomes.accountsWithDue(recheckMs, windowDays)) {
+    try {
+      const api = await d.amo(accountId);
+      const order = new Map<number, number>();
+      for (const p of await api.getPipelines()) for (const st of p.statuses) order.set(st.id, st.sort);
+      const due = await d.outcomes.due(accountId, { olderThanMs: recheckMs, withinDays: windowDays, limit: opts.batch ?? 500 });
+      for (let i = 0; i < due.length; i += 50) {
+        const chunk = due.slice(i, i + 50);
+        const leads = new Map((await api.getLeadsByIds(chunk.map((x) => x.leadId))).map((l) => [l.id, l]));
+        for (const x of chunk) {
+          const lead = leads.get(x.leadId);
+          if (!lead) {
+            await d.outcomes.markGone(accountId, x.leadId);
+            continue;
+          }
+          const c = classifyOutcome({ pipelineId: x.pipelineId, statusId: x.firstStatusId }, { pipelineId: lead.pipeline_id, statusId: lead.status_id }, order);
+          await d.outcomes.record(accountId, x.leadId, { statusId: lead.status_id, pipelineId: lead.pipeline_id, ...c });
+          res.checked += 1;
+          if (c.advanced) res.advanced += 1;
+        }
+      }
+    } catch (err) {
+      res.errors += 1;
+      log.warn({ accountId, err: (err as Error).message }, 'analytics: не удалось обновить исходы');
+    }
+  }
+  if (res.checked) log.info(res, 'analytics: исходы обновлены');
+  return res;
 }

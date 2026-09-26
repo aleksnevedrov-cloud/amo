@@ -220,6 +220,9 @@ importers:
       '@ai-door/agent':
         specifier: workspace:*
         version: link:../packages/agent
+      '@ai-door/amo':
+        specifier: workspace:*
+        version: link:../packages/amo
       '@ai-door/catalog':
         specifier: workspace:*
         version: link:../packages/catalog

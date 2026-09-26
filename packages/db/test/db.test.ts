@@ -258,3 +258,77 @@ describe('DocumentsRepo', () => {
     expect(await repo.get(1202, id)).toBeNull();
   });
 });
+
+describe('аналитика (фаза 4)', () => {
+  it('исходы: старт один раз, перепроверка, классификация, сводка и расход по месяцам', async () => {
+    const { AnalyticsRepo, OutcomesRepo, classifyOutcome } = await import('../src/index.ts');
+    await installAccount(1301, new Date(Date.now() + HOUR));
+    const outcomes = new OutcomesRepo(db);
+    await outcomes.start(1301, 10, 1, 100);
+    await outcomes.start(1301, 10, 1, 999); // повтор не перезаписывает
+    await outcomes.start(1301, 11, 1, 100);
+    expect(await outcomes.accountsWithDue(0, 60)).toEqual([1301]);
+    const due = await outcomes.due(1301, { olderThanMs: 0, withinDays: 60, limit: 10 });
+    expect(due.map((d) => d.firstStatusId)).toEqual([100, 100]);
+
+    const order = new Map([[100, 10], [101, 20], [102, 30]]);
+    expect(classifyOutcome({ pipelineId: 1, statusId: 100 }, { pipelineId: 1, statusId: 102 }, order)).toEqual({ advanced: true, won: false, lost: false });
+    expect(classifyOutcome({ pipelineId: 1, statusId: 101 }, { pipelineId: 1, statusId: 100 }, order)).toEqual({ advanced: false, won: false, lost: false });
+    expect(classifyOutcome({ pipelineId: 1, statusId: 100 }, { pipelineId: 1, statusId: 142 }, order)).toEqual({ advanced: true, won: true, lost: false });
+    expect(classifyOutcome({ pipelineId: 1, statusId: 100 }, { pipelineId: 2, statusId: 5 }, order)).toEqual({ advanced: false, won: false, lost: false });
+    expect(classifyOutcome({ pipelineId: 1, statusId: 100 }, { pipelineId: 1, statusId: 143 }, order).lost).toBe(true);
+
+    await outcomes.record(1301, 10, { statusId: 102, pipelineId: 1, advanced: true, won: false, lost: false });
+    await outcomes.markGone(1301, 11);
+    // Только что проверенная сделка не попадает в выборку, пока не пройдёт интервал перепроверки.
+    expect(await outcomes.due(1301, { olderThanMs: HOUR, withinDays: 60, limit: 10 })).toEqual([]);
+
+    const journal = new JournalRepo(db);
+    await journal.add({ accountId: 1301, leadId: 10, kind: 'reply', summary: 'a', costRub: 3, inputTokens: 1000, outputTokens: 100 });
+    await journal.add({ accountId: 1301, leadId: 10, kind: 'handoff', summary: 'b', details: { reason: 'discount' } });
+    await journal.add({ accountId: 1301, leadId: 10, kind: 'handoff', summary: 'служебная запись без reason' });
+    await journal.add({ accountId: 1301, leadId: 11, kind: 'draft', summary: 'c', details: { delivery: 'draft' }, costRub: 1 });
+    await journal.add({ accountId: 1301, leadId: 12, kind: 'skipped', summary: 'не диалог' });
+    await journal.add({ accountId: 1302, leadId: 1, kind: 'reply', summary: 'чужой аккаунт', costRub: 100 }).catch(() => undefined);
+    const a = await new AnalyticsRepo(db).summary(1301, new Date(Date.now() - HOUR), new Date(Date.now() + HOUR));
+    expect(a).toMatchObject({ dialogs: 2, replies: 1, drafts: 1, handoffs: 1, costRub: 4, avgCostPerDialogRub: 2 });
+    expect(a.outcomes).toEqual({ tracked: 2, advanced: 1, won: 0, lost: 1, conversionPct: 50 });
+    expect(a.handoffReasons).toEqual([{ reason: 'discount', count: 1 }]);
+    expect(a.byDay).toHaveLength(1);
+    expect(a.byDay[0]).toMatchObject({ dialogs: 2, replies: 1, handoffs: 1, costRub: 4 });
+    const months = await new AnalyticsRepo(db).billing(1301);
+    expect(months).toHaveLength(1);
+    expect(months[0]).toMatchObject({ costRub: 4, inputTokens: 1000, outputTokens: 100, dialogs: 2, replies: 1 });
+  });
+});
+
+describe('версии настроек и удаление данных', () => {
+  it('история с изменёнными разделами, снимок, откат новой версией; purge удаляет всё каскадом', async () => {
+    await installAccount(1401, new Date(Date.now() + HOUR));
+    const repo = new SettingsRepo(db);
+    const v1 = widgetSettingsSchema.parse({ enabled: true, mode: 'auto' });
+    await repo.save(1401, 7, v1);
+    await repo.save(1401, 8, { ...v1, behavior: { ...v1.behavior, greeting: 'Здравствуйте!' }, limits: { ...v1.limits, dailyRub: 500 } });
+    const history = await repo.history(1401);
+    expect(history).toHaveLength(2);
+    expect(history[0]).toMatchObject({ userId: 8, changed: ['behavior', 'limits'] });
+    expect(history[1]!.changed).toContain('enabled');
+    const snap = await repo.version(1401, history[1]!.id);
+    expect(snap?.settings.behavior.greeting).toBe('');
+    const r = await repo.restore(1401, 9, history[1]!.id);
+    expect(r?.version).toBe(3);
+    const cur = await repo.get(1401);
+    expect(cur.settings.behavior.greeting).toBe('');
+    expect(cur.settings.limits.dailyRub).toBeNull();
+    expect((await repo.history(1401))[0]).toMatchObject({ userId: 9, changed: ['behavior', 'limits'] });
+    expect(await repo.version(1401, 999_999)).toBeNull();
+
+    await new JournalRepo(db).add({ accountId: 1401, kind: 'reply', summary: 'x' });
+    expect(await new AccountsRepo(db).purge(1401)).toBe(true);
+    expect(await new AccountsRepo(db).purge(1401)).toBe(false);
+    for (const t of ['widget_settings', 'settings_audit', 'ai_journal', 'amo_tokens']) {
+      const { rows } = await db.query(`SELECT count(*) AS n FROM ${t} WHERE account_id = 1401`);
+      expect(Number(rows[0].n), t).toBe(0);
+    }
+  });
+});

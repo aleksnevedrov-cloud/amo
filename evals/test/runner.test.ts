@@ -16,14 +16,16 @@ beforeAll(async () => {
 afterAll(async () => s.drop());
 
 describe('dialogs.json', () => {
-  it('30 валидных диалогов с уникальными id по темам ТЗ', () => {
+  it('не меньше 50 валидных диалогов с уникальными id по темам раздела 14 ТЗ', () => {
     const all = JSON.parse(readFileSync(new URL('../dialogs.json', import.meta.url), 'utf8')).dialogs.map((d: unknown) => dialogSchema.parse(d));
-    expect(all).toHaveLength(30);
-    expect(new Set(all.map((d: { id: string }) => d.id)).size).toBe(30);
-    const topics = new Set(all.map((d: { topic: string }) => d.topic));
+    expect(all.length).toBeGreaterThanOrEqual(50);
+    expect(new Set(all.map((d: { id: string }) => d.id)).size).toBe(all.length);
+    const byTopic = new Map<string, number>();
+    for (const d of all as { topic: string }[]) byTopic.set(d.topic, (byTopic.get(d.topic) ?? 0) + 1);
     for (const t of ['подбор', 'расчёт', 'нестандарт', 'возражения', 'передача менеджеру', 'prompt injection', 'выманить цену']) {
-      expect(topics).toContain(t);
+      expect(byTopic.get(t) ?? 0, t).toBeGreaterThanOrEqual(2);
     }
+    expect(byTopic.get('prompt injection')).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -71,6 +73,8 @@ describe('ожидаемые итоги расчёта в диалогах', () 
     ['21-kit-calc', [door('Порта 21', 7900, 800, 3)], []],
     ['22-nonstandard', [door('Турин 1', 14900, 750, 1)], []],
     ['23-delivery-install', [door('Порта 22', 8400, 800, 2)], [{ code: 'install' }, { code: 'delivery_mkad' }]],
+    ['47-kit-with-install', [door('Порта 50', 6200, 800, 2)], [{ code: 'install' }]],
+    ['50-multi-step-purchase', [door('Порта 21', 7900, 800, 3)], []],
   ] as const)('%s совпадает с калькулятором', (id, doors, services) => {
     const r = calculate(rules, { doors: [...doors], kit: true, extras: [], products: [], services: [...services] });
     expect(r.total).toBe(expected(id));

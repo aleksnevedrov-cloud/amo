@@ -2,6 +2,7 @@ import type { LlmClient } from '@ai-door/agent';
 import type { CatalogRepo } from '@ai-door/catalog';
 import type { DocumentSource, DocumentsRepo, WidgetSettings } from '@ai-door/db';
 import { analyzeDocument } from './analyze.ts';
+import type { DwgConverter } from './dwg.ts';
 import { extract, ExtractError, type Extracted } from './extract.ts';
 import { estimateKit, type KitEstimate } from './kit.ts';
 import { matchPositions, type PositionMatch } from './match.ts';
@@ -16,6 +17,8 @@ export interface DocumentServiceDeps {
   documents: DocumentsRepo;
   /** OCR по настройке аккаунта; null — выключен или нет ключа. */
   ocr(provider: WidgetSettings['vision']['provider']): OcrProvider | null;
+  /** Конвертер DWG → DXF (в тестах подменяется). */
+  dwg?: DwgConverter;
 }
 
 export interface AnalyzeFileInput {
@@ -75,7 +78,7 @@ export class DocumentService {
     }
     let extracted: Extracted;
     try {
-      extracted = await extract(input.bytes, input.mime, input.filename);
+      extracted = await extract(input.bytes, input.mime, input.filename, this.d.dwg ? { dwg: this.d.dwg } : {});
     } catch (err) {
       throw new DocumentError(err instanceof ExtractError ? err.message : `Файл не читается: ${(err as Error).message}`);
     }

@@ -46,7 +46,8 @@ describe('extract', () => {
     expect(detectFormat('application/octet-stream', 'Смета.XLSX')).toBe('xlsx');
     expect(detectFormat('application/vnd.openxmlformats-officedocument.wordprocessingml.document')).toBe('docx');
     expect(detectFormat('image/jpeg', 'IMG_1.jpg')).toBe('image');
-    expect(detectFormat('application/x-dwg', 'plan.dwg')).toBe('unsupported');
+    expect(detectFormat('application/x-dwg', 'plan.dwg')).toBe('dwg');
+    expect(detectFormat('application/zip', 'archive.zip')).toBe('unsupported');
   });
 
   it('PDF: текстовый слой без OCR', async () => {

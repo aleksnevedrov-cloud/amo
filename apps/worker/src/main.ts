@@ -9,7 +9,7 @@ import {
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, OutcomesRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
@@ -26,8 +26,11 @@ import {
   POLL_MAIL_EVERY_MS,
   POLL_MAIL_JOB,
   REFRESH_EVERY_MS,
+  REFRESH_OUTCOMES_EVERY_MS,
+  REFRESH_OUTCOMES_JOB,
   REFRESH_TOKENS_JOB,
   runImportFeeds,
+  runRefreshOutcomes,
   runIncoming,
   runPollMail,
   runRefreshTokens,
@@ -52,6 +55,7 @@ const catalog = new CatalogRepo(db);
 const importer = new CatalogImporter(db);
 const knowledge = new KnowledgeRepo(db);
 const mail = new MailRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
+const outcomes = new OutcomesRepo(db);
 const amoClient = async (accountId: number) => {
   const account = await accounts.get(accountId);
   if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён`);
@@ -88,11 +92,13 @@ const maintenance = new Queue(MAINTENANCE_QUEUE, { connection });
 await maintenance.upsertJobScheduler(REFRESH_TOKENS_JOB, { every: REFRESH_EVERY_MS }, { name: REFRESH_TOKENS_JOB });
 await maintenance.upsertJobScheduler(IMPORT_FEEDS_JOB, { every: IMPORT_CHECK_EVERY_MS }, { name: IMPORT_FEEDS_JOB });
 await maintenance.upsertJobScheduler(POLL_MAIL_JOB, { every: POLL_MAIL_EVERY_MS }, { name: POLL_MAIL_JOB });
+await maintenance.upsertJobScheduler(REFRESH_OUTCOMES_JOB, { every: REFRESH_OUTCOMES_EVERY_MS }, { name: REFRESH_OUTCOMES_JOB });
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
   async (job) => {
     if (job.name === REFRESH_TOKENS_JOB) return runRefreshTokens(tokenService, log);
     if (job.name === IMPORT_FEEDS_JOB) return runImportFeeds({ settings, catalog, importer, journal }, log);
+    if (job.name === REFRESH_OUTCOMES_JOB) return runRefreshOutcomes({ outcomes, amo: amoClient }, log);
     if (job.name === POLL_MAIL_JOB) {
       return runPollMail(
         {
@@ -128,6 +134,7 @@ if (llm) {
     orchestrator: new Orchestrator(llm),
     llm,
     documents: docs,
+    outcomes,
     email: {
       reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),
       managerRepliedSince: (a, addrs, since) => emailChannel.managerRepliedSince(a, addrs, since),
