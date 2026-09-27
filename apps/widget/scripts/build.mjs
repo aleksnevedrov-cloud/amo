@@ -45,8 +45,10 @@ const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 manifest.widget.version = pkg.version;
 await writeFile(join(out, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 await cp(join(root, 'static/i18n'), join(out, 'i18n'), { recursive: true });
+// Фирменные логотипы из static/images (нарезка из логотипа РФ-Двери); если файла нет — заглушка нужного размера.
 for (const [name, [w, h]] of Object.entries(LOGOS)) {
-  await writeFile(join(out, 'images', name), logoPng(w, h));
+  const branded = join(root, 'static/images', name);
+  await writeFile(join(out, 'images', name), (await stat(branded).catch(() => null)) ? await readFile(branded) : logoPng(w, h));
 }
 
 // Файлы в корне архива, без вложенной папки — так требует загрузка виджета в amo.
