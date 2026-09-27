@@ -110,7 +110,7 @@ describe('юридические страницы', () => {
     expect(p.headers['content-type']).toContain('text/html');
     expect(p.body).toContain('<h1>Политика конфиденциальности');
     expect(p.body).toContain('<b>не передаются</b>');
-    expect(p.body).toContain('support@rf-dveri.ru');
+    expect(p.body).toContain('rf-dveri@yandex.ru');
     const t = await ctx.app.inject({ url: '/legal/terms.md' });
     expect(t.headers['content-type']).toContain('text/markdown');
     expect(t.body).toContain('# Пользовательское соглашение');

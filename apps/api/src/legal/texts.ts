@@ -4,14 +4,16 @@
  * Издатель — по решению заказчика: РФ-Двери (rf-dveri.ru). Реквизиты и дата — при подаче.
  */
 export const PUBLISHER = {
-  name: 'РФ-Двери',
+  name: 'ООО «РУС-ДВЕРИ» (торговая марка РФ-Двери)',
+  legal: 'ООО «РУС-ДВЕРИ», ИНН 9706000520, ОГРН 1197746363528, 109316, г. Москва, Волгоградский пр-кт, д. 32, к. 25, этаж 1, ком. 7',
   site: 'https://rf-dveri.ru',
-  email: 'support@rf-dveri.ru',
+  email: 'rf-dveri@yandex.ru',
+  phone: '+7 (495) 532-49-41',
 };
 
 export const PRIVACY_MD = `# Политика конфиденциальности виджета «AI-продавец дверей»
 
-Редакция от 27.09.2026. Оператор: ${PUBLISHER.name} (${PUBLISHER.site}), почта для обращений: ${PUBLISHER.email}.
+Редакция от 27.09.2026. Оператор персональных данных: ${PUBLISHER.legal}. Сайт: ${PUBLISHER.site}. Обращения: ${PUBLISHER.email}, ${PUBLISHER.phone}.
 
 ## 1. Что это за сервис
 
@@ -67,7 +69,7 @@ export const PRIVACY_MD = `# Политика конфиденциальност
 
 export const TERMS_MD = `# Пользовательское соглашение виджета «AI-продавец дверей»
 
-Редакция от 27.09.2026. Правообладатель: ${PUBLISHER.name} (${PUBLISHER.site}), поддержка: ${PUBLISHER.email}.
+Редакция от 27.09.2026. Правообладатель: ${PUBLISHER.legal}. Сайт: ${PUBLISHER.site}. Поддержка: ${PUBLISHER.email}, ${PUBLISHER.phone}.
 
 ## 1. Предмет
 
