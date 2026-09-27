@@ -248,6 +248,10 @@ export class WidgetApi {
   settingsHistory = () => this.call<{ items: SettingsVersion[] }>('GET', '/widget/v1/settings/history');
   settingsVersion = (id: number) => this.call<SettingsVersion & { settings: WidgetSettings }>('GET', `/widget/v1/settings/history/${id}`);
   restoreSettings = (id: number) => this.call<{ version: number }>('POST', `/widget/v1/settings/history/${id}/restore`);
+  llmStatus = () => this.call<{ hasOwnKey: boolean; configured: boolean; source: 'account' | 'server' | null }>('GET', '/widget/v1/llm/status');
+  setLlmKey = (key: string) => this.call<{ ok: true }>('PUT', '/widget/v1/llm/key', { key });
+  deleteLlmKey = () => this.call<{ ok: true }>('DELETE', '/widget/v1/llm/key');
+  testLlmKey = (key?: string) => this.call<{ ok: true; models: string[] } | { ok: false; error: string }>('POST', '/widget/v1/llm/test', key ? { key } : {});
   purgeAccount = () => this.call<{ ok: true }>('POST', '/widget/v1/account/purge', { confirm: 'УДАЛИТЬ' });
 
   leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);

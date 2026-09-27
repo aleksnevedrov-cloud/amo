@@ -31,7 +31,7 @@ amo передаёт `redirect_uri` при каждом обмене и обно
 
 ```bash
 WIDGET_API_URL=https://ai-agent.rf-dveri.ru pnpm widget:build
-# → apps/widget/dist/widget.zip (версия 0.5.0)
+# → apps/widget/dist/widget.zip (версия 1.0.0)
 ```
 
 Логотипы в архиве — временные заглушки; заменить на фирменные тех же размеров
@@ -199,3 +199,14 @@ pnpm check                                   # линтер, секреты, т�
 TEST_DATABASE_URL=... pnpm --filter @ai-door/evals perf 100   # 100 одновременных диалогов (без реальной модели)
 ANTHROPIC_API_KEY=... TEST_DATABASE_URL=... pnpm --filter @ai-door/evals eval   # 52 эталонных диалога на модели
 ```
+
+## 12. Маркетплейс (фаза 5)
+
+Материалы для подачи — `docs/marketplace/`: карточка (`listing.md`), инструкция для пользователей
+(`installation-guide.md`, со списком скриншотов), чек-лист модерации (`moderation-checklist.md`).
+
+- Ключ Anthropic для каждой компании — Настройки → «Модель» → «Ключ Anthropic» → «Проверить» → «Сохранить ключ».
+  Серверный `ANTHROPIC_API_KEY` остаётся запасным (для РФ-Двери).
+- Политика конфиденциальности и соглашение отдаются самим API: `https://<PUBLIC_URL>/legal/privacy`,
+  `https://<PUBLIC_URL>/legal/terms`. Реквизиты издателя — `apps/api/src/legal/texts.ts`.
+- Данные отключённых аккаунтов удаляются через `PURGE_UNINSTALLED_AFTER_DAYS` дней (по умолчанию 30).

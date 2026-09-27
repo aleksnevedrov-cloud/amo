@@ -71,6 +71,8 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   const [error, setError] = useState<string | null>(null);
   const [dict, setDict] = useState<Dictionaries | null>(null);
   const dirty = JSON.stringify(draft) !== JSON.stringify(base);
+  // Ключ Anthropic меняется на вкладке «Модель» — бейдж в «Статусе» обновляем без перезагрузки формы.
+  const [llmOk, setLlmOk] = useState(status.llmConfigured);
   const onRestored = async () => {
     const { settings } = await api.settings();
     setBase(settings);
@@ -115,8 +117,8 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Интеграции">
             <div style={s.row}>
               <ConnectionBadge status={status} />
-              <span style={status.llmConfigured ? s.badgeOk : s.badgeBad}>
-                {status.llmConfigured ? 'LLM подключена' : 'Не задан ключ LLM на сервере'}
+              <span style={llmOk ? s.badgeOk : s.badgeBad}>
+                {llmOk ? 'LLM подключена' : 'Нет ключа Anthropic — задайте во вкладке «Модель»'}
               </span>
               <span style={status.catalog.products > 0 ? s.badgeOk : s.badgeWarn}>Каталог: {status.catalog.products} товаров</span>
             </div>
@@ -172,6 +174,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
 
       {tab === 'model' && (
         <>
+          <LlmKey api={api} isAdmin={props.status.isAdmin} onChanged={setLlmOk} />
           <Field label="Провайдер">
             <select style={s.select} value="anthropic" disabled>
               <option value="anthropic">Anthropic Claude</option>
@@ -456,6 +459,55 @@ function PurgeAccount({ api }: { api: WidgetApi }) {
       <button type="button" style={s.buttonGhost} onClick={() => void purge()}>
         Удалить все данные
       </button>
+      {msg && <div style={s.small}>{msg}</div>}
+    </Field>
+  );
+}
+
+/** Ключ Anthropic аккаунта: ввод (только запись), проверка без расходов, удаление. */
+function LlmKey({ api, isAdmin, onChanged }: { api: WidgetApi; isAdmin: boolean; onChanged: (configured: boolean) => void }) {
+  const load = useCallback(async () => {
+    const st = await api.llmStatus();
+    onChanged(st.configured);
+    return st;
+  }, [api, onChanged]);
+  const [state, reload] = useLoad(load);
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const run = async (fn: () => Promise<string>) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      setMsg(await fn());
+      reload();
+    } catch (err) {
+      setMsg(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const statusText =
+    state.status !== 'ready' ? '' : state.data.hasOwnKey ? 'Используется ключ вашего аккаунта.' : state.data.configured ? 'Используется общий ключ сервера.' : 'Ключа нет — AI не отвечает. Получите ключ на console.anthropic.com и вставьте сюда.';
+  return (
+    <Field label="Ключ Anthropic" hint="Ключ хранится зашифрованным и не показывается. Расход на модель идёт с вашего счёта Anthropic.">
+      <div style={{ ...s.small, marginBottom: 6 }}>{statusText}</div>
+      {isAdmin && (
+        <div style={s.row}>
+          <input style={{ ...s.input, width: 360 }} type="password" placeholder="sk-ant-…" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
+          <button type="button" style={s.buttonGhost} disabled={busy || key.trim().length < 20} onClick={() => void run(async () => { const r = await api.testLlmKey(key.trim()); return r.ok ? `Ключ работает, моделей доступно: ${r.models.length}.` : r.error; })}>
+            Проверить
+          </button>
+          <button type="button" style={s.button} disabled={busy || key.trim().length < 20} onClick={() => void run(async () => { await api.setLlmKey(key.trim()); setKey(''); return 'Ключ сохранён.'; })}>
+            Сохранить ключ
+          </button>
+          {state.status === 'ready' && state.data.hasOwnKey && (
+            <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => void run(async () => { await api.deleteLlmKey(); return 'Ключ удалён.'; })}>
+              Удалить ключ
+            </button>
+          )}
+        </div>
+      )}
       {msg && <div style={s.small}>{msg}</div>}
     </Field>
   );

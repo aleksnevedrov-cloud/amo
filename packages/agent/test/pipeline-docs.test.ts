@@ -123,3 +123,25 @@ describe('аналитика: стартовый этап', () => {
     expect(starts).toEqual([[ACC, lead, 1, 10]]);
   });
 });
+
+describe('ключ Anthropic по аккаунту', () => {
+  it('нет ключа ни у аккаунта, ни на сервере — передача менеджеру с ошибкой в журнале', async () => {
+    const t = await setup([], {}, null);
+    const pipeline = new DialogPipeline({ ...t, llm: null, orchestrator: null, ai: async () => null } as unknown as ConstructorParameters<typeof DialogPipeline>[0]);
+    await t.dialog.enqueue(ACC, lead, 'Привет', 'https://test.amocrm.ru/c/10');
+    const out = await pipeline.processLead(ACC, lead);
+    expect(out).toEqual({ status: 'handoff', reason: 'no_answer' });
+    const log = await t.journal.list(ACC, { leadId: lead });
+    expect(log.some((e) => e.kind === 'error' && e.summary.includes('Ключ Anthropic не задан'))).toBe(true);
+  });
+
+  it('LLM аккаунта используется вместо общей', async () => {
+    const t = await setup([text('общая')], {}, null);
+    const own = new ScriptedLlm([text('Ответ по ключу аккаунта')]);
+    const pipeline = new DialogPipeline({ ...t, ai: async () => ({ llm: own, orchestrator: new Orchestrator(own), source: 'account' }) } as unknown as ConstructorParameters<typeof DialogPipeline>[0]);
+    await t.dialog.enqueue(ACC, lead, 'Привет', 'https://test.amocrm.ru/c/11');
+    const out = await pipeline.processLead(ACC, lead);
+    expect(out).toEqual({ status: 'replied', text: 'Ответ по ключу аккаунта' });
+    expect(own.requests).toHaveLength(1);
+  });
+});

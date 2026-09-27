@@ -1,5 +1,6 @@
 import {
   AnthropicLlm,
+  createAiProvider,
   DialogPipeline,
   INCOMING_QUEUE,
   Orchestrator,
@@ -9,7 +10,7 @@ import {
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, OutcomesRepo, PgTokenStore, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
@@ -25,11 +26,14 @@ import {
   MAINTENANCE_QUEUE,
   POLL_MAIL_EVERY_MS,
   POLL_MAIL_JOB,
+  PURGE_CHECK_EVERY_MS,
+  PURGE_UNINSTALLED_JOB,
   REFRESH_EVERY_MS,
   REFRESH_OUTCOMES_EVERY_MS,
   REFRESH_OUTCOMES_JOB,
   REFRESH_TOKENS_JOB,
   runImportFeeds,
+  runPurgeUninstalled,
   runRefreshOutcomes,
   runIncoming,
   runPollMail,
@@ -62,10 +66,14 @@ const amoClient = async (accountId: number) => {
   return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
 };
 const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
+// Ключ аккаунта (Маркетплейс) приоритетнее серверного.
+const secrets = new SecretsRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
+const ai = createAiProvider((accountId) => secrets.get(accountId, 'anthropic'), env.ANTHROPIC_API_KEY);
 // Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
 let tesseract: TesseractOcr | null = null;
 const docs = new DocumentService({
   llm,
+  llmFor: async (id) => (await ai(id))?.llm ?? null,
   catalog,
   documents: new DocumentsRepo(db),
   ocr(provider) {
@@ -93,12 +101,14 @@ await maintenance.upsertJobScheduler(REFRESH_TOKENS_JOB, { every: REFRESH_EVERY_
 await maintenance.upsertJobScheduler(IMPORT_FEEDS_JOB, { every: IMPORT_CHECK_EVERY_MS }, { name: IMPORT_FEEDS_JOB });
 await maintenance.upsertJobScheduler(POLL_MAIL_JOB, { every: POLL_MAIL_EVERY_MS }, { name: POLL_MAIL_JOB });
 await maintenance.upsertJobScheduler(REFRESH_OUTCOMES_JOB, { every: REFRESH_OUTCOMES_EVERY_MS }, { name: REFRESH_OUTCOMES_JOB });
+await maintenance.upsertJobScheduler(PURGE_UNINSTALLED_JOB, { every: PURGE_CHECK_EVERY_MS }, { name: PURGE_UNINSTALLED_JOB });
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
   async (job) => {
     if (job.name === REFRESH_TOKENS_JOB) return runRefreshTokens(tokenService, log);
     if (job.name === IMPORT_FEEDS_JOB) return runImportFeeds({ settings, catalog, importer, journal }, log);
     if (job.name === REFRESH_OUTCOMES_JOB) return runRefreshOutcomes({ outcomes, amo: amoClient }, log);
+    if (job.name === PURGE_UNINSTALLED_JOB) return runPurgeUninstalled({ accounts }, env.PURGE_UNINSTALLED_AFTER_DAYS, log);
     if (job.name === POLL_MAIL_JOB) {
       return runPollMail(
         {
@@ -120,9 +130,8 @@ const maintenanceWorker = new Worker(
 );
 
 // Входящие сообщения клиентов.
-let pipeline: DialogPipeline | null = null;
-if (llm) {
-  pipeline = new DialogPipeline({
+// Конвейер работает и без серверного ключа: аккаунты Маркетплейса приходят со своими.
+const pipeline = new DialogPipeline({
     settings,
     dialog,
     journal,
@@ -131,8 +140,9 @@ if (llm) {
     pricing: new PricingRepo(db),
     memory: new MemoryRepo(db),
     suggestions: new SuggestionsRepo(db),
-    orchestrator: new Orchestrator(llm),
+    orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
+    ai,
     documents: docs,
     outcomes,
     email: {
@@ -155,28 +165,20 @@ if (llm) {
     async send(access, returnUrl, messages) {
       await continueBot(returnUrl, await access.accessToken(), messages);
     },
-  });
-} else {
-  log.warn('ANTHROPIC_API_KEY не задан — входящие сообщения не обрабатываются');
-  await alerter.alert('ANTHROPIC_API_KEY не задан: AI не отвечает клиентам').catch(() => undefined);
-}
-const activePipeline = pipeline;
-const incomingWorker = activePipeline
-  ? new Worker<IncomingJob>(
-      INCOMING_QUEUE,
-      async (job) => {
-        const outcome = await runIncoming(job.data, { pipeline: activePipeline, dialog, settings }, (j, w) =>
-          scheduleLead(incoming, j, w),
-        );
-        log.info({ ...job.data, outcome: outcome.status }, 'incoming: обработано');
-        return outcome;
-      },
-      { connection, concurrency: 5 },
-    )
-  : null;
+});
+if (!env.ANTHROPIC_API_KEY) log.warn('ANTHROPIC_API_KEY не задан — отвечать смогут только аккаунты со своим ключом Anthropic');
+const incomingWorker = new Worker<IncomingJob>(
+  INCOMING_QUEUE,
+  async (job) => {
+    const outcome = await runIncoming(job.data, { pipeline, dialog, settings }, (j, w) => scheduleLead(incoming, j, w));
+    log.info({ ...job.data, outcome: outcome.status }, 'incoming: обработано');
+    return outcome;
+  },
+  { connection, concurrency: 5 },
+);
 
 for (const w of [maintenanceWorker, incomingWorker]) {
-  w?.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data }, 'задача упала'));
+  w.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data }, 'задача упала'));
 }
 log.info('worker запущен');
 

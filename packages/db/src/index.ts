@@ -9,3 +9,4 @@ export * from './memory.ts';
 export * from './suggestions.ts';
 export * from './documents.ts';
 export * from './analytics.ts';
+export * from './secrets.ts';

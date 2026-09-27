@@ -156,9 +156,10 @@ export function widgetPhase2Routes(
 
   // Резюме диалога по кнопке (раздел 10 ТЗ).
   api.post('/leads/:leadId/summary', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
-    if (!deps.llm) return reply.code(503).send({ error: 'llm_not_configured' });
     const { leadId } = leadParams.parse(req.params);
     const p = principal(req);
+    const ai = await deps.ai(p.accountId);
+    if (!ai) return reply.code(503).send({ error: 'llm_not_configured' });
     const client = await amoClient(p.accountId);
     if (!client) return reply.code(409).send({ error: 'not_installed' });
     const lead = await client.getLead(leadId);
@@ -169,7 +170,7 @@ export function widgetPhase2Routes(
       deps.dialog.history(p.accountId, leadId, 80),
       deps.memory.get(p.accountId, subject),
     ]);
-    const s = await summarizeDialog(deps.llm, settings, {
+    const s = await summarizeDialog(ai.llm, settings, {
       history: history.map((m) => ({ role: m.role, text: m.text })),
       memoryText: memoryToText(mem.data, null),
     });

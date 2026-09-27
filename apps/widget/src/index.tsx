@@ -1,6 +1,7 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { currentLeadId, type AmoWidgetSelf } from './amo.ts';
 import { WidgetApi } from './api.ts';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { LeadPanel } from './components/LeadPanel.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { SettingsStatus } from './components/SettingsStatus.tsx';
@@ -40,7 +41,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
     if (!el) return;
     roots.get(key)?.unmount();
     const root = createRoot(el);
-    root.render(node);
+    root.render(<ErrorBoundary>{node}</ErrorBoundary>);
     roots.set(key, root);
   };
 

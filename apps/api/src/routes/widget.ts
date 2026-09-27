@@ -90,7 +90,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
           tokenError: token?.lastError ?? null,
           enabled: settings.enabled,
           mode: settings.mode,
-          llmConfigured: deps.orchestrator !== null,
+          llmConfigured: (await deps.ai(p.accountId)) !== null,
           spend,
           dailyLimitRub: settings.limits.dailyRub,
           catalog,
@@ -219,8 +219,9 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
 
       // Песочница: реальный каталог и база знаний, CRM — тестовая сделка, клиенту ничего не уходит.
       api.post('/sandbox', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
-        if (!deps.orchestrator) return reply.code(503).send({ error: 'llm_not_configured' });
         const p = principal(req);
+        const ai = await deps.ai(p.accountId);
+        if (!ai) return reply.code(503).send({ error: 'llm_not_configured' });
         const b = sandboxBody.safeParse(req.body);
         if (!b.success) return reply.code(400).send({ error: 'invalid', issues: b.error.issues });
         const last = b.data.messages.at(-1);
@@ -235,7 +236,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const crm = new SandboxCrm();
         const memory = new InMemoryMemory();
         const { rules } = await deps.pricing.get(p.accountId);
-        const result = await deps.orchestrator.runTurn({
+        const result = await ai.orchestrator.runTurn({
           settings,
           history: b.data.messages.slice(0, -1),
           incoming: [last.text],

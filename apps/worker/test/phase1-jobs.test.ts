@@ -140,3 +140,21 @@ describe('runRefreshOutcomes', () => {
     ]);
   });
 });
+
+describe('runPurgeUninstalled', () => {
+  it('удаляет данные аккаунтов, отключённых раньше срока; свежие и активные не трогает', async () => {
+    const { runPurgeUninstalled } = await import('../src/jobs.ts');
+    const accounts = new AccountsRepo(db);
+    for (const id of [71, 72, 73]) await accounts.upsertInstalled({ id, subdomain: `p${id}`, accountDomain: `p${id}.amocrm.ru` });
+    await accounts.markUninstalled(71);
+    await accounts.markUninstalled(72);
+    await db.query("UPDATE accounts SET uninstalled_at = now() - interval '40 days' WHERE id = 71");
+    await new JournalRepo(db).add({ accountId: 71, kind: 'reply', summary: 'x' });
+    const purged = await runPurgeUninstalled({ accounts }, 30, log);
+    expect(purged).toEqual([71]);
+    expect(await accounts.get(71)).toBeNull();
+    expect(await accounts.get(72)).not.toBeNull();
+    expect(await accounts.get(73)).not.toBeNull();
+    expect(Number((await db.query('SELECT count(*) AS n FROM ai_journal WHERE account_id = 71')).rows[0].n)).toBe(0);
+  });
+});

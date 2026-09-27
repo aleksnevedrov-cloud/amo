@@ -24,6 +24,7 @@ import {
   type ToolContext,
 } from '@ai-door/tools';
 import { LlmUnavailableError, type LlmClient } from './llm.ts';
+import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
 import { formatCalculation, summarizeDialog } from './summary.ts';
 
@@ -42,9 +43,12 @@ export interface PipelineDeps {
   pricing: PricingRepo;
   memory: MemoryRepo;
   suggestions: SuggestionsRepo;
-  orchestrator: Orchestrator;
+  /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
+  orchestrator: Orchestrator | null;
   /** Для резюме диалога. */
-  llm: LlmClient;
+  llm: LlmClient | null;
+  /** LLM по аккаунту (свой ключ или серверный) — приоритетнее общих. */
+  ai?: AiProvider;
   amo(accountId: number): Promise<AmoAccess>;
   /** Ответ в чат через Salesbot (continue). Пустой список — просто продолжить бота. */
   send(access: AmoAccess, returnUrl: string, messages: string[]): Promise<void>;
@@ -117,6 +121,7 @@ interface Turn {
   sendErrors: string[];
   /** Проёмы из разобранных замерных листов — в память клиента. */
   openings: MemoryOpening[];
+  ai: AccountAi | null;
 }
 
 export class DialogPipeline {
@@ -128,7 +133,8 @@ export class DialogPipeline {
     if (!pending.length) return { status: 'empty' };
     const { settings } = await this.d.settings.get(accountId);
     const access = await this.d.amo(accountId);
-    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [] };
+    const ai = (await this.d.ai?.(accountId)) ?? (this.d.orchestrator && this.d.llm ? { llm: this.d.llm, orchestrator: this.d.orchestrator, source: 'server' as const } : null);
+    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [], ai };
     try {
       t.texts = await this.incomingTexts(t);
       for (const text of t.texts) await this.d.dialog.addMessage(accountId, leadId, 'client', text);
@@ -143,6 +149,10 @@ export class DialogPipeline {
   private async process(t: Turn): Promise<PipelineOutcome> {
     const { settings, access, accountId, leadId } = t;
     if (!settings.enabled || settings.mode === 'off') return this.skip(t, 'disabled', 'AI выключен');
+    if (!t.ai) {
+      await this.journal(t, { kind: 'error', summary: 'Ключ Anthropic не задан — ни у аккаунта, ни на сервере' });
+      return this.handoff(t, 'no_answer', 'AI не настроен: нет ключа Anthropic. Клиент ждёт ответа.');
+    }
 
     const lead = await access.api.getLead(leadId);
     if (!lead) return this.skip(t, 'no_lead', 'Сделка не найдена');
@@ -228,7 +238,7 @@ export class DialogPipeline {
 
     let result: TurnResult;
     try {
-      result = await this.d.orchestrator.runTurn({
+      result = await t.ai.orchestrator.runTurn({
         settings,
         history: past,
         incoming: t.texts,
@@ -383,9 +393,9 @@ export class DialogPipeline {
     const now = this.d.now?.() ?? new Date();
 
     let note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n${summary}`;
-    if (ctx) {
+    if (ctx && t.ai) {
       try {
-        const s = await summarizeDialog(this.d.llm, settings, { history: ctx.history, memoryText: ctx.memoryText });
+        const s = await summarizeDialog(t.ai.llm, settings, { history: ctx.history, memoryText: ctx.memoryText });
         note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n\n${s.text}`;
         await this.d.memory.setSummary(accountId, ctx.subject, s.text);
         await this.journal(t, { kind: 'summary', summary: s.text, costUsd: s.cost.usd, costRub: s.cost.usd * settings.billing.usdRubRate, inputTokens: s.cost.inputTokens, outputTokens: s.cost.outputTokens });

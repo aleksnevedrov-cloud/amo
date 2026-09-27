@@ -1,3 +1,4 @@
+import { verifyAnthropicKey } from '@ai-door/agent';
 import type { WidgetPrincipal } from '@ai-door/amo';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -43,6 +44,41 @@ export function widgetPhase4Routes(
     if (!r) return reply.code(404).send({ error: 'not_found' });
     await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `Настройки откачены к версии #${id}`, details: { userId: p.userId, versionId: id } });
     return { version: r.version };
+  });
+
+  // Ключ Anthropic аккаунта (Маркетплейс: каждая компания со своим ключом). Хранится зашифрованным, не отдаётся.
+  api.get('/llm/status', async (req) => {
+    const accountId = principal(req).accountId;
+    const [hasOwnKey, ai] = await Promise.all([deps.secrets.has(accountId, 'anthropic'), deps.ai(accountId)]);
+    return { hasOwnKey, configured: ai !== null, source: ai?.source ?? null };
+  });
+
+  api.put('/llm/key', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const b = z.object({ key: z.string().trim().min(20).max(500) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_key' });
+    const p = principal(req);
+    await deps.secrets.set(p.accountId, 'anthropic', b.data.key, p.userId);
+    await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: 'Ключ Anthropic аккаунта обновлён', details: { userId: p.userId } });
+    return { ok: true };
+  });
+
+  api.delete('/llm/key', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const p = principal(req);
+    await deps.secrets.remove(p.accountId, 'anthropic');
+    await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: 'Ключ Anthropic аккаунта удалён', details: { userId: p.userId } });
+    return { ok: true };
+  });
+
+  // Проверка ключа без расходов (список моделей). Ключ из тела — до сохранения, иначе сохранённый.
+  api.post('/llm/test', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const b = z.object({ key: z.string().trim().min(20).max(500).optional() }).safeParse(req.body ?? {});
+    if (!b.success) return reply.code(400).send({ error: 'bad_key' });
+    const key = b.data.key ?? (await deps.secrets.get(principal(req).accountId, 'anthropic'));
+    if (!key) return reply.code(400).send({ error: 'no_key' });
+    return verifyAnthropicKey(key, deps.fetch);
   });
 
   // Удаление всех данных аккаунта по запросу (чек-лист Маркетплейса). Необратимо; виджет придётся установить заново.

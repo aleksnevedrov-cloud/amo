@@ -2,7 +2,7 @@ import type { DialogPipeline, IncomingJob } from '@ai-door/agent';
 import type { TokenService } from '@ai-door/amo';
 import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import type { AmoApiClient } from '@ai-door/amo';
-import { classifyOutcome, type DialogRepo, type JournalRepo, type OutcomesRepo, type SettingsRepo } from '@ai-door/db';
+import { classifyOutcome, type AccountsRepo, type DialogRepo, type JournalRepo, type OutcomesRepo, type SettingsRepo } from '@ai-door/db';
 import { pollMailbox, type PollDeps, type PollResult } from '@ai-door/mail';
 
 export const MAINTENANCE_QUEUE = 'maintenance';
@@ -12,6 +12,8 @@ export const REFRESH_EVERY_MS = 30 * 60_000;
 export const IMPORT_CHECK_EVERY_MS = 30 * 60_000;
 export const POLL_MAIL_JOB = 'poll-mail';
 export const POLL_MAIL_EVERY_MS = 60_000;
+export const PURGE_UNINSTALLED_JOB = 'purge-uninstalled';
+export const PURGE_CHECK_EVERY_MS = 24 * 3600_000;
 export const REFRESH_OUTCOMES_JOB = 'refresh-outcomes';
 export const REFRESH_OUTCOMES_EVERY_MS = 6 * 3600_000;
 /** Как долго следим за сделкой после диалога с AI и как часто перепроверяем. */
@@ -124,4 +126,12 @@ export async function runRefreshOutcomes(
   }
   if (res.checked) log.info(res, 'analytics: исходы обновлены');
   return res;
+}
+
+/** Политика конфиденциальности: данные отключённого аккаунта удаляются через N дней (каскадом). */
+export async function runPurgeUninstalled(d: { accounts: AccountsRepo }, afterDays: number, log: JobLogger, now = new Date()): Promise<number[]> {
+  const ids = await d.accounts.listUninstalledBefore(new Date(now.getTime() - afterDays * 86_400_000));
+  for (const id of ids) await d.accounts.purge(id);
+  if (ids.length) log.info({ ids, afterDays }, 'accounts: данные отключённых аккаунтов удалены');
+  return ids;
 }

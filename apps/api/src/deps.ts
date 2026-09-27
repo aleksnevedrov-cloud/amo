@@ -1,8 +1,10 @@
 import {
   AnthropicLlm,
+  createAiProvider,
   createIncomingQueue,
   Orchestrator,
   scheduleLead,
+  type AiProvider,
   type IncomingJob,
   type LlmClient,
 } from '@ai-door/agent';
@@ -18,6 +20,7 @@ import {
   MemoryRepo,
   OutcomesRepo,
   PgTokenStore,
+  SecretsRepo,
   SettingsRepo,
   SuggestionsRepo,
   type Db,
@@ -61,9 +64,12 @@ export interface Deps {
   analytics: AnalyticsRepo;
   /** Разбор файлов (фаза 3); без ключа LLM бросает понятную ошибку. */
   docs: DocumentService;
-  /** null — не задан ANTHROPIC_API_KEY. */
+  /** Серверные LLM/оркестратор (ANTHROPIC_API_KEY); null — не задан. */
   orchestrator: Orchestrator | null;
   llm: LlmClient | null;
+  /** LLM по аккаунту: свой ключ (Маркетплейс) или серверный. */
+  ai: AiProvider;
+  secrets: SecretsRepo;
   schedule: ScheduleLead;
   alerter: Alerter;
   fetch: typeof fetch;
@@ -121,7 +127,14 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
 
   const catalog = new CatalogRepo(db);
   const documents = new DocumentsRepo(db);
-  const docs = new DocumentService({ llm, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
+  const secrets = new SecretsRepo(db, secretBox);
+  // В тестах подменённая LLM используется и как «серверная», и для ключей аккаунтов.
+  const ai = createAiProvider(
+    (accountId) => secrets.get(accountId, 'anthropic'),
+    overrides.llm !== undefined ? (overrides.llm ? 'override' : undefined) : env.ANTHROPIC_API_KEY,
+    overrides.llm ? () => overrides.llm as LlmClient : undefined,
+  );
+  const docs = new DocumentService({ llm, llmFor: async (id) => (await ai(id))?.llm ?? null, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
 
   return {
     env,
@@ -150,6 +163,8 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     analytics: new AnalyticsRepo(db),
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
+    ai,
+    secrets,
     schedule,
     alerter,
     fetch: fetchImpl,

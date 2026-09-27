@@ -1,7 +1,7 @@
 # AI-агент продаж дверей — виджет amoCRM
 
 AI-агент ведёт переписку с клиентом в amoCRM как продавец дверей РФ-Двери (rf-dveri.ru).
-ТЗ: v2.0. Текущее состояние: **фаза 4 — Расширение** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md), [фаза 3](docs/phase-3-report.md), [фаза 4](docs/phase-4-report.md); [security review](docs/security-review.md)).
+ТЗ: v2.0. Текущее состояние: **фаза 5 — Маркетплейс, готово к подаче** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md), [фаза 3](docs/phase-3-report.md), [фаза 4](docs/phase-4-report.md), [фаза 5](docs/phase-5-report.md); [security review](docs/security-review.md); [материалы для amoМаркета](docs/marketplace/)).
 
 ## Состав
 
@@ -22,7 +22,7 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
 | `packages/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
 | `evals` | 52 эталонных диалога и прогон на реальной модели; нагрузочный прогон (`perf.ts`); обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
-| `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md) |
+| `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md), [материалы для amoМаркета](docs/marketplace/) |
 
 ## Разработка
 

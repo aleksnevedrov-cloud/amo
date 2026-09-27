@@ -332,3 +332,20 @@ describe('версии настроек и удаление данных', () =>
     }
   });
 });
+
+describe('SecretsRepo', () => {
+  it('хранит зашифрованно, обновляет, удаляет; каскад при удалении аккаунта', async () => {
+    const { SecretsRepo } = await import('../src/index.ts');
+    await installAccount(1501, new Date(Date.now() + HOUR));
+    const repo = new SecretsRepo(db, box);
+    expect(await repo.has(1501, 'anthropic')).toBe(false);
+    await repo.set(1501, 'anthropic', 'sk-ant-secret-1', 7);
+    await repo.set(1501, 'anthropic', 'sk-ant-secret-2', 8);
+    expect(await repo.get(1501, 'anthropic')).toBe('sk-ant-secret-2');
+    const { rows } = await db.query('SELECT value_enc, updated_by FROM account_secrets WHERE account_id = 1501');
+    expect(rows[0].value_enc).not.toContain('sk-ant');
+    expect(Number(rows[0].updated_by)).toBe(8);
+    await repo.remove(1501, 'anthropic');
+    expect(await repo.get(1501, 'anthropic')).toBeNull();
+  });
+});

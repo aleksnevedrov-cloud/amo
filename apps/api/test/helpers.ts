@@ -23,6 +23,10 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     mock.calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null, auth: headers.get('authorization') });
     const json = (status: number, body: unknown) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://api.anthropic.com/v1/models')) {
+      const key = headers.get('x-api-key') ?? '';
+      return key.startsWith('sk-ant-good') ? json(200, { data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }], has_more: false }) : json(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
+    }
     if (url.endsWith('/oauth2/access_token')) {
       if (mock.tokenStatus !== 200) return json(mock.tokenStatus, { hint: 'invalid code' });
       return json(200, { token_type: 'Bearer', expires_in: 86400, access_token: 'ACCESS', refresh_token: 'REFRESH' });

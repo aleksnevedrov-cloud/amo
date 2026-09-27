@@ -4,6 +4,7 @@ import { normalizeAccountDomain } from '@ai-door/amo';
 import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify';
 import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';
+import { legalRoutes } from './routes/legal.ts';
 import { oauthRoutes } from './routes/oauth.ts';
 import { salesbotRoutes } from './routes/salesbot.ts';
 import { widgetRoutes } from './routes/widget.ts';
@@ -36,6 +37,7 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
   });
 
   healthRoutes(app, deps);
+  legalRoutes(app);
   oauthRoutes(app, deps);
   widgetRoutes(app, deps);
   salesbotRoutes(app, deps);

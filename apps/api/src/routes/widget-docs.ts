@@ -24,11 +24,11 @@ export function widgetDocsRoutes(api: FastifyInstance, deps: Deps, principal: (r
   });
 
   api.post('/leads/:leadId/documents', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } }, bodyLimit: 30 * 1024 * 1024 }, async (req, reply) => {
-    if (!deps.llm) return reply.code(503).send({ error: 'llm_not_configured' });
     const { leadId } = leadParams.parse(req.params);
+    const p = principal(req);
+    if (!(await deps.ai(p.accountId))) return reply.code(503).send({ error: 'llm_not_configured' });
     const b = uploadBody.safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_file' });
-    const p = principal(req);
     const bytes = new Uint8Array(Buffer.from(b.data.file, 'base64'));
     if (!bytes.byteLength) return reply.code(400).send({ error: 'bad_file' });
     const { settings } = await deps.settings.get(p.accountId);

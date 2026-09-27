@@ -40,6 +40,9 @@ export const envSchema = z.object({
   YANDEX_VISION_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 
+  /** Через сколько дней после отключения виджета удалять все данные аккаунта (политика конфиденциальности). */
+  PURGE_UNINSTALLED_AFTER_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+
   TELEGRAM_ALERT_BOT_TOKEN: z.string().optional(),
   TELEGRAM_ALERT_CHAT_ID: z.string().optional(),
 });

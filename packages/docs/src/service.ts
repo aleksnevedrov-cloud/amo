@@ -13,6 +13,8 @@ import type { DocumentData } from './schema.ts';
 
 export interface DocumentServiceDeps {
   llm: LlmClient | null;
+  /** LLM по аккаунту (свой ключ) — приоритетнее общей. */
+  llmFor?(accountId: number): Promise<LlmClient | null>;
   catalog: CatalogRepo;
   documents: DocumentsRepo;
   /** OCR по настройке аккаунта; null — выключен или нет ключа. */
@@ -72,7 +74,8 @@ export class DocumentService {
 
   async analyze(input: AnalyzeFileInput): Promise<DocumentResult> {
     const { settings } = input;
-    if (!this.d.llm) throw new DocumentError('LLM не настроена (ANTHROPIC_API_KEY)');
+    const llm = (await this.d.llmFor?.(input.accountId)) ?? this.d.llm;
+    if (!llm) throw new DocumentError('LLM не настроена: задайте ключ Anthropic в настройках («Модель») или на сервере');
     if ((await this.d.documents.countToday(input.accountId)) >= settings.vision.maxFilesPerDay) {
       throw new DocumentError(`Достигнут дневной лимит разбора файлов (${settings.vision.maxFilesPerDay})`);
     }
@@ -106,7 +109,7 @@ export class DocumentService {
     }
 
     const cleaned = cleanPersonalData(text);
-    const analyzed = await analyzeDocument(this.d.llm, settings, {
+    const analyzed = await analyzeDocument(llm, settings, {
       text: cleaned.text,
       filename: input.filename,
       ...(image ? { image } : {}),

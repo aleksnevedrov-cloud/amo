@@ -27,6 +27,12 @@ export class AccountsRepo {
     );
   }
 
+  /** Аккаунты, отключённые раньше указанной даты — кандидаты на автоматическое удаление данных. */
+  async listUninstalledBefore(before: Date): Promise<number[]> {
+    const { rows } = await this.db.query('SELECT id FROM accounts WHERE uninstalled_at IS NOT NULL AND uninstalled_at < $1 ORDER BY id', [before]);
+    return rows.map((r) => Number(r.id));
+  }
+
   /** Деинсталляция: помечаем аккаунт и удаляем токены (они больше недействительны). */
   async markUninstalled(id: number): Promise<void> {
     await this.db.query('UPDATE accounts SET uninstalled_at = now(), updated_at = now() WHERE id = $1', [id]);
