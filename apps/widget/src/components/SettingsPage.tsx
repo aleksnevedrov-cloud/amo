@@ -379,13 +379,21 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
 
       {tab === 'catalog' && (
         <>
-          <Field label="Адрес фида YML" hint="Выгрузка каталога UMI в формате YML (Яндекс.Маркет).">
-            <input style={s.input} value={draft.catalog.feedUrl} placeholder="https://rf-dveri.ru/…" onChange={(e) => set('catalog', { feedUrl: e.target.value.trim() })} />
+          <Field label="Адреса фидов YML" hint="Выгрузки каталога UMI в формате YML (Яндекс.Маркет), по одному адресу в строке — например входные, межкомнатные, фурнитура. Все фиды сливаются в один каталог.">
+            <textarea
+              style={{ ...s.textarea, minHeight: 70 }}
+              value={[draft.catalog.feedUrl, ...draft.catalog.feedUrls].filter(Boolean).join('\n')}
+              placeholder={'https://www.rf-dveri.ru/admin/exchange/get_export/…/?as_file=0'}
+              onChange={(e) => {
+                const [first = '', ...rest] = linesToList(e.target.value);
+                set('catalog', { feedUrl: first, feedUrls: rest });
+              }}
+            />
           </Field>
           <Field label="Обновлять каждые, часов">
             <NumberInput value={draft.catalog.importEveryHours} min={1} max={168} onChange={(v) => set('catalog', { importEveryHours: v ?? 24 })} />
           </Field>
-          <CatalogStatus api={api} hasFeed={Boolean(base.catalog.feedUrl)} />
+          <CatalogStatus api={api} hasFeed={Boolean(base.catalog.feedUrl || base.catalog.feedUrls.length)} />
         </>
       )}
 

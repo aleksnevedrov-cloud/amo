@@ -15,6 +15,20 @@ export interface ImporterOptions {
   resolve?: (host: string) => Promise<string[]>;
 }
 
+/** Представляемся сайту: антибот rf-dveri.ru отправляет запросы с пустым User-Agent в STOP. */
+export const USER_AGENT = 'AI-Door-Agent/1.0 (+https://rf-dveri.ru; catalog import)';
+
+/** Слияние фидов: по одинаковому id последний побеждает; категории — объединение. */
+export function mergeFeeds(feeds: Feed[]): Feed {
+  const products = new Map<string, Feed['products'][number]>();
+  const categories = new Map<string, Feed['categories'][number]>();
+  for (const f of feeds) {
+    for (const c of f.categories) categories.set(c.id, c);
+    for (const p of f.products) products.set(p.id, p);
+  }
+  return { shopName: feeds.find((f) => f.shopName)?.shopName ?? null, categories: [...categories.values()], products: [...products.values()] };
+}
+
 export class CatalogImporter {
   private readonly fetchImpl: typeof fetch;
 
@@ -27,16 +41,33 @@ export class CatalogImporter {
 
   /** Скачивает фид по адресу и импортирует его. Ошибка фиксируется в catalog_imports. */
   async importFromUrl(accountId: number, feedUrl: string): Promise<ImportResult> {
-    return this.run(accountId, feedUrl, async () => {
-      const url = await assertPublicUrl(feedUrl, this.opts.resolve);
-      const res = await this.fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(120_000) });
-      if (!res.ok) throw new FeedError(`Фид недоступен: HTTP ${res.status}`);
-      const len = Number(res.headers.get('content-length') ?? 0);
-      if (len > MAX_FEED_BYTES) throw new FeedError('Фид больше 100 МБ');
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.byteLength > MAX_FEED_BYTES) throw new FeedError('Фид больше 100 МБ');
-      return parseYml(decodeFeed(buf));
+    return this.importFromUrls(accountId, [feedUrl]);
+  }
+
+  /**
+   * Несколько фидов одного магазина (у РФ-Двери — входные, межкомнатные, фурнитура) сливаются в один каталог:
+   * товары и категории объединяются, и только после этого удаляется то, чего нет ни в одном фиде.
+   */
+  async importFromUrls(accountId: number, feedUrls: string[]): Promise<ImportResult> {
+    const urls = [...new Set(feedUrls.map((u) => u.trim()).filter(Boolean))];
+    if (!urls.length) throw new FeedError('Адрес фида не задан');
+    return this.run(accountId, urls.join(' '), async () => {
+      const feeds: Feed[] = [];
+      for (const feedUrl of urls) feeds.push(await this.download(feedUrl));
+      return mergeFeeds(feeds);
     });
+  }
+
+  private async download(feedUrl: string): Promise<Feed> {
+    const url = await assertPublicUrl(feedUrl, this.opts.resolve);
+    // Явный User-Agent: антибот сайта отправляет запросы без него в STOP.
+    const res = await this.fetchImpl(url, { redirect: 'error', headers: { 'user-agent': USER_AGENT, accept: 'application/xml,text/xml,*/*' }, signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) throw new FeedError(`Фид недоступен: HTTP ${res.status} (${feedUrl})`);
+    const len = Number(res.headers.get('content-length') ?? 0);
+    if (len > MAX_FEED_BYTES) throw new FeedError('Фид больше 100 МБ');
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > MAX_FEED_BYTES) throw new FeedError('Фид больше 100 МБ');
+    return parseYml(decodeFeed(buf));
   }
 
   /** Импорт из загруженного файла (кнопка в настройках, тесты, песочница). */

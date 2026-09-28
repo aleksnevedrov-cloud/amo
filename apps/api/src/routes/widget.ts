@@ -4,7 +4,7 @@ import { widgetEmailRoutes } from './widget-email.ts';
 import { widgetPhase4Routes } from './widget-phase4.ts';
 import { widgetPhase2Routes } from './widget-phase2.ts';
 import { AmoApiClient, disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@ai-door/amo';
-import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
+import { feedUrlsOf, widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
 import { amoRedirectUri } from '@ai-door/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -178,10 +178,11 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         if (!requireAdmin(req, reply)) return;
         const accountId = principal(req).accountId;
         const { settings } = await deps.settings.get(accountId);
-        if (!settings.catalog.feedUrl) return reply.code(400).send({ error: 'no_feed_url' });
+        const feedUrls = feedUrlsOf(settings);
+        if (!feedUrls.length) return reply.code(400).send({ error: 'no_feed_url' });
         // Импорт может идти долго — выполняем в фоне, статус виден в GET /catalog.
         void deps.importer
-          .importFromUrl(accountId, settings.catalog.feedUrl)
+          .importFromUrls(accountId, feedUrls)
           .then((r) => deps.journal.add({ accountId, kind: 'import', summary: `Каталог обновлён: ${r.products} товаров` }))
           .catch((err: Error) =>
             deps.journal.add({ accountId, kind: 'error', summary: `Импорт каталога: ${err.message}` }).catch(() => undefined),

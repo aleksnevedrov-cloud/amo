@@ -40,7 +40,7 @@ export class KnowledgeRepo {
   /** Загружает статью по URL (например, раздел «Полезные советы про двери»). */
   async addUrl(accountId: number, url: string, userId?: number): Promise<number> {
     const safe = await assertPublicUrl(url, this.opts.resolve);
-    const res = await (this.opts.fetch ?? fetch)(safe, { signal: AbortSignal.timeout(30_000) });
+    const res = await (this.opts.fetch ?? fetch)(safe, { headers: { 'user-agent': 'AI-Door-Agent/1.0 (+https://rf-dveri.ru; knowledge)' }, signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`Страница недоступна: HTTP ${res.status}`);
     const { title, text } = htmlToText(await res.text());
     if (text.length < 50) throw new Error('На странице не найден текст');

@@ -124,7 +124,7 @@ describe('расширенные настройки', () => {
     model: { provider: 'anthropic', model: 'claude-opus-5', fallbackModel: 'claude-sonnet-5', effort: 'low', maxTokens: 4096 },
     where: { pipelineIds: null, disabledStatusIds: [], batchWindowSec: 8, typingDelay: false },
     handoff: { taskTypeId: 1, taskDeadlineMin: 60, responsibleUserId: null, statusId: null },
-    catalog: { feedUrl: '', importEveryHours: 24 },
+    catalog: { feedUrl: '', feedUrls: [], importEveryHours: 24 },
     limits: { dailyRub: null },
     billing: { usdRubRate: 90 },
   };

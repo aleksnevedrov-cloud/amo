@@ -45,7 +45,7 @@ export async function runImportFeeds(
     const last = await d.catalog.lastSuccessAt(f.accountId);
     if (last && now.getTime() - last.getTime() < f.everyHours * 3600_000) continue;
     try {
-      const r = await d.importer.importFromUrl(f.accountId, f.feedUrl);
+      const r = await d.importer.importFromUrls(f.accountId, f.feedUrls);
       await d.journal.add({ accountId: f.accountId, kind: 'import', summary: `Каталог обновлён: ${r.products} товаров` });
       done.push(f.accountId);
     } catch (err) {

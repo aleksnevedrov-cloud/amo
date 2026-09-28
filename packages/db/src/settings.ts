@@ -63,7 +63,10 @@ export const widgetSettingsSchema = z
       .default({}),
     catalog: z
       .object({
+        /** Основной фид (совместимость с ранними настройками); полный список — feedUrls. */
         feedUrl: z.union([z.literal(''), z.string().url()]).default(''),
+        /** Дополнительные фиды того же магазина (у РФ-Двери: входные, межкомнатные, фурнитура). */
+        feedUrls: z.array(z.string().url()).max(10).default([]),
         importEveryHours: z.number().int().min(1).max(168).default(24),
       })
       .strict()
@@ -178,6 +181,9 @@ export type WidgetSettingsInput = z.input<typeof widgetSettingsSchema>;
 
 export const defaultSettings = (): WidgetSettings => widgetSettingsSchema.parse({});
 
+/** Все адреса фидов аккаунта без повторов. */
+export const feedUrlsOf = (s: WidgetSettings): string[] => [...new Set([s.catalog.feedUrl, ...s.catalog.feedUrls].filter(Boolean))];
+
 export interface SettingsVersion {
   id: number;
   userId: number | null;
@@ -272,14 +278,15 @@ export class SettingsRepo {
   }
 
   /** Аккаунты с включённым AI и заданным фидом — для планового импорта. */
-  async listWithFeeds(): Promise<{ accountId: number; feedUrl: string; everyHours: number }[]> {
+  async listWithFeeds(): Promise<{ accountId: number; feedUrls: string[]; everyHours: number }[]> {
     const { rows } = await this.db.query(
       `SELECT s.account_id, s.settings FROM widget_settings s JOIN accounts a ON a.id = s.account_id
-        WHERE a.uninstalled_at IS NULL AND coalesce(s.settings->'catalog'->>'feedUrl', '') <> ''`,
+        WHERE a.uninstalled_at IS NULL
+          AND (coalesce(s.settings->'catalog'->>'feedUrl', '') <> '' OR jsonb_array_length(coalesce(s.settings->'catalog'->'feedUrls', '[]'::jsonb)) > 0)`,
     );
     return rows.map((r) => {
       const s = widgetSettingsSchema.parse(r.settings);
-      return { accountId: Number(r.account_id), feedUrl: s.catalog.feedUrl, everyHours: s.catalog.importEveryHours };
+      return { accountId: Number(r.account_id), feedUrls: feedUrlsOf(s), everyHours: s.catalog.importEveryHours };
     });
   }
 }

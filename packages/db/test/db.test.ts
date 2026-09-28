@@ -139,7 +139,7 @@ describe('SettingsRepo.listWithFeeds', () => {
     await installAccount(7, new Date(Date.now() + 20 * HOUR));
     await new SettingsRepo(db).save(7, 1, widgetSettingsSchema.parse({ catalog: { feedUrl: 'https://rf-dveri.ru/feed.xml' } }));
     const list = await new SettingsRepo(db).listWithFeeds();
-    expect(list).toEqual([{ accountId: 7, feedUrl: 'https://rf-dveri.ru/feed.xml', everyHours: 24 }]);
+    expect(list).toEqual([{ accountId: 7, feedUrls: ['https://rf-dveri.ru/feed.xml'], everyHours: 24 }]);
   });
 });
 

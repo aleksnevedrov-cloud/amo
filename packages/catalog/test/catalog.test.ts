@@ -69,6 +69,7 @@ describe('импорт и поиск', () => {
     ({ db, drop } = await freshDb());
     await new AccountsRepo(db).upsertInstalled({ id: 1, subdomain: 'a', accountDomain: 'a.amocrm.ru' });
     await new AccountsRepo(db).upsertInstalled({ id: 2, subdomain: 'b', accountDomain: 'b.amocrm.ru' });
+    await new AccountsRepo(db).upsertInstalled({ id: 3, subdomain: 'c', accountDomain: 'c.amocrm.ru' });
     await new CatalogImporter(db).importFromBytes(1, FEED);
     repo = new CatalogRepo(db);
   });
@@ -126,9 +127,36 @@ describe('импорт и поиск', () => {
     expect(s.lastImport).toMatchObject({ status: 'failed' });
   });
 
-  it('импорт по URL через fetch', async () => {
-    const fetchImpl = (async () => new Response(FEED, { status: 200 })) as typeof fetch;
+  it('импорт по URL через fetch, с User-Agent для антибота', async () => {
+    let ua: string | null = null;
+    const fetchImpl = (async (_u: string | URL | Request, init?: RequestInit) => {
+      ua = new Headers(init?.headers).get('user-agent');
+      return new Response(FEED, { status: 200 });
+    }) as typeof fetch;
     const imp = new CatalogImporter(db, { fetch: fetchImpl, resolve: async () => ['93.158.134.3'] });
     await expect(imp.importFromUrl(2, 'https://rf-dveri.ru/feed.yml')).resolves.toMatchObject({ products: 16 });
+    expect(ua).toContain('AI-Door-Agent');
+  });
+
+  it('несколько фидов сливаются в один каталог; повтор адреса не скачивается дважды', async () => {
+    const text = new TextDecoder('windows-1251').decode(FEED);
+    // Второй фид — «фурнитура»: один новый товар и один общий (id 1001) с другой ценой.
+    const extra = text
+      .replace(/<offers>[\s\S]*<\/offers>/, '<offers><offer id="9001" available="true"><name>Ручка Сенат</name><price>1500</price><currencyId>RUR</currencyId><categoryId>1</categoryId></offer><offer id="1001" available="true"><name>Турин 1 (обновлён)</name><price>15900</price><currencyId>RUR</currencyId><categoryId>1</categoryId></offer></offers>');
+    const bodies: Record<string, Uint8Array> = { 'https://rf-dveri.ru/a.yml': FEED, 'https://rf-dveri.ru/b.yml': new TextEncoder().encode(extra.replace('windows-1251', 'utf-8')) };
+    const calls: string[] = [];
+    const fetchImpl = (async (u: string | URL | Request) => {
+      calls.push(String(u));
+      return new Response(bodies[String(u)] as Uint8Array, { status: 200 });
+    }) as typeof fetch;
+    const imp = new CatalogImporter(db, { fetch: fetchImpl, resolve: async () => ['93.158.134.3'] });
+    const r = await imp.importFromUrls(3, ['https://rf-dveri.ru/a.yml', 'https://rf-dveri.ru/b.yml', 'https://rf-dveri.ru/a.yml']);
+    expect(r.products).toBe(17);
+    expect(calls).toHaveLength(2);
+    const repo = new CatalogRepo(db);
+    expect((await repo.get(3, '9001'))?.name).toBe('Ручка Сенат');
+    expect((await repo.get(3, '1001'))?.price).toBe(15900);
+    // Пустой список — ошибка, а не пустой каталог.
+    await expect(imp.importFromUrls(3, [])).rejects.toThrow(/не задан/);
   });
 });
