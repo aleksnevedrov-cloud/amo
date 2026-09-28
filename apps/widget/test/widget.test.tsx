@@ -116,8 +116,7 @@ describe('панель в карточке сделки', () => {
   });
 });
 
-describe('расширенные настройки', () => {
-  const settings = {
+const fullSettings = {
     enabled: false,
     mode: 'off',
     behavior: { persona: 'p', rules: '', forbiddenTopics: [], greeting: '', handoffPhrase: 'Передаю менеджеру' },
@@ -127,7 +126,10 @@ describe('расширенные настройки', () => {
     catalog: { feedUrl: '', feedUrls: [], importEveryHours: 24 },
     limits: { dailyRub: null },
     billing: { usdRubRate: 90 },
-  };
+};
+
+describe('расширенные настройки', () => {
+  const settings = fullSettings;
 
   it('статус, включение и режим сохраняются целиком', async () => {
     document.body.innerHTML = '<div id="work-area-ai_door"></div>';
@@ -200,5 +202,41 @@ describe('Salesbot', () => {
       handler: 'widget_request',
       params: { url: 'https://ai.test.ru/salesbot/v1/hook', data: { lead_id: '{{lead.id}}', message: '{{message_text}}' } },
     });
+  });
+});
+
+describe('модальное окно настроек интеграции', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('рисует полную форму с вкладкой «Модель» и ссылкой на страницу расширенных настроек', async () => {
+    document.body.innerHTML = '<div class="modal"><div class="widget_settings_block"></div></div>';
+    const { self } = fakeSelf('settings', {
+      'GET /widget/v1/status': { ...status, llmConfigured: false },
+      'GET /widget/v1/settings': { settings: fullSettings, version: 1 },
+      'GET /widget/v1/llm/status': { hasOwnKey: false, configured: false, source: null },
+    });
+    const cb = createCallbacks(self, 'https://ai.test.ru');
+    const modal = { find: (sel: string) => ({ get: (i: number) => document.querySelectorAll(sel)[i] }) };
+    await act(async () => void cb.settings!(modal));
+    await flush();
+    const block = document.querySelector('.widget_settings_block')!;
+    expect([...block.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(expect.arrayContaining(['Статус', 'Модель', 'Каталог']));
+    expect(block.textContent).toContain('Нет ключа Anthropic');
+    const link = block.querySelector('a[href$="/settings/widgets/ai_door/"]');
+    expect(link?.textContent).toContain('на всю страницу');
+    await click('Модель');
+    await flush();
+    expect(block.querySelector('input[type="password"]')).not.toBeNull();
+  });
+
+  it('без контейнера .widget_settings_block ничего не ломает', () => {
+    const { self } = fakeSelf('settings', {});
+    const cb = createCallbacks(self, 'https://ai.test.ru');
+    expect(cb.settings!({ find: () => ({ get: () => undefined }) })).toBe(true);
   });
 });

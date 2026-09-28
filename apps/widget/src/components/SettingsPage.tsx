@@ -48,8 +48,11 @@ const TABS = [
 type Tab = (typeof TABS)[number][0];
 const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'email', 'catalog', 'limits']);
 
-/** Расширенные настройки виджета (раздел 11.1 ТЗ). */
-export function SettingsPage({ api }: { api: WidgetApi }) {
+/**
+ * Расширенные настройки виджета (раздел 11.1 ТЗ). Рисуется и на своей странице (advanced_settings),
+ * и в модальном окне интеграции — тогда `fullPageUrl` даёт ссылку на полноэкранный вариант.
+ */
+export function SettingsPage({ api, fullPageUrl }: { api: WidgetApi; fullPageUrl?: string }) {
   const load = useCallback(async () => {
     const [status, { settings }] = await Promise.all([api.status(), api.settings()]);
     return { status, settings };
@@ -58,7 +61,18 @@ export function SettingsPage({ api }: { api: WidgetApi }) {
 
   if (state.status === 'loading') return <div style={{ ...s.root, ...s.muted }}>Загрузка…</div>;
   if (state.status === 'error') return <div style={{ ...s.root, ...s.error }}>{state.message}</div>;
-  return <SettingsForm api={api} status={state.data.status} initial={state.data.settings} onSaved={reload} />;
+  return (
+    <>
+      {fullPageUrl && (
+        <div style={{ ...s.root, ...s.small, ...s.muted, marginBottom: 8 }}>
+          <a href={fullPageUrl} target="_blank" rel="noreferrer">
+            Открыть настройки на всю страницу
+          </a>
+        </div>
+      )}
+      <SettingsForm api={api} status={state.data.status} initial={state.data.settings} onSaved={reload} />
+    </>
+  );
 }
 
 function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSettings; onSaved: () => void }) {
