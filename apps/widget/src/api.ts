@@ -395,6 +395,7 @@ export class WidgetApi {
   evalRun = (id: number) => this.call<EvalRun>('GET', `/widget/v1/evals/runs/${id}`);
   analyticsModels = (days: number) => this.call<{ items: ModelStats[] }>('GET', `/widget/v1/analytics/models?days=${days}`);
   analyzeChatFile = (leadId: number, fileId: number) => this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/files/${fileId}/analyze`);
+  addLeadNote = (leadId: number, text: string) => this.call<{ ok: true }>('POST', `/widget/v1/leads/${leadId}/notes`, { text });
   purgeAccount = () => this.call<{ ok: true }>('POST', '/widget/v1/account/purge', { confirm: 'УДАЛИТЬ' });
 
   leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);

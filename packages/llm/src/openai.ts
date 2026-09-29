@@ -208,7 +208,7 @@ export function fromOpenAiResponse(res: OpenAIResponseT, latencyMs = 0): ChatRes
 
 /** Поля статуса из items ответа при повторной отправке не нужны. */
 function stripStatus(item: OpenAIResponseT['output'][number]): unknown {
-  const rest: Record<string, unknown> = { ...(item as Record<string, unknown>) };
+  const rest: Record<string, unknown> = { ...(item as unknown as Record<string, unknown>) };
   delete rest.status;
   return rest;
 }

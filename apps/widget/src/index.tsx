@@ -75,7 +75,8 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
         body: '',
         render: `<div id="${id}"></div>`,
       });
-      mount('lcard', document.getElementById(id), <LeadPanel api={api} leadId={leadId} />);
+      const path = typeof self.params?.path === 'string' ? self.params.path.replace(/\/$/, '') : '';
+      mount('lcard', document.getElementById(id), <LeadPanel api={api} leadId={leadId} logoUrl={path ? `${path}/images/logo_min.png` : undefined} settingsUrl={advancedSettingsUrl(code())} />);
     }),
 
     /**

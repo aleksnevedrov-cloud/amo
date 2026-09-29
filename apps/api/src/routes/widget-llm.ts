@@ -1,5 +1,5 @@
 import { resolveRoute } from '@ai-door/agent';
-import { type WidgetPrincipal } from '@ai-door/amo';
+import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
 import { llmModelRefSchema, llmProviderSchema, type LlmModelRef } from '@ai-door/db';
 import { isProviderId, maskKey, pricePublic, PROVIDER_IDS, PROVIDERS, tariffModels, verifyKey, type ModelInfo, type ProviderId } from '@ai-door/llm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -129,6 +129,20 @@ export function widgetLlmRoutes(
     });
     const { settings } = await deps.settings.get(p.accountId);
     return { ok: true, route: resolveRoute(settings, { lead: ref }) };
+  });
+
+  // «В примечание» из панели сделки (расчёт, резюме): примечание в amo от имени пользователя виджета.
+  api.post('/leads/:leadId/notes', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const { leadId } = leadParams.parse(req.params);
+    const p = principal(req);
+    const b = z.object({ text: z.string().trim().min(1).max(8000) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_text' });
+    const account = await deps.accounts.get(p.accountId);
+    if (!account || account.uninstalledAt) return reply.code(409).send({ error: 'not_installed' });
+    const client = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(p.accountId), deps.fetch);
+    await client.addLeadNote(leadId, b.data.text);
+    await deps.journal.add({ accountId: p.accountId, leadId, kind: 'note', summary: `Примечание из панели: ${b.data.text.slice(0, 120)}`, details: { userId: p.userId } });
+    return { ok: true };
   });
 
   // Eval-набор на выбранных моделях (раздел 7 ТЗ): запуск в фоне, прогресс и итог — в eval_runs.

@@ -42,7 +42,7 @@ cp .env.example .env
 - `POSTGRES_PASSWORD` — сгенерировать: `openssl rand -hex 16`; `DATABASE_URL` с этим паролем (см. docker-compose.yml)
 - `TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)`
 - `AMO_CLIENT_ID`, `AMO_CLIENT_SECRET` — из интеграции amo (раздел 5), можно заполнить позже
-- `ANTHROPIC_API_KEY` — если заказчик даст; иначе ключ вводится в виджете («Модель»)
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — если заказчик даст; иначе ключи вводятся в виджете («Модель»)
 - `YANDEX_SPEECHKIT_API_KEY`, `YANDEX_FOLDER_ID` — если есть
 - порты: если 5432/6379 на хосте заняты, в `docker-compose.yml` не публиковать их наружу (они нужны только внутри сети compose)
 

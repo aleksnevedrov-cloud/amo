@@ -1,7 +1,7 @@
 # AI-агент продаж дверей — виджет amoCRM
 
 AI-агент ведёт переписку с клиентом в amoCRM как продавец дверей РФ-Двери (rf-dveri.ru).
-ТЗ: v2.0. Текущее состояние: **фаза 5 — Маркетплейс, готово к подаче** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md), [фаза 3](docs/phase-3-report.md), [фаза 4](docs/phase-4-report.md), [фаза 5](docs/phase-5-report.md); [security review](docs/security-review.md); [материалы для amoМаркета](docs/marketplace/)).
+ТЗ: v2.0 + ТЗ 1.1.0 (переключение провайдера LLM). Текущее состояние: **1.1.0 — Anthropic Claude ↔ OpenAI ChatGPT** (отчёты: [фаза 0](docs/phase-0-report.md), [фаза 1](docs/phase-1-report.md), [фаза 2](docs/phase-2-report.md), [почта](docs/email-report.md), [фаза 3](docs/phase-3-report.md), [фаза 4](docs/phase-4-report.md), [фаза 5](docs/phase-5-report.md), [1.1.0 — провайдеры LLM](docs/llm-providers-report.md); [security review](docs/security-review.md); [материалы для amoМаркета](docs/marketplace/)).
 
 ## Состав
 
@@ -9,8 +9,9 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 |---|---|
 | `apps/api` | API Gateway (Fastify): OAuth 2.0 amo, приём Salesbot, API виджета (песочница, журнал, каталог, база знаний), `/health` |
 | `apps/worker` | BullMQ: обработка входящих, обновление токенов amo, импорт фидов по расписанию |
-| `apps/widget` | Виджет amo (React + TS): настройки, песочница, журнал, панель сделки, шаг Salesbot; сборка `widget.zip` |
-| `packages/agent` | Оркестратор на Claude, пост-фильтр фактов, учёт стоимости, конвейер диалога, очередь склейки |
+| `apps/widget` | Виджет amo (React + TS) 1.1.0: настройки (вкладка «Модель» с двумя провайдерами), песочница со сравнением моделей и прогоном eval, журнал, аналитика по моделям, панель сделки, шаг Salesbot; сборка `widget.zip` |
+| `packages/llm` | Единый интерфейс провайдера LLM: адаптеры Anthropic и OpenAI (Responses API), реестр провайдеров, таблица тарифов, резервная модель любого провайдера |
+| `packages/agent` | Оркестратор на единых типах (провайдер выбирается настройкой аккаунта), пост-фильтр фактов, учёт стоимости, конвейер диалога, очередь склейки |
 | `packages/tools` | Инструменты агента (по файлу на инструмент), CRM-порты amo и песочницы |
 | `packages/catalog` | Импорт фида YML, поиск по каталогу |
 | `packages/pricing` | Правила цен, расчёт черновика детализации, импорт/экспорт XLSX |
@@ -21,7 +22,7 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `packages/amo` | Клиент amoCRM: OAuth, токены, API v4, Salesbot |
 | `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
 | `packages/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
-| `evals` | 52 эталонных диалога и прогон на реальной модели; нагрузочный прогон (`perf.ts`); обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
+| `evals` | 52 эталонных диалога и прогон на реальной модели любого провайдера (`--model openai:gpt-5`, `--compare a,b`); нагрузочный прогон (`perf.ts`); обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
 | `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md), [материалы для amoМаркета](docs/marketplace/) |
 
 ## Разработка
