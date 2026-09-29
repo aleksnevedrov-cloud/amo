@@ -27,6 +27,30 @@ export function amoFetch(mock: AmoMock): typeof fetch {
       const key = headers.get('x-api-key') ?? '';
       return key.startsWith('sk-ant-good') ? json(200, { data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }], has_more: false }) : json(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
     }
+    // OpenAI (1.1.0): список моделей по ключу sk-good…, ответ Responses API — вызов каталога, затем текст с ценой из результата.
+    if (url.startsWith('https://api.openai.com/v1/models')) {
+      const key = headers.get('authorization') ?? '';
+      return key.startsWith('Bearer sk-good')
+        ? json(200, { object: 'list', data: [{ id: 'gpt-5', object: 'model', created: 1, owned_by: 'openai' }, { id: 'gpt-5-mini', object: 'model', created: 1, owned_by: 'openai' }, { id: 'text-embedding-3-small', object: 'model', created: 1, owned_by: 'openai' }] })
+        : json(401, { error: { message: 'Incorrect API key provided', type: 'invalid_request_error', code: 'invalid_api_key' } });
+    }
+    if (url.startsWith('https://api.openai.com/v1/responses')) {
+      const body = JSON.parse(String(init?.body)) as { model: string; input: { type?: string; role?: string; content?: unknown }[] };
+      const usage = { input_tokens: 100, input_tokens_details: { cached_tokens: 0 }, output_tokens: 10, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 110 };
+      const base = { id: 'resp_1', object: 'response', created_at: 1, status: 'completed', model: body.model, error: null, incomplete_details: null, usage };
+      const afterTool = body.input.some((i) => i.type === 'function_call_output');
+      // Разбор документа (ответ по JSON Schema) — минимальный валидный документ.
+      const schema = (body as { text?: { format?: { type?: string } } }).text?.format?.type === 'json_schema';
+      const doc = { kind: 'measurement', title: 'Замерный лист', summary: 'Один проём 900×2100.', customer_type: 'b2c', openings: [{ room: null, label: '1', width_mm: 900, height_mm: 2100, wall_mm: 100, leaf_width_mm: null, qty: 1, double: null, side: null, note: null }], positions: [], requirements: [], questions: [], photo: null };
+      return json(200, {
+        ...base,
+        output: schema
+          ? [{ type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify(doc), annotations: [] }] }]
+          : afterTool
+          ? [{ type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Рекомендую Турин 1 эмаль белая — 14 900 ₽, в наличии: https://rf-dveri.ru/catalog/test-1001/', annotations: [] }] }]
+          : [{ type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'catalog_search', arguments: JSON.stringify({ query: 'белая эмаль' }), status: 'completed' }],
+      });
+    }
     if (url.endsWith('/oauth2/access_token')) {
       if (mock.tokenStatus !== 200) return json(mock.tokenStatus, { hint: 'invalid code' });
       return json(200, { token_type: 'Bearer', expires_in: 86400, access_token: 'ACCESS', refresh_token: 'REFRESH' });
@@ -44,7 +68,7 @@ export function amoFetch(mock: AmoMock): typeof fetch {
   }) as typeof fetch;
 }
 
-export async function setup(opts: { llm?: LlmClient | null; mailConnect?: Deps['mailConnect']; mailSender?: Deps['mailSender'] } = {}) {
+export async function setup(opts: { llm?: LlmClient | null; mailConnect?: Deps['mailConnect']; mailSender?: Deps['mailSender']; evalFixtures?: Deps['evalFixtures']; download?: Deps['download'] } = {}) {
   const { db, drop } = await freshDb();
   const env = loadEnv({
     NODE_ENV: 'test',
@@ -65,6 +89,8 @@ export async function setup(opts: { llm?: LlmClient | null; mailConnect?: Deps['
       llm: opts.llm ?? null,
       ...(opts.mailConnect ? { mailConnect: opts.mailConnect } : {}),
       ...(opts.mailSender ? { mailSender: opts.mailSender } : {}),
+      ...(opts.evalFixtures ? { evalFixtures: opts.evalFixtures } : {}),
+      ...(opts.download ? { download: opts.download } : {}),
       schedule: async (job, windowMs) => void scheduled.push({ job, windowMs }),
       fetch: amoFetch(amo),
       redis: { ping: async () => 'PONG' },

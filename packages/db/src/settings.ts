@@ -8,6 +8,11 @@ const DEFAULT_PERSONA =
 
 const ids = z.array(z.number().int().positive());
 
+export const llmProviderSchema = z.enum(['anthropic', 'openai']);
+export type LlmProviderId = z.infer<typeof llmProviderSchema>;
+export const llmModelRefSchema = z.object({ provider: llmProviderSchema, model: z.string().min(1) }).strict();
+export type LlmModelRef = z.infer<typeof llmModelRefSchema>;
+
 /**
  * Схема настроек виджета. Каждый раздел имеет значения по умолчанию,
  * поэтому сохранённые ранее настройки остаются валидными при добавлении разделов.
@@ -31,11 +36,20 @@ export const widgetSettingsSchema = z
       .default({}),
     model: z
       .object({
-        provider: z.literal('anthropic').default('anthropic'),
+        /** Провайдер LLM (1.1.0): переключается в настройках, хранится в БД, действует со следующего сообщения. */
+        provider: llmProviderSchema.default('anthropic'),
         model: z.string().min(1).default('claude-opus-5'),
         fallbackModel: z.string().min(1).nullable().default('claude-sonnet-5'),
+        /** Провайдер резервной модели; null — тот же, что основной. */
+        fallbackProvider: llmProviderSchema.nullable().default(null),
         effort: z.enum(['low', 'medium', 'high']).default('low'),
         maxTokens: z.number().int().min(512).max(16000).default(4096),
+        /** null — значение провайдера по умолчанию; моделям без поддержки параметр не передаётся. */
+        temperature: z.number().min(0).max(2).nullable().default(null),
+        /** Модель по умолчанию для каждого провайдера — подставляется при переключении. */
+        defaults: z.object({ anthropic: z.string().min(1).nullable().default(null), openai: z.string().min(1).nullable().default(null) }).strict().default({}),
+        /** Переопределения для воронок и этапов (иерархия: сделка > этап > воронка > глобально, раздел 3 ТЗ). */
+        overrides: z.object({ pipelines: z.record(llmModelRefSchema).default({}), statuses: z.record(llmModelRefSchema).default({}) }).strict().default({}),
       })
       .strict()
       .default({}),
@@ -170,6 +184,12 @@ export const widgetSettingsSchema = z
     billing: z
       .object({
         usdRubRate: z.number().positive().default(90),
+        /** Валюта в интерфейсе: ₽ по курсу или $. */
+        currency: z.enum(['rub', 'usd']).default('rub'),
+        /** Тарифы по моделям, $ за 1M токенов, ключ `provider:model`; пусто — таблица по умолчанию. */
+        pricing: z
+          .record(z.object({ input: z.number().min(0), output: z.number().min(0), cachedInput: z.number().min(0).optional() }).strict())
+          .default({}),
       })
       .strict()
       .default({}),

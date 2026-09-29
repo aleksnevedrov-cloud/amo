@@ -85,6 +85,21 @@ export class JournalRepo {
     }));
   }
 
+  /** Сколько записей вида с таким же текстом за последние ms — чтобы не дублировать предупреждения. */
+  async countRecent(accountId: number, kind: JournalKind, summary: string, ms: number): Promise<number> {
+    const { rows } = await this.db.query(
+      `SELECT count(*)::int AS n FROM ai_journal WHERE account_id = $1 AND kind = $2 AND summary = $3 AND created_at >= now() - ($4::bigint || ' milliseconds')::interval`,
+      [accountId, kind, summary.slice(0, 2000), ms],
+    );
+    return rows[0]?.n ?? 0;
+  }
+
+  /** Последняя запись вида по сделке (например, последнее резюме). */
+  async lastOf(accountId: number, leadId: number, kind: JournalKind): Promise<JournalRow | null> {
+    const rows = await this.list(accountId, { leadId, kind, limit: 1 });
+    return rows[0] ?? null;
+  }
+
   /** Расход за текущие сутки (по времени сервера БД, МСК задаётся timezone БД). */
   async spentTodayRub(accountId: number): Promise<number> {
     const { rows } = await this.db.query(

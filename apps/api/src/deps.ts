@@ -8,6 +8,9 @@ import {
   type IncomingJob,
   type LlmClient,
 } from '@ai-door/agent';
+import { evalFixtures, type EvalFixtures } from '@ai-door/evals/seed';
+import { AnthropicProvider, createProvider, type ProviderId } from '@ai-door/llm';
+import { downloadAttachment } from '@ai-door/media';
 import { AmoOAuth, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import {
@@ -16,8 +19,10 @@ import {
   createPool,
   DialogRepo,
   DocumentsRepo,
+  EvalRunsRepo,
   JournalRepo,
   MemoryRepo,
+  ModelsCacheRepo,
   OutcomesRepo,
   PgTokenStore,
   SecretsRepo,
@@ -67,9 +72,17 @@ export interface Deps {
   /** Серверные LLM/оркестратор (ANTHROPIC_API_KEY); null — не задан. */
   orchestrator: Orchestrator | null;
   llm: LlmClient | null;
-  /** LLM по аккаунту: свой ключ (Маркетплейс) или серверный. */
+  /** LLM по аккаунту: свои ключи провайдеров (Маркетплейс) или серверные. */
   ai: AiProvider;
+  /** Общие серверные ключи провайдеров из .env. */
+  serverKeys: Partial<Record<ProviderId, string | undefined>>;
   secrets: SecretsRepo;
+  modelsCache: ModelsCacheRepo;
+  evalRuns: EvalRunsRepo;
+  /** Временная схема с тестовым каталогом для прогона eval из «Песочницы». */
+  evalFixtures(): Promise<EvalFixtures>;
+  /** Скачивание вложения из чата amo (проверка адреса и размера). */
+  download: typeof downloadAttachment;
   schedule: ScheduleLead;
   alerter: Alerter;
   fetch: typeof fetch;
@@ -77,7 +90,7 @@ export interface Deps {
 }
 
 export type DepsOverrides = Partial<
-  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender'> & {
+  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender' | 'evalFixtures' | 'download'> & {
     llm: LlmClient | null;
     ocr: (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null;
   }
@@ -128,12 +141,14 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
   const catalog = new CatalogRepo(db);
   const documents = new DocumentsRepo(db);
   const secrets = new SecretsRepo(db, secretBox);
-  // В тестах подменённая LLM используется и как «серверная», и для ключей аккаунтов.
-  const ai = createAiProvider(
-    (accountId) => secrets.get(accountId, 'anthropic'),
-    overrides.llm !== undefined ? (overrides.llm ? 'override' : undefined) : env.ANTHROPIC_API_KEY,
-    overrides.llm ? () => overrides.llm as LlmClient : undefined,
-  );
+  const serverKeys: Deps['serverKeys'] = { anthropic: env.ANTHROPIC_API_KEY, openai: env.OPENAI_API_KEY };
+  // В тестах подменённая LLM используется и как «серверная», и для ключей аккаунтов (Anthropic); OpenAI — адаптер на подменённом fetch.
+  const testLlm = overrides.llm;
+  const ai = createAiProvider({
+    accountKey: (accountId, provider) => secrets.get(accountId, provider),
+    serverKeys: testLlm !== undefined ? { anthropic: testLlm ? 'override' : undefined } : serverKeys,
+    make: (provider, key) => (provider === 'anthropic' && testLlm ? new AnthropicProvider(testLlm as LlmClient) : createProvider(provider, key, { fetch: fetchImpl })),
+  });
   const docs = new DocumentService({ llm, llmFor: async (id) => (await ai(id))?.llm ?? null, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
 
   return {
@@ -164,7 +179,12 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     ai,
+    serverKeys,
     secrets,
+    modelsCache: new ModelsCacheRepo(db),
+    evalRuns: new EvalRunsRepo(db),
+    evalFixtures: overrides.evalFixtures ?? (() => evalFixtures(env.DATABASE_URL, 1, process.env.MIGRATIONS_DIR)),
+    download: overrides.download ?? ((url) => downloadAttachment(url, { fetch: fetchImpl })),
     schedule,
     alerter,
     fetch: fetchImpl,

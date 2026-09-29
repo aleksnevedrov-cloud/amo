@@ -23,9 +23,11 @@ import {
   type HandoffReason,
   type ToolContext,
 } from '@ai-door/tools';
-import { LlmUnavailableError, type LlmClient } from './llm.ts';
+import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
+import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
+import { resolveRoute } from './route.ts';
 import { formatCalculation, summarizeDialog } from './summary.ts';
 
 export interface AmoAccess {
@@ -45,8 +47,8 @@ export interface PipelineDeps {
   suggestions: SuggestionsRepo;
   /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
   orchestrator: Orchestrator | null;
-  /** Для резюме диалога. */
-  llm: LlmClient | null;
+  /** Для резюме диалога (сырой клиент Anthropic или единый шлюз). */
+  llm: LlmClient | LlmGateway | null;
   /** LLM по аккаунту (свой ключ или серверный) — приоритетнее общих. */
   ai?: AiProvider;
   amo(accountId: number): Promise<AmoAccess>;
@@ -122,6 +124,8 @@ interface Turn {
   /** Проёмы из разобранных замерных листов — в память клиента. */
   openings: MemoryOpening[];
   ai: AccountAi | null;
+  /** Провайдер и модель хода: сделка > этап > воронка > настройки (раздел 3 ТЗ 1.1.0). */
+  route: ChatRoute;
 }
 
 export class DialogPipeline {
@@ -133,8 +137,12 @@ export class DialogPipeline {
     if (!pending.length) return { status: 'empty' };
     const { settings } = await this.d.settings.get(accountId);
     const access = await this.d.amo(accountId);
-    const ai = (await this.d.ai?.(accountId)) ?? (this.d.orchestrator && this.d.llm ? { llm: this.d.llm, orchestrator: this.d.orchestrator, source: 'server' as const } : null);
-    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [], ai };
+    const ai: AccountAi | null =
+      (await this.d.ai?.(accountId)) ??
+      (this.d.orchestrator && this.d.llm
+        ? { llm: asGateway(this.d.llm), orchestrator: this.d.orchestrator, source: 'server' as const, providers: ['anthropic'], keySources: { anthropic: 'server' } }
+        : null);
+    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [], ai, route: resolveRoute(settings) };
     try {
       t.texts = await this.incomingTexts(t);
       for (const text of t.texts) await this.d.dialog.addMessage(accountId, leadId, 'client', text);
@@ -150,8 +158,9 @@ export class DialogPipeline {
     const { settings, access, accountId, leadId } = t;
     if (!settings.enabled || settings.mode === 'off') return this.skip(t, 'disabled', 'AI выключен');
     if (!t.ai) {
-      await this.journal(t, { kind: 'error', summary: 'Ключ Anthropic не задан — ни у аккаунта, ни на сервере' });
-      return this.handoff(t, 'no_answer', 'AI не настроен: нет ключа Anthropic. Клиент ждёт ответа.');
+      const label = PROVIDER_LABELS[settings.model.provider]?.split(' ')[0] ?? 'Anthropic';
+      await this.journal(t, { kind: 'error', summary: `Ключ ${label} не задан — ни у аккаунта, ни на сервере` });
+      return this.handoff(t, 'no_answer', `AI не настроен: нет ключа ${label}. Клиент ждёт ответа.`);
     }
 
     const lead = await access.api.getLead(leadId);
@@ -166,6 +175,7 @@ export class DialogPipeline {
     await this.d.outcomes?.start(accountId, leadId, lead.pipeline_id, lead.status_id).catch(() => undefined);
 
     let state = await this.d.dialog.state(accountId, leadId);
+    t.route = resolveRoute(settings, { pipelineId: lead.pipeline_id, statusId: lead.status_id, lead: state.llm });
     const now = this.d.now?.() ?? new Date();
     const emails = t.pending.filter((m) => m.channel === 'email');
     const chats = t.pending.filter((m) => m.channel !== 'email');
@@ -247,13 +257,17 @@ export class DialogPipeline {
         now,
         dynamic: { memory: memoryText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
         clientFacts,
+        route: t.route,
       });
     } catch (err) {
-      const unavailable = err instanceof LlmUnavailableError;
+      const unavailable = err instanceof LlmUnavailableError ? err : null;
       await this.journal(t, {
         kind: 'error',
-        summary: unavailable ? 'LLM недоступна (основная и резервная модели)' : `Ошибка AI: ${(err as Error).message}`,
+        summary: unavailable ? `LLM недоступна (основная и резервная модели): ${unavailable.message}`.slice(0, 500) : `Ошибка AI: ${(err as Error).message}`,
+        details: { provider: t.route.primary.provider, model: t.route.primary.model, ...(unavailable ? { attempts: unavailable.attempts } : {}) },
       });
+      const missing = unavailable?.attempts.find((a) => a.code === 'not_found');
+      if (missing) await this.modelMissing(t, missing.ref);
       if (delivery === 'hint') return this.skip(t, 'error', 'Подсказка не подготовлена: ошибка AI');
       return this.handoff(t, 'no_answer', 'AI временно недоступен. Клиент ждёт ответа.');
     }
@@ -265,8 +279,13 @@ export class DialogPipeline {
       costRub: result.cost.usd * settings.billing.usdRubRate,
     };
     const lastEmail = emails.at(-1);
+    if (result.fallbackUsed && result.model !== result.requestedModel) await this.noteFallback(t, result);
     const details = {
+      provider: result.provider,
       model: result.model,
+      requestedModel: result.requestedModel,
+      fallbackUsed: result.fallbackUsed,
+      latencyMs: result.latencyMs,
       delivery,
       channel: lastEmail && !chats.length ? 'email' : 'chat',
       ...(lastEmail ? { emailMeta: lastEmail.meta } : {}),
@@ -395,10 +414,10 @@ export class DialogPipeline {
     let note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n${summary}`;
     if (ctx && t.ai) {
       try {
-        const s = await summarizeDialog(t.ai.llm, settings, { history: ctx.history, memoryText: ctx.memoryText });
+        const s = await summarizeDialog(t.ai.llm, settings, { history: ctx.history, memoryText: ctx.memoryText, route: t.route });
         note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n\n${s.text}`;
         await this.d.memory.setSummary(accountId, ctx.subject, s.text);
-        await this.journal(t, { kind: 'summary', summary: s.text, costUsd: s.cost.usd, costRub: s.cost.usd * settings.billing.usdRubRate, inputTokens: s.cost.inputTokens, outputTokens: s.cost.outputTokens });
+        await this.journal(t, { kind: 'summary', summary: s.text, details: { provider: s.provider, model: s.model, fallbackUsed: s.fallbackUsed }, costUsd: s.cost.usd, costRub: s.cost.usd * settings.billing.usdRubRate, inputTokens: s.cost.inputTokens, outputTokens: s.cost.outputTokens });
       } catch {
         // Резюме не критично: остаётся краткое от агента.
       }
@@ -450,6 +469,37 @@ export class DialogPipeline {
     }
     // Повторно не отвечаем тем же ботам.
     for (const m of withUrl) m.returnUrl = null;
+  }
+
+  /** Ответ дала резервная модель — отметка «fallback» в журнале (критерий 6 приёмки 1.1.0). */
+  private async noteFallback(t: Turn, r: TurnResult): Promise<void> {
+    await this.journal(t, {
+      kind: 'note',
+      summary: `fallback: ${t.route.primary.provider}/${r.requestedModel} недоступна, ответ дала ${r.provider}/${r.model}`,
+      details: { fallback: true, provider: r.provider, model: r.model, requestedModel: r.requestedModel, requestedProvider: t.route.primary.provider },
+    });
+  }
+
+  /**
+   * Модель пропала из API провайдера (раздел 4 ТЗ): предупреждение в журнал (видно в статусе здоровья интеграций)
+   * и задача ответственному по настройке — не чаще раза в сутки на модель.
+   */
+  private async modelMissing(t: Turn, ref: { provider: string; model: string }): Promise<void> {
+    const summary = `Модель ${ref.provider}/${ref.model} недоступна у провайдера — проверьте настройки «Модель»`;
+    const recent = await this.d.journal.countRecent(t.accountId, 'error', summary, 24 * 3600_000).catch(() => 1);
+    if (recent > 0) return;
+    await this.journal(t, { kind: 'error', summary, details: { modelMissing: true, provider: ref.provider, model: ref.model } });
+    const h = t.settings.handoff;
+    const now = this.d.now?.() ?? new Date();
+    await t.access.api
+      .createTask({
+        text: `AI: ${summary}. Выберите другую модель в настройках AI-агента.`,
+        completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
+        leadId: t.leadId,
+        taskTypeId: h.taskTypeId,
+        ...(h.responsibleUserId ? { responsibleUserId: h.responsibleUserId } : {}),
+      })
+      .catch(() => undefined);
   }
 
   private journal(t: Turn, e: Omit<JournalEntry, 'accountId' | 'leadId'>) {

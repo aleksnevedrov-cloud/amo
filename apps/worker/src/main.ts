@@ -68,7 +68,10 @@ const amoClient = async (accountId: number) => {
 const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
 // Ключ аккаунта (Маркетплейс) приоритетнее серверного.
 const secrets = new SecretsRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
-const ai = createAiProvider((accountId) => secrets.get(accountId, 'anthropic'), env.ANTHROPIC_API_KEY);
+const ai = createAiProvider({
+  accountKey: (accountId, provider) => secrets.get(accountId, provider),
+  serverKeys: { anthropic: env.ANTHROPIC_API_KEY, openai: env.OPENAI_API_KEY },
+});
 // Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
 let tesseract: TesseractOcr | null = null;
 const docs = new DocumentService({
@@ -166,7 +169,7 @@ const pipeline = new DialogPipeline({
       await continueBot(returnUrl, await access.accessToken(), messages);
     },
 });
-if (!env.ANTHROPIC_API_KEY) log.warn('ANTHROPIC_API_KEY не задан — отвечать смогут только аккаунты со своим ключом Anthropic');
+if (!env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY) log.warn('ANTHROPIC_API_KEY и OPENAI_API_KEY не заданы — отвечать смогут только аккаунты со своими ключами');
 const incomingWorker = new Worker<IncomingJob>(
   INCOMING_QUEUE,
   async (job) => {

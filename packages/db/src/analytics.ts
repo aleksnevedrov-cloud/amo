@@ -88,6 +88,27 @@ export interface AnalyticsSummary {
   byDay: { day: string; dialogs: number; replies: number; handoffs: number; costRub: number }[];
 }
 
+export interface ModelStats {
+  provider: string;
+  model: string;
+  dialogs: number;
+  replies: number;
+  drafts: number;
+  hints: number;
+  handoffs: number;
+  sandbox: number;
+  errors: number;
+  /** Ответов через резервную модель. */
+  fallbacks: number;
+  costRub: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgCostPerDialogRub: number;
+  /** Среднее время ответа модели, мс (по ходам с замером). */
+  avgLatencyMs: number | null;
+}
+
 export interface BillingMonth {
   month: string;
   costRub: number;
@@ -169,6 +190,52 @@ export class AnalyticsRepo {
       handoffReasons: reasons.rows.map((r) => ({ reason: String(r.reason), count: Number(r.n) })),
       byDay: days.rows.map((r) => ({ day: String(r.day), dialogs: Number(r.dialogs), replies: Number(r.replies), handoffs: Number(r.handoffs), costRub: Number(r.cost) })),
     };
+  }
+
+  /** Разбивка по провайдеру и модели (раздел 7 ТЗ 1.1.0): диалоги, передачи, стоимость, время ответа, ошибки. */
+  async byModel(accountId: number, from: Date, to: Date): Promise<ModelStats[]> {
+    const { rows } = await this.db.query(
+      `SELECT coalesce(details->>'provider', CASE WHEN details ? 'model' THEN 'anthropic' END) AS provider,
+              details->>'model' AS model,
+              count(DISTINCT lead_id) FILTER (WHERE kind = ANY($4)) AS dialogs,
+              count(*) FILTER (WHERE kind = 'reply') AS replies,
+              count(*) FILTER (WHERE kind = 'draft' AND details->>'delivery' = 'draft') AS drafts,
+              count(*) FILTER (WHERE kind = 'hint') AS hints,
+              count(*) FILTER (WHERE kind = 'handoff' AND details ? 'reason') AS handoffs,
+              count(*) FILTER (WHERE kind = 'sandbox') AS sandbox,
+              count(*) FILTER (WHERE kind = 'error') AS errors,
+              count(*) FILTER (WHERE (details->>'fallbackUsed')::boolean) AS fallbacks,
+              coalesce(sum(cost_rub), 0) AS cost,
+              coalesce(sum(cost_usd), 0) AS cost_usd,
+              coalesce(sum(input_tokens), 0) AS inp, coalesce(sum(output_tokens), 0) AS outp,
+              avg((details->>'latencyMs')::numeric) FILTER (WHERE details ? 'latencyMs') AS latency
+         FROM ai_journal
+        WHERE account_id = $1 AND created_at >= $2 AND created_at < $3 AND details ? 'model'
+        GROUP BY 1, 2 ORDER BY dialogs DESC, cost DESC`,
+      [accountId, from, to, DIALOG_KINDS],
+    );
+    return rows.map((r) => {
+      const dialogs = Number(r.dialogs ?? 0);
+      const costRub = Number(r.cost ?? 0);
+      return {
+        provider: String(r.provider ?? 'anthropic'),
+        model: String(r.model),
+        dialogs,
+        replies: Number(r.replies ?? 0),
+        drafts: Number(r.drafts ?? 0),
+        hints: Number(r.hints ?? 0),
+        handoffs: Number(r.handoffs ?? 0),
+        sandbox: Number(r.sandbox ?? 0),
+        errors: Number(r.errors ?? 0),
+        fallbacks: Number(r.fallbacks ?? 0),
+        costRub,
+        costUsd: Number(r.cost_usd ?? 0),
+        inputTokens: Number(r.inp ?? 0),
+        outputTokens: Number(r.outp ?? 0),
+        avgCostPerDialogRub: dialogs ? costRub / dialogs : 0,
+        avgLatencyMs: r.latency === null || r.latency === undefined ? null : Math.round(Number(r.latency)),
+      };
+    });
   }
 
   /** Расход по месяцам — учёт для биллинга (по решению заказчика тарифов пока нет). */

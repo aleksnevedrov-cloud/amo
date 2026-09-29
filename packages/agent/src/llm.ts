@@ -1,35 +1,45 @@
 import Anthropic from '@anthropic-ai/sdk';
+import {
+  AnthropicProvider,
+  AnthropicSdkClient,
+  LlmUnavailableError,
+  singleProviderGateway,
+  type AnthropicClient,
+  type AnthropicRequest,
+  type AnthropicResponse,
+  type LlmGateway,
+} from '@ai-door/llm';
 
-export type LlmRequest = Anthropic.Beta.MessageCreateParamsNonStreaming;
-export type LlmResponse = Anthropic.Beta.BetaMessage;
+/**
+ * Совместимость с 1.0.x: «сырой» клиент Anthropic (`create`) остаётся, оркестратор и резюме работают
+ * через единый шлюз (`LlmGateway`), а сырой клиент оборачивается адаптером Anthropic.
+ */
+export type LlmRequest = AnthropicRequest;
+export type LlmResponse = AnthropicResponse;
+export type LlmClient = AnthropicClient;
 
-export interface LlmClient {
-  create(req: LlmRequest): Promise<LlmResponse>;
-}
+export { LlmUnavailableError };
+export type { LlmGateway };
 
-export class LlmUnavailableError extends Error {
-  override name = 'LlmUnavailableError';
-}
+/** Клиент Anthropic по ключу (серверному или аккаунта). */
+export class AnthropicLlm extends AnthropicSdkClient implements LlmClient {}
 
-/** Модели, для которых включаем серверный fallback при отказе (stop_reason: refusal). */
-const SERVER_FALLBACK_MODELS = new Set(['claude-opus-5', 'claude-fable-5-1']);
+const gateways = new WeakMap<object, LlmGateway>();
 
-export class AnthropicLlm implements LlmClient {
-  private readonly client: Anthropic;
+export const isGateway = (x: unknown): x is LlmGateway => typeof (x as LlmGateway | null)?.chat === 'function' && typeof (x as LlmGateway).providers === 'function';
 
-  constructor(apiKey?: string) {
-    this.client = new Anthropic({ ...(apiKey ? { apiKey } : {}), timeout: 60_000, maxRetries: 2 });
+/** Единый шлюз из чего угодно: готовый шлюз или сырой клиент Anthropic (тесты, серверный ключ одного провайдера). */
+export function asGateway(x: LlmClient | LlmGateway): LlmGateway {
+  if (isGateway(x)) return x;
+  let g = gateways.get(x);
+  if (!g) {
+    g = singleProviderGateway(new AnthropicProvider(x));
+    gateways.set(x, g);
   }
-
-  create(req: LlmRequest): Promise<LlmResponse> {
-    const withFallback: LlmRequest = SERVER_FALLBACK_MODELS.has(req.model)
-      ? { ...req, betas: [...(req.betas ?? []), 'server-side-fallback-2026-07-01'], fallbacks: 'default' }
-      : req;
-    return this.client.beta.messages.create(withFallback);
-  }
+  return g;
 }
 
-/** Сбой, при котором есть смысл переключиться на резервную модель. */
+/** Сбой, при котором есть смысл переключиться на резервную модель (сырой клиент Anthropic). */
 export function isRetryableLlmError(err: unknown): boolean {
   if (err instanceof Anthropic.APIConnectionError) return true;
   if (err instanceof Anthropic.RateLimitError) return true;
@@ -39,7 +49,7 @@ export function isRetryableLlmError(err: unknown): boolean {
 }
 
 /**
- * Вызов основной модели, при недоступности — резервной (раздел 13 ТЗ).
+ * Вызов основной модели сырым клиентом Anthropic, при недоступности — резервной (совместимость 1.0.x).
  * SDK уже делает 2 повтора на 429/5xx; здесь — переключение модели.
  */
 export async function createWithFallback(

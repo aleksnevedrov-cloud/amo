@@ -17,6 +17,7 @@
     "@ai-door/catalog": "workspace:*",
     "@ai-door/db": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/llm": "workspace:*",
     "@ai-door/media": "workspace:*",
     "@ai-door/pricing": "workspace:*",
     "@ai-door/shared": "workspace:*",

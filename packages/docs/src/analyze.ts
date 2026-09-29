@@ -1,5 +1,5 @@
-import type Anthropic from '@anthropic-ai/sdk';
-import { costOf, createWithFallback, type Cost, type LlmClient } from '@ai-door/agent';
+import { asGateway, costOfResponse, resolveRoute, type Cost, type LlmClient } from '@ai-door/agent';
+import { modelTraits, type ChatRoute, type LlmGateway, type UnifiedImage, type UnifiedPart } from '@ai-door/llm';
 import type { WidgetSettings } from '@ai-door/db';
 import { findMarkings, markingToText } from './gost.ts';
 import { documentJsonSchema, documentSchema, type DocumentData } from './schema.ts';
@@ -25,26 +25,38 @@ export interface AnalyzeInput {
   text: string;
   filename?: string;
   /** Для фото: картинка целиком (только при включённой настройке vision.photosToClaude). */
-  image?: { bytes: Uint8Array; mime: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' };
+  image?: { bytes: Uint8Array; mime: UnifiedImage['mime'] };
   hint?: 'measurement' | 'request' | 'photo';
+  /** Провайдер и модель; по умолчанию — из настроек. */
+  route?: ChatRoute;
 }
 
 export interface Analyzed {
   data: DocumentData;
   cost: Cost;
   model: string;
+  provider: string;
+  fallbackUsed: boolean;
 }
 
-export async function analyzeDocument(llm: LlmClient, settings: WidgetSettings, input: AnalyzeInput): Promise<Analyzed> {
+/**
+ * Маршрут для изображения (раздел 8 ТЗ 1.1.0): выбранная модель, если она видит изображения,
+ * иначе резервная с поддержкой изображений; если и она не видит — ошибка.
+ */
+export function pickVisionRoute(route: ChatRoute, hasImage: boolean): ChatRoute {
+  if (!hasImage || modelTraits(route.primary.provider, route.primary.model).vision) return route;
+  if (route.fallback && modelTraits(route.fallback.provider, route.fallback.model).vision) return { primary: route.fallback, fallback: null };
+  throw new AnalyzeError(`Модель ${route.primary.provider}/${route.primary.model} не принимает изображения, а резервной модели с поддержкой изображений нет`);
+}
+
+export async function analyzeDocument(llm: LlmClient | LlmGateway, settings: WidgetSettings, input: AnalyzeInput): Promise<Analyzed> {
   const text = input.text.length > MAX_LLM_CHARS ? `${input.text.slice(0, MAX_LLM_CHARS)}\n…(обрезано)` : input.text;
   const markings = findMarkings(text, 30);
   const hints = markings.length
     ? `Расшифровка условных обозначений (алгоритм, может ошибаться):\n${markings.map((m) => `- ${m.raw} → ${markingToText(m)}`).join('\n')}`
     : '';
-  const content: Anthropic.Beta.BetaContentBlockParam[] = [];
-  if (input.image) {
-    content.push({ type: 'image', source: { type: 'base64', media_type: input.image.mime, data: Buffer.from(input.image.bytes).toString('base64') } });
-  }
+  const content: UnifiedPart[] = [];
+  if (input.image) content.push({ type: 'image', image: { mime: input.image.mime, data: Buffer.from(input.image.bytes).toString('base64') } });
   const parts = [
     input.filename ? `Имя файла: ${input.filename}` : '',
     input.hint === 'measurement' ? 'Ожидается замерный лист.' : input.hint === 'request' ? 'Ожидается запрос или спецификация.' : input.hint === 'photo' ? 'Это фото; если на нём документ — разберите текст.' : '',
@@ -53,21 +65,26 @@ export async function analyzeDocument(llm: LlmClient, settings: WidgetSettings, 
   ].filter(Boolean);
   content.push({ type: 'text', text: parts.join('\n\n') });
 
-  const req: Anthropic.Beta.MessageCreateParamsNonStreaming = {
-    model: settings.model.model,
-    max_tokens: Math.max(settings.model.maxTokens, 4096),
-    system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content }],
-    output_config: { effort: 'medium', format: { type: 'json_schema', schema: documentJsonSchema() } },
-  };
-  const res = await createWithFallback(llm, req, settings.model.fallbackModel);
-  const raw = res.content
-    .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
-    .map((b) => b.text)
-    .join('');
-  const parsed = documentSchema.safeParse(tryJson(raw));
+  const route = pickVisionRoute(input.route ?? resolveRoute(settings), Boolean(input.image));
+  const res = await asGateway(llm).chat(
+    {
+      system: [{ text: SYSTEM, cache: true }],
+      messages: [{ role: 'user', content }],
+      maxTokens: Math.max(settings.model.maxTokens, 4096),
+      effort: 'medium',
+      outputSchema: { name: 'document', schema: documentJsonSchema() },
+    },
+    route,
+  );
+  const parsed = documentSchema.safeParse(tryJson(res.text ?? ''));
   if (!parsed.success) throw new AnalyzeError(`Ответ модели не соответствует схеме: ${parsed.error.issues[0]?.message ?? ''}`);
-  return { data: parsed.data, cost: costOf(res.model, res.usage), model: res.model };
+  return {
+    data: parsed.data,
+    cost: costOfResponse({ provider: res.provider, model: res.model }, res.usage, settings.billing.pricing),
+    model: res.model,
+    provider: res.provider,
+    fallbackUsed: res.fallbackUsed,
+  };
 }
 
 function tryJson(s: string): unknown {

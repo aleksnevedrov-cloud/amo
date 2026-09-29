@@ -1,7 +1,8 @@
 import type { LlmClient } from '@ai-door/agent';
+import type { ChatRoute, LlmGateway } from '@ai-door/llm';
 import type { CatalogRepo } from '@ai-door/catalog';
 import type { DocumentSource, DocumentsRepo, WidgetSettings } from '@ai-door/db';
-import { analyzeDocument } from './analyze.ts';
+import { analyzeDocument, AnalyzeError } from './analyze.ts';
 import type { DwgConverter } from './dwg.ts';
 import { extract, ExtractError, type Extracted } from './extract.ts';
 import { estimateKit, type KitEstimate } from './kit.ts';
@@ -12,9 +13,9 @@ import { documentToNote, documentToText } from './render.ts';
 import type { DocumentData } from './schema.ts';
 
 export interface DocumentServiceDeps {
-  llm: LlmClient | null;
-  /** LLM по аккаунту (свой ключ) — приоритетнее общей. */
-  llmFor?(accountId: number): Promise<LlmClient | null>;
+  llm: LlmClient | LlmGateway | null;
+  /** LLM по аккаунту (свои ключи) — приоритетнее общей. */
+  llmFor?(accountId: number): Promise<LlmClient | LlmGateway | null>;
   catalog: CatalogRepo;
   documents: DocumentsRepo;
   /** OCR по настройке аккаунта; null — выключен или нет ключа. */
@@ -33,6 +34,8 @@ export interface AnalyzeFileInput {
   settings: WidgetSettings;
   createdBy?: number | null;
   hint?: 'measurement' | 'request' | 'photo';
+  /** Провайдер и модель (переопределение сделки); по умолчанию — из настроек. */
+  route?: ChatRoute;
 }
 
 export interface DocumentResult {
@@ -48,6 +51,7 @@ export interface DocumentResult {
   textChars: number;
   costUsd: number;
   model: string;
+  provider: string;
   /** Кратко для контекста агента. */
   text: string;
   /** Примечание в сделку для менеджера. */
@@ -75,7 +79,7 @@ export class DocumentService {
   async analyze(input: AnalyzeFileInput): Promise<DocumentResult> {
     const { settings } = input;
     const llm = (await this.d.llmFor?.(input.accountId)) ?? this.d.llm;
-    if (!llm) throw new DocumentError('LLM не настроена: задайте ключ Anthropic в настройках («Модель») или на сервере');
+    if (!llm) throw new DocumentError('LLM не настроена: задайте ключ провайдера в настройках («Модель») или на сервере');
     if ((await this.d.documents.countToday(input.accountId)) >= settings.vision.maxFilesPerDay) {
       throw new DocumentError(`Достигнут дневной лимит разбора файлов (${settings.vision.maxFilesPerDay})`);
     }
@@ -109,12 +113,20 @@ export class DocumentService {
     }
 
     const cleaned = cleanPersonalData(text);
-    const analyzed = await analyzeDocument(llm, settings, {
+    let analyzed: Awaited<ReturnType<typeof analyzeDocument>>;
+    try {
+      analyzed = await analyzeDocument(llm, settings, {
       text: cleaned.text,
       filename: input.filename,
       ...(image ? { image } : {}),
-      ...(input.hint ? { hint: input.hint } : image ? { hint: 'photo' as const } : {}),
-    });
+        ...(input.hint ? { hint: input.hint } : image ? { hint: 'photo' as const } : {}),
+        ...(input.route ? { route: input.route } : {}),
+      });
+    } catch (err) {
+      // Ответ не по схеме или модель не видит изображения — понятная ошибка менеджеру, а не 500.
+      if (err instanceof AnalyzeError) throw new DocumentError(err.message);
+      throw err;
+    }
     const data = analyzed.data;
     const matches = await matchPositions(this.d.catalog, input.accountId, data);
     const kit = data.kind === 'measurement' && data.openings.length ? estimateKit(data.openings) : null;
@@ -148,6 +160,7 @@ export class DocumentService {
       textChars: cleaned.text.length,
       costUsd: analyzed.cost.usd,
       model: analyzed.model,
+      provider: analyzed.provider,
       text: '',
       note: '',
       memoryOpenings: data.openings

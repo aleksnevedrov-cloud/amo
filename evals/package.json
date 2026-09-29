@@ -8,21 +8,30 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "eval:docs": "tsx documents/run-docs.ts",
-    "perf": "tsx perf.ts"
+    "perf": "tsx perf.ts",
+    "embed": "node scripts/embed-fixtures.mjs"
   },
   "dependencies": {
     "@ai-door/agent": "workspace:*",
+    "@ai-door/amo": "workspace:*",
     "@ai-door/catalog": "workspace:*",
     "@ai-door/db": "workspace:*",
+    "@ai-door/docs": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/llm": "workspace:*",
     "@ai-door/pricing": "workspace:*",
     "@ai-door/tools": "workspace:*",
     "pg": "^8.23.0",
-    "zod": "^3.25.76",
-    "@ai-door/docs": "workspace:*",
-    "@ai-door/amo": "workspace:*"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1"
+  },
+  "main": "./runner.ts",
+  "exports": {
+    ".": "./runner.ts",
+    "./runner": "./runner.ts",
+    "./seed": "./seed.ts",
+    "./dialogs": "./dialogs.json"
   }
 }

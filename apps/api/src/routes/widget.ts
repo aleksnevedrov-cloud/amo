@@ -1,10 +1,13 @@
-import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@ai-door/tools';
+import { resolveRoute, type Orchestrator, type TurnResult } from '@ai-door/agent';
+import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm, type Source } from '@ai-door/tools';
 import { widgetDocsRoutes } from './widget-docs.ts';
 import { widgetEmailRoutes } from './widget-email.ts';
+import { widgetLlmRoutes } from './widget-llm.ts';
 import { widgetPhase4Routes } from './widget-phase4.ts';
 import { widgetPhase2Routes } from './widget-phase2.ts';
 import { AmoApiClient, disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@ai-door/amo';
-import { feedUrlsOf, widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
+import { feedUrlsOf, llmModelRefSchema, widgetSettingsSchema, type JournalRow, type WidgetSettings } from '@ai-door/db';
+import { PROVIDERS, type ChatRoute } from '@ai-door/llm';
 import { amoRedirectUri } from '@ai-door/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -49,6 +52,13 @@ const sandboxBody = z.object({
     .max(60),
   /** Черновик настроек — проверить поведение до сохранения. */
   settings: z.unknown().optional(),
+  /** Провайдер и модель для этого прогона (иначе — из настроек). */
+  model: llmModelRefSchema.optional(),
+});
+
+const compareBody = sandboxBody.omit({ model: true }).extend({
+  /** Две модели для сравнения рядом (раздел 7 ТЗ 1.1.0). */
+  models: z.array(llmModelRefSchema).min(1).max(2),
 });
 
 /** API для фронтенда виджета. Авторизация — одноразовый токен amo в X-Auth-Token. */
@@ -82,6 +92,11 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
           deps.catalog.stats(p.accountId),
         ]);
         const connected = Boolean(account && !account.uninstalledAt && token && !token.lastError);
+        const ai = await deps.ai(p.accountId);
+        // Здоровье интеграции LLM (раздел 4 ТЗ): модель пропала из списка провайдера, ответы через резервную, ошибки.
+        const cache = ai ? await deps.modelsCache.get<{ id: string }>(p.accountId, settings.model.provider).catch(() => null) : null;
+        const missing = cache?.models.length && !cache.models.some((m) => m.id === settings.model.model) ? [settings.model.model] : [];
+        const recentErrors = await deps.journal.list(p.accountId, { kind: 'error', limit: 5 });
         return {
           accountId: p.accountId,
           isAdmin: p.isAdmin,
@@ -90,7 +105,15 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
           tokenError: token?.lastError ?? null,
           enabled: settings.enabled,
           mode: settings.mode,
-          llmConfigured: (await deps.ai(p.accountId)) !== null,
+          llmConfigured: ai !== null && ai.providers.includes(settings.model.provider),
+          llm: {
+            provider: settings.model.provider,
+            model: settings.model.model,
+            fallback: resolveRoute(settings).fallback,
+            providers: ai?.providers ?? [],
+            missingModels: missing,
+            lastError: recentErrors.find((e) => (e.details as { modelMissing?: boolean; provider?: string }).modelMissing || (e.details as { attempts?: unknown }).attempts) ?? null,
+          },
           spend,
           dailyLimitRub: settings.limits.dailyRub,
           catalog,
@@ -105,8 +128,23 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const parsed = widgetSettingsSchema.safeParse(req.body);
         if (!parsed.success) return reply.code(400).send({ error: 'invalid_settings', issues: parsed.error.issues });
         if (!(await deps.accounts.get(p.accountId))) return reply.code(409).send({ error: 'not_installed' });
-        const { version } = await deps.settings.save(p.accountId, p.userId, parsed.data);
-        return { settings: parsed.data, version };
+        // Смена провайдера без сохранённого ключа не применяется (раздел 3 ТЗ 1.1.0).
+        const prev = (await deps.settings.get(p.accountId)).settings;
+        const next = parsed.data;
+        if (next.model.provider !== prev.model.provider) {
+          const ai = await deps.ai(p.accountId);
+          if (!ai?.providers.includes(next.model.provider)) return reply.code(409).send({ error: 'no_key', provider: next.model.provider, message: `Введите ключ ${PROVIDERS[next.model.provider].label.split(' ')[0]}` });
+        }
+        const { version } = await deps.settings.save(p.accountId, p.userId, next);
+        if (next.model.provider !== prev.model.provider || next.model.model !== prev.model.model || next.model.fallbackModel !== prev.model.fallbackModel || next.model.fallbackProvider !== prev.model.fallbackProvider) {
+          await deps.journal.add({
+            accountId: p.accountId,
+            kind: 'note',
+            summary: `Модель по умолчанию: ${PROVIDERS[next.model.provider].short} · ${next.model.model}${next.model.fallbackModel ? ` (резерв: ${next.model.fallbackModel})` : ''}`,
+            details: { userId: p.userId, audit: 'llm.model', provider: next.model.provider, model: next.model.model, before: prev.model, after: next.model },
+          });
+        }
+        return { settings: next, version };
       });
 
       api.get('/journal', async (req, reply) => {
@@ -115,32 +153,55 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         return { items: await deps.journal.list(principal(req).accountId, q.data) };
       });
 
-      // Панель в карточке сделки.
+      // Панель в карточке сделки (раздел 11 ТЗ 1.1.0): статус, модель, черновики, товары, расчёт, файлы, задачи, резюме, журнал.
       api.get('/leads/:leadId/panel', async (req) => {
         const { leadId } = leadParams.parse(req.params);
         const accountId = principal(req).accountId;
-        const [{ settings }, state, log, suggestions] = await Promise.all([
+        const [{ settings }, state, log, suggestions, attachments, documents, ai] = await Promise.all([
           deps.settings.get(accountId),
           deps.dialog.state(accountId, leadId),
-          deps.journal.list(accountId, { leadId, limit: 30 }),
+          deps.journal.list(accountId, { leadId, limit: 40 }),
           deps.suggestions.listForLead(accountId, leadId, 10),
+          deps.dialog.attachments(accountId, leadId, 20).catch(() => []),
+          deps.documents.listForLead(accountId, leadId, 20).catch(() => []),
+          deps.ai(accountId),
         ]);
         const lastCalc = log.find((e) => (e.details as { calculation?: unknown }).calculation);
-        const lastReply = log.find((e) => e.kind === 'reply' || e.kind === 'handoff');
-        const sources = ((lastReply?.details as { sources?: { type: string }[] } | undefined)?.sources ?? []);
+        const lastReply = log.find((e) => e.kind === 'reply' || e.kind === 'handoff' || e.kind === 'draft' || e.kind === 'hint');
+        const sources = ((lastReply?.details as { sources?: Source[] } | undefined)?.sources ?? []).filter((x) => x.type === 'product');
+        const products = await Promise.all(
+          sources.slice(0, 10).map(async (src) => {
+            const pr = await deps.catalog.get(accountId, src.id).catch(() => null);
+            return { ...src, title: pr?.name ?? src.title, url: pr?.url ?? src.url ?? null, price: pr?.price ?? null, available: pr?.available ?? null, picture: pr?.picture ?? null, category: pr?.category ?? null };
+          }),
+        );
+        const route = resolveRoute(settings, { lead: state.llm });
+        const daily = settings.limits.dailyRub !== null ? await deps.journal.spentTodayRub(accountId) : 0;
+        const lastSummary = log.find((e) => e.kind === 'summary');
+        const lastErrorEntry = log.find((e) => e.kind === 'error');
         return {
           leadId,
-          ai: {
-            enabled: settings.enabled,
-            mode: settings.mode,
-            paused: state.paused,
-            pauseReason: state.pauseReason,
-            pausedAt: state.pausedAt,
+          ai: { enabled: settings.enabled, mode: settings.mode, paused: state.paused, pauseReason: state.pauseReason, pausedAt: state.pausedAt },
+          llm: {
+            provider: route.primary.provider,
+            model: route.primary.model,
+            fallback: route.fallback,
+            override: state.llm,
+            providers: ai?.providers ?? [],
+            configured: ai !== null && ai.providers.includes(route.primary.provider),
+          },
+          health: {
+            llmConfigured: ai !== null && ai.providers.includes(route.primary.provider),
+            dailyLimitExhausted: settings.limits.dailyRub !== null && daily >= settings.limits.dailyRub,
+            lastError: lastErrorEntry ? { summary: lastErrorEntry.summary, createdAt: lastErrorEntry.createdAt } : null,
           },
           hints: suggestions.filter((x) => x.status === 'pending'),
-          products: sources.filter((s) => s.type === 'product'),
+          products,
           calculations: lastCalc ? [(lastCalc.details as { calculation: unknown }).calculation] : [],
-          log: log.map((e) => ({ id: e.id, kind: e.kind, summary: e.summary, costRub: e.costRub, createdAt: e.createdAt })),
+          files: filesOf(attachments, documents, log),
+          tasks: tasksOf(log),
+          summary: lastSummary ? { text: lastSummary.summary, createdAt: lastSummary.createdAt } : null,
+          log: log.map((e) => ({ id: e.id, kind: e.kind, summary: e.summary, costRub: e.costRub, createdAt: e.createdAt, ...modelOf(e) })),
           costRub: log.reduce((sum, e) => sum + e.costRub, 0),
         };
       });
@@ -227,57 +288,40 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         if (!b.success) return reply.code(400).send({ error: 'invalid', issues: b.error.issues });
         const last = b.data.messages.at(-1);
         if (last?.role !== 'client') return reply.code(400).send({ error: 'last_must_be_client' });
-
-        let settings: WidgetSettings = (await deps.settings.get(p.accountId)).settings;
-        if (b.data.settings !== undefined) {
-          const draft = widgetSettingsSchema.safeParse(b.data.settings);
-          if (!draft.success) return reply.code(400).send({ error: 'invalid_settings', issues: draft.error.issues });
-          settings = draft.data;
-        }
-        const crm = new SandboxCrm();
-        const memory = new InMemoryMemory();
+        const settings = await sandboxSettings(deps, p.accountId, b.data.settings, reply);
+        if (!settings) return;
+        const route = b.data.model ? { primary: b.data.model, fallback: resolveRoute(settings).fallback } : resolveRoute(settings);
         const { rules } = await deps.pricing.get(p.accountId);
-        const result = await ai.orchestrator.runTurn({
-          settings,
-          history: b.data.messages.slice(0, -1),
-          incoming: [last.text],
-          ctx: { accountId: p.accountId, catalog: deps.catalog, knowledge: deps.knowledge, crm, memory, pricing: rules, tasks: settings.tasks },
-          tools: PHASE2_TOOLS,
-          dynamic: { pricing: pricingCodesHint(rules) },
-        });
-        const costRub = result.cost.usd * settings.billing.usdRubRate;
-        await deps.journal.add({
-          accountId: p.accountId,
-          kind: 'sandbox',
-          summary: result.kind === 'reply' ? result.text : `Песочница: ${result.kind}`,
-          details: { toolCalls: result.toolCalls, sources: result.sources, rejections: result.rejections, userId: p.userId },
-          inputTokens: result.cost.inputTokens,
-          outputTokens: result.cost.outputTokens,
-          costUsd: result.cost.usd,
-          costRub,
-        });
-        return {
-          kind: result.kind,
-          text:
-            result.kind === 'reply'
-              ? result.text
-              : result.kind === 'handoff'
-                ? settings.behavior.handoffPhrase
-                : null,
-          handoff: result.kind === 'handoff' ? result.handoff : null,
-          blockedReason: result.kind === 'blocked' ? result.reason : null,
-          toolCalls: result.toolCalls,
-          sources: result.sources,
-          rejections: result.rejections,
-          notes: crm.notes,
-          tasks: crm.tasks,
-          memory: await memory.get(),
-          calculation: result.calculation ?? null,
-          model: result.model,
-          cost: { usd: result.cost.usd, rub: costRub, inputTokens: result.cost.inputTokens, outputTokens: result.cost.outputTokens },
-        };
+        return runSandbox(deps, p, ai.orchestrator, settings, rules, b.data.messages, route);
       });
 
+      // Сравнение двух моделей на одном диалоге: ответы, инструменты, токены, стоимость и время рядом (раздел 7 ТЗ 1.1.0).
+      api.post('/sandbox/compare', { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } }, async (req, reply) => {
+        const p = principal(req);
+        const ai = await deps.ai(p.accountId);
+        if (!ai) return reply.code(503).send({ error: 'llm_not_configured' });
+        const b = compareBody.safeParse(req.body);
+        if (!b.success) return reply.code(400).send({ error: 'invalid', issues: b.error.issues });
+        const last = b.data.messages.at(-1);
+        if (last?.role !== 'client') return reply.code(400).send({ error: 'last_must_be_client' });
+        const settings = await sandboxSettings(deps, p.accountId, b.data.settings, reply);
+        if (!settings) return;
+        const { rules } = await deps.pricing.get(p.accountId);
+        const results = await Promise.all(
+          b.data.models.map(async (model) => {
+            if (!ai.providers.includes(model.provider)) return { model, error: `Нет ключа ${PROVIDERS[model.provider].label}` };
+            try {
+              const r = await runSandbox(deps, p, ai.orchestrator, settings, rules, b.data.messages, { primary: model, fallback: null }, true);
+              return { ...r, model };
+            } catch (err) {
+              return { model, error: (err as Error).message };
+            }
+          }),
+        );
+        return { results };
+      });
+
+      widgetLlmRoutes(api, deps, principal, requireAdmin);
       widgetPhase2Routes(api, deps, principal, requireAdmin);
       widgetEmailRoutes(api, deps, principal, requireAdmin);
       widgetDocsRoutes(api, deps, principal);
@@ -285,4 +329,132 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
     },
     { prefix: '/widget/v1' },
   );
+}
+
+async function sandboxSettings(deps: Deps, accountId: number, draft: unknown, reply: FastifyReply): Promise<WidgetSettings | null> {
+  let settings: WidgetSettings = (await deps.settings.get(accountId)).settings;
+  if (draft !== undefined) {
+    const parsed = widgetSettingsSchema.safeParse(draft);
+    if (!parsed.success) {
+      void reply.code(400).send({ error: 'invalid_settings', issues: parsed.error.issues });
+      return null;
+    }
+    settings = parsed.data;
+  }
+  return settings;
+}
+
+async function runSandbox(
+  deps: Deps,
+  p: WidgetPrincipal,
+  orchestrator: Orchestrator,
+  settings: WidgetSettings,
+  rules: Awaited<ReturnType<Deps['pricing']['get']>>['rules'],
+  messages: { role: 'client' | 'ai'; text: string }[],
+  route: ChatRoute,
+  compare = false,
+) {
+  const crm = new SandboxCrm();
+  const memory = new InMemoryMemory();
+  const last = messages.at(-1) as { text: string };
+  const started = Date.now();
+  const result: TurnResult = await orchestrator.runTurn({
+    settings,
+    history: messages.slice(0, -1),
+    incoming: [last.text],
+    ctx: { accountId: p.accountId, catalog: deps.catalog, knowledge: deps.knowledge, crm, memory, pricing: rules, tasks: settings.tasks },
+    tools: PHASE2_TOOLS,
+    dynamic: { pricing: pricingCodesHint(rules) },
+    route,
+  });
+  const costRub = result.cost.usd * settings.billing.usdRubRate;
+  await deps.journal.add({
+    accountId: p.accountId,
+    kind: 'sandbox',
+    summary: result.kind === 'reply' ? result.text : `Песочница: ${result.kind}`,
+    details: { toolCalls: result.toolCalls, sources: result.sources, rejections: result.rejections, userId: p.userId, provider: result.provider, model: result.model, requestedModel: result.requestedModel, fallbackUsed: result.fallbackUsed, latencyMs: result.latencyMs, ...(compare ? { compare: true } : {}) },
+    inputTokens: result.cost.inputTokens,
+    outputTokens: result.cost.outputTokens,
+    costUsd: result.cost.usd,
+    costRub,
+  });
+  return {
+    kind: result.kind,
+    text: result.kind === 'reply' ? result.text : result.kind === 'handoff' ? settings.behavior.handoffPhrase : null,
+    handoff: result.kind === 'handoff' ? result.handoff : null,
+    blockedReason: result.kind === 'blocked' ? result.reason : null,
+    toolCalls: result.toolCalls,
+    sources: result.sources,
+    rejections: result.rejections,
+    notes: crm.notes,
+    tasks: crm.tasks,
+    memory: await memory.get(),
+    calculation: result.calculation ?? null,
+    model: result.model,
+    provider: result.provider,
+    requestedModel: result.requestedModel,
+    fallbackUsed: result.fallbackUsed,
+    latencyMs: result.latencyMs,
+    totalMs: Date.now() - started,
+    cost: { usd: result.cost.usd, rub: costRub, inputTokens: result.cost.inputTokens, outputTokens: result.cost.outputTokens },
+  };
+}
+
+/** Провайдер и модель записи журнала (ответы, черновики, подсказки, резюме, песочница). */
+function modelOf(e: JournalRow): { provider?: string; model?: string; fallbackUsed?: boolean } {
+  const d = e.details as { provider?: string; model?: string; fallbackUsed?: boolean; fallback?: boolean };
+  if (!d.model) return {};
+  return { provider: d.provider ?? 'anthropic', model: d.model, ...(d.fallbackUsed || d.fallback ? { fallbackUsed: true } : {}) };
+}
+
+type Attachment = { id: number; url: string; type: string | null; text: string; receivedAt: Date; processed: boolean };
+type Doc = { id: number; filename: string | null; kind: string; data: Record<string, unknown>; createdAt: Date };
+
+/** Файлы клиента из чата сделки со статусом разбора (блок 8 раздела 11 ТЗ). */
+function filesOf(attachments: Attachment[], documents: Doc[], log: JournalRow[]) {
+  const nameOf = (url: string) => decodeURIComponent(new URL(url, 'https://x').pathname.split('/').pop() ?? '') || 'файл';
+  const items = attachments.map((a) => {
+    const name = nameOf(a.url);
+    const doc = documents.find((d) => d.filename === name && d.createdAt >= a.receivedAt) ?? documents.find((d) => d.filename === name);
+    const failed = !doc && log.find((e) => e.kind === 'error' && e.summary.startsWith(`Разбор файла «${name}»`) && e.createdAt >= a.receivedAt);
+    const data = (doc?.data ?? {}) as { summary?: string; openings?: unknown[]; positions?: unknown[] };
+    return {
+      id: a.id,
+      name,
+      type: a.type,
+      url: a.url,
+      receivedAt: a.receivedAt,
+      status: doc ? ('parsed' as const) : failed ? ('error' as const) : a.processed ? ('unparsed' as const) : ('pending' as const),
+      documentId: doc?.id ?? null,
+      kind: doc?.kind ?? null,
+      summary: doc ? (data.summary ?? '') : failed ? failed.summary.replace(/^Разбор файла «[^»]*»: /, '') : '',
+      openings: data.openings?.length ?? 0,
+      positions: data.positions?.length ?? 0,
+    };
+  });
+  // Файлы, загруженные вручную из карточки (нет в чате).
+  for (const d of documents) {
+    if (items.some((i) => i.documentId === d.id)) continue;
+    const data = d.data as { summary?: string; openings?: unknown[]; positions?: unknown[] };
+    items.push({ id: -d.id, name: d.filename ?? 'файл', type: null, url: '', receivedAt: d.createdAt, status: 'parsed', documentId: d.id, kind: d.kind, summary: data.summary ?? '', openings: data.openings?.length ?? 0, positions: data.positions?.length ?? 0 });
+  }
+  return items.sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime()).slice(0, 20);
+}
+
+const TASK_LABEL: Record<string, string> = { callback: 'Перезвонить клиенту', send_offer: 'Отправить КП', check_availability: 'Проверить наличие', measure: 'Согласовать замер', other: 'Задача' };
+
+/** Задачи, поставленные AI: из вызовов crm_create_task в журнале и передач менеджеру (блок 9 раздела 11 ТЗ). */
+function tasksOf(log: JournalRow[]) {
+  const out: { id: string; kind: string; text: string; createdAt: Date; source: 'tool' | 'handoff' }[] = [];
+  for (const e of log) {
+    const calls = ((e.details as { toolCalls?: { name: string; ok: boolean; input?: { type?: string; text?: string } }[] }).toolCalls ?? []).filter((c) => c.name === 'crm_create_task' && c.ok);
+    for (const [i, c] of calls.entries()) {
+      const type = c.input?.type ?? 'other';
+      out.push({ id: `${e.id}-${i}`, kind: TASK_LABEL[type] ?? type, text: c.input?.text ?? '', createdAt: e.createdAt, source: 'tool' });
+    }
+    if (e.kind === 'handoff' && (e.details as { reason?: string }).reason) {
+      out.push({ id: `${e.id}-h`, kind: 'Передача менеджеру', text: e.summary, createdAt: e.createdAt, source: 'handoff' });
+    }
+  }
+  return out.slice(0, 10);
 }

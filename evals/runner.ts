@@ -1,4 +1,5 @@
 import { checkFacts, Orchestrator, type HistoryMessage, type LlmClient, type TurnResult } from '@ai-door/agent';
+import type { ChatRoute, LlmGateway } from '@ai-door/llm';
 import type { CatalogRepo } from '@ai-door/catalog';
 import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
@@ -44,13 +45,20 @@ export interface DialogReport {
   rejections: number;
   costUsd: number;
   latencyMs: number[];
+  /** Провайдер и фактическая модель последнего ответа. */
+  provider: string;
+  model: string;
+  fallbackUsed: boolean;
 }
 
 export interface EvalEnv {
   accountId: number;
   catalog: CatalogRepo;
   knowledge: KnowledgeRepo;
-  llm: LlmClient;
+  /** Сырой клиент Anthropic или единый шлюз (любой провайдер). */
+  llm: LlmClient | LlmGateway;
+  /** Провайдер и модель прогона; по умолчанию — из настроек. */
+  route?: ChatRoute;
   settings?: WidgetSettings;
   pricing?: PricingRules | null;
   /** Полный дамп данных (каталог + база знаний) для независимой сверки. */
@@ -69,6 +77,7 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
   let last: TurnResult | null = null;
   let costUsd = 0;
   let rejections = 0;
+  let fallbackUsed = false;
 
   for (const turn of d.turns) {
     const started = Date.now();
@@ -79,7 +88,9 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
       ctx: { accountId: env.accountId, catalog: env.catalog, knowledge: env.knowledge, crm, memory, pricing: env.pricing ?? null },
       tools: PHASE2_TOOLS,
       dynamic: { pricing: pricingCodesHint(env.pricing) },
+      ...(env.route ? { route: env.route } : {}),
     });
+    fallbackUsed ||= last.fallbackUsed;
     if (last.calculation) calcTotal = last.calculation.total;
     latencyMs.push(Date.now() - started);
     costUsd += last.cost.usd;
@@ -148,6 +159,9 @@ export async function runDialog(d: Dialog, env: EvalEnv): Promise<DialogReport> 
     rejections,
     costUsd,
     latencyMs,
+    provider: result.provider,
+    model: result.model,
+    fallbackUsed,
   };
 }
 
@@ -158,16 +172,38 @@ const TASK_LABEL: Record<string, string> = {
   measure: 'Согласовать замер',
 };
 
-export function summarize(reports: DialogReport[]) {
+export interface EvalSummary {
+  total: number;
+  passed: number;
+  fabricated: number;
+  rejections: number;
+  costUsd: number;
+  /** Средняя стоимость диалога, $. */
+  avgCostUsd: number;
+  p95LatencyMs: number;
+  /** Диалоги с ожидаемой передачей менеджеру: сколько сработало. */
+  handoffExpected: number;
+  handoffOk: number;
+  fallbacks: number;
+}
+
+export function summarize(reports: DialogReport[], dialogs: Pick<Dialog, 'id' | 'expect'>[] = []): EvalSummary {
   const lat = reports.flatMap((r) => r.latencyMs).sort((a, b) => a - b);
-  const p95 = lat.length ? lat[Math.min(lat.length - 1, Math.ceil(lat.length * 0.95) - 1)] : 0;
+  const p95 = lat.length ? (lat[Math.min(lat.length - 1, Math.ceil(lat.length * 0.95) - 1)] ?? 0) : 0;
+  const expectHandoff = new Set(dialogs.filter((d) => d.expect.final.includes('handoff') && d.expect.final.length === 1).map((d) => d.id));
+  const handoffReports = reports.filter((r) => expectHandoff.has(r.id));
+  const costUsd = reports.reduce((n, r) => n + r.costUsd, 0);
   return {
     total: reports.length,
     passed: reports.filter((r) => r.passed).length,
     fabricated: reports.reduce((n, r) => n + r.fabricated.length, 0),
     rejections: reports.reduce((n, r) => n + r.rejections, 0),
-    costUsd: reports.reduce((n, r) => n + r.costUsd, 0),
+    costUsd,
+    avgCostUsd: reports.length ? costUsd / reports.length : 0,
     p95LatencyMs: p95,
+    handoffExpected: handoffReports.length,
+    handoffOk: handoffReports.filter((r) => r.final === 'handoff').length,
+    fallbacks: reports.filter((r) => r.fallbackUsed).length,
   };
 }
 

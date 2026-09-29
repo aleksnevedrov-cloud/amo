@@ -8,6 +8,8 @@ export interface ConversationState {
   pausedAt: Date | null;
   misses: number;
   lastAiAt: Date | null;
+  /** Провайдер и модель, заданные для этой сделки в панели (раздел 3 ТЗ 1.1.0); null — по настройкам. */
+  llm: { provider: 'anthropic' | 'openai'; model: string } | null;
 }
 
 export interface PendingMessage {
@@ -24,7 +26,7 @@ export interface PendingMessage {
   receivedAt: Date;
 }
 
-const EMPTY: ConversationState = { paused: false, pauseReason: null, pausedAt: null, misses: 0, lastAiAt: null };
+const EMPTY: ConversationState = { paused: false, pauseReason: null, pausedAt: null, misses: 0, lastAiAt: null, llm: null };
 
 /** Состояние AI по сделке, переписка и очередь входящих сообщений. */
 export class DialogRepo {
@@ -32,12 +34,38 @@ export class DialogRepo {
 
   async state(accountId: number, leadId: number): Promise<ConversationState> {
     const { rows } = await this.db.query(
-      'SELECT paused, pause_reason, paused_at, misses, last_ai_at FROM conversations WHERE account_id = $1 AND lead_id = $2',
+      'SELECT paused, pause_reason, paused_at, misses, last_ai_at, llm_provider, llm_model FROM conversations WHERE account_id = $1 AND lead_id = $2',
       [accountId, leadId],
     );
     const r = rows[0];
     if (!r) return { ...EMPTY };
-    return { paused: r.paused, pauseReason: r.pause_reason, pausedAt: r.paused_at, misses: r.misses, lastAiAt: r.last_ai_at };
+    return {
+      paused: r.paused,
+      pauseReason: r.pause_reason,
+      pausedAt: r.paused_at,
+      misses: r.misses,
+      lastAiAt: r.last_ai_at,
+      llm: r.llm_provider && r.llm_model ? { provider: r.llm_provider, model: r.llm_model } : null,
+    };
+  }
+
+  /** Провайдер и модель только для этой сделки; null — снять переопределение. */
+  async setLlmOverride(accountId: number, leadId: number, ref: { provider: 'anthropic' | 'openai'; model: string } | null): Promise<void> {
+    await this.db.query(
+      `INSERT INTO conversations (account_id, lead_id, llm_provider, llm_model) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (account_id, lead_id) DO UPDATE SET llm_provider = EXCLUDED.llm_provider, llm_model = EXCLUDED.llm_model, updated_at = now()`,
+      [accountId, leadId, ref?.provider ?? null, ref?.model ?? null],
+    );
+  }
+
+  /** Вложения из чата сделки (все входящие с файлом), новые первыми — блок «Файлы клиента». */
+  async attachments(accountId: number, leadId: number, limit = 20): Promise<{ id: number; url: string; type: string | null; text: string; receivedAt: Date; processed: boolean }[]> {
+    const { rows } = await this.db.query(
+      `SELECT id, attachment_url, attachment_type, text, received_at, processed_at FROM pending_messages
+        WHERE account_id = $1 AND lead_id = $2 AND attachment_url IS NOT NULL ORDER BY id DESC LIMIT $3`,
+      [accountId, leadId, limit],
+    );
+    return rows.map((r) => ({ id: Number(r.id), url: r.attachment_url, type: r.attachment_type, text: r.text, receivedAt: r.received_at, processed: r.processed_at !== null }));
   }
 
   async pause(accountId: number, leadId: number, reason: string): Promise<void> {

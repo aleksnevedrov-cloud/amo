@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { SandboxResult, WidgetApi, WidgetSettings } from '../api.ts';
+import type { ModelRef, ProviderId, SandboxResult, WidgetApi, WidgetSettings } from '../api.ts';
 import { rub } from './StatusBadge.tsx';
 import { s } from './styles.ts';
 import { errorMessage } from './useLoad.ts';
@@ -11,7 +11,7 @@ interface Turn {
 }
 
 /** Песочница: диалог с агентом на реальном каталоге, без записи в CRM и без отправки клиенту. */
-export function Sandbox({ api, draft }: { api: WidgetApi; draft?: WidgetSettings }) {
+export function Sandbox({ api, draft, compare: _compare, providers: _providers }: { api: WidgetApi; draft?: WidgetSettings; compare?: ModelRef[]; providers?: ProviderId[] }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);

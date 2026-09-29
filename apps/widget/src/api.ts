@@ -1,7 +1,8 @@
 import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@ai-door/db';
+import type { ModelInfo, ModelRef, ProviderId } from '@ai-door/llm/types';
 import type { CalcResult, PricingRules } from '@ai-door/pricing';
 
-export type { CalcResult, PricingRules };
+export type { CalcResult, PricingRules, ModelInfo, ModelRef, ProviderId };
 export type Suggestion = Omit<DbSuggestion, 'createdAt' | 'decidedAt'> & { createdAt: string; decidedAt: string | null };
 import type { AmoWidgetSelf } from './amo.ts';
 
@@ -22,6 +23,15 @@ export interface Status {
   enabled: boolean;
   mode: Mode;
   llmConfigured: boolean;
+  /** 1.1.0: провайдер и модель по умолчанию, ключи каких провайдеров есть, здоровье интеграции. */
+  llm?: {
+    provider: ProviderId;
+    model: string;
+    fallback: ModelRef | null;
+    providers: ProviderId[];
+    missingModels: string[];
+    lastError: { summary: string; createdAt: string } | null;
+  };
   spend: { todayRub: number; monthRub: number };
   dailyLimitRub: number | null;
   catalog: CatalogStats;
@@ -45,13 +55,48 @@ export interface JournalItem {
   createdAt: string;
 }
 
+export interface LeadFile {
+  id: number;
+  name: string;
+  type: string | null;
+  url: string;
+  receivedAt: string;
+  status: 'parsed' | 'error' | 'unparsed' | 'pending';
+  documentId: number | null;
+  kind: string | null;
+  summary: string;
+  openings: number;
+  positions: number;
+}
+
+export interface LeadTask {
+  id: string;
+  kind: string;
+  text: string;
+  createdAt: string;
+  source: 'tool' | 'handoff';
+}
+
+export interface LeadProduct extends Source {
+  price?: number | null;
+  available?: boolean | null;
+  picture?: string | null;
+  category?: string | null;
+}
+
 export interface LeadPanel {
   leadId: number;
   ai: { enabled: boolean; mode: Mode; paused: boolean; pauseReason: string | null; pausedAt: string | null };
+  /** 1.1.0: кто отвечает в этой сделке (с учётом переопределения). Нет у старого бэкенда. */
+  llm?: { provider: ProviderId; model: string; fallback: ModelRef | null; override: ModelRef | null; providers: ProviderId[]; configured: boolean };
+  health?: { llmConfigured: boolean; dailyLimitExhausted: boolean; lastError: { summary: string; createdAt: string } | null };
   hints: Suggestion[];
-  products: Source[];
+  products: LeadProduct[];
   calculations: CalcResult[];
-  log: { id: number; kind: string; summary: string; costRub: number; createdAt: string }[];
+  files?: LeadFile[];
+  tasks?: LeadTask[];
+  summary?: { text: string; createdAt: string } | null;
+  log: { id: number; kind: string; summary: string; costRub: number; createdAt: string; provider?: string; model?: string; fallbackUsed?: boolean }[];
   costRub: number;
 }
 
@@ -78,7 +123,92 @@ export interface SandboxResult {
   memory: ClientMemory;
   calculation: CalcResult | null;
   model: string;
+  provider?: ProviderId;
+  requestedModel?: string;
+  fallbackUsed?: boolean;
+  /** Время ответов модели за ход, мс. */
+  latencyMs?: number;
+  totalMs?: number;
   cost: { usd: number; rub: number; inputTokens: number; outputTokens: number };
+}
+
+export type CompareResult = ({ model: ModelRef } & Partial<SandboxResult> & { error?: string })[];
+
+export interface LlmKeys {
+  provider: ProviderId;
+  fallbackProvider: ProviderId;
+  keys: Record<ProviderId, { saved: boolean; mask: string | null; source: 'account' | 'server' | null }>;
+  providers: ProviderId[];
+}
+
+export interface LlmModels {
+  provider: ProviderId;
+  models: ModelInfo[];
+  fetchedAt: string | null;
+  fromCache: boolean;
+  source: 'api' | 'tariff';
+  noKey: boolean;
+  error?: string;
+}
+
+export interface ModelStats {
+  provider: string;
+  model: string;
+  dialogs: number;
+  replies: number;
+  drafts: number;
+  hints: number;
+  handoffs: number;
+  sandbox: number;
+  errors: number;
+  fallbacks: number;
+  costRub: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgCostPerDialogRub: number;
+  avgLatencyMs: number | null;
+}
+
+export interface EvalReport {
+  id: string;
+  topic: string;
+  passed: boolean;
+  failures: string[];
+  fabricated: string[];
+  final: string;
+  handoffReason: string | null;
+  costUsd: number;
+  latencyMs: number[];
+  provider: string;
+  model: string;
+  fallbackUsed: boolean;
+}
+
+export interface EvalSummary {
+  total: number;
+  passed: number;
+  fabricated: number;
+  rejections: number;
+  costUsd: number;
+  avgCostUsd: number;
+  p95LatencyMs: number;
+  handoffExpected: number;
+  handoffOk: number;
+  fallbacks: number;
+}
+
+export interface EvalRun {
+  id: number;
+  status: 'running' | 'done' | 'failed';
+  models: ModelRef[];
+  dialogIds: string[];
+  results?: { ref: ModelRef; reports: EvalReport[]; summary: EvalSummary | null; error?: string }[];
+  summary: unknown;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  progress: { done: number; total: number };
 }
 
 export interface KnowledgeItem {
@@ -222,8 +352,8 @@ export class WidgetApi {
   knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
   addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
-  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings) =>
-    this.call<SandboxResult>('POST', '/widget/v1/sandbox', settings ? { messages, settings } : { messages });
+  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef) =>
+    this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}) });
 
   pricing = () => this.call<{ rules: PricingRules; version: number }>('GET', '/widget/v1/pricing');
   savePricing = (rules: PricingRules) => this.call<{ rules: PricingRules; version: number }>('PUT', '/widget/v1/pricing', rules);
@@ -249,9 +379,22 @@ export class WidgetApi {
   settingsVersion = (id: number) => this.call<SettingsVersion & { settings: WidgetSettings }>('GET', `/widget/v1/settings/history/${id}`);
   restoreSettings = (id: number) => this.call<{ version: number }>('POST', `/widget/v1/settings/history/${id}/restore`);
   llmStatus = () => this.call<{ hasOwnKey: boolean; configured: boolean; source: 'account' | 'server' | null }>('GET', '/widget/v1/llm/status');
-  setLlmKey = (key: string) => this.call<{ ok: true }>('PUT', '/widget/v1/llm/key', { key });
-  deleteLlmKey = () => this.call<{ ok: true }>('DELETE', '/widget/v1/llm/key');
-  testLlmKey = (key?: string) => this.call<{ ok: true; models: string[] } | { ok: false; error: string }>('POST', '/widget/v1/llm/test', key ? { key } : {});
+  llmKeys = () => this.call<LlmKeys>('GET', '/widget/v1/llm/keys');
+  // Anthropic — провайдер по умолчанию: тело и адрес как в 1.0.x (совместимость с бэкендом 1.0.x).
+  setLlmKey = (key: string, provider: ProviderId = 'anthropic') => this.call<{ ok: true }>('PUT', '/widget/v1/llm/key', provider === 'anthropic' ? { key } : { key, provider });
+  deleteLlmKey = (provider: ProviderId = 'anthropic') => this.call<{ ok: true }>('DELETE', `/widget/v1/llm/key${provider === 'anthropic' ? '' : `?provider=${provider}`}`);
+  testLlmKey = (key?: string, provider: ProviderId = 'anthropic') =>
+    this.call<{ ok: true; models: string[] } | { ok: false; error: string }>('POST', '/widget/v1/llm/test', { ...(key ? { key } : {}), ...(provider === 'anthropic' ? {} : { provider }) });
+  llmModels = (provider: ProviderId, refresh = false) => this.call<LlmModels>('GET', `/widget/v1/llm/models?provider=${provider}${refresh ? '&refresh=1' : ''}`);
+  setLeadModel = (leadId: number, model: ModelRef | null) => this.call<{ ok: true }>('PUT', `/widget/v1/leads/${leadId}/llm`, { model });
+  sandboxCompare = (messages: { role: 'client' | 'ai'; text: string }[], models: ModelRef[], settings?: WidgetSettings) =>
+    this.call<{ results: CompareResult }>('POST', '/widget/v1/sandbox/compare', settings ? { messages, models, settings } : { messages, models });
+  evalDialogs = () => this.call<{ items: { id: string; topic: string; turns: number }[] }>('GET', '/widget/v1/evals/dialogs');
+  runEval = (models: ModelRef[], opts: { ids?: string[]; limit?: number } = {}) => this.call<{ id: number }>('POST', '/widget/v1/evals/run', { models, ...opts });
+  evalRuns = () => this.call<{ items: EvalRun[] }>('GET', '/widget/v1/evals/runs');
+  evalRun = (id: number) => this.call<EvalRun>('GET', `/widget/v1/evals/runs/${id}`);
+  analyticsModels = (days: number) => this.call<{ items: ModelStats[] }>('GET', `/widget/v1/analytics/models?days=${days}`);
+  analyzeChatFile = (leadId: number, fileId: number) => this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/files/${fileId}/analyze`);
   purgeAccount = () => this.call<{ ok: true }>('POST', '/widget/v1/account/purge', { confirm: 'УДАЛИТЬ' });
 
   leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);

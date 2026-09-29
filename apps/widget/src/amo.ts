@@ -4,6 +4,8 @@
  */
 export interface AmoWidgetSelf {
   get_settings(): { widget_code: string; [key: string]: unknown };
+  /** Параметры виджета от amo; `path` — адрес папки виджета (для картинок). */
+  params?: { path?: string; [key: string]: unknown };
   system(): { area?: string; subdomain?: string; amouser_id?: number };
   i18n(key: string): unknown;
   render_template(opts: { caption: { class_name: string }; body: string; render: string }): void;

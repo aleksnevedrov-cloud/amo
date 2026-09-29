@@ -18,6 +18,15 @@ export function ConnectionBadge({ status }: { status: Pick<Status, 'connected' |
 }
 
 export const rub = (n: number) => `${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`;
+export const usd = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 4 : 2 })}`;
+
+const PROVIDER_SHORT: Record<string, string> = { anthropic: 'Claude', openai: 'ChatGPT' };
+export const PROVIDER_NAME: Record<string, string> = { anthropic: 'Anthropic Claude', openai: 'OpenAI ChatGPT' };
+export const providerShort = (p: string | undefined | null) => (p ? (PROVIDER_SHORT[p] ?? p) : '');
+/** «Anthropic» / «OpenAI» — для подсказок про ключ. */
+export const providerVendor = (p: string | undefined | null) => (PROVIDER_NAME[p ?? ''] ?? p ?? '').split(' ')[0] ?? '';
+/** «Claude · claude-opus-5» для журнала и панели. */
+export const modelLabel = (provider: string | undefined | null, model: string | undefined | null) => (model ? `${providerShort(provider ?? 'anthropic')} · ${model}` : '');
 
 export const dateTime = (iso: string) =>
   new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });

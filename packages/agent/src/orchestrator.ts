@@ -1,10 +1,11 @@
-import type Anthropic from '@anthropic-ai/sdk';
+import type { ChatRoute, LlmGateway, ProviderId, UnifiedMessage, UnifiedPart, UnifiedTool } from '@ai-door/llm';
 import type { Role, WidgetSettings } from '@ai-door/db';
 import { toolByName, type AgentTool, type HandoffRequest, type Source, type ToolContext } from '@ai-door/tools';
 import { checkFacts, describeViolations, type FactViolation } from './factcheck.ts';
-import { createWithFallback, type LlmClient } from './llm.ts';
-import { addCost, costOf, ZERO_COST, type Cost } from './pricing.ts';
+import { asGateway, type LlmClient } from './llm.ts';
+import { addCost, costOfResponse, ZERO_COST, type Cost } from './pricing.ts';
 import { buildSystem, type DynamicContext } from './prompt.ts';
+import { resolveRoute } from './route.ts';
 import type { CalcResult } from '@ai-door/pricing';
 
 export interface HistoryMessage {
@@ -26,7 +27,15 @@ interface Common {
   toolCalls: ToolCallTrace[];
   sources: Source[];
   cost: Cost;
+  /** Провайдер и фактическая модель последнего ответа. */
+  provider: ProviderId;
   model: string;
+  /** Что запрашивали по настройкам (отличается от model при резервной модели или серверном fallback). */
+  requestedModel: string;
+  /** Хотя бы один ответ хода дала резервная модель. */
+  fallbackUsed: boolean;
+  /** Суммарное время ответов модели за ход, мс. */
+  latencyMs: number;
   /** Сколько раз ответ отклонял пост-фильтр. */
   rejections: FactViolation[][];
   /** Последний расчёт price_calculate в этом ходе — черновик детализации. */
@@ -49,6 +58,8 @@ export interface TurnInput {
   dynamic?: DynamicContext;
   /** Данные клиента из памяти (бюджет, размеры) — допустимые числа для пост-фильтра. */
   clientFacts?: string[];
+  /** Провайдер и модель хода; по умолчанию — из настроек (глобально). */
+  route?: ChatRoute;
 }
 
 const MAX_ITERATIONS = 8;
@@ -56,8 +67,11 @@ const MAX_REJECTIONS = 2;
 const SEARCH_TOOLS = new Set(['catalog_search', 'catalog_get_product', 'knowledge_search']);
 const CATALOG_TOOLS = new Set(['catalog_search', 'catalog_get_product']);
 
-/** История диалога → сообщения API. Менеджер — сторона продавца (assistant) с пометкой. */
-export function toApiMessages(history: HistoryMessage[], incoming: string[]): Anthropic.Beta.BetaMessageParam[] {
+/**
+ * История диалога → единые сообщения. Менеджер — сторона продавца (assistant) с пометкой.
+ * История из amoCRM и памяти — только текст, поэтому подходит любому провайдеру (раздел 3 ТЗ).
+ */
+export function toApiMessages(history: HistoryMessage[], incoming: string[]): UnifiedMessage[] {
   const items: { role: 'user' | 'assistant'; text: string }[] = history.map((m) => ({
     role: m.role === 'client' ? 'user' : 'assistant',
     text: m.role === 'manager' ? `(Сообщение менеджера) ${m.text}` : m.text,
@@ -73,69 +87,80 @@ export function toApiMessages(history: HistoryMessage[], incoming: string[]): An
   return merged.map((m) => ({ role: m.role, content: m.text }));
 }
 
+/** Инструменты агента → единое описание (одна JSON Schema на инструмент). */
+export const toUnifiedTools = (tools: readonly AgentTool[]): UnifiedTool[] =>
+  tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as Record<string, unknown> }));
+
 export class Orchestrator {
-  constructor(private readonly llm: LlmClient) {}
+  private readonly gateway: LlmGateway;
+
+  constructor(llm: LlmClient | LlmGateway) {
+    this.gateway = asGateway(llm);
+  }
 
   async runTurn(input: TurnInput): Promise<TurnResult> {
     const { settings, ctx, tools } = input;
+    const route = input.route ?? resolveRoute(settings);
     const messages = toApiMessages(input.history, input.incoming);
     const clientTexts = [
       ...input.history.filter((m) => m.role === 'client').map((m) => m.text),
       ...input.incoming,
       ...(input.clientFacts ?? []),
     ];
-    const apiTools: Anthropic.Beta.BetaToolUnion[] = tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema as Anthropic.Beta.BetaTool.InputSchema,
-    }));
+    const apiTools = toUnifiedTools(tools);
     const system = buildSystem(settings, input.now, input.dynamic);
 
-    const common: Common = { toolCalls: [], sources: [], cost: ZERO_COST, model: settings.model.model, rejections: [] };
+    const common: Common = {
+      toolCalls: [],
+      sources: [],
+      cost: ZERO_COST,
+      provider: route.primary.provider,
+      model: route.primary.model,
+      requestedModel: route.primary.model,
+      fallbackUsed: false,
+      latencyMs: 0,
+      rejections: [],
+    };
     const toolResults: string[] = [];
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const res = await createWithFallback(
-        this.llm,
+      const res = await this.gateway.chat(
         {
-          model: settings.model.model,
-          max_tokens: settings.model.maxTokens,
           system,
-          tools: apiTools,
           messages,
-          output_config: { effort: settings.model.effort },
+          tools: apiTools,
+          maxTokens: settings.model.maxTokens,
+          effort: settings.model.effort,
+          temperature: settings.model.temperature ?? null,
+          cacheKey: `ai-door-${ctx.accountId}`,
         },
-        settings.model.fallbackModel,
+        route,
       );
-      common.cost = addCost(common.cost, costOf(res.model, res.usage));
+      common.cost = addCost(common.cost, costOfResponse({ provider: res.provider, model: res.model }, res.usage, settings.billing.pricing));
       common.model = res.model;
-      messages.push({ role: 'assistant', content: res.content as Anthropic.Beta.BetaContentBlockParam[] });
+      common.provider = res.provider;
+      common.fallbackUsed ||= res.fallbackUsed;
+      common.latencyMs += res.latencyMs;
+      messages.push(res.assistantMessage);
 
-      if (res.stop_reason === 'tool_use') {
-        const uses = res.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
-        const outcomes = await Promise.all(uses.map((u) => this.execTool(tools, ctx, u, common)));
+      if (res.stopReason === 'tool_call' && res.toolCalls.length) {
+        const outcomes = await Promise.all(res.toolCalls.map((u) => this.execTool(tools, ctx, u, common)));
         const handoff = outcomes.find((o) => o.handoff)?.handoff;
         if (handoff) return { ...common, kind: 'handoff', handoff };
         for (const o of outcomes) toolResults.push(o.json);
         // Все результаты — одним сообщением пользователя.
-        messages.push({
-          role: 'user',
-          content: uses.map((u, k) => {
-            const o = outcomes[k] ?? { json: '{}', isError: true };
-            return { type: 'tool_result' as const, tool_use_id: u.id, content: o.json, ...(o.isError ? { is_error: true } : {}) };
-          }),
+        const parts: UnifiedPart[] = res.toolCalls.map((u, k) => {
+          const o = outcomes[k] ?? { json: '{}', isError: true };
+          return { type: 'tool_result', toolCallId: u.id, name: u.name, content: o.json, ...(o.isError ? { isError: true } : {}) };
         });
+        messages.push({ role: 'user', content: parts });
         continue;
       }
-      if (res.stop_reason === 'pause_turn') continue;
-      if (res.stop_reason === 'refusal') return { ...common, kind: 'blocked', reason: 'refusal' };
-      if (res.stop_reason === 'max_tokens') return { ...common, kind: 'blocked', reason: 'max_tokens' };
+      if (res.stopReason === 'pause' || (res.stopReason === 'tool_call' && !res.toolCalls.length)) continue;
+      if (res.stopReason === 'refusal') return { ...common, kind: 'blocked', reason: 'refusal' };
+      if (res.stopReason === 'max_tokens') return { ...common, kind: 'blocked', reason: 'max_tokens' };
 
-      const text = res.content
-        .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-        .trim();
+      const text = (res.text ?? '').trim();
       if (!text) return { ...common, kind: 'blocked', reason: 'empty_reply' };
 
       const violations = checkFacts({
@@ -167,7 +192,7 @@ export class Orchestrator {
   private async execTool(
     tools: readonly AgentTool[],
     ctx: ToolContext,
-    use: Anthropic.Beta.BetaToolUseBlock,
+    use: { id: string; name: string; args: Record<string, unknown> },
     common: Common,
   ): Promise<{ json: string; isError: boolean; handoff?: HandoffRequest }> {
     const started = Date.now();
@@ -175,7 +200,7 @@ export class Orchestrator {
     const trace: ToolCallTrace = {
       name: use.name,
       specName: tool?.specName ?? use.name,
-      input: use.input,
+      input: use.args,
       ok: false,
       empty: false,
       durationMs: 0,
@@ -183,7 +208,7 @@ export class Orchestrator {
     common.toolCalls.push(trace);
     try {
       if (!tool) throw new Error(`Неизвестный инструмент ${use.name}`);
-      const parsed = tool.input.safeParse(use.input);
+      const parsed = tool.input.safeParse(use.args);
       if (!parsed.success) throw new Error(`Некорректные параметры: ${parsed.error.issues.map((x) => x.message).join('; ')}`);
       const out = await tool.run(ctx, parsed.data);
       trace.ok = true;

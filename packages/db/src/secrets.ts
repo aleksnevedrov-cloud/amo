@@ -1,7 +1,8 @@
 import type { SecretBox } from '@ai-door/shared';
 import type { Db } from './pool.ts';
 
-export type SecretKind = 'anthropic';
+export type SecretKind = 'anthropic' | 'openai';
+export const SECRET_KINDS: readonly SecretKind[] = ['anthropic', 'openai'];
 
 /** Секреты аккаунта (ключи провайдеров), зашифрованные; обратно через API не отдаются. */
 export class SecretsRepo {
@@ -26,6 +27,12 @@ export class SecretsRepo {
   async has(accountId: number, kind: SecretKind): Promise<boolean> {
     const { rows } = await this.db.query('SELECT 1 FROM account_secrets WHERE account_id = $1 AND kind = $2', [accountId, kind]);
     return rows.length > 0;
+  }
+
+  /** Какие ключи сохранены у аккаунта. */
+  async list(accountId: number): Promise<SecretKind[]> {
+    const { rows } = await this.db.query('SELECT kind FROM account_secrets WHERE account_id = $1 ORDER BY kind', [accountId]);
+    return rows.map((r) => r.kind as SecretKind).filter((k) => SECRET_KINDS.includes(k));
   }
 
   async remove(accountId: number, kind: SecretKind): Promise<void> {
