@@ -23,6 +23,10 @@ export const LOGOS = {
 await rm(join(root, 'dist'), { recursive: true, force: true });
 await mkdir(join(out, 'images'), { recursive: true });
 
+// Стилевой слой по макету Figma: вшивается в бандл (define __STYLES__) и кладётся в архив файлом style.css.
+const styles = await readFile(join(root, 'src/styles.css'), 'utf8');
+await writeFile(join(out, 'style.css'), styles);
+
 const result = await build({
   entryPoints: [join(root, 'src/index.tsx')],
   bundle: true,
@@ -32,7 +36,7 @@ const result = await build({
   target: 'es2020',
   minify: true,
   jsx: 'automatic',
-  define: { __API_URL__: JSON.stringify(apiUrl), 'process.env.NODE_ENV': '"production"' },
+  define: { __API_URL__: JSON.stringify(apiUrl), __STYLES__: JSON.stringify(styles), 'process.env.NODE_ENV': '"production"' },
   legalComments: 'none',
 });
 const bundle = result.outputFiles[0].text;
@@ -62,4 +66,4 @@ const walk = async (dir) => {
 };
 await walk(out);
 await writeFile(join(root, 'dist/widget.zip'), zipSync(files, { level: 9 }));
-console.log(`widget.zip собран: ${Object.keys(files).length} файлов, API ${apiUrl}, script.js ${(script.length / 1024).toFixed(0)} КБ`);
+console.log(`widget.zip собран: ${Object.keys(files).length} файлов, API ${apiUrl}, script.js ${(script.length / 1024).toFixed(0)} КБ, style.css ${(styles.length / 1024).toFixed(1)} КБ`);

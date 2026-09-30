@@ -6,6 +6,22 @@ import { LeadPanel } from './components/LeadPanel.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 
 declare const __API_URL__: string;
+declare const __STYLES__: string;
+
+/**
+ * Стилевой слой виджета (src/styles.css) вшит в бандл сборкой и вставляется в документ один раз.
+ * В архив тот же CSS кладётся отдельным файлом style.css — на случай, если он понадобится снаружи.
+ */
+function ensureStyles(): void {
+  if (typeof document === 'undefined' || document.getElementById('ai-door-styles')) return;
+  // В тестах и в dev-сборке define отсутствует — тогда стили просто не вставляются.
+  const css = typeof __STYLES__ === 'string' ? __STYLES__ : '';
+  if (!css) return;
+  const tag = document.createElement('style');
+  tag.id = 'ai-door-styles';
+  tag.textContent = css;
+  document.head.appendChild(tag);
+}
 
 /**
  * Шаги Salesbot для обработчика виджета:
@@ -43,6 +59,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
 
   const mount = (key: string, el: Element | null, node: React.ReactNode) => {
     if (!el) return;
+    ensureStyles();
     roots.get(key)?.unmount();
     const root = createRoot(el);
     root.render(<ErrorBoundary>{node}</ErrorBoundary>);
@@ -66,6 +83,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
     bind_actions: safe(() => undefined),
 
     render: safe(() => {
+      ensureStyles();
       if (self.system().area !== 'lcard') return;
       const leadId = currentLeadId();
       if (!leadId) return;
@@ -76,7 +94,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
         render: `<div id="${id}"></div>`,
       });
       const path = typeof self.params?.path === 'string' ? self.params.path.replace(/\/$/, '') : '';
-      mount('lcard', document.getElementById(id), <LeadPanel api={api} leadId={leadId} logoUrl={path ? `${path}/images/logo_min.png` : undefined} settingsUrl={advancedSettingsUrl(code())} />);
+      mount('lcard', document.getElementById(id), <LeadPanel api={api} leadId={leadId} assetsUrl={path ? `${path}/images` : undefined} settingsUrl={advancedSettingsUrl(code())} />);
     }),
 
     /**

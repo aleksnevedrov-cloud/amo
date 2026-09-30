@@ -28,7 +28,8 @@ describe('архив виджета', () => {
     expect(m.widget.interface_version).toBe(2);
     expect(m.widget.locale).toEqual(['ru', 'en']);
     expect(m.locations).toEqual(expect.arrayContaining(['settings', 'advanced_settings', 'lcard-1', 'salesbot_designer']));
-    expect(m.widget.version).toBe('1.1.0');
+    // Версия манифеста берётся из package.json — тест не даёт им разойтись.
+    expect(m.widget.version).toBe(JSON.parse(readFileSync(`${root}/package.json`, 'utf8')).version);
   });
 
   it('все ключи перевода из манифеста есть в ru и en', () => {

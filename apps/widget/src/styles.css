@@ -1,0 +1,142 @@
+/*
+ * Стилевой слой виджета «AI-агент продаж дверей».
+ * Верстка по макету Figma «Rf-Dveri-26 → Виджет AI РФ Двери» (фрейм 550 px),
+ * пересчитанному под ширину колонки виджетов в карточке сделки amoCRM (~280-300 px).
+ * Токены макета: фон #F7F8FA, карточка #FFF/#E1E5E9/12px, текст #28313D, приглушённый #8A949F,
+ * зелёный #61C100 (обводка) и #258500 (текст), ссылка #087BBE, пустое состояние #F5F7F9, шрифт Open Sans.
+ */
+.ai-door-root {
+  --ad-bg: #f7f8fa;
+  --ad-card: #fff;
+  --ad-line: #e1e5e9;
+  --ad-text: #28313d;
+  --ad-muted: #8a949f;
+  --ad-green: #61c100;
+  --ad-green-ink: #258500;
+  --ad-link: #087bbe;
+  --ad-soft: #f5f7f9;
+  --ad-radius: 8px;
+  --ad-radius-sm: 6px;
+  font-family: 'Open Sans', 'PT Sans', Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ad-text);
+  background: var(--ad-bg);
+  margin: -8px -10px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+.ai-door-root * { box-sizing: border-box; }
+
+/*
+ * Шапка виджета рисуется самим amoCRM (.ai-door-caption передаётся в render_template):
+ * внутри — логотип logo_medium.png и стрелка сворачивания. Приводим её к макету:
+ * компактная белая полоса с логотипом нормального размера, а не картинка во всю ширину.
+ * Класс лежит ВНЕ .ai-door-root, поэтому селекторы здесь без вложенности в него.
+ */
+.ai-door-caption {
+  background: #fff !important;
+  padding: 9px 34px 9px 12px !important;
+  position: relative;
+  margin: 0 !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  border-bottom: 1px solid #e1e5e9;
+  min-height: 0 !important;
+  height: auto !important;
+  line-height: 0;
+  text-align: left;
+}
+.ai-door-caption img.card-widgets__widget__caption__logo {
+  height: 20px !important;
+  width: auto !important;
+  max-width: 150px !important;
+  margin: 0 !important;
+  object-fit: contain;
+}
+.ai-door-caption img.card-widgets__widget__caption__logo_min { display: none !important; }
+/* Стрелка сворачивания: своя «галочка», иначе на белом фоне штатная не видна. */
+.ai-door-caption .card-widgets__widget__caption__arrow {
+  position: absolute !important;
+  right: 12px; top: 50%; margin: 0 !important;
+  transform: translateY(-50%);
+  width: 12px !important; height: 12px !important;
+  background: none !important;
+}
+.ai-door-caption .card-widgets__widget__caption__arrow::after {
+  content: ''; display: block; width: 7px; height: 7px; margin: 0 0 0 1px;
+  border-right: 2px solid #8a949f; border-bottom: 2px solid #8a949f;
+  transform: rotate(45deg) translate(-2px, -2px);
+}
+.ai-door-caption .widgets__widget__caption__arrow_top::after { transform: rotate(-135deg) translate(-2px, -2px); }
+
+.ai-door-card {
+  background: var(--ad-card);
+  border: 1px solid var(--ad-line);
+  border-radius: var(--ad-radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.ai-door-card:last-child { margin-bottom: 0; }
+
+.ai-door-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ai-door-row-tight { flex-wrap: nowrap; }
+.ai-door-row-top { align-items: flex-start; }
+.ai-door-row-tight > :first-child { min-width: 0; }
+.ai-door-row .ai-door-btn { flex: none; }
+.ai-door-col { display: flex; flex-direction: column; gap: 6px; }
+
+/* Заголовок виджета «AI-агент»: в макете 20/700, здесь 15/700. */
+.ai-door-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
+.ai-door-title img { width: 26px; height: 20px; object-fit: contain; border: 1px solid var(--ad-line); border-radius: 4px; padding: 1px; background: #fff; }
+
+/* Заголовок раздела карточки: в макете 17/600, здесь 13/600. */
+.ai-door-sect { font-size: 13px; font-weight: 600; color: var(--ad-text); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-family: inherit; }
+.ai-door-sect:hover { color: #000; }
+
+.ai-door-divider { height: 1px; background: var(--ad-line); margin: 9px 0; }
+
+/* Режим агента: в макете 18/600, здесь 13,5/600. */
+.ai-door-mode { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; font-weight: 600; min-width: 0; }
+.ai-door-mode > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.ai-door-dot { margin-top: 5px; }
+.ai-door-dot { width: 9px; height: 9px; border-radius: 5px; flex: none; display: inline-block; }
+.ai-door-meta { font-size: 12px; }
+.ai-door-muted { color: var(--ad-muted); }
+
+/* Кнопки: в макете высота 46-48, радиус 7, обводка #E1E5E9 или зелёная #61C100. */
+.ai-door-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm);
+  background: #fff; color: var(--ad-text);
+  font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; text-decoration: none;
+}
+.ai-door-btn:hover { border-color: #c9d0d6; }
+.ai-door-btn:disabled { opacity: .55; cursor: default; }
+.ai-door-btn-green { border-color: var(--ad-green); color: var(--ad-green-ink); }
+.ai-door-btn-green:hover { border-color: var(--ad-green-ink); background: #f6fff0; }
+.ai-door-icon { min-height: 26px; width: 26px; padding: 0; font-size: 13px; font-weight: 400; }
+
+.ai-door-link { color: var(--ad-link); font-size: 12px; font-weight: 600; text-decoration: none; }
+.ai-door-link:hover { text-decoration: underline; }
+
+/* Пустое состояние раздела: плашка #F5F7F9, радиус 7 в макете. */
+.ai-door-empty { background: var(--ad-soft); border-radius: var(--ad-radius-sm); padding: 9px 10px; color: var(--ad-muted); font-size: 12px; }
+
+.ai-door-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.ai-door-badge-ok { background: #edf9e4; color: var(--ad-green-ink); }
+.ai-door-badge-warn { background: #fff4d6; color: #8a5a00; }
+.ai-door-badge-bad { background: #fde8e8; color: #b02a2a; }
+.ai-door-error { color: #b02a2a; font-size: 12px; }
+
+.ai-door-product { display: flex; align-items: flex-start; gap: 8px; }
+.ai-door-product img, .ai-door-product .ai-door-thumb { width: 38px; height: 38px; border-radius: var(--ad-radius-sm); object-fit: cover; flex: none; background: #f0f2f4; }
+.ai-door-product a { color: var(--ad-link); text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; }
+.ai-door-product a:hover { text-decoration: underline; }
+.ai-door-grow { flex: 1; min-width: 0; }
+.ai-door-pre { white-space: pre-wrap; }
+.ai-door-skel { height: 11px; border-radius: 4px; background: #eef0f2; margin: 7px 0; }
+
+@keyframes ai-door-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }

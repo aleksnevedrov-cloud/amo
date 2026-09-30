@@ -294,7 +294,7 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     await flush();
     expect(calls.filter((c) => c.url.endsWith('/panel'))).toHaveLength(2);
     expect(document.body.textContent).toContain('Ключ провайдера не задан или недействителен');
-    const dot = document.querySelector<HTMLElement>('span[style*="border-radius: 5px"]')!;
+    const dot = document.querySelector<HTMLElement>('.ai-door-dot')!;
     expect(dot.style.background).toMatch(/rgb\(208, 52, 44\)|#d0342c/);
     await act(async () => void cb.destroy!());
   });
