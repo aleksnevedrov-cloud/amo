@@ -86,6 +86,8 @@ export interface LeadProduct extends Source {
 
 export interface LeadPanel {
   leadId: number;
+  /** 1.1.4: администратор аккаунта amo. Нет у старого бэкенда — тогда переключение модели скрыто. */
+  isAdmin?: boolean;
   ai: { enabled: boolean; mode: Mode; paused: boolean; pauseReason: string | null; pausedAt: string | null };
   /** 1.1.0: кто отвечает в этой сделке (с учётом переопределения). Нет у старого бэкенда. */
   llm?: { provider: ProviderId; model: string; fallback: ModelRef | null; override: ModelRef | null; providers: ProviderId[]; configured: boolean };

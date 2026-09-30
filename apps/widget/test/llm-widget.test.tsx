@@ -212,6 +212,7 @@ describe('вкладка «Модель» 1.1.0', () => {
 describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
   const panel = () => ({
     leadId: 555,
+    isAdmin: true,
     ai: { enabled: true, mode: 'semi', paused: false, pauseReason: null, pausedAt: null },
     llm: { provider: 'anthropic', model: 'claude-sonnet-5', fallback: null, override: null, providers: ['anthropic', 'openai'], configured: true },
     health: { llmConfigured: true, dailyLimitExhausted: false, lastError: null },
@@ -272,6 +273,21 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     await click('Найденные товары (4) ▾');
     expect(document.body.textContent).not.toContain('Ницца 3');
     expect(JSON.parse(localStorage.getItem('ai-door-panel-collapsed') ?? '{}')).toEqual({ products: true });
+    await act(async () => void cb.destroy!());
+  });
+
+  it('менеджеру модель показывается текстом: ни кнопки, ни списка выбора (право администратора)', async () => {
+    const { self, calls } = fakeSelf('lcard', {
+      'GET /widget/v1/leads/555/panel': () => ({ ...panel(), isAdmin: false }),
+      'GET /widget/v1/llm/models': () => ({ provider: 'anthropic', models: [model('claude-sonnet-5', 'anthropic')], fetchedAt: null, fromCache: false, source: 'api', noKey: false }),
+    });
+    const cb = createCallbacks(self, 'https://ai.test.ru');
+    await act(async () => void cb.render!());
+    await flush();
+    expect(document.body.textContent).toContain('Claude · claude-sonnet-5');
+    expect([...document.querySelectorAll('button')].some((b) => (b.textContent ?? '').includes('claude-sonnet-5'))).toBe(false);
+    expect(document.querySelector('select')).toBeNull();
+    expect(calls.some((c) => c.method === 'PUT' && c.url.endsWith('/leads/555/llm'))).toBe(false);
     await act(async () => void cb.destroy!());
   });
 

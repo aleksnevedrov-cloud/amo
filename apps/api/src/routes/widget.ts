@@ -181,6 +181,8 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const lastErrorEntry = log.find((e) => e.kind === 'error');
         return {
           leadId,
+          // Права текущего пользователя: смену модели показываем только администратору.
+          isAdmin: principal(req).isAdmin,
           ai: { enabled: settings.enabled, mode: settings.mode, paused: state.paused, pauseReason: state.pauseReason, pausedAt: state.pausedAt },
           llm: {
             provider: route.primary.provider,

@@ -109,7 +109,9 @@ export function widgetLlmRoutes(
   });
 
   // Провайдер и модель только для этой сделки (панель карточки, раздел 3 ТЗ); null — снять.
+  // Переключение модели/провайдера для сделки — право администратора (менеджер видит модель, но не меняет).
   api.put('/leads/:leadId/llm', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
     const { leadId } = leadParams.parse(req.params);
     const p = principal(req);
     const b = z.object({ model: llmModelRefSchema.nullable() }).safeParse(req.body);

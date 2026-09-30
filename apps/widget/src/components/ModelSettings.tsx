@@ -146,7 +146,9 @@ export function ModelTab({
   const compareWith: ModelRef[] = [{ provider, model: value.model }, fallbackRef ?? (providersWithKey.includes(other) ? { provider: other, model: models(other)[0]?.id ?? '' } : { provider, model: list.find((m) => m.id !== value.model)?.id ?? value.model })];
 
   return (
-    <>
+    // Менеджеру вкладка доступна только на чтение: провайдера и модель меняет администратор аккаунта.
+    <fieldset disabled={!isAdmin} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+      {!isAdmin && <div style={{ ...s.block, ...s.muted, ...s.small }}>Провайдера и модель меняет администратор аккаунта amoCRM. Здесь показаны текущие настройки.</div>}
       <Field label="Провайдер" hint="Смена провайдера действует со следующего сообщения клиента во всех сделках аккаунта, без перезапуска.">
         <select style={s.select} value={provider} onChange={(e) => switchProvider(e.target.value as ProviderId)}>
           {PROVIDERS.map((p) => (
@@ -210,7 +212,7 @@ export function ModelTab({
           Сравнить в песочнице: {compareWith.map((m) => `${providerShort(m.provider)} ${m.model}`).join(' и ')}
         </button>
       </Field>
-    </>
+    </fieldset>
   );
 }
 

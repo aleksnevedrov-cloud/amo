@@ -117,6 +117,14 @@ describe('переключение провайдера (раздел 3 ТЗ 1.1
     expect(b.cost.usd).toBeGreaterThan(0);
   });
 
+  it('модель для сделки меняет только администратор, панель отдаёт признак прав', async () => {
+    const denied = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/leads/700/llm', headers: await user(), payload: { model: { provider: 'anthropic', model: 'claude-haiku-4-5' } } });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: 'admin_only' });
+    expect((await ctx.app.inject({ url: '/widget/v1/leads/700/panel', headers: await user() })).json().isAdmin).toBe(false);
+    expect((await ctx.app.inject({ url: '/widget/v1/leads/700/panel', headers: await admin() })).json().isAdmin).toBe(true);
+  });
+
   it('модель для отдельной сделки: панель, журнал, следующий ход через неё (критерий 3 панели)', async () => {
     const h = await admin();
     const no = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/leads/700/llm', headers: h, payload: { model: { provider: 'anthropic', model: 'claude-haiku-4-5' } } });
