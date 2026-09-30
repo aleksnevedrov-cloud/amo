@@ -276,6 +276,18 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     await act(async () => void cb.destroy!());
   });
 
+  it('старый бэкенд без поля isAdmin: строка модели остаётся (администратор её не теряет)', async () => {
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/leads/555/panel': () => { const p = panel() as Record<string, unknown>; delete p.isAdmin; return p; },
+      'GET /widget/v1/llm/models': () => ({ provider: 'anthropic', models: [model('claude-sonnet-5', 'anthropic')], fetchedAt: null, fromCache: false, source: 'api', noKey: false }),
+    });
+    const cb = createCallbacks(self, 'https://ai.test.ru');
+    await act(async () => void cb.render!());
+    await flush();
+    expect((document.body.textContent ?? '').split('Черновики')[0]).toContain('claude-sonnet-5');
+    await act(async () => void cb.destroy!());
+  });
+
   it('менеджеру строки с моделью и расходом нет вовсе (право администратора)', async () => {
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': () => ({ ...panel(), isAdmin: false }),

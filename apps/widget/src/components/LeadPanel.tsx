@@ -179,8 +179,9 @@ export function LeadPanel({ api, leadId, assetsUrl, settingsUrl }: { api: Widget
           )}
         </div>
         {p.ai.paused && p.ai.pauseReason && <div className="ai-door-muted" style={{ marginTop: 4 }}>{pauseReasonText(p.ai.pauseReason)}</div>}
-        {/* Модель и расход по сделке — только администратору: менеджеру строка не показывается. */}
-        {p.llm && p.isAdmin === true && (
+        {/* Модель и расход по сделке — только администратору. Старый бэкенд поля isAdmin не отдаёт:
+            тогда строка показывается как раньше, иначе она пропадала бы и у администратора. */}
+        {p.llm && p.isAdmin !== false && (
           <div className="ai-door-row ai-door-row-tight" style={{ marginTop: 8 }}>
             <LeadModel api={api} leadId={leadId} value={p.llm} providers={providers} busy={busy} onChange={(m) => void act(() => api.setLeadModel(leadId, m))} />
             <span className="ai-door-meta" style={{ whiteSpace: 'nowrap', flex: 'none' }} title="Расход на LLM по этой сделке">
