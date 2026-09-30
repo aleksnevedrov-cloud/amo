@@ -202,6 +202,9 @@ importers:
       '@ai-door/tools':
         specifier: workspace:*
         version: link:../../packages/tools
+      '@anthropic-ai/sdk':
+        specifier: ^0.128.0
+        version: 0.128.0(zod@3.25.76)
       bullmq:
         specifier: ^5.81.5
         version: 5.81.5
