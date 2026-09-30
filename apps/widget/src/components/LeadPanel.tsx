@@ -179,9 +179,10 @@ export function LeadPanel({ api, leadId, assetsUrl, settingsUrl }: { api: Widget
           )}
         </div>
         {p.ai.paused && p.ai.pauseReason && <div className="ai-door-muted" style={{ marginTop: 4 }}>{pauseReasonText(p.ai.pauseReason)}</div>}
-        {p.llm && (
+        {/* Модель и расход по сделке — только администратору: менеджеру строка не показывается. */}
+        {p.llm && p.isAdmin === true && (
           <div className="ai-door-row ai-door-row-tight" style={{ marginTop: 8 }}>
-            <LeadModel api={api} leadId={leadId} value={p.llm} providers={providers} busy={busy} canEdit={p.isAdmin === true} onChange={(m) => void act(() => api.setLeadModel(leadId, m))} />
+            <LeadModel api={api} leadId={leadId} value={p.llm} providers={providers} busy={busy} onChange={(m) => void act(() => api.setLeadModel(leadId, m))} />
             <span className="ai-door-meta" style={{ whiteSpace: 'nowrap', flex: 'none' }} title="Расход на LLM по этой сделке">
               {rub(p.costRub)} по сделке
             </span>
@@ -426,21 +427,14 @@ function FileStatus({ f }: { f: LeadFile }) {
 }
 
 /** «Провайдер · модель» с выпадающим списком — переопределение для этой сделки (раздел 3 ТЗ). */
-function LeadModel({ api, leadId: _leadId, value, providers, busy, canEdit, onChange }: { api: WidgetApi; leadId: number; value: NonNullable<Panel['llm']>; providers: Panel['llm'] extends infer T ? (T extends { providers: infer P } ? P : never) : never; busy: boolean; canEdit: boolean; onChange: (m: ModelRef | null) => void }) {
+function LeadModel({ api, leadId: _leadId, value, providers, busy, onChange }: { api: WidgetApi; leadId: number; value: NonNullable<Panel['llm']>; providers: Panel['llm'] extends infer T ? (T extends { providers: infer P } ? P : never) : never; busy: boolean; onChange: (m: ModelRef | null) => void }) {
   const [editing, setEditing] = useState(false);
-  // Менеджеру модель показывается текстом: переключать провайдера и модель может только администратор.
-  if (!canEdit) {
-    return (
-      <span className="ai-door-meta" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title="Модель меняет администратор аккаунта">
-        {modelLabel(value.provider, value.model)}
-        {value.override && <span className="ai-door-badge ai-door-badge-warn" style={{ marginLeft: 4 }}>для сделки</span>}
-      </span>
-    );
-  }
   if (!editing) {
     return (
-      <button type="button" className="ai-door-meta" style={{ background: 'none', border: 0, padding: 0, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', color: 'inherit', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title="Сменить модель для этой сделки" disabled={busy} onClick={() => setEditing(true)}>
-        {modelLabel(value.provider, value.model)} ▾{value.override && <span className="ai-door-badge ai-door-badge-warn" style={{ marginLeft: 4 }}>для сделки</span>}
+      <button type="button" className="ai-door-model" title="Сменить модель для этой сделки" disabled={busy} onClick={() => setEditing(true)}>
+        <span>{modelLabel(value.provider, value.model)}</span>
+        {value.override && <span className="ai-door-badge ai-door-badge-warn">для сделки</span>}{' '}
+        <span aria-hidden="true">▾</span>
       </button>
     );
   }

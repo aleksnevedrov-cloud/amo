@@ -276,7 +276,7 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     await act(async () => void cb.destroy!());
   });
 
-  it('менеджеру модель показывается текстом: ни кнопки, ни списка выбора (право администратора)', async () => {
+  it('менеджеру строки с моделью и расходом нет вовсе (право администратора)', async () => {
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': () => ({ ...panel(), isAdmin: false }),
       'GET /widget/v1/llm/models': () => ({ provider: 'anthropic', models: [model('claude-sonnet-5', 'anthropic')], fetchedAt: null, fromCache: false, source: 'api', noKey: false }),
@@ -284,8 +284,11 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
-    expect(document.body.textContent).toContain('Claude · claude-sonnet-5');
-    expect([...document.querySelectorAll('button')].some((b) => (b.textContent ?? '').includes('claude-sonnet-5'))).toBe(false);
+    expect(document.body.textContent).toContain('Полуавтоматический');
+    // В карточке статуса модели и расхода нет (в журнале запись о прошлом ответе остаётся — это история).
+    const statusCard = (document.body.textContent ?? '').split('Черновики')[0];
+    expect(statusCard).not.toContain('claude-sonnet-5');
+    expect(document.body.textContent).not.toContain('по сделке');
     expect(document.querySelector('select')).toBeNull();
     expect(calls.some((c) => c.method === 'PUT' && c.url.endsWith('/leads/555/llm'))).toBe(false);
     await act(async () => void cb.destroy!());

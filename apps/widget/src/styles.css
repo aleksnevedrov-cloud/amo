@@ -119,6 +119,16 @@
 .ai-door-btn-green:hover { border-color: var(--ad-green-ink); background: #f6fff0; }
 .ai-door-icon { min-height: 26px; width: 26px; padding: 0; font-size: 13px; font-weight: 400; }
 
+/* Модель в карточке сделки: у администратора — кликабельная плашка, у менеджера просто текст. */
+.ai-door-model {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  min-height: 24px; padding: 2px 8px;
+  border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm);
+  background: #fff; color: var(--ad-text);
+  font-family: inherit; font-size: 12px; line-height: 1.2; cursor: pointer;
+}
+.ai-door-model:hover { border-color: var(--ad-green); color: var(--ad-green-ink); }
+.ai-door-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-door-link { color: var(--ad-link); font-size: 12px; font-weight: 600; text-decoration: none; }
 .ai-door-link:hover { text-decoration: underline; }
 
