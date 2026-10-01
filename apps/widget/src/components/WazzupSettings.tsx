@@ -49,7 +49,7 @@ export function WazzupSettings(props: { api: WidgetApi }) {
         )}
       </Field>
 
-      <Field label="Ключ API Wazzup" hint="Кабинет Wazzup → Настройки → API (или Sidecar-ключ интеграции amoCRM). Хранится в зашифрованном виде и не показывается.">
+      <Field label="Ключ API Wazzup" hint="Кабинет Wazzup → «Интеграция с CRM» → вкладка «Дополнительно» → блок «Ключ API». Хранится в зашифрованном виде и не показывается.">
         <div style={s.row}>
           <input style={{ ...s.input, width: 320 }} type="password" autoComplete="new-password" value={apiKey} onChange={(ev) => setApiKey(ev.target.value)} />
           <button
