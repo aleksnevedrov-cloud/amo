@@ -23,6 +23,8 @@ const dataSchema = z.object({
 });
 
 /** Приём сообщений клиента из Salesbot (`widget_request`). Отвечаем сразу, обработка — в очереди. */
+const WAZZUP_SYSTEM_RE = /===\s*SYSTEM\s+WZ\s*===|^\s*Сообщение не отправлено/iu;
+
 export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
   app.post(
     '/salesbot/v1/hook',
@@ -72,6 +74,12 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
 
       const attachment = data.data.attachment_url ? { url: data.data.attachment_url, type: data.data.attachment_type ?? null } : null;
       const text = data.data.message.trim() || (attachment ? '' : '(клиент отправил сообщение без текста — вложение или стикер)');
+      // Системные уведомления Wazzup (канал недоступен, сообщение не доставлено) приходят в бота как «сообщения клиента»
+      // и зацикливают диалог (RFD-AI-AGENT-DEPLOY-112): не обрабатываем и бота не продолжаем.
+      if (WAZZUP_SYSTEM_RE.test(text)) {
+        await deps.journal.add({ accountId, leadId, kind: 'skipped', summary: `Системное сообщение Wazzup пропущено: ${text.slice(0, 120)}` });
+        return reply.code(200).send({ ok: true, skipped: 'wazzup_system' });
+      }
       await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
       const { settings } = await deps.settings.get(accountId);
       await deps.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
