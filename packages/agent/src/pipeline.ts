@@ -11,6 +11,8 @@ import {
   type SettingsRepo,
   type SuggestionsRepo,
   type WidgetSettings,
+  normalizePhone,
+  type WazzupHistoryItem,
 } from '@ai-door/db';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
 import { downloadAttachment, isAudio, type SttProvider } from '@ai-door/media';
@@ -44,6 +46,8 @@ export interface PipelineDeps {
   knowledge: KnowledgeRepo;
   pricing: PricingRepo;
   memory: MemoryRepo;
+  /** Переписка из Wazzup по телефону контакта (RFD-AI-AGENT-WAZZUP-HISTORY); нет — блок не добавляется. */
+  wazzup?: { historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]> };
   suggestions: SuggestionsRepo;
   /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
   orchestrator: Orchestrator | null;
@@ -245,6 +249,8 @@ export class DialogPipeline {
     const history = (await this.d.dialog.history(accountId, leadId, 40)).map((m) => ({ role: m.role, text: m.text }));
     // Новые сообщения уже в истории — отдаём историю без них и их отдельно.
     const past = history.slice(0, history.length - t.texts.length);
+    // Переписка менеджера с клиентом в мессенджере (Wazzup) — по телефону основного контакта сделки.
+    const messengerText = await this.messengerHistory(accountId, access, contactRef?.id ?? null, history);
 
     let result: TurnResult;
     try {
@@ -255,7 +261,7 @@ export class DialogPipeline {
         ctx,
         tools,
         now,
-        dynamic: { memory: memoryText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
+        dynamic: { memory: memoryText, messenger: messengerText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
         clientFacts,
         route: t.route,
       });
@@ -343,6 +349,37 @@ export class DialogPipeline {
   }
 
   /** Тексты входящих: голосовые расшифровываются, прочие вложения помечаются (раздел 5, шаг 4). */
+  /** История мессенджера для промпта: телефон контакта → последние сообщения без собственных ответов агента. */
+  private async messengerHistory(
+    accountId: number,
+    access: AmoAccess,
+    contactId: number | null,
+    own: { role: string; text: string }[],
+  ): Promise<string | null> {
+    if (!this.d.wazzup || !contactId) return null;
+    try {
+      const contact = await access.api.getContact(contactId);
+      const raw = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values?.[0]?.value;
+      const phone = normalizePhone(typeof raw === 'string' ? raw : null);
+      if (!phone) return null;
+      const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
+      if (!items.length) return null;
+      // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
+      const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
+      const lines = items
+        .filter((m) => !(m.direction === 'out' && ownTexts.has(m.text.trim())))
+        .map((m) => {
+          const who = m.direction === 'in' ? 'Клиент' : m.author === 'agent' ? 'AI' : 'Менеджер';
+          const when = new Date(m.sentAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+          return `[${when}] ${who}: ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`;
+        });
+      return lines.length ? lines.join('\n') : null;
+    } catch (err) {
+      await this.d.journal.add({ accountId, kind: 'error', summary: `Wazzup: не удалось собрать историю мессенджера: ${(err as Error).message}` }).catch(() => undefined);
+      return null;
+    }
+  }
+
   private async incomingTexts(t: Turn): Promise<string[]> {
     const out: string[] = [];
     for (const m of t.pending) {

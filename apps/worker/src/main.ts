@@ -10,7 +10,8 @@ import {
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
+import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
+  WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
 import { WhisperStt, YandexStt } from '@ai-door/media';
@@ -142,6 +143,7 @@ const pipeline = new DialogPipeline({
     knowledge,
     pricing: new PricingRepo(db),
     memory: new MemoryRepo(db),
+    wazzup: new WazzupRepo(db),
     suggestions: new SuggestionsRepo(db),
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
