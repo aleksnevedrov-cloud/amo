@@ -10,3 +10,4 @@ coverage/
 evals/results/
 evals/documents/files/
 dump.rdb
+.pnpm-store/
