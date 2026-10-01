@@ -6,6 +6,7 @@ import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';
 import { legalRoutes } from './routes/legal.ts';
 import { oauthRoutes } from './routes/oauth.ts';
+import { registerFormBody } from './formbody.ts';
 import { salesbotRoutes } from './routes/salesbot.ts';
 import { widgetRoutes } from './routes/widget.ts';
 
@@ -29,6 +30,7 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
     methods: ['GET', 'PUT', 'POST', 'DELETE'],
   });
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
+  registerFormBody(app);
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     const status = err.statusCode ?? 500;
