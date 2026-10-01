@@ -2,6 +2,7 @@ import { resolveRoute, type Orchestrator, type TurnResult } from '@ai-door/agent
 import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm, type Source } from '@ai-door/tools';
 import { widgetDocsRoutes } from './widget-docs.ts';
 import { widgetEmailRoutes } from './widget-email.ts';
+import { widgetWazzupRoutes } from './widget-wazzup.ts';
 import { widgetLlmRoutes } from './widget-llm.ts';
 import { widgetPhase4Routes } from './widget-phase4.ts';
 import { widgetPhase2Routes } from './widget-phase2.ts';
@@ -326,6 +327,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
       widgetLlmRoutes(api, deps, principal, requireAdmin);
       widgetPhase2Routes(api, deps, principal, requireAdmin);
       widgetEmailRoutes(api, deps, principal, requireAdmin);
+      widgetWazzupRoutes(api, deps, principal, requireAdmin);
       widgetDocsRoutes(api, deps, principal);
       widgetPhase4Routes(api, deps, principal, requireAdmin);
     },

@@ -410,6 +410,18 @@ export class WidgetApi {
       '/widget/v1/email/status',
     );
   setEmailPassword = (password: string) => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password });
+  wazzupStatus = () =>
+    this.call<{
+      hasKey: boolean;
+      webhookUri: string;
+      state: { webhookUri: string | null; subscribedAt: string | null; lastEventAt: string | null; eventsTotal: number; lastError: string | null; lastErrorAt: string | null };
+      stats: { total: number; last24h: number; phones: number };
+    }>('GET', '/widget/v1/wazzup/status');
+  setWazzupKey = (apiKey: string) => this.call<{ ok: true }>('PUT', '/widget/v1/wazzup/key', { apiKey });
+  testWazzup = () =>
+    this.call<{ ok: boolean; error?: string; channels?: { id: string | null; transport: string | null; name: string | null; state: string | null }[] }>('POST', '/widget/v1/wazzup/test');
+  subscribeWazzup = () => this.call<{ ok: boolean; error?: string; webhookUri?: string }>('POST', '/widget/v1/wazzup/subscribe');
+  wazzupSubscription = () => this.call<{ ok: boolean; error?: string; current?: unknown }>('GET', '/widget/v1/wazzup/subscription');
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
