@@ -53,11 +53,19 @@ export async function continueBot(
   const res = await fetchImpl(returnUrl, {
     method: 'POST',
     headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+    // Хендлер show ограничен 80 символами (amoCRM отвечает 400 TooLong), поэтому текст отдаём через data:
+    // в боте следующим шагом «Отправить сообщение» с текстом {{json.reply}}.
     body: JSON.stringify({
-      data: { status: 'success' },
-      execute_handlers: messages.map((value) => ({ handler: 'show', params: { type: 'text', value } })),
+      data: {
+        status: 'success',
+        reply: messages.join('\n\n'),
+        has_reply: messages.length ? '1' : '0',
+      },
     }),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new AmoError(`Salesbot continue: HTTP ${res.status}`, res.status, await res.text().catch(() => ''));
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new AmoError(`Salesbot continue: HTTP ${res.status} ${body.slice(0, 300)}`, res.status, body);
+  }
 }

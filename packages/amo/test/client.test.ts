@@ -89,18 +89,15 @@ describe('Salesbot', () => {
     expect(isSafeReturnUrl('http://acc.amocrm.ru/x', 'acc.amocrm.ru')).toBe(false);
   });
 
-  it('continue отправляет сообщения через show', async () => {
+  it('continue отдаёт текст через data.reply (show ограничен 80 символами)', async () => {
     const s = scripted([{ status: 200 }]);
     await continueBot('https://acc.amocrm.ru/c', 'TOKEN', ['Привет', 'Вот модели'], s.fn);
     expect(s.calls[0]).toMatchObject({
       auth: 'Bearer TOKEN',
       body: {
-        data: { status: 'success' },
-        execute_handlers: [
-          { handler: 'show', params: { type: 'text', value: 'Привет' } },
-          { handler: 'show', params: { type: 'text', value: 'Вот модели' } },
-        ],
+        data: { status: 'success', reply: 'Привет\n\nВот модели', has_reply: '1' },
       },
     });
+    expect(s.calls[0].body.execute_handlers).toBeUndefined();
   });
 });
