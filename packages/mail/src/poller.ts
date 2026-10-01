@@ -62,6 +62,9 @@ export const ourAddress = (e: WidgetSettings['email']) => (e.fromAddress || e.us
  * Один проход по ящику аккаунта. Первый запуск (или смена UIDVALIDITY) только запоминает
  * позицию — старая переписка не обрабатывается.
  */
+const AUTH_ERROR_RE = /AUTHENTICATIONFAILED|authentication failed|invalid credentials|Login denied|\b535\b/i;
+const AUTH_BACKOFF_MS = 30 * 60_000;
+
 export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollResult> {
   const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0 };
   const { settings } = await d.settings.get(accountId);
@@ -69,6 +72,11 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
   if (!e.enabled || !e.imapHost || !e.username) return res;
   const password = await d.mail.getPassword(accountId);
   if (!password) return res;
+  // Защита от блокировки адреса провайдером: после ошибки авторизации не подключаемся 30 минут —
+  // Яндекс блокирует IP после серии неудачных входов (RFD-AI-AGENT-DEPLOY-112). Ошибка остаётся видна на вкладке «Почта».
+  const st = await d.mail.folderState(accountId, e.inboxFolder);
+  if (st?.lastError && AUTH_ERROR_RE.test(st.lastError) && st.lastErrorAt
+    && Date.now() - new Date(st.lastErrorAt).getTime() < AUTH_BACKOFF_MS) return res;
 
   let box: Mailbox | null = null;
   try {
@@ -90,7 +98,9 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
       });
     }
   } catch (err) {
-    res.error = (err as Error).message;
+    // imapflow: текст ответа сервера (например «[AUTHENTICATIONFAILED] LOGIN invalid credentials») лежит не в message.
+    const e2 = err as Error & { serverResponseCode?: string; responseText?: string };
+    res.error = [e2.message, e2.serverResponseCode, e2.responseText].filter(Boolean).join(' ');
     await d.mail.markError(accountId, e.inboxFolder, res.error);
   } finally {
     await box?.close().catch(() => undefined);

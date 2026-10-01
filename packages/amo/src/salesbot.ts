@@ -50,6 +50,9 @@ export async function continueBot(
   messages: string[],
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  // Нет ответа (выключен, пауза, передача менеджеру, подсказка) — бота не продолжаем:
+  // иначе шаг «Отправить сообщение» ушлёт клиенту неподставленный шаблон {{json.reply}} (amoCRM не подставляет пустое).
+  if (!messages.length) return;
   const res = await fetchImpl(returnUrl, {
     method: 'POST',
     headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
