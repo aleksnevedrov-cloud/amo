@@ -135,3 +135,8 @@ export async function runPurgeUninstalled(d: { accounts: AccountsRepo }, afterDa
   if (ids.length) log.info({ ids, afterDays }, 'accounts: данные отключённых аккаунтов удалены');
   return ids;
 }
+
+/** Выгрузки истории Wazzup (messages_dump): проверка заявок раз в минуту. */
+export const WAZZUP_DUMP_JOB = 'wazzup-dumps';
+export const WAZZUP_DUMP_EVERY_MS = 60_000;
+export { runWazzupDumps } from './wazzup-dump.ts';

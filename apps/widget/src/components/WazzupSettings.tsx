@@ -3,6 +3,7 @@ import type { WidgetApi } from '../api.ts';
 import { Field } from './fields.tsx';
 import { s } from './styles.ts';
 import { errorMessage, useLoad } from './useLoad.ts';
+import { WazzupDumps } from './WazzupDumps.tsx';
 
 const fmt = (v: string | null | undefined) => (v ? new Date(v).toLocaleString('ru-RU') : '—');
 
@@ -124,6 +125,7 @@ export function WazzupSettings(props: { api: WidgetApi }) {
           </ul>
         )}
       </Field>
+      <WazzupDumps api={api} />
     </>
   );
 }

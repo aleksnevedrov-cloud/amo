@@ -331,6 +331,12 @@ export interface Dictionaries {
   taskTypes: { id: number; name: string }[];
 }
 
+export interface WazzupDumpInfo {
+  id: number; status: string; startAt: string; endAt: string; channelId: string | null;
+  rowsTotal: number; inserted: number; skipped: number; columns: string | null; error: string | null;
+  createdAt: string; finishedAt: string | null;
+}
+
 export class WidgetApi {
   constructor(
     private readonly self: AmoWidgetSelf,
@@ -422,6 +428,9 @@ export class WidgetApi {
     this.call<{ ok: boolean; error?: string; channels?: { id: string | null; transport: string | null; name: string | null; state: string | null }[] }>('POST', '/widget/v1/wazzup/test');
   subscribeWazzup = () => this.call<{ ok: boolean; error?: string; webhookUri?: string }>('POST', '/widget/v1/wazzup/subscribe');
   wazzupSubscription = () => this.call<{ ok: boolean; error?: string; current?: unknown }>('GET', '/widget/v1/wazzup/subscription');
+  wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
+    this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
+  wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {

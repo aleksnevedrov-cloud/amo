@@ -94,4 +94,29 @@ export function widgetWazzupRoutes(
     const r = await call(apiKey, 'GET', '/webhooks');
     return r.ok ? { ok: true, current: r.json } : { ok: false, error: `HTTP ${r.status} ${r.text}` };
   });
+
+  // Выгрузка истории за период (messages_dump). Заявку исполняет воркер раз в минуту; ключ — тот же 'wazzup'.
+  api.post('/wazzup/dump', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const b = z.object({ startAt: z.string().min(8), endAt: z.string().min(8), channelId: z.string().max(100).optional() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_period' });
+    const p = principal(req);
+    if (!(await deps.secrets.has(p.accountId, 'wazzup'))) return reply.code(400).send({ error: 'no_key' });
+    const startAt = new Date(b.data.startAt);
+    const endAt = new Date(b.data.endAt);
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || endAt <= startAt) return reply.code(400).send({ error: 'bad_period' });
+    if (endAt.getTime() - startAt.getTime() > 92 * 86_400_000) return reply.code(400).send({ error: 'period_too_long' });
+    if (await deps.wazzupDumps.hasActive(p.accountId)) return reply.code(409).send({ error: 'dump_in_progress' });
+    const channelId = b.data.channelId?.trim() || null;
+    const dump = await deps.wazzupDumps.create(p.accountId, { startAt, endAt, channelId, userId: p.userId });
+    await deps.journal.add({
+      accountId: p.accountId,
+      kind: 'note',
+      summary: `Заказана выгрузка истории Wazzup ${startAt.toISOString().slice(0, 10)} – ${endAt.toISOString().slice(0, 10)}${channelId ? `, канал ${channelId}` : ''}`,
+      details: { userId: p.userId, dumpId: dump.id },
+    });
+    return { ok: true, dump };
+  });
+
+  api.get('/wazzup/dumps', async (req) => ({ ok: true, dumps: await deps.wazzupDumps.list(principal(req).accountId, 10) }));
 }

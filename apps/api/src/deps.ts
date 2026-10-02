@@ -26,7 +26,7 @@ import {
   OutcomesRepo,
   PgTokenStore,
   SecretsRepo,
-  WazzupRepo,
+  WazzupDumpRepo, WazzupRepo,
   SettingsRepo,
   SuggestionsRepo,
   type Db,
@@ -80,6 +80,7 @@ export interface Deps {
   secrets: SecretsRepo;
   /** Переписка из Wazzup (WhatsApp/Telegram) — история для контекста агента. */
   wazzup: WazzupRepo;
+  wazzupDumps: WazzupDumpRepo;
   modelsCache: ModelsCacheRepo;
   evalRuns: EvalRunsRepo;
   /** Временная схема с тестовым каталогом для прогона eval из «Песочницы». */
@@ -185,6 +186,7 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     serverKeys,
     secrets,
     wazzup: new WazzupRepo(db),
+    wazzupDumps: new WazzupDumpRepo(db),
     modelsCache: new ModelsCacheRepo(db),
     evalRuns: new EvalRunsRepo(db),
     evalFixtures: overrides.evalFixtures ?? (() => evalFixtures(env.DATABASE_URL, 1, process.env.MIGRATIONS_DIR)),
