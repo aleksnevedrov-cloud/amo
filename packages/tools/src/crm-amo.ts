@@ -8,6 +8,8 @@ export class AmoCrm implements CrmPort {
   constructor(
     private readonly api: AmoApiClient,
     private readonly leadId: number,
+    /** Получатель задач (ответственный / администратор) — считает pipeline один раз на ход. */
+    private readonly assignee?: () => Promise<{ userId: number | null } | null>,
   ) {}
 
   async getContext(): Promise<LeadContext | null> {
@@ -37,12 +39,14 @@ export class AmoCrm implements CrmPort {
   }
 
   async createTask(t: { text: string; taskTypeId: number; deadlineMin: number }): Promise<void> {
-    // Без responsible_user_id amo ставит задачу ответственному по сделке.
+    // Получателя выбирает код: ответственный по сделке, иначе администратор (см. resolveTaskAssignee).
+    const a = this.assignee ? await this.assignee().catch(() => null) : null;
     await this.api.createTask({
       text: t.text,
       taskTypeId: t.taskTypeId,
       completeTill: new Date(Date.now() + t.deadlineMin * 60_000),
       leadId: this.leadId,
+      ...(a?.userId ? { responsibleUserId: a.userId } : {}),
     });
   }
 

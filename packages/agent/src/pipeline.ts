@@ -1,4 +1,4 @@
-import type { AmoApiClient } from '@ai-door/amo';
+import { resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@ai-door/amo';
 import type { CatalogRepo } from '@ai-door/catalog';
 import {
   memorySubject,
@@ -149,6 +149,8 @@ interface Turn {
   ai: AccountAi | null;
   /** Провайдер и модель хода: сделка > этап > воронка > настройки (раздел 3 ТЗ 1.1.0). */
   route: ChatRoute;
+  /** Получатель задач агента на этом ходу (считается один раз, лениво). */
+  assignee?: Promise<TaskAssignee>;
 }
 
 export class DialogPipeline {
@@ -256,7 +258,7 @@ export class DialogPipeline {
       accountId,
       catalog: this.d.catalog,
       knowledge: this.d.knowledge,
-      crm: new AmoCrm(access.api, leadId),
+      crm: new AmoCrm(access.api, leadId, () => this.taskAssignee(t)),
       pricing: rules,
       tasks: settings.tasks,
       memory: {
@@ -525,13 +527,14 @@ export class DialogPipeline {
         // Резюме не критично: остаётся краткое от агента.
       }
     }
+    const assignee = await this.taskAssignee(t);
     const steps = await Promise.allSettled([
       access.api.createTask({
         text: `AI: ${REASON_TEXT[reason]}. ${summary}`.slice(0, 1000),
         completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
         leadId,
         taskTypeId: h.taskTypeId,
-        ...(h.responsibleUserId ? { responsibleUserId: h.responsibleUserId } : {}),
+        ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
       }),
       access.api.addLeadNote(leadId, note),
       h.statusId ? access.api.setLeadStatus(leadId, h.statusId) : Promise.resolve(),
@@ -541,7 +544,7 @@ export class DialogPipeline {
     const phrase = settings.mode === 'auto' ? [settings.behavior.handoffPhrase] : [];
     await this.release(t, [...before, ...phrase]);
     if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
-    await this.journal(t, { kind: 'handoff', summary: `Передано менеджеру: ${REASON_TEXT[reason]}`, details: { reason, summary, errors: failed } });
+    await this.journal(t, { kind: 'handoff', summary: `Передано менеджеру: ${REASON_TEXT[reason]}`, details: { reason, summary, errors: failed, assignee } });
     return { status: 'handoff', reason };
   }
 
@@ -594,15 +597,41 @@ export class DialogPipeline {
     await this.journal(t, { kind: 'error', summary, details: { modelMissing: true, provider: ref.provider, model: ref.model } });
     const h = t.settings.handoff;
     const now = this.d.now?.() ?? new Date();
+    const assignee = await this.taskAssignee(t);
     await t.access.api
       .createTask({
         text: `AI: ${summary}. Выберите другую модель в настройках AI-агента.`,
         completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
         leadId: t.leadId,
         taskTypeId: h.taskTypeId,
-        ...(h.responsibleUserId ? { responsibleUserId: h.responsibleUserId } : {}),
+        ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
       })
       .catch(() => undefined);
+  }
+
+  /**
+   * Получатель задач агента: ответственный по сделке, иначе «администратор для задач», иначе первый активный
+   * администратор. Считается один раз на ход; при подмене — примечание в сделку.
+   */
+  private taskAssignee(t: Turn): Promise<TaskAssignee> {
+    if (!t.assignee) {
+      const h = t.settings.handoff;
+      t.assignee = resolveTaskAssignee(t.access.api, t.leadId, { forcedUserId: h.responsibleUserId, fallbackUserId: h.fallbackUserId })
+        .then(async (a) => {
+          if (a.reason === 'fallback' || a.reason === 'admin') {
+            await t.access.api
+              .addLeadNote(t.leadId, `AI: у сделки нет активного ответственного, задача поставлена администратору ${a.name ?? a.userId}`)
+              .catch(() => undefined);
+          }
+          if (a.reason === 'none') await this.journal(t, { kind: 'error', summary: 'Некому поставить задачу: нет активного ответственного и администратора', details: { assignee: a } });
+          return a;
+        })
+        .catch(async (err) => {
+          await this.journal(t, { kind: 'error', summary: `Получатель задачи: ${(err as Error).message}` });
+          return { userId: h.responsibleUserId, name: null, reason: 'none' as const };
+        });
+    }
+    return t.assignee;
   }
 
   private journal(t: Turn, e: Omit<JournalEntry, 'accountId' | 'leadId'>) {

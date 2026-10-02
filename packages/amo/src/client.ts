@@ -25,6 +25,15 @@ export interface AmoLead {
   _embedded?: { contacts?: { id: number; is_main?: boolean }[]; tags?: { name: string }[] };
 }
 
+/** Пользователь аккаунта amo (для выбора получателя задач). */
+export interface AmoUser {
+  id: number;
+  name: string;
+  email: string | null;
+  isActive: boolean;
+  isAdmin: boolean;
+}
+
 export interface AmoContact {
   id: number;
   name: string;
@@ -88,6 +97,26 @@ export class AmoApiClient {
   }
 
   /** Типы задач аккаунта. */
+  /** Домен аккаунта — ключ кэшей (список пользователей). */
+  get domain(): string {
+    return this.accountDomain;
+  }
+
+  /** Пользователи аккаунта: активность и права администратора. */
+  async listUsers(): Promise<AmoUser[]> {
+    const res = await this.request<{ _embedded?: { users?: { id: number; name: string; email?: string; rights?: { is_active?: boolean; is_admin?: boolean } }[] } }>(
+      'GET',
+      '/api/v4/users?limit=250',
+    );
+    return (res?._embedded?.users ?? []).map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email ?? null,
+      isActive: u.rights?.is_active !== false,
+      isAdmin: Boolean(u.rights?.is_admin),
+    }));
+  }
+
   async getTaskTypes(): Promise<{ id: number; name: string }[]> {
     const res = await this.request<{ _embedded?: { task_types?: { id: number; name: string }[] } }>(
       'GET',

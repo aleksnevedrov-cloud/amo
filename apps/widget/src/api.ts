@@ -329,6 +329,8 @@ export interface SettingsVersion {
 export interface Dictionaries {
   pipelines: { id: number; name: string; statuses: { id: number; name: string }[] }[];
   taskTypes: { id: number; name: string }[];
+  /** Пользователи аккаунта — для выбора получателя задач. */
+  users?: { id: number; name: string; email: string | null; isActive: boolean; isAdmin: boolean }[];
 }
 
 export interface WazzupDumpInfo {

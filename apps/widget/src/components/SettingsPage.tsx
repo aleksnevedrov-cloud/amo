@@ -333,8 +333,27 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Срок задачи, минут">
             <NumberInput value={draft.handoff.taskDeadlineMin} min={5} onChange={(v) => set('handoff', { taskDeadlineMin: v ?? 60 })} />
           </Field>
-          <Field label="Ответственный (ID пользователя amo)" hint="Пусто — ответственный по сделке.">
-            <NumberInput nullable value={draft.handoff.responsibleUserId} onChange={(v) => set('handoff', { responsibleUserId: v })} />
+          <Field label="Администратор для задач" hint="Кому ставить задачу, если у сделки нет активного ответственного. Пусто — первый активный администратор аккаунта.">
+            <select style={s.select} value={draft.handoff.fallbackUserId ?? ''} onChange={(e) => set('handoff', { fallbackUserId: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">Первый активный администратор</option>
+              {(dict?.users ?? []).filter((u) => u.isActive).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+                {u.isAdmin ? ' (администратор)' : ''}
+              </option>
+            ))}
+            </select>
+          </Field>
+          <Field label="Всегда ставить задачи этому пользователю (не рекомендуется)" hint="Минуя ответственного по сделке. Пусто — задачи уходят ответственному, при его отсутствии — администратору.">
+            <select style={s.select} value={draft.handoff.responsibleUserId ?? ''} onChange={(e) => set('handoff', { responsibleUserId: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">Не задано</option>
+              {(dict?.users ?? []).filter((u) => u.isActive).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+                {u.isAdmin ? ' (администратор)' : ''}
+              </option>
+            ))}
+            </select>
           </Field>
           <Field label="Перевести сделку на этап">
             <select

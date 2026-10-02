@@ -70,6 +70,8 @@ export const widgetSettingsSchema = z
         taskDeadlineMin: z.number().int().min(5).max(7 * 24 * 60).default(60),
         /** null — ответственный по сделке. */
         responsibleUserId: z.number().int().positive().nullable().default(null),
+        /** «Администратор для задач»: кому ставить, если у сделки нет активного ответственного; null — первый активный администратор. */
+        fallbackUserId: z.number().int().positive().nullable().default(null),
         /** Этап, на который переводить сделку при передаче; null — не переводить. */
         statusId: z.number().int().positive().nullable().default(null),
       })

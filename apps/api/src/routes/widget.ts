@@ -233,8 +233,8 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const account = await deps.accounts.get(accountId);
         if (!account || account.uninstalledAt) return reply.code(409).send({ error: 'not_installed' });
         const client = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
-        const [pipelines, taskTypes] = await Promise.all([client.getPipelines(), client.getTaskTypes()]);
-        return { pipelines, taskTypes };
+        const [pipelines, taskTypes, users] = await Promise.all([client.getPipelines(), client.getTaskTypes(), client.listUsers().catch(() => [])]);
+        return { pipelines, taskTypes, users };
       });
 
       // Каталог.
