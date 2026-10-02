@@ -354,8 +354,8 @@ export class WidgetApi {
   knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
   addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
-  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef) =>
-    this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}) });
+  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef, phone?: string) =>
+    this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}), ...(phone ? { phone } : {}) });
 
   pricing = () => this.call<{ rules: PricingRules; version: number }>('GET', '/widget/v1/pricing');
   savePricing = (rules: PricingRules) => this.call<{ rules: PricingRules; version: number }>('PUT', '/widget/v1/pricing', rules);

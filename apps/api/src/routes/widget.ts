@@ -7,7 +7,7 @@ import { widgetLlmRoutes } from './widget-llm.ts';
 import { widgetPhase4Routes } from './widget-phase4.ts';
 import { widgetPhase2Routes } from './widget-phase2.ts';
 import { AmoApiClient, disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@ai-door/amo';
-import { feedUrlsOf, llmModelRefSchema, widgetSettingsSchema, type JournalRow, type WidgetSettings } from '@ai-door/db';
+import { feedUrlsOf, llmModelRefSchema, widgetSettingsSchema, type JournalRow, type WidgetSettings, formatWazzupHistory, normalizePhone } from '@ai-door/db';
 import { PROVIDERS, type ChatRoute } from '@ai-door/llm';
 import { amoRedirectUri } from '@ai-door/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -55,6 +55,8 @@ const sandboxBody = z.object({
   settings: z.unknown().optional(),
   /** Провайдер и модель для этого прогона (иначе — из настроек). */
   model: llmModelRefSchema.optional(),
+  /** Телефон клиента — подтянуть переписку из Wazzup как в боевом контексте (RFD-AI-AGENT-WAZZUP-HISTORY). */
+  phone: z.string().max(32).optional(),
 });
 
 const compareBody = sandboxBody.omit({ model: true }).extend({
@@ -295,7 +297,8 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         if (!settings) return;
         const route = b.data.model ? { primary: b.data.model, fallback: resolveRoute(settings).fallback } : resolveRoute(settings);
         const { rules } = await deps.pricing.get(p.accountId);
-        return runSandbox(deps, p, ai.orchestrator, settings, rules, b.data.messages, route);
+        const messenger = await sandboxMessenger(deps, p.accountId, b.data.phone, b.data.messages);
+      return runSandbox(deps, p, ai.orchestrator, settings, rules, b.data.messages, route, false, messenger);
       });
 
       // Сравнение двух моделей на одном диалоге: ответы, инструменты, токены, стоимость и время рядом (раздел 7 ТЗ 1.1.0).
@@ -348,6 +351,20 @@ async function sandboxSettings(deps: Deps, accountId: number, draft: unknown, re
   return settings;
 }
 
+/** Песочница: история Wazzup по телефону — тот же блок, что в боевом контексте (без собственных реплик AI из диалога). */
+async function sandboxMessenger(
+  deps: Deps,
+  accountId: number,
+  phoneRaw: string | undefined,
+  messages: { role: 'client' | 'ai'; text: string }[],
+): Promise<{ text: string | null; count: number } | null> {
+  const phone = normalizePhone(phoneRaw);
+  if (!phone) return null;
+  const items = await deps.wazzup.historyByPhone(accountId, phone, 40);
+  const own = new Set(messages.filter((m) => m.role === 'ai').map((m) => m.text.trim()));
+  return formatWazzupHistory(items, own);
+}
+
 async function runSandbox(
   deps: Deps,
   p: WidgetPrincipal,
@@ -357,6 +374,7 @@ async function runSandbox(
   messages: { role: 'client' | 'ai'; text: string }[],
   route: ChatRoute,
   compare = false,
+  messenger: { text: string | null; count: number } | null = null,
 ) {
   const crm = new SandboxCrm();
   const memory = new InMemoryMemory();
@@ -368,7 +386,7 @@ async function runSandbox(
     incoming: [last.text],
     ctx: { accountId: p.accountId, catalog: deps.catalog, knowledge: deps.knowledge, crm, memory, pricing: rules, tasks: settings.tasks },
     tools: PHASE2_TOOLS,
-    dynamic: { pricing: pricingCodesHint(rules) },
+    dynamic: { pricing: pricingCodesHint(rules), messenger: messenger?.text ?? null },
     route,
   });
   const costRub = result.cost.usd * settings.billing.usdRubRate;
@@ -376,7 +394,7 @@ async function runSandbox(
     accountId: p.accountId,
     kind: 'sandbox',
     summary: result.kind === 'reply' ? result.text : `Песочница: ${result.kind}`,
-    details: { toolCalls: result.toolCalls, sources: result.sources, rejections: result.rejections, userId: p.userId, provider: result.provider, model: result.model, requestedModel: result.requestedModel, fallbackUsed: result.fallbackUsed, latencyMs: result.latencyMs, ...(compare ? { compare: true } : {}) },
+    details: { wazzupMessages: messenger?.count ?? 0, toolCalls: result.toolCalls, sources: result.sources, rejections: result.rejections, userId: p.userId, provider: result.provider, model: result.model, requestedModel: result.requestedModel, fallbackUsed: result.fallbackUsed, latencyMs: result.latencyMs, ...(compare ? { compare: true } : {}) },
     inputTokens: result.cost.inputTokens,
     outputTokens: result.cost.outputTokens,
     costUsd: result.cost.usd,

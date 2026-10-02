@@ -20,6 +20,7 @@ const replyText = (r: Partial<SandboxResult>) =>
 export function Sandbox({ api, draft, compare, providers = [] }: { api: WidgetApi; draft?: WidgetSettings; compare?: ModelRef[]; providers?: ProviderId[] }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
+  const [phone, setPhone] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'single' | 'compare'>(compare?.length ? 'compare' : 'single');
@@ -47,7 +48,7 @@ export function Sandbox({ api, draft, compare, providers = [] }: { api: WidgetAp
         const first = r.results[0];
         setTurns([...next, { role: 'ai', text: first && !first.error ? replyText(first) : '', compare: r.results }]);
       } else {
-        const r = await api.sandbox(history, draft);
+        const r = await api.sandbox(history, draft, undefined, phone.trim() || undefined);
         setTurns([...next, { role: 'ai', text: replyText(r), result: r }]);
       }
     } catch (err) {
@@ -101,6 +102,12 @@ export function Sandbox({ api, draft, compare, providers = [] }: { api: WidgetAp
           </div>
         ))}
       </div>
+      <input
+        style={{ ...s.input, width: 300, marginBottom: 6 }}
+        placeholder="Телефон клиента — подтянуть переписку Wazzup (необязательно)"
+        value={phone}
+        onChange={(e) => setPhone(e.target.value)}
+      />
       <textarea
         style={{ ...s.textarea, minHeight: 60 }}
         placeholder="Сообщение от имени клиента"

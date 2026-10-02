@@ -11,6 +11,7 @@ import {
   type SettingsRepo,
   type SuggestionsRepo,
   type WidgetSettings,
+  formatWazzupHistory,
   normalizePhone,
   type WazzupHistoryItem,
 } from '@ai-door/db';
@@ -250,6 +251,7 @@ export class DialogPipeline {
     // Новые сообщения уже в истории — отдаём историю без них и их отдельно.
     const past = history.slice(0, history.length - t.texts.length);
     // Переписка менеджера с клиентом в мессенджере (Wazzup) — по телефону основного контакта сделки.
+    this.lastMessengerCount = 0;
     const messengerText = await this.messengerHistory(accountId, access, contactRef?.id ?? null, history);
 
     let result: TurnResult;
@@ -287,6 +289,7 @@ export class DialogPipeline {
     const lastEmail = emails.at(-1);
     if (result.fallbackUsed && result.model !== result.requestedModel) await this.noteFallback(t, result);
     const details = {
+      wazzupMessages: this.lastMessengerCount,
       provider: result.provider,
       model: result.model,
       requestedModel: result.requestedModel,
@@ -350,6 +353,9 @@ export class DialogPipeline {
 
   /** Тексты входящих: голосовые расшифровываются, прочие вложения помечаются (раздел 5, шаг 4). */
   /** История мессенджера для промпта: телефон контакта → последние сообщения без собственных ответов агента. */
+  /** Сколько сообщений Wazzup попало в контекст последнего хода (для журнала). */
+  private lastMessengerCount = 0;
+
   private async messengerHistory(
     accountId: number,
     access: AmoAccess,
@@ -366,14 +372,9 @@ export class DialogPipeline {
       if (!items.length) return null;
       // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
       const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
-      const lines = items
-        .filter((m) => !(m.direction === 'out' && ownTexts.has(m.text.trim())))
-        .map((m) => {
-          const who = m.direction === 'in' ? 'Клиент' : m.author === 'agent' ? 'AI' : 'Менеджер';
-          const when = new Date(m.sentAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-          return `[${when}] ${who}: ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`;
-        });
-      return lines.length ? lines.join('\n') : null;
+      const { text, count } = formatWazzupHistory(items, ownTexts);
+      this.lastMessengerCount = count;
+      return text;
     } catch (err) {
       await this.d.journal.add({ accountId, kind: 'error', summary: `Wazzup: не удалось собрать историю мессенджера: ${(err as Error).message}` }).catch(() => undefined);
       return null;

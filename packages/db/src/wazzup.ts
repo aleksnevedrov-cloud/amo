@@ -125,3 +125,15 @@ export class WazzupRepo {
     return rows[0] ?? { total: 0, last24h: 0, phones: 0 };
   }
 }
+
+/** История мессенджера для промпта: строки «[дата] Клиент|Менеджер|AI: текст»; исходящие, совпадающие с ownTexts (ответы агента), опускаются. */
+export function formatWazzupHistory(items: WazzupHistoryItem[], ownTexts: Set<string> = new Set()): { text: string | null; count: number } {
+  const lines = items
+    .filter((m) => !(m.direction === 'out' && ownTexts.has(m.text.trim())))
+    .map((m) => {
+      const who = m.direction === 'in' ? 'Клиент' : m.author === 'agent' ? 'AI' : 'Менеджер';
+      const when = new Date(m.sentAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      return `[${when}] ${who}: ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`;
+    });
+  return { text: lines.length ? lines.join('\n') : null, count: lines.length };
+}
