@@ -17,6 +17,7 @@ const messageSchema = z.object({
   text: z.string().nullish(),
   status: z.string().nullish(),
   authorName: z.string().nullish(),
+  contentUri: z.string().nullish(),
   contact: z.object({ name: z.string().nullish(), phone: z.string().nullish(), username: z.string().nullish() }).nullish(),
 }).passthrough();
 
@@ -49,6 +50,8 @@ export function toWazzupMessage(m: z.infer<typeof messageSchema>): WazzupMessage
     sentAt: m.dateTime ? new Date(m.dateTime) : new Date(),
     source: 'webhook',
     raw: m,
+    contentUri: m.contentUri ?? null,
+    contentType: m.type ?? null,
   };
 }
 

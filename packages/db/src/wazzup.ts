@@ -15,6 +15,18 @@ export interface WazzupMessage {
   sentAt: Date;
   source: 'webhook' | 'dump';
   raw?: unknown;
+  /** Ссылка и тип вложения из вебхука (image, audio, document, video…). */
+  contentUri?: string | null;
+  contentType?: string | null;
+}
+
+/** Входящее вложение клиента для подхвата в диалог агента. */
+export interface WazzupContentItem {
+  id: number;
+  contentUri: string;
+  contentType: string | null;
+  text: string;
+  sentAt: Date;
 }
 
 export interface WazzupHistoryItem {
@@ -49,15 +61,33 @@ export class WazzupRepo {
   /** Вставка по message_id идемпотентна; повтор с тем же id обновляет только статус и пустой текст. */
   async upsert(accountId: number, m: WazzupMessage): Promise<boolean> {
     const { rows } = await this.db.query(
-      `INSERT INTO wazzup_messages (account_id, message_id, channel_id, chat_id, chat_type, phone, direction, author, text, status, is_system, sent_at, source, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      `INSERT INTO wazzup_messages (account_id, message_id, channel_id, chat_id, chat_type, phone, direction, author, text, status, is_system, sent_at, source, raw, content_uri, content_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (account_id, message_id) DO UPDATE SET
          status = COALESCE(EXCLUDED.status, wazzup_messages.status),
          text = CASE WHEN wazzup_messages.text = '' THEN EXCLUDED.text ELSE wazzup_messages.text END
        RETURNING (xmax = 0) AS inserted`,
-      [accountId, m.messageId, m.channelId, m.chatId, m.chatType, m.phone, m.direction, m.author, m.text, m.status, m.isSystem, m.sentAt, m.source, m.raw ?? null],
+      [accountId, m.messageId, m.channelId, m.chatId, m.chatType, m.phone, m.direction, m.author, m.text, m.status, m.isSystem, m.sentAt, m.source, m.raw ?? null, m.contentUri ?? null, m.contentType ?? null],
     );
     return Boolean(rows[0]?.inserted);
+  }
+
+  /** Входящие вложения клиента в окне времени, ещё не использованные агентом. */
+  async incomingContent(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]> {
+    if (!phones.length) return [];
+    const { rows } = await this.db.query<{ id: string; content_uri: string; content_type: string | null; text: string; sent_at: Date }>(
+      `SELECT id, content_uri, content_type, text, sent_at FROM wazzup_messages
+       WHERE account_id = $1 AND phone = ANY($2::text[]) AND direction = 'in' AND content_uri IS NOT NULL AND consumed_at IS NULL
+         AND sent_at BETWEEN $3 AND $4
+       ORDER BY sent_at, id`,
+      [accountId, phones, from, to],
+    );
+    return rows.map((r) => ({ id: Number(r.id), contentUri: r.content_uri, contentType: r.content_type, text: r.text, sentAt: r.sent_at }));
+  }
+
+  async markConsumed(accountId: number, ids: number[]): Promise<void> {
+    if (!ids.length) return;
+    await this.db.query('UPDATE wazzup_messages SET consumed_at = now() WHERE account_id = $1 AND id = ANY($2::bigint[])', [accountId, ids]);
   }
 
   async setStatus(accountId: number, messageId: string, status: string): Promise<void> {

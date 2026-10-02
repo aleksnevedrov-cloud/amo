@@ -13,6 +13,7 @@ import {
   type WidgetSettings,
   formatWazzupHistory,
   normalizePhone,
+  type WazzupContentItem,
   type WazzupHistoryItem,
 } from '@ai-door/db';
 import type { KnowledgeRepo } from '@ai-door/knowledge';
@@ -48,7 +49,11 @@ export interface PipelineDeps {
   pricing: PricingRepo;
   memory: MemoryRepo;
   /** Переписка из Wazzup по телефону контакта (RFD-AI-AGENT-WAZZUP-HISTORY); нет — блок не добавляется. */
-  wazzup?: { historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]> };
+  wazzup?: {
+    historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]>;
+    incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
+    markConsumed?(accountId: number, ids: number[]): Promise<void>;
+  };
   suggestions: SuggestionsRepo;
   /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
   orchestrator: Orchestrator | null;
@@ -62,6 +67,8 @@ export interface PipelineDeps {
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(provider: WidgetSettings['stt']['provider']): SttProvider | null;
   download?: typeof downloadAttachment;
+  /** Пауза перед повторным поиском вложения в Wazzup (мс); в тестах 0. */
+  wazzupRetryMs?: number;
   /** Почта: ответы письмом и признак ответа менеджера. */
   email?: {
     reply(accountId: number, leadId: number, meta: Record<string, unknown>, text: string): Promise<unknown>;
@@ -117,6 +124,17 @@ const READ_ONLY = new Set(['catalog_search', 'catalog_get_product', 'knowledge_s
 
 /** Сколько смотреть назад, если AI ещё не отвечал в сделке. */
 const MANAGER_LOOKBACK_MS = 7 * 24 * 3600_000;
+
+/** Заглушка hook'а Salesbot для сообщения без текста (вложение, стикер) — повод искать вложение в Wazzup. */
+const isEmptyPlaceholder = (text: string): boolean => {
+  const v = text.trim();
+  return !v || v.startsWith('(клиент отправил сообщение без текста');
+};
+const WAZZUP_ATTACH_WINDOW_MS = 3 * 60_000;
+const WAZZUP_ATTACH_RETRY_MS = 5_000;
+/** Тип вложения Wazzup → MIME для существующих веток разбора (vision/документы/STT). */
+const wazzupMime = (type: string | null): string =>
+  type === 'image' ? 'image/jpeg' : type === 'audio' ? 'audio/ogg' : type === 'video' ? 'video/mp4' : 'application/octet-stream';
 
 interface Turn {
   accountId: number;
@@ -384,30 +402,77 @@ export class DialogPipeline {
   private async incomingTexts(t: Turn): Promise<string[]> {
     const out: string[] = [];
     for (const m of t.pending) {
-      if (!m.attachmentUrl) {
-        out.push(m.text);
-        continue;
+      if (!m.attachmentUrl && isEmptyPlaceholder(m.text)) {
+        // Salesbot не передаёт вложения: фото/файл/голос берём из вебхуков Wazzup по телефону клиента.
+        const picked = await this.wazzupAttachments(t, m);
+        if (picked.length) {
+          for (const pm of picked) out.push(await this.pendingText(t, pm));
+          continue;
+        }
       }
-      if (!isAudio(m.attachmentType)) {
-        out.push(await this.attachmentText(t, m));
-        continue;
-      }
-      const stt = this.d.stt?.(t.settings.stt.provider) ?? null;
-      if (!stt) {
-        out.push([m.text, '(клиент отправил голосовое сообщение; расшифровка выключена — попросите написать текстом)'].filter(Boolean).join('\n'));
-        continue;
-      }
-      try {
-        const file = await (this.d.download ?? downloadAttachment)(m.attachmentUrl);
-        const text = await stt.transcribe(file.bytes, file.mime);
-        out.push(text ? `[Голосовое сообщение] ${text}` : '(голосовое сообщение без распознанной речи)');
-        await this.journal(t, { kind: 'note', summary: `Голосовое расшифровано (${stt.name})`, details: { text } });
-      } catch (err) {
-        out.push('(клиент отправил голосовое сообщение, расшифровать не удалось — попросите написать текстом)');
-        await this.journal(t, { kind: 'error', summary: `Расшифровка голосового: ${(err as Error).message}` });
-      }
+      out.push(await this.pendingText(t, m));
     }
     return out;
+  }
+
+  /** Текст одного входящего: как есть, разбор файла/фото или расшифровка голосового. */
+  private async pendingText(t: Turn, m: PendingMessage): Promise<string> {
+    if (!m.attachmentUrl) return m.text;
+    if (!isAudio(m.attachmentType)) return this.attachmentText(t, m);
+    const stt = this.d.stt?.(t.settings.stt.provider) ?? null;
+    if (!stt) return [m.text, '(клиент отправил голосовое сообщение; расшифровка выключена — попросите написать текстом)'].filter(Boolean).join('\n');
+    try {
+      const file = await (this.d.download ?? downloadAttachment)(m.attachmentUrl);
+      const text = await stt.transcribe(file.bytes, file.mime);
+      await this.journal(t, { kind: 'note', summary: `Голосовое расшифровано (${stt.name})`, details: { text } });
+      return text ? `[Голосовое сообщение] ${text}` : '(голосовое сообщение без распознанной речи)';
+    } catch (err) {
+      await this.journal(t, { kind: 'error', summary: `Расшифровка голосового: ${(err as Error).message}` });
+      return '(клиент отправил голосовое сообщение, расшифровать не удалось — попросите написать текстом)';
+    }
+  }
+
+  /** Телефоны основного контакта сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
+  private async leadPhones(t: Turn): Promise<string[]> {
+    try {
+      const lead = await t.access.api.getLead(t.leadId);
+      const ref = lead?._embedded?.contacts?.find((c) => c.is_main) ?? lead?._embedded?.contacts?.[0];
+      if (!ref) return [];
+      const contact = await t.access.api.getContact(ref.id);
+      const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
+      const phones = values.map((v) => normalizePhone(typeof v.value === 'string' ? v.value : null)).filter((x): x is string => Boolean(x));
+      return [...new Set(phones)];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Вложения клиента из Wazzup в окне ±3 мин от получения сообщения; пусто → одна повторная попытка через 5 с. */
+  private async wazzupAttachments(t: Turn, m: PendingMessage): Promise<PendingMessage[]> {
+    const wz = this.d.wazzup;
+    if (!wz?.incomingContent) return [];
+    const phones = await this.leadPhones(t);
+    if (!phones.length) return [];
+    const from = new Date(m.receivedAt.getTime() - WAZZUP_ATTACH_WINDOW_MS);
+    const to = new Date(m.receivedAt.getTime() + WAZZUP_ATTACH_WINDOW_MS);
+    let items = await wz.incomingContent(t.accountId, phones, from, to);
+    if (!items.length) {
+      await new Promise((r) => setTimeout(r, this.d.wazzupRetryMs ?? WAZZUP_ATTACH_RETRY_MS));
+      items = await wz.incomingContent(t.accountId, phones, from, to);
+    }
+    if (!items.length) return [];
+    await wz.markConsumed?.(t.accountId, items.map((i) => i.id));
+    await this.journal(t, {
+      kind: 'note',
+      summary: `Вложение из Wazzup: ${items.map((i) => i.contentType ?? 'file').join(', ')} — ${items.length} шт.`,
+      details: { items: items.map((i) => ({ id: i.id, contentUri: i.contentUri, type: i.contentType })) },
+    });
+    return items.map((i) => ({
+      ...m,
+      text: /^\[[a-z_]+\]$/i.test(i.text.trim()) ? '' : i.text,
+      attachmentUrl: i.contentUri,
+      attachmentType: wazzupMime(i.contentType),
+    }));
   }
 
   /** Файл или фото из чата: разбор (фаза 3) или пометка, если разбор недоступен. */
