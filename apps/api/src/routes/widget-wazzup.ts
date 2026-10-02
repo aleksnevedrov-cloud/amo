@@ -13,7 +13,7 @@ export function widgetWazzupRoutes(
   principal: (req: FastifyRequest) => WidgetPrincipal,
   requireAdmin: (req: FastifyRequest, reply: FastifyReply) => boolean,
 ) {
-  const webhookUri = (accountId: number) => new URL(`/wazzup/v1/webhook/${accountId}`, deps.env.PUBLIC_URL).toString();
+  const webhookUri = (accountId: number, token?: string | null) => new URL(`/wazzup/v1/webhook/${accountId}${token ? `/${token}` : ''}`, deps.env.PUBLIC_URL).toString();
 
   const call = async (apiKey: string, method: 'GET' | 'PATCH', path: string, body?: unknown) => {
     const res = await deps.fetch(`${WAZZUP_API}${path}`, {
@@ -71,11 +71,10 @@ export function widgetWazzupRoutes(
     const p = principal(req);
     const [apiKey, crmKey] = await Promise.all([deps.secrets.get(p.accountId, 'wazzup'), deps.secrets.get(p.accountId, 'wazzup_crm')]);
     if (!apiKey || !crmKey) return reply.code(400).send({ error: 'no_key' });
-    const uri = webhookUri(p.accountId);
+    const uri = webhookUri(p.accountId, crmKey);
     const r = await call(apiKey, 'PATCH', '/webhooks', {
       webhooksUri: uri,
       subscriptions: { messagesAndStatuses: true, contactsAndDealsCreation: false, channelsUpdates: false, templateStatus: false },
-      crmKey,
     });
     if (!r.ok) {
       await deps.wazzup.markError(p.accountId, `подписка: HTTP ${r.status} ${r.text}`);

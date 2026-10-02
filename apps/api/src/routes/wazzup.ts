@@ -54,12 +54,14 @@ export function toWazzupMessage(m: z.infer<typeof messageSchema>): WazzupMessage
 
 /** Приёмник вебхуков Wazzup API v3 (messagesAndStatuses). Адрес содержит id аккаунта, доступ — Bearer crmKey (секрет wazzup_crm). */
 export function wazzupRoutes(app: FastifyInstance, deps: Deps): void {
-  app.post('/wazzup/v1/webhook/:accountId', { config: { rateLimit: { max: 600, timeWindow: '1 minute' } }, bodyLimit: 2_000_000 }, async (req, reply) => {
+  app.post('/wazzup/v1/webhook/:accountId/:token?', { config: { rateLimit: { max: 600, timeWindow: '1 minute' } }, bodyLimit: 2_000_000 }, async (req, reply) => {
     const accountId = Number((req.params as { accountId: string }).accountId);
     if (!Number.isInteger(accountId) || accountId <= 0) return reply.code(404).send({ error: 'not_found' });
     const expected = await deps.secrets.get(accountId, 'wazzup_crm');
     const auth = String(req.headers.authorization ?? '');
-    if (!expected || auth !== `Bearer ${expected}`) {
+    const token = String((req.params as { token?: string }).token ?? '');
+    // Wazzup не передаёт Authorization в вебхуках — секрет (crmKey) идёт в адресе подписки.
+    if (!expected || (auth !== `Bearer ${expected}` && token !== expected)) {
       req.log.warn({ accountId }, 'wazzup: вебхук с неверным ключом');
       return reply.code(401).send({ error: 'unauthorized' });
     }

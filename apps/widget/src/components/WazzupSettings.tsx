@@ -3,7 +3,6 @@ import type { WidgetApi } from '../api.ts';
 import { Field } from './fields.tsx';
 import { s } from './styles.ts';
 import { errorMessage, useLoad } from './useLoad.ts';
-import { WazzupDumps } from './WazzupDumps.tsx';
 
 const fmt = (v: string | null | undefined) => (v ? new Date(v).toLocaleString('ru-RU') : '—');
 
@@ -109,7 +108,7 @@ export function WazzupSettings(props: { api: WidgetApi }) {
             onClick={() =>
               act(async () => {
                 const r = await api.wazzupSubscription();
-                setMsg(r.ok ? `На стороне Wazzup: ${JSON.stringify(r.current)}` : `Ошибка: ${r.error ?? '?'}`);
+                setMsg(r.ok ? `На стороне Wazzup: ${JSON.stringify(r.current).replace(/webhook\/(\d+)\/[0-9a-f]+/, 'webhook/$1/•••')}` : `Ошибка: ${r.error ?? '?'}`);
               })
             }
           >
@@ -125,7 +124,9 @@ export function WazzupSettings(props: { api: WidgetApi }) {
           </ul>
         )}
       </Field>
-      <WazzupDumps api={api} />
+      <Field label="История за период" hint="Выгрузка истории (messages_dump) в API Wazzup открыта только партнёрам Wazzup (OAuth, client_id от менеджера Wazzup); с ключом интеграции она отвечает 401. Переписка копится с момента подписки на вебхуки.">
+        <span style={s.small}>Недоступно для этого аккаунта — старые диалоги в контекст агента не попадают.</span>
+      </Field>
     </>
   );
 }
