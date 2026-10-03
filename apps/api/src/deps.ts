@@ -18,6 +18,7 @@ import {
   AnalyticsRepo,
   createPool,
   DialogRepo,
+  GroupTurnsRepo,
   DocumentsRepo,
   EvalRunsRepo,
   JournalRepo,
@@ -54,6 +55,8 @@ export interface Deps {
   accounts: AccountsRepo;
   settings: SettingsRepo;
   dialog: DialogRepo;
+  /** Нить переписки в групповых чатах Wazzup (RFD-AI-AGENT-GRUPPOVYE-CHATY). */
+  groupTurns: GroupTurnsRepo;
   journal: JournalRepo;
   catalog: CatalogRepo;
   importer: CatalogImporter;
@@ -178,6 +181,7 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     mailConnect,
     mailSender,
     dialog: new DialogRepo(db),
+    groupTurns: new GroupTurnsRepo(db),
     journal: new JournalRepo(db),
     catalog,
     importer: overrides.importer ?? new CatalogImporter(db),

@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { normalizePhone, type WazzupMessage } from '@ai-door/db';
+import { isGroupChatType, normalizePhone, type WazzupMessage } from '@ai-door/db';
 import type { Deps } from '../deps.ts';
+import { replyInGroup } from '../group-reply.ts';
 
 /** Системные тексты Wazzup (канал недоступен, не доставлено) — храним, но в контекст агента не даём. */
 export const WAZZUP_SYSTEM_TEXT_RE = /===\s*SYSTEM\s+WZ\s*===|^\s*Сообщение не отправлено/iu;
@@ -56,6 +57,42 @@ export function toWazzupMessage(m: z.infer<typeof messageSchema>): WazzupMessage
 }
 
 /** Приёмник вебхуков Wazzup API v3 (messagesAndStatuses). Адрес содержит id аккаунта, доступ — Bearer crmKey (секрет wazzup_crm). */
+/** Ответ в групповом чате в фоне: вебхук Wazzup должен ответить 200 сразу. */
+async function handleGroupMessage(
+  deps: Deps,
+  accountId: number,
+  row: WazzupMessage,
+  log: { error: (o: unknown, m: string) => void },
+): Promise<void> {
+  try {
+    const outcome = await replyInGroup(deps, {
+      accountId,
+      chatId: row.chatId,
+      chatType: row.chatType ?? 'whatsgroup',
+      channelId: row.channelId,
+      author: row.author,
+      text: row.text,
+    });
+    if (outcome.status === 'sent') {
+      await deps.journal.add({
+        accountId,
+        kind: 'reply',
+        summary: `Групповой чат ${row.chatId}: ${outcome.text.slice(0, 120)}`,
+        details: { chatId: row.chatId, chatType: row.chatType },
+      });
+    } else if (outcome.status === 'error') {
+      await deps.journal.add({
+        accountId,
+        kind: 'error',
+        summary: `Групповой чат ${row.chatId}: ошибка ответа — ${outcome.error}`,
+        details: { chatId: row.chatId },
+      });
+    }
+  } catch (err) {
+    log.error({ err: (err as Error).message, chatId: row.chatId }, 'wazzup: ошибка ответа в группе');
+  }
+}
+
 export function wazzupRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/wazzup/v1/webhook/:accountId/:token?', { config: { rateLimit: { max: 600, timeWindow: '1 minute' } }, bodyLimit: 2_000_000 }, async (req, reply) => {
     const accountId = Number((req.params as { accountId: string }).accountId);
@@ -78,7 +115,14 @@ export function wazzupRoutes(app: FastifyInstance, deps: Deps): void {
     if (b.test) return reply.code(200).send({ ok: true, test: true });
     let inserted = 0;
     try {
-      for (const m of b.messages ?? []) if (await deps.wazzup.upsert(accountId, toWazzupMessage(m))) inserted += 1;
+      for (const m of b.messages ?? []) {
+        const row = toWazzupMessage(m);
+        if (await deps.wazzup.upsert(accountId, row)) inserted += 1;
+        // Групповые чаты: у них нет сделки, Salesbot их не запускает — отвечаем отсюда.
+        if (row.direction === 'in' && !row.isSystem && isGroupChatType(row.chatType) && row.text.trim()) {
+          void handleGroupMessage(deps, accountId, row, req.log);
+        }
+      }
       for (const s of b.statuses ?? []) await deps.wazzup.setStatus(accountId, s.messageId, s.status);
       await deps.wazzup.markEvent(accountId, inserted);
     } catch (err) {

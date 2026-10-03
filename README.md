@@ -65,6 +65,13 @@ pnpm build            # api, worker, widget.zip
 ### Обращение к агенту в группе (пункт 8)
 
 - `where.groups.mention` (по умолчанию `@Амма`) и `where.groups.mentionOnly` (включено) - поля блока «Групповые чаты»
+- Ответ в группе идёт не через Salesbot: у группового чата нет сделки, и триггер amoCRM не срабатывает.
+  Вебхук Wazzup (`apps/api/src/routes/wazzup.ts`) сам зовёт `replyInGroup` (`apps/api/src/group-reply.ts`),
+  ответ уходит прямо в Wazzup через `sendWazzupMessage` (`apps/api/src/wazzup-send.ts`).
+- В группе агент только справочный: инструменты `catalog_search`, `catalog_get_product`, `knowledge_search`,
+  `price_calculate`, `door_components`. В amoCRM не пишется ничего: ни сделок, ни задач, ни примечаний.
+- Нить переписки группы — таблица `group_turns` (миграция 014), репозиторий `GroupTurnsRepo`.
+  Входящие пишутся всегда, даже когда агент молчит; потолок — 20 ответов в одном чате за час.
 - распознавание: `hasMention` / `stripMention` в `packages/shared/src/mention.ts`, регистр и собака не важны, «Аммадин» не срабатывает
 - без обращения сообщение не доходит до модели: журнал «Группа: нет обращения к агенту», ответ hook `skipped: group_no_mention`
 - с обращением слово вырезается, к тексту добавляется строка «сотрудник обратился к агенту напрямую - ответь в чат»
