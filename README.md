@@ -40,3 +40,14 @@ pnpm build            # api, worker, widget.zip
 (по умолчанию `postgres://aidoor:aidoor@localhost:5432/aidoor_test`); каждый тестовый файл работает в своей схеме.
 
 Секреты — только в `.env` (шаблон — `.env.example`), в репозиторий не попадают.
+
+## Групповые чаты (RFD-AI-AGENT-GRUPPOVYE-CHATY)
+
+Агент отвечает в групповых беседах WhatsApp и Telegram только там, где разрешено.
+
+- настройка `where.groups` (вкладка «Где работает», блок «Групповые чаты»): `mode` = allowlist | block_all | allow_all, `allowedChatIds` - chatId Wazzup.
+- по умолчанию разрешён один чат - «Рабочие моменты» (79296519427-1595920633).
+- `WazzupRepo.resolveChatKind(accountId, leadId, text)` определяет чат: сначала по `lead_id`, иначе по тексту в окне -3 мин / +1 мин; найденная связка записывается в `lead_id`.
+- проверка стоит дважды: в hook `/salesbot/v1/hook` до вызова модели (журнал `kind=skipped`, ответ `skipped: group_chat`) и в `pipeline.ts` перед ответом.
+- если чат определить не удалось (`unknown`), агент работает как обычно - молчание не по умолчанию.
+- список групп и счётчик пропусков: `GET /widget/v1/wazzup/groups`.

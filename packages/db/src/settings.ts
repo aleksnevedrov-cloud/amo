@@ -61,6 +61,16 @@ export const widgetSettingsSchema = z
         disabledStatusIds: ids.default([]),
         batchWindowSec: z.number().int().min(0).max(120).default(8),
         typingDelay: z.boolean().default(false),
+        /** Групповые чаты WhatsApp/Telegram: где агенту разрешено отвечать. */
+        groups: z
+          .object({
+            /** allowlist - только разрешенные чаты; block_all - молчать во всех группах; allow_all - отвечать везде. */
+            mode: z.enum(['allowlist', 'block_all', 'allow_all']).default('allowlist'),
+            /** chatId Wazzup разрешенных групп. */
+            allowedChatIds: z.array(z.string().min(1).max(120)).max(50).default(['79296519427-1595920633']),
+          })
+          .strict()
+          .default({}),
       })
       .strict()
       .default({}),

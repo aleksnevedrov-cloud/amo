@@ -28,6 +28,12 @@ export function widgetWazzupRoutes(
     return { ok: res.ok, status: res.status, json, text: text.slice(0, 300) };
   };
 
+  /** Групповые чаты из данных Wazzup - для блока «Групповые чаты» вкладки «Где работает». */
+  api.get('/wazzup/groups', async (req) => {
+    const accountId = principal(req).accountId;
+    return { items: await deps.wazzup.groups(accountId) };
+  });
+
   api.get('/wazzup/status', async (req) => {
     const accountId = principal(req).accountId;
     const [hasKey, state, stats] = await Promise.all([

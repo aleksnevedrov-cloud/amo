@@ -80,8 +80,25 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
         await deps.journal.add({ accountId, leadId, kind: 'skipped', summary: `Системное сообщение Wazzup пропущено: ${text.slice(0, 120)}` });
         return reply.code(200).send({ ok: true, skipped: 'wazzup_system' });
       }
-      await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
       const { settings } = await deps.settings.get(accountId);
+      // Групповые чаты: агент отвечает только в разрешённых (RFD-AI-AGENT-GRUPPOVYE-CHATY).
+      const chat = await deps.wazzup.resolveChatKind(accountId, leadId, text);
+      const groups = settings.where.groups;
+      const groupBlocked =
+        chat.kind === 'group' &&
+        (groups.mode === 'block_all' ||
+          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? '')));
+      if (groupBlocked) {
+        await deps.journal.add({
+          accountId,
+          leadId,
+          kind: 'skipped',
+          summary: `Групповой чат без разрешения: ${chat.chatName ?? chat.chatId ?? 'без названия'}`,
+          details: { chatId: chat.chatId, chatName: chat.chatName, chatType: chat.chatType, mode: groups.mode },
+        });
+        return reply.code(200).send({ ok: true, skipped: 'group_chat' });
+      }
+      await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
       await deps.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
       return reply.code(200).send({ ok: true });
     },

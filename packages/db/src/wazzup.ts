@@ -55,6 +55,40 @@ export function normalizePhone(v: string | null | undefined): string | null {
   return d.length >= 11 && d.length <= 15 ? d : null;
 }
 
+export interface WazzupGroupItem {
+  chatId: string;
+  chatName: string | null;
+  chatType: string | null;
+  messages: number;
+  lastAt: Date | null;
+  skipped: number;
+}
+
+export type WazzupChatKindName = 'direct' | 'group' | 'unknown';
+
+export interface WazzupChatKind {
+  kind: WazzupChatKindName;
+  chatType: string | null;
+  chatId: string | null;
+  chatName: string | null;
+}
+
+/** whatsgroup / telegroup - групповые беседы Wazzup. */
+export function isGroupChatType(v: string | null | undefined): boolean {
+  return typeof v === 'string' && v.toLowerCase().endsWith('group');
+}
+
+const UNKNOWN_CHAT: WazzupChatKind = { kind: 'unknown', chatType: null, chatId: null, chatName: null };
+
+function toChatKind(r: { chat_type: string | null; chat_id: string | null; chat_name: string | null }): WazzupChatKind {
+  return {
+    kind: isGroupChatType(r.chat_type) ? 'group' : 'direct',
+    chatType: r.chat_type ?? null,
+    chatId: r.chat_id ?? null,
+    chatName: r.chat_name ?? null,
+  };
+}
+
 export class WazzupRepo {
   constructor(private readonly db: Db) {}
 
@@ -113,6 +147,69 @@ export class WazzupRepo {
 
   async setLead(accountId: number, phone: string, contactId: number | null, leadId: number | null): Promise<void> {
     await this.db.query('UPDATE wazzup_messages SET contact_id = $3, lead_id = $4 WHERE account_id = $1 AND phone = $2 AND lead_id IS NULL', [accountId, phone, contactId, leadId]);
+  }
+
+  /**
+   * Чат, из которого пришло сообщение клиента. Salesbot тип чата не передаёт,
+   * поэтому ищем сообщение в данных Wazzup: сначала по уже связанной сделке,
+   * иначе по тексту в окне +-3 мин (приём из темы вложений). Найденная связка
+   * сохраняется в lead_id, чтобы следующие сообщения решались без поиска по тексту.
+   */
+  async resolveChatKind(accountId: number, leadId: number | null, text: string): Promise<WazzupChatKind> {
+    if (leadId) {
+      const { rows } = await this.db.query(
+        `SELECT chat_type, chat_id, raw->'contact'->>'name' AS chat_name FROM wazzup_messages
+          WHERE account_id = $1 AND lead_id = $2 AND direction = 'in'
+          ORDER BY sent_at DESC LIMIT 1`,
+        [accountId, leadId],
+      );
+      if (rows[0]) return toChatKind(rows[0]);
+    }
+    const needle = (text ?? '').trim();
+    if (!needle) return UNKNOWN_CHAT;
+    const { rows } = await this.db.query(
+      `SELECT chat_type, chat_id, raw->'contact'->>'name' AS chat_name FROM wazzup_messages
+        WHERE account_id = $1 AND direction = 'in' AND NOT is_system AND btrim(text) = $2
+          AND sent_at > now() - interval '3 minutes' AND sent_at < now() + interval '1 minute'
+        ORDER BY sent_at DESC LIMIT 1`,
+      [accountId, needle],
+    );
+    const r = rows[0];
+    if (!r) return UNKNOWN_CHAT;
+    if (leadId && r.chat_id) {
+      await this.db.query(
+        'UPDATE wazzup_messages SET lead_id = $3 WHERE account_id = $1 AND chat_id = $2 AND lead_id IS NULL',
+        [accountId, r.chat_id, leadId],
+      );
+    }
+    return toChatKind(r);
+  }
+
+  /** Групповые чаты с названиями и числом пропусков агента (вкладка «Где работает»). */
+  async groups(accountId: number): Promise<WazzupGroupItem[]> {
+    const { rows } = await this.db.query(
+      `SELECT m.chat_id,
+              max(m.raw->'contact'->>'name') AS chat_name,
+              max(m.chat_type) AS chat_type,
+              count(*)::int AS messages,
+              max(m.sent_at) AS last_at,
+              (SELECT count(*)::int FROM ai_journal j
+                WHERE j.account_id = $1 AND j.kind = 'skipped' AND j.details->>'chatId' = m.chat_id) AS skipped
+         FROM wazzup_messages m
+        WHERE m.account_id = $1 AND m.chat_type LIKE '%group'
+        GROUP BY m.chat_id
+        ORDER BY max(m.sent_at) DESC
+        LIMIT 100`,
+      [accountId],
+    );
+    return rows.map((r) => ({
+      chatId: String(r.chat_id),
+      chatName: r.chat_name ?? null,
+      chatType: r.chat_type ?? null,
+      messages: Number(r.messages),
+      lastAt: r.last_at ?? null,
+      skipped: Number(r.skipped ?? 0),
+    }));
   }
 
   async state(accountId: number): Promise<WazzupState> {

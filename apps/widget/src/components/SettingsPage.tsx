@@ -93,6 +93,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   const providersWithKey = keys ? keys.providers : status.llm?.providers ?? null;
   // Ключ выбранного провайдера не сохранён — «Сохранить» недоступна (раздел 3 ТЗ 1.1.0).
   const noKey = providersWithKey !== null && !providersWithKey.includes(provider) && provider !== (base.model?.provider ?? 'anthropic');
+  const [groups, setGroups] = useState<{ chatId: string; chatName: string | null; messages: number; skipped: number }[] | null>(null);
   const onKeys = useCallback((k: LlmKeys | null, legacyConfigured: boolean) => {
     setKeys(k);
     setLlmOk(k ? k.providers.includes(k.provider) : legacyConfigured);
@@ -106,6 +107,10 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   useEffect(() => {
     if ((tab === 'where' || tab === 'handoff' || tab === 'email' || tab === 'model') && !dict) api.dictionaries().then((d) => setDict(d ?? null), () => undefined);
   }, [tab, dict, api]);
+
+  useEffect(() => {
+    if (tab === ("where") && groups === null) api.wazzupGroups().then((r) => setGroups(r?.items ?? []), () => setGroups([]));
+  }, [tab, groups, api]);
 
   const set = <K extends keyof WidgetSettings>(k: K, v: Partial<WidgetSettings[K]>) =>
     setDraft((d) => ({ ...d, [k]: typeof v === 'object' && v !== null ? { ...(d[k] as object), ...v } : v }));
@@ -316,6 +321,28 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               Задержка ответа пропорционально длине
             </label>
           </Field>
+        <Field label="Групповые чаты" hint="Агент отвечает только в отмеченных группах WhatsApp и Telegram; остальные групповые беседы пропускает и пишет об этом в журнал.">
+          <label style={s.row}>
+            <input type="checkbox" checked={draft.where.groups.mode !== 'allow_all'} onChange={(e) => set('where', { groups: { ...draft.where.groups, mode: e.target.checked ? 'allowlist' : 'allow_all' } })} />
+            Ограничивать работу в группах
+          </label>
+          {(groups ?? []).map((g) => (
+            <label key={g.chatId} style={s.row}>
+              <input
+                type="checkbox"
+                checked={draft.where.groups.allowedChatIds.includes(g.chatId)}
+                onChange={(e) => {
+                  const cur = new Set(draft.where.groups.allowedChatIds);
+                  if (e.target.checked) cur.add(g.chatId);
+                  else cur.delete(g.chatId);
+                  set('where', { groups: { ...draft.where.groups, allowedChatIds: [...cur] } });
+                }}
+              />
+              {`${g.chatName ?? 'Без названия'} (${g.chatId}) — сообщений ${g.messages}, пропущено ${g.skipped}`}
+            </label>
+          ))}
+          {groups !== null && groups.length === 0 ? <div>Групповых чатов в данных Wazzup пока нет</div> : null}
+        </Field>
         </>
       )}
 

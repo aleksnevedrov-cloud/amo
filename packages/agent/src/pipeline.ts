@@ -51,6 +51,7 @@ export interface PipelineDeps {
   /** Переписка из Wazzup по телефону контакта (RFD-AI-AGENT-WAZZUP-HISTORY); нет — блок не добавляется. */
   wazzup?: {
     historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]>;
+    resolveChatKind?(accountId: number, leadId: number | null, text: string): Promise<{ kind: string; chatId: string | null; chatName: string | null }>;
     incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
     markConsumed?(accountId: number, ids: number[]): Promise<void>;
   };
@@ -196,6 +197,20 @@ export class DialogPipeline {
     if (settings.where.disabledStatusIds.includes(lead.status_id)) {
       await this.d.dialog.pause(accountId, leadId, 'status_without_ai');
       return this.skip(t, 'status', 'Этап сделки — «без AI»');
+    }
+    // Вторая линия после hook: групповой чат без разрешения (RFD-AI-AGENT-GRUPPOVYE-CHATY).
+    const wz = this.d.wazzup;
+    if (wz?.resolveChatKind) {
+      const groups = settings.where.groups;
+      const lastText = t.texts[t.texts.length - 1] ?? '';
+      const chat = await wz.resolveChatKind(accountId, leadId, lastText);
+      if (
+        chat.kind === 'group' &&
+        (groups.mode === 'block_all' ||
+          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? '')))
+      ) {
+        return this.skip(t, 'group_chat', `Групповой чат без разрешения: ${chat.chatName ?? chat.chatId ?? 'без названия'}`);
+      }
     }
     await this.d.outcomes?.start(accountId, leadId, lead.pipeline_id, lead.status_id).catch(() => undefined);
 

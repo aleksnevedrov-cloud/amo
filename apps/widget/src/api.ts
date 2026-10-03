@@ -425,6 +425,10 @@ export class WidgetApi {
       state: { webhookUri: string | null; subscribedAt: string | null; lastEventAt: string | null; eventsTotal: number; lastError: string | null; lastErrorAt: string | null };
       stats: { total: number; last24h: number; phones: number };
     }>('GET', '/widget/v1/wazzup/status');
+  wazzupGroups = () =>
+    this.call<{
+      items: { chatId: string; chatName: string | null; chatType: string | null; messages: number; lastAt: string | null; skipped: number }[];
+    }>('GET', '/widget/v1/wazzup/groups');
   setWazzupKey = (apiKey: string) => this.call<{ ok: true }>('PUT', '/widget/v1/wazzup/key', { apiKey });
   testWazzup = () =>
     this.call<{ ok: boolean; error?: string; channels?: { id: string | null; transport: string | null; name: string | null; state: string | null }[] }>('POST', '/widget/v1/wazzup/test');
