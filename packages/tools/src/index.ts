@@ -10,3 +10,4 @@ export * from './types.ts';
 export * from './price-calculate.ts';
 export * from './crm-create-task.ts';
 export * from './memory-save.ts';
+export * from './door-components.ts';

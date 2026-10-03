@@ -13,3 +13,4 @@ export * from './secrets.ts';
 export * from './llm.ts';
 export * from './wazzup.ts';
 export * from './wazzup-dumps.ts';
+export * from './door-components.ts';

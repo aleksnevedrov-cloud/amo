@@ -12,7 +12,7 @@ import { evalFixtures, type EvalFixtures } from '@ai-door/evals/seed';
 import { AnthropicProvider, createProvider, type ProviderId } from '@ai-door/llm';
 import { downloadAttachment } from '@ai-door/media';
 import { AmoOAuth, TokenService } from '@ai-door/amo';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
+import { CatalogImporter, CatalogRepo, fetchDoorComponents } from '@ai-door/catalog';
 import {
   AccountsRepo,
   AnalyticsRepo,
@@ -30,6 +30,7 @@ import {
   SettingsRepo,
   SuggestionsRepo,
   type Db,
+  DoorComponentsRepo,
 } from '@ai-door/db';
 import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
@@ -80,6 +81,14 @@ export interface Deps {
   secrets: SecretsRepo;
   /** Переписка из Wazzup (WhatsApp/Telegram) — история для контекста агента. */
   wazzup: WazzupRepo;
+  /** Комплектующие конкретной двери из её карточки с TTL 24 ч (RFD-AI-AGENT-KOMPLEKTUYUWIE). */
+  doorComponents: {
+    forProduct(
+      accountId: number,
+      productId: string,
+      url: string,
+    ): Promise<{ group: string; name: string; price: number }[]>;
+  };
   wazzupDumps: WazzupDumpRepo;
   modelsCache: ModelsCacheRepo;
   evalRuns: EvalRunsRepo;
@@ -186,6 +195,20 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     serverKeys,
     secrets,
     wazzup: new WazzupRepo(db),
+    doorComponents: ((repo) => ({
+      async forProduct(accountId: number, productId: string, url: string) {
+        const cached = await repo.get(accountId, productId, 24);
+        if (cached) return cached;
+        try {
+          const items = await fetchDoorComponents(url);
+          await repo.save(accountId, productId, url, items);
+          return items;
+        } catch (err) {
+          await repo.save(accountId, productId, url, [], (err as Error).message);
+          throw err;
+        }
+      },
+    }))(new DoorComponentsRepo(db)),
     wazzupDumps: new WazzupDumpRepo(db),
     modelsCache: new ModelsCacheRepo(db),
     evalRuns: new EvalRunsRepo(db),

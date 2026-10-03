@@ -45,6 +45,14 @@ export interface PipelineDeps {
   dialog: DialogRepo;
   journal: JournalRepo;
   catalog: CatalogRepo;
+  /** Комплектующие конкретной двери из её карточки (RFD-AI-AGENT-KOMPLEKTUYUWIE). */
+  doorComponents?: {
+    forProduct(
+      accountId: number,
+      productId: string,
+      url: string,
+    ): Promise<{ group: string; name: string; price: number }[]>;
+  } | null;
   knowledge: KnowledgeRepo;
   pricing: PricingRepo;
   memory: MemoryRepo;
@@ -272,6 +280,7 @@ export class DialogPipeline {
     const ctx: ToolContext = {
       accountId,
       catalog: this.d.catalog,
+      components: this.d.doorComponents ?? null,
       knowledge: this.d.knowledge,
       crm: new AmoCrm(access.api, leadId, () => this.taskAssignee(t)),
       pricing: rules,

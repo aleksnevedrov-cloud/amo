@@ -59,6 +59,14 @@ export interface ToolContext {
   crm: CrmPort;
   /** Правила расчёта аккаунта; null — не настроены. */
   pricing?: PricingRules | null;
+  /** Комплектующие конкретной двери из её карточки (RFD-AI-AGENT-KOMPLEKTUYUWIE). */
+  components?: {
+    forProduct(
+      accountId: number,
+      productId: string,
+      url: string,
+    ): Promise<{ group: string; name: string; price: number }[]>;
+  } | null;
   memory?: MemoryPort;
   /** Типы и сроки задач из настроек. */
   tasks?: Partial<Record<TaskKind, { taskTypeId: number; deadlineMin: number }>>;

@@ -1,5 +1,6 @@
 import { catalogGetProduct } from './catalog-get-product.ts';
 import { catalogSearch } from './catalog-search.ts';
+import { doorComponents } from './door-components.ts';
 import { crmAddNote } from './crm-add-note.ts';
 import { crmGetContext } from './crm-get-context.ts';
 import { crmHandoff } from './crm-handoff.ts';
@@ -13,6 +14,7 @@ import type { AgentTool } from './types.ts';
 export const PHASE1_TOOLS: readonly AgentTool[] = [
   catalogSearch,
   catalogGetProduct,
+  doorComponents,
   knowledgeSearch,
   crmGetContext,
   crmAddNote,

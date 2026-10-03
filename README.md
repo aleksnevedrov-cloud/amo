@@ -51,3 +51,13 @@ pnpm build            # api, worker, widget.zip
 - проверка стоит дважды: в hook `/salesbot/v1/hook` до вызова модели (журнал `kind=skipped`, ответ `skipped: group_chat`) и в `pipeline.ts` перед ответом.
 - если чат определить не удалось (`unknown`), агент работает как обычно - молчание не по умолчанию.
 - список групп и счётчик пропусков: `GET /widget/v1/wazzup/groups`.
+
+## Комплектующие из карточки двери (RFD-AI-AGENT-KOMPLEKTUYUWIE)
+
+У каждой двери свой набор комплектующих и свои цены, общие «Правила цен» для них не годятся.
+
+- связки нет ни в YML-фиде, ни в `/upage/<id>.json` - единственный источник - HTML карточки
+- парсер: `packages/catalog/src/components.ts`, блок `ComponentsInTheFormOfTradeOffers`, заголовок `Title FBB_CA`, инпуты `ComponentInTheFormOfTradeOffer`; первый вариант группы («не выбрано») пропускается
+- хранение: таблицы `door_components` и `door_components_state` (миграция 013), TTL 24 ч, сайт не опрашивается на каждый ответ
+- инструмент агента: `door_components(id)` - группы с вариантами и ценами; пустой результат - не ошибка
+- `DoorComponentsRepo.stats()` даёт счётчик карточек без связки и с ошибкой разбора - вёрстка сайта может поменяться
