@@ -1,3 +1,4 @@
+import { hasMention, stripMention } from '@ai-door/shared';
 import { resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@ai-door/amo';
 import type { CatalogRepo } from '@ai-door/catalog';
 import {
@@ -207,6 +208,7 @@ export class DialogPipeline {
       return this.skip(t, 'status', 'Этап сделки — «без AI»');
     }
     // Вторая линия после hook: групповой чат без разрешения (RFD-AI-AGENT-GRUPPOVYE-CHATY).
+    let groupMention = false;
     const wz = this.d.wazzup;
     if (wz?.resolveChatKind) {
       const groups = settings.where.groups;
@@ -218,6 +220,15 @@ export class DialogPipeline {
           (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? '')))
       ) {
         return this.skip(t, 'group_chat', `Групповой чат без разрешения: ${chat.chatName ?? chat.chatId ?? 'без названия'}`);
+      }
+      // Пункт 8: в группе отвечаем на обращение по имени; слово-вызов модели не показываем.
+      if (chat.kind === 'group' && hasMention(lastText, groups.mention)) {
+        groupMention = true;
+        t.texts = t.texts.map((x) =>
+          hasMention(x, groups.mention)
+            ? `${stripMention(x, groups.mention)}\n(сотрудник обратился к агенту напрямую - ответь в чат)`
+            : x,
+        );
       }
     }
     await this.d.outcomes?.start(accountId, leadId, lead.pipeline_id, lead.status_id).catch(() => undefined);
@@ -241,7 +252,7 @@ export class DialogPipeline {
     }
 
     let delivery: Delivery = settings.mode === 'auto' ? 'send' : settings.mode === 'semi' ? 'draft' : 'hint';
-    if (state.paused) {
+    if (state.paused && !groupMention) {
       if (!settings.hints.whenPaused) {
         return this.skip(t, state.pauseReason === 'manager_message' ? 'manager' : 'paused', `AI на паузе: ${state.pauseReason ?? ''}`);
       }

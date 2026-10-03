@@ -326,6 +326,14 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
             <input type="checkbox" checked={draft.where.groups.mode !== 'allow_all'} onChange={(e) => set('where', { groups: { ...draft.where.groups, mode: e.target.checked ? 'allowlist' : 'allow_all' } })} />
             Ограничивать работу в группах
           </label>
+              <label style={s.row}>
+                <input type="checkbox" checked={draft.where.groups.mentionOnly} onChange={(e) => set('where', { groups: { ...draft.where.groups, mentionOnly: e.target.checked } })} />
+                В группах отвечать только на обращение
+              </label>
+              <label style={s.row}>
+                Слово-обращение
+                <input value={draft.where.groups.mention} maxLength={40} placeholder="@Амма" onChange={(e) => set('where', { groups: { ...draft.where.groups, mention: e.target.value } })} />
+              </label>
           {(groups ?? []).map((g) => (
             <label key={g.chatId} style={s.row}>
               <input

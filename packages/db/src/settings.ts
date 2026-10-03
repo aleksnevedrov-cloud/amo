@@ -68,6 +68,10 @@ export const widgetSettingsSchema = z
             mode: z.enum(['allowlist', 'block_all', 'allow_all']).default('allowlist'),
             /** chatId Wazzup разрешенных групп. */
             allowedChatIds: z.array(z.string().min(1).max(120)).max(50).default(['79296519427-1595920633']),
+            /** Слово-обращение к агенту в группе; регистр и собака не важны. */
+            mention: z.string().max(40).default('@Амма'),
+            /** В группах отвечать только на обращение. */
+            mentionOnly: z.boolean().default(true),
           })
           .strict()
           .default({}),

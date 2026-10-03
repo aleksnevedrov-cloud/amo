@@ -1,6 +1,7 @@
 import { continueBot, isSafeReturnUrl, verifyBotToken } from '@ai-door/amo';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { hasMention } from '@ai-door/shared';
 import type { Deps } from '../deps.ts';
 
 const bodySchema = z.object({
@@ -97,6 +98,17 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
           details: { chatId: chat.chatId, chatName: chat.chatName, chatType: chat.chatType, mode: groups.mode },
         });
         return reply.code(200).send({ ok: true, skipped: 'group_chat' });
+      }
+      // Пункт 8: в разрешённой группе агент отвечает только на обращение по имени.
+      if (chat.kind === 'group' && groups.mentionOnly && !hasMention(text, groups.mention)) {
+        await deps.journal.add({
+          accountId,
+          leadId,
+          kind: 'skipped',
+          summary: 'Группа: нет обращения к агенту',
+          details: { chatId: chat.chatId, chatName: chat.chatName, mention: groups.mention },
+        });
+        return reply.code(200).send({ ok: true, skipped: 'group_no_mention' });
       }
       await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
       await deps.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
