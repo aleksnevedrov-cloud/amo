@@ -98,6 +98,6 @@ describe('Salesbot', () => {
         data: { status: 'success', reply: 'Привет\n\nВот модели', has_reply: '1' },
       },
     });
-    expect(s.calls[0].body.execute_handlers).toBeUndefined();
+    expect((s.calls[0]?.body as { execute_handlers?: unknown }).execute_handlers).toBeUndefined();
   });
 });

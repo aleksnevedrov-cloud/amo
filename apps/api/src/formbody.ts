@@ -6,7 +6,7 @@ function setDeep(target: Record<string, unknown>, key: string, value: string): v
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let cur: any = target;
   for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
+    const p = parts[i] ?? '';
     if (i === parts.length - 1) {
       if (p === '') {
         if (Array.isArray(cur)) cur.push(value);
@@ -15,7 +15,7 @@ function setDeep(target: Record<string, unknown>, key: string, value: string): v
       }
       return;
     }
-    const next = parts[i + 1];
+    const next = parts[i + 1] ?? '';
     if (cur[p] === undefined || typeof cur[p] !== 'object') cur[p] = /^\d*$/.test(next) ? [] : {};
     cur = cur[p];
   }
