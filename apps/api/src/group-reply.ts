@@ -80,17 +80,21 @@ export async function replyInGroup(deps: Deps, msg: GroupMessage): Promise<Group
   };
 
   const tools: readonly AgentTool[] = PHASE2_TOOLS.filter((t) => GROUP_TOOLS.has(t.name));
-  const past = (await deps.groupTurns.history(accountId, chatId, 20)).map((m) => ({
-    role: m.role === 'client' ? ('client' as const) : ('ai' as const),
-    text: m.text,
-  }));
+  // История берётся из переписки Wazzup: там весь чат, включая сообщения до внедрения агента.
+  const raw = await deps.wazzup.historyByChat(accountId, chatId, 30);
+  const past = raw
+    .filter((m, i) => !(i === raw.length - 1 && m.direction === 'in' && m.text.trim() === text))
+    .map((m) => ({
+      role: m.direction === 'in' ? ('client' as const) : ('ai' as const),
+      text: m.text,
+    }));
   const incoming = [stripMention(text, groups.mention) || text];
 
   let result;
   try {
     result = await orchestrator.runTurn({
       settings,
-      history: past.slice(0, Math.max(0, past.length - 1)),
+      history: past,
       incoming,
       ctx,
       tools,

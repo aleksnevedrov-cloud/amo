@@ -140,6 +140,18 @@ export class WazzupRepo {
     return rows.map((r) => ({ direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at, chatType: r.chat_type }));
   }
 
+  /** История переписки конкретного чата — для групп, где нет телефона контакта. */
+  async historyByChat(accountId: number, chatId: string, limit = 40): Promise<WazzupHistoryItem[]> {
+    const { rows } = await this.db.query(
+      `SELECT direction, author, text, sent_at, chat_type FROM (
+         SELECT direction, author, text, sent_at, chat_type FROM wazzup_messages
+         WHERE account_id = $1 AND chat_id = $2 AND NOT is_system AND text <> ''
+         ORDER BY sent_at DESC LIMIT $3) t ORDER BY sent_at ASC`,
+      [accountId, chatId, limit],
+    );
+    return rows.map((r) => ({ direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at, chatType: r.chat_type }));
+  }
+
   async countByPhone(accountId: number, phone: string): Promise<number> {
     const { rows } = await this.db.query('SELECT count(*)::int AS n FROM wazzup_messages WHERE account_id = $1 AND phone = $2 AND NOT is_system', [accountId, phone]);
     return rows[0]?.n ?? 0;
