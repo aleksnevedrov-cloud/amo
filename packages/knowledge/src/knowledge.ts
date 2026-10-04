@@ -47,6 +47,22 @@ export class KnowledgeRepo {
     return this.add(accountId, 'url', title ?? url, text, url, userId);
   }
 
+  /** Файл из вкладки «База знаний»: текст уже извлечён вызывающим (packages/docs), здесь только запись и индекс. */
+  addFile(accountId: number, filename: string, text: string, userId?: number): Promise<number> {
+    if (text.trim().length < 50) throw new Error('В файле не найден текст');
+    return this.add(accountId, 'file', filename, text, filename, userId);
+  }
+
+  /** Перечитать статью по сохранённой ссылке: новая запись создаётся, старая удаляется. Возвращает новый id. */
+  async refreshUrl(accountId: number, id: number, userId?: number): Promise<number> {
+    const { rows } = await this.db.query('SELECT kind, source FROM knowledge_items WHERE account_id = $1 AND id = $2', [accountId, id]);
+    const row = rows[0] as { kind?: string; source?: string | null } | undefined;
+    if (!row || row.kind !== 'url' || !row.source) throw new Error('Это не статья по ссылке');
+    const fresh = await this.addUrl(accountId, row.source, userId);
+    await this.remove(accountId, id);
+    return fresh;
+  }
+
   private async add(
     accountId: number,
     kind: KnowledgeKind,

@@ -1,3 +1,4 @@
+import { detectFormat, extract } from '@ai-door/docs';
 import { resolveRoute, type Orchestrator, type TurnResult } from '@ai-door/agent';
 import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm, type Source } from '@ai-door/tools';
 import { widgetDocsRoutes } from './widget-docs.ts';
@@ -39,6 +40,14 @@ const journalQuery = z.object({
   before: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
+
+/** Файл для базы знаний: содержимое в base64, как у документов сделки. */
+const knowledgeFileBody = z.object({
+  name: z.string().min(1).max(200),
+  mime: z.string().max(120).default('application/octet-stream'),
+  file: z.string().min(1),
+});
+const KNOWLEDGE_FILE_FORMATS = new Set(['pdf', 'docx', 'xlsx', 'text']);
 
 const knowledgeBody = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('faq'), question: z.string().min(3).max(1000), answer: z.string().min(1).max(8000) }),
@@ -284,7 +293,41 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         return ok ? { ok } : reply.code(404).send({ error: 'not_found' });
       });
 
-      // Песочница: реальный каталог и база знаний, CRM — тестовая сделка, клиенту ничего не уходит.
+      // Файл в базу знаний: PDF, DOCX, XLSX, TXT. Текст извлекает packages/docs, индексирует knowledge.
+  api.post('/knowledge/file', { bodyLimit: 30 * 1024 * 1024 }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const p = principal(req);
+    const b = knowledgeFileBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'invalid', issues: b.error.issues });
+    const bytes = new Uint8Array(Buffer.from(b.data.file, 'base64'));
+    if (!bytes.byteLength) return reply.code(400).send({ error: 'bad_file' });
+    const format = detectFormat(b.data.mime, b.data.name);
+    if (!KNOWLEDGE_FILE_FORMATS.has(format)) {
+      return reply.code(422).send({ error: 'cannot_add', message: 'Поддерживаются PDF, DOCX, XLSX и TXT' });
+    }
+    try {
+      const ex = await extract(bytes, b.data.mime, b.data.name);
+      if (ex.needsOcr) return reply.code(422).send({ error: 'cannot_add', message: 'В файле нет текстового слоя — это скан. Загрузите текстовую версию.' });
+      const id = await deps.knowledge.addFile(p.accountId, b.data.name, ex.text, p.userId);
+      return { id, chars: ex.text.length, pages: ex.pages };
+    } catch (err) {
+      return reply.code(422).send({ error: 'cannot_add', message: (err as Error).message });
+    }
+  });
+
+  // Перечитать статью по ссылке — когда на сайте поменялся текст.
+  api.post('/knowledge/:id/refresh', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const p = principal(req);
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    try {
+      return { id: await deps.knowledge.refreshUrl(p.accountId, id, p.userId) };
+    } catch (err) {
+      return reply.code(422).send({ error: 'cannot_refresh', message: (err as Error).message });
+    }
+  });
+
+  // Песочница: реальный каталог и база знаний, CRM — тестовая сделка, клиенту ничего не уходит.
       api.post('/sandbox', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
         const p = principal(req);
         const ai = await deps.ai(p.accountId);

@@ -362,6 +362,11 @@ export class WidgetApi {
   knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
   addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
+  /** Файл в базу знаний (PDF, DOCX, XLSX, TXT) — содержимое в base64. */
+  addKnowledgeFile = (name: string, mime: string, file: string) =>
+    this.call<{ id: number; chars: number; pages: number }>('POST', '/widget/v1/knowledge/file', { name, mime, file });
+  /** Перечитать статью по ссылке. */
+  refreshKnowledge = (id: number) => this.call<{ id: number }>('POST', `/widget/v1/knowledge/${id}/refresh`);
   sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef, phone?: string) =>
     this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}), ...(phone ? { phone } : {}) });
 
