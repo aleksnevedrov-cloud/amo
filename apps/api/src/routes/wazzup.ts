@@ -119,8 +119,10 @@ export function wazzupRoutes(app: FastifyInstance, deps: Deps): void {
         const row = toWazzupMessage(m);
         if (await deps.wazzup.upsert(accountId, row)) inserted += 1;
         // Групповые чаты: у них нет сделки, Salesbot их не запускает — отвечаем отсюда.
-        if (row.direction === 'in' && !row.isSystem && isGroupChatType(row.chatType) && row.text.trim()) {
-          void handleGroupMessage(deps, accountId, row, req.log);
+        // С номера канала сообщения приходят как «исходящие» — отличаем их от эха нашего ответа по тексту.
+        if (!row.isSystem && isGroupChatType(row.chatType) && row.text.trim()) {
+          const human = row.direction === 'in' || !(await deps.groupTurns.isOwnReply(accountId, row.chatId, row.text));
+          if (human) void handleGroupMessage(deps, accountId, row, req.log);
         }
       }
       for (const s of b.statuses ?? []) await deps.wazzup.setStatus(accountId, s.messageId, s.status);

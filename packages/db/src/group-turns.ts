@@ -56,6 +56,19 @@ export class GroupTurnsRepo {
     return Number((rows[0] as { n?: number } | undefined)?.n ?? 0);
   }
 
+  /** Эхо нашего ответа: такой текст агент уже отправлял в этот чат недавно. Исходящее без такого совпадения — человек с номера канала. */
+  async isOwnReply(accountId: number, chatId: string, text: string, minutes = 10): Promise<boolean> {
+    const { rows } = await this.db.query(
+      `SELECT 1 FROM group_turns
+         WHERE account_id = $1 AND chat_id = $2 AND role = 'assistant'
+           AND created_at > now() - make_interval(mins => $4)
+           AND left(text, 300) = left($3, 300)
+         LIMIT 1`,
+      [accountId, chatId, text.trim(), minutes],
+    );
+    return rows.length > 0;
+  }
+
   /** Сводка для вкладки «Где работает»: сколько чатов и ответов. */
   async stats(accountId: number): Promise<{ chats: number; replies: number }> {
     const { rows } = await this.db.query(
