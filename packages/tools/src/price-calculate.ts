@@ -56,6 +56,21 @@ export const priceCalculate = defineTool({
           additionalProperties: false,
         },
       },
+      card_components: {
+        type: 'array',
+        description:
+          'Комплектующие из карточки двери (инструмент door_components): название и цена с сайта. Если переданы, комплектующие из «Правил цен» не используются.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            price_rub: { type: 'number' },
+            qty: { type: 'integer', minimum: 1 },
+          },
+          required: ['name', 'price_rub'],
+          additionalProperties: false,
+        },
+      },
       services: {
         type: 'array',
         description: 'Услуги по коду; для доставки за МКАД — km, для подъёма и заноса — floor.',
@@ -75,6 +90,10 @@ export const priceCalculate = defineTool({
     kit: z.boolean().optional(),
     extras: z.array(z.object({ code: z.string().max(40), qty: z.number().int().min(1).max(1000) })).max(30).optional(),
     products: z.array(z.object({ product_id: z.string().max(100), qty: z.number().int().min(1).max(1000) })).max(30).optional(),
+    card_components: z
+      .array(z.object({ name: z.string().max(200), price_rub: z.number().min(0).max(1000000), qty: z.number().int().min(1).max(100).optional() }))
+      .max(30)
+      .optional(),
     services: z
       .array(z.object({ code: z.string().max(40), km: z.number().min(0).max(1000).optional(), floor: z.number().int().min(0).max(100).optional() }))
       .max(20)
@@ -102,7 +121,15 @@ export const priceCalculate = defineTool({
     }
     if (notFound.length) return { empty: true, content: { error: `Товары не найдены в каталоге: ${notFound.join(', ')}` } };
 
-    const r = calculate(ctx.pricing, { doors, kit: i.kit ?? true, extras: i.extras ?? [], products, services: i.services ?? [] });
+    const cardComponents = (i.card_components ?? []).map((c) => ({ name: c.name, price: c.price_rub, qty: c.qty }));
+    const r = calculate(ctx.pricing, {
+      doors,
+      kit: i.kit ?? true,
+      extras: i.extras ?? [],
+      products,
+      services: i.services ?? [],
+      cardComponents,
+    });
     const content = {
       lines: r.lines.map((l) => ({ name: l.name, qty: l.qty, price_rub: l.price, total_rub: l.total, basis: l.basis })),
       total_rub: r.total,

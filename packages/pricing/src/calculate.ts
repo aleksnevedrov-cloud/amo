@@ -20,6 +20,9 @@ export interface CalcInput {
   /** Фурнитура и прочие товары из каталога. */
   products: { productId: string; name: string; price: number | null; qty: number }[];
   services: { code: string; km?: number; floor?: number }[];
+  /** Комплектующие из карточки двери на сайте (RFD-AI-AGENT-KOMPLEKTUYUWIE).
+   *  Если список не пуст, комплектующие из «Правил цен» не участвуют. */
+  cardComponents?: { name: string; price: number; qty?: number }[];
 }
 
 export interface CalcLine {
@@ -114,13 +117,19 @@ export function calculate(rules: PricingRules, input: CalcInput): CalcResult {
       });
     }
   };
-  if (input.kit && input.doors.length) {
+  // Комплектующие из карточки двери: цена сайта важнее общих правил.
+  const fromCard = input.cardComponents ?? [];
+  for (const c of fromCard) {
+    const qty = c.qty && c.qty > 0 ? c.qty : doorsCount;
+    add({ name: c.name, article: null, qty, price: c.price, basis: 'цена из карточки двери' });
+  }
+  if (!fromCard.length && input.kit && input.doors.length) {
     for (const c of rules.components.filter((x) => x.inKit && x.qtyPerDoor > 0)) {
       componentLines(c, (d) => d.qty * c.qtyPerDoor);
     }
   }
   // Явные позиции (доборы): общее количество распределяем по сериям пропорционально дверям.
-  for (const e of input.extras) {
+  for (const e of fromCard.length ? [] : input.extras) {
     const c = rules.components.find((x) => x.code === e.code);
     if (!c) {
       missing.push(`неизвестная позиция «${e.code}»`);
