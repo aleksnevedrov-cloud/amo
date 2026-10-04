@@ -23,6 +23,34 @@ export interface KnowledgeHit {
   content: string;
 }
 
+/** Ссылки на дочерние страницы раздела: тот же сайт, путь = путь раздела + один сегмент, без параметров. */
+export function listingLinks(html: string, pageUrl: string): string[] {
+  const base = new URL(pageUrl);
+  const dir = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`;
+  const out = new Set<string>();
+  for (const m of html.matchAll(/href="([^"#]+)"/gi)) {
+    let u: URL;
+    try {
+      u = new URL(m[1] ?? '', base);
+    } catch {
+      continue;
+    }
+    if (u.origin !== base.origin || u.search || !u.pathname.startsWith(dir)) continue;
+    const rest = u.pathname.slice(dir.length).replace(/\/$/, '');
+    if (!rest || rest.includes('/') || /\.[a-z0-9]{2,5}$/i.test(rest)) continue;
+    out.add(`${u.origin}${dir}${rest}/`);
+  }
+  return [...out];
+}
+
+export interface UrlAddResult {
+  kind: 'article' | 'listing';
+  ids: number[];
+  added: number;
+  skipped: number;
+  total: number;
+}
+
 export class KnowledgeRepo {
   constructor(
     private readonly db: Db,
@@ -45,6 +73,58 @@ export class KnowledgeRepo {
     const { title, text } = htmlToText(await res.text());
     if (text.length < 50) throw new Error('На странице не найден текст');
     return this.add(accountId, 'url', title ?? url, text, url, userId);
+  }
+
+  private async fetchHtml(safe: string): Promise<string> {
+    const res = await (this.opts.fetch ?? fetch)(safe, {
+      headers: { 'user-agent': 'AI-Door-Agent/1.0 (+https://rf-dveri.ru; knowledge)' },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`Страница недоступна: HTTP ${res.status}`);
+    return res.text();
+  }
+
+  /**
+   * Ссылка любого вида: статья — одна запись; раздел (на странице >= 3 дочерних ссылок) —
+   * обход пагинации ?p=N и каждая статья отдельной записью; уже сохранённые пропускаются.
+   */
+  async addUrlSmart(accountId: number, url: string, userId?: number): Promise<UrlAddResult> {
+    const safe = (await assertPublicUrl(url, this.opts.resolve)).toString();
+    const first = await this.fetchHtml(safe);
+    const links = new Set(listingLinks(first, safe));
+    if (links.size < 3) {
+      const id = await this.addUrl(accountId, url, userId);
+      return { kind: 'article', ids: [id], added: 1, skipped: 0, total: 1 };
+    }
+    for (let p = 2; p <= 30; p++) {
+      const pageUrl = new URL(safe);
+      pageUrl.searchParams.set('p', String(p));
+      let html: string;
+      try {
+        html = await this.fetchHtml(pageUrl.toString());
+      } catch {
+        break;
+      }
+      const fresh = listingLinks(html, safe).filter((u) => !links.has(u));
+      if (!fresh.length) break;
+      for (const u of fresh) links.add(u);
+    }
+    const { rows } = await this.db.query("SELECT source FROM knowledge_items WHERE account_id = $1 AND kind = 'url'", [accountId]);
+    const known = new Set(rows.map((r: { source?: string | null }) => r.source ?? ''));
+    const ids: number[] = [];
+    let skipped = 0;
+    for (const u of [...links].slice(0, 100)) {
+      if (known.has(u)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        ids.push(await this.addUrl(accountId, u, userId));
+      } catch {
+        skipped += 1;
+      }
+    }
+    return { kind: 'listing', ids, added: ids.length, skipped, total: links.size };
   }
 
   /** Файл из вкладки «База знаний»: текст уже извлечён вызывающим (packages/docs), здесь только запись и индекс. */

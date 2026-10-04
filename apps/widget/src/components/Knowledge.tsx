@@ -93,9 +93,11 @@ export function Knowledge({ api }: { api: WidgetApi }) {
     });
   const addUrl = () =>
     run('url', async () => {
-      await api.addKnowledge({ kind: 'url', url: url.trim() });
+      const r = await api.addKnowledge({ kind: 'url', url: url.trim() });
       setUrl('');
-      return 'Страница прочитана и проиндексирована';
+      return r.listing
+        ? `Раздел: добавлено статей ${r.added ?? 0}, уже было ${r.skipped ?? 0}`
+        : 'Страница прочитана и проиндексирована';
     });
   const addFile = () =>
     run('file', async () => {
@@ -122,7 +124,7 @@ export function Knowledge({ api }: { api: WidgetApi }) {
         <textarea style={s.textarea} placeholder="Текст" value={text} onChange={(e) => setText(e.target.value)} />
       </Block>
 
-      <Block title="3. Статья по ссылке" hint="Адрес страницы сайта. Сервер сам прочитает её и сохранит текст; когда страница изменится — кнопка «Обновить» в списке ниже."
+      <Block title="3. Статья по ссылке" hint="Адрес статьи или целого раздела (например «Полезные советы про двери»): раздел обходится по страницам, каждая статья добавляется отдельно. Сервер сам прочитает её и сохранит текст; когда страница изменится — кнопка «Обновить» в списке ниже."
         canAdd={/^https?:\/\/\S+$/i.test(url.trim())} busy={busy === 'url'} msg={msg.url ?? null} ok={ok.url ?? null} onAdd={addUrl} button="Прочитать и добавить">
         <input style={s.input} placeholder="https://www.rf-dveri.ru/…" value={url} onChange={(e) => setUrl(e.target.value)} />
       </Block>

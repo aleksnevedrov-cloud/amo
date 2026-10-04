@@ -274,12 +274,15 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const b = knowledgeBody.safeParse(req.body);
         if (!b.success) return reply.code(400).send({ error: 'invalid', issues: b.error.issues });
         try {
+          if (b.data.kind === 'url') {
+            // Статья или раздел — сервис разберётся сам; раздел даёт по записи на каждую статью.
+            const r = await deps.knowledge.addUrlSmart(p.accountId, b.data.url, p.userId);
+            return { id: r.ids[0] ?? null, listing: r.kind === 'listing', added: r.added, skipped: r.skipped, total: r.total };
+          }
           const id =
             b.data.kind === 'faq'
               ? await deps.knowledge.addFaq(p.accountId, b.data.question, b.data.answer, p.userId)
-              : b.data.kind === 'text'
-                ? await deps.knowledge.addText(p.accountId, b.data.title, b.data.content, null, p.userId)
-                : await deps.knowledge.addUrl(p.accountId, b.data.url, p.userId);
+              : await deps.knowledge.addText(p.accountId, b.data.title, b.data.content, null, p.userId);
           return { id };
         } catch (err) {
           return reply.code(422).send({ error: 'cannot_add', message: (err as Error).message });

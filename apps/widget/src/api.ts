@@ -360,7 +360,8 @@ export class WidgetApi {
   catalog = () => this.call<CatalogStats>('GET', '/widget/v1/catalog');
   importCatalog = () => this.call<{ started: boolean }>('POST', '/widget/v1/catalog/import');
   knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
-  addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
+  addKnowledge = (item: KnowledgeInput) =>
+    this.call<{ id: number | null; listing?: boolean; added?: number; skipped?: number; total?: number }>('POST', '/widget/v1/knowledge', item);
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
   /** Файл в базу знаний (PDF, DOCX, XLSX, TXT) — содержимое в base64. */
   addKnowledgeFile = (name: string, mime: string, file: string) =>
