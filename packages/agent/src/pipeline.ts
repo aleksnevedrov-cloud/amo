@@ -29,6 +29,7 @@ import {
   type ToolContext,
 } from '@ai-door/tools';
 import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
+import { blockSummary, canReply } from './can-reply.ts';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
@@ -394,8 +395,28 @@ export class DialogPipeline {
       return delivery === 'draft' ? { status: 'drafted', id } : { status: 'hinted', id };
     }
 
-    const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
     if (settings.where.typingDelay && chats.length) await (this.d.sleep ?? defaultSleep)(Math.min(1500 + result.text.length * 25, 8000));
+    // Жёсткий допуск перед отправкой: между проверкой в начале хода и этим местом прошло
+    // 17-31 с (склейка, вызов модели, имитация набора) - менеджер мог вступить в диалог.
+    // Готовый ответ не теряем: он уходит менеджеру подсказкой, клиенту не отправляется.
+    const gate = await canReply(
+      { state: (a, l) => this.d.dialog.state(a, l), outgoingChatEvents: (l, since) => access.api.getOutgoingChatEvents(l, since) },
+      { accountId, leadId, now: this.d.now?.() ?? new Date(), manualReturn: groupMention, checkChat: chats.length > 0 },
+    );
+    if (!gate.allowed) {
+      const id = await this.d.suggestions.add(accountId, leadId, 'hint', result.text, { ...details, blockedBy: gate.reason });
+      await this.journal(t, {
+        kind: 'blocked',
+        summary: blockSummary(gate),
+        details: { ...details, reason: gate.reason, ...gate.details, text: result.text, suggestionId: id },
+        ...cost,
+      });
+      if (gate.reason === 'manager_active') await this.d.dialog.pause(accountId, leadId, 'manager_message');
+      await this.release(t, []);
+      return { status: 'hinted', id };
+    }
+
+    const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
     await this.journal(t, { kind: 'reply', summary: result.text, details, ...cost });
     if (misses >= 2) {
       await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);

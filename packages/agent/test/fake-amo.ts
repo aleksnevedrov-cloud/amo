@@ -9,6 +9,12 @@ export interface FakeAmoState {
   calls: { method: string; path: string; body: unknown }[];
   sent: { returnUrl: string; messages: string[] }[];
   failSend?: boolean;
+  /**
+   * Вызывается на каждом запросе GET /api/v4/events (n — номер запроса, с 1).
+   * Позволяет сымитировать сообщение менеджера, появившееся между проверкой в начале
+   * хода и проверкой перед отправкой.
+   */
+  onEventsCall?: (n: number, state: FakeAmoState) => void;
 }
 
 export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmoState; access: AmoAccess; send: (a: AmoAccess, u: string, m: string[]) => Promise<void> } {
@@ -19,6 +25,7 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
     sent: [],
     ...overrides,
   };
+  let eventsCalls = 0;
   const f = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const method = init?.method ?? 'GET';
@@ -29,7 +36,11 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
       return state.lead ? json(state.lead) : new Response('', { status: 404 });
     }
     if (url.pathname.startsWith('/api/v4/contacts/') && method === 'GET') return state.contact ? json(state.contact) : new Response('', { status: 404 });
-    if (url.pathname === '/api/v4/events') return state.events.length ? json({ _embedded: { events: state.events } }) : new Response(null, { status: 204 });
+    if (url.pathname === '/api/v4/events') {
+      eventsCalls += 1;
+      state.onEventsCall?.(eventsCalls, state);
+      return state.events.length ? json({ _embedded: { events: state.events } }) : new Response(null, { status: 204 });
+    }
     if (url.pathname.endsWith('/notes') && method === 'GET') return new Response(null, { status: 204 });
     if (url.pathname.endsWith('/notes')) return json({ _embedded: { notes: [{ id: 1 }] } });
     if (url.pathname === '/api/v4/tasks') return json({ _embedded: { tasks: [{ id: 2 }] } });

@@ -121,6 +121,37 @@ describe('DialogPipeline', () => {
     expect((await t.dialog.state(ACC, lead)).paused).toBe(true);
   });
 
+  it('менеджер вступил в диалог пока работала модель — ответ клиенту не уходит, а становится подсказкой', async () => {
+    // Первый запрос событий — в начале хода, менеджера ещё нет. Второй — перед отправкой,
+    // к этому моменту менеджер уже ответил клиенту сам.
+    const t = await setup(
+      [toolUse(['catalog_search', { query: 'входная терморазрыв' }]), text('Подойдёт Страж Термо — 42 000 ₽, в наличии.')],
+      {},
+      {
+        onEventsCall: (n, st) => {
+          if (n >= 2) {
+            st.events = [{ id: 'e1', type: 'outgoing_chat_message', entity_id: lead, created_by: 3, created_at: 1791108000 }];
+          }
+        },
+      },
+    );
+    await t.dialog.enqueue(ACC, lead, 'Нужна входная дверь с терморазрывом', 'https://test.amocrm.ru/c/9');
+    const res = await t.pipeline.processLead(ACC, lead);
+    expect(res.status).toBe('hinted');
+
+    // Клиенту не ушло ничего, бот просто продолжен пустым списком.
+    expect(t.fake.state.sent.flatMap((x) => x.messages)).toEqual([]);
+    // Текст сохранён менеджеру подсказкой.
+    const hints = await t.suggestions.listForLead(ACC, lead);
+    expect(hints.some((h) => h.kind === 'hint' && h.text.includes('Страж Термо'))).toBe(true);
+    // Нарушение зафиксировано: правило, текст, автор сообщения менеджера.
+    const blocked = (await t.journal.list(ACC, { leadId: lead })).find((r) => r.kind === 'blocked');
+    expect(blocked?.summary).toBe('Ответ не отправлен: менеджер ведёт диалог');
+    expect(blocked?.details).toMatchObject({ reason: 'manager_active', createdBy: 3 });
+    // Сделка переведена на паузу.
+    expect((await t.dialog.state(ACC, lead)).paused).toBe(true);
+  });
+
   it('заблокированный пост-фильтром ответ не уходит клиенту — передача менеджеру', async () => {
     const t = await setup([text('Цена 1 ₽'), text('Цена 2 ₽'), text('Цена 3 ₽')]);
     await t.dialog.enqueue(ACC, lead, 'Сколько стоит?', 'https://test.amocrm.ru/c/5');

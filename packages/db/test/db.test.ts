@@ -124,7 +124,13 @@ describe('SettingsRepo', () => {
 describe('widgetSettingsSchema', () => {
   it('старые настройки фазы 0 дополняются значениями по умолчанию', () => {
     const s = widgetSettingsSchema.parse({ enabled: true, mode: 'auto' });
-    expect(s.where).toEqual({ pipelineIds: null, disabledStatusIds: [], batchWindowSec: 8, typingDelay: false });
+    expect(s.where).toEqual({
+      pipelineIds: null,
+      disabledStatusIds: [],
+      batchWindowSec: 8,
+      typingDelay: false,
+      groups: { mode: 'allowlist', allowedChatIds: ['79296519427-1595920633'], mention: '@Амма', mentionOnly: true },
+    });
     expect(s.limits.dailyRub).toBeNull();
   });
 

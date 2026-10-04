@@ -84,6 +84,7 @@ describe('crm_create_task и memory_save', () => {
     expect(PHASE2_TOOLS.map((t) => t.specName)).toEqual([
       'catalog.search',
       'catalog.get_product',
+      'door_components',
       'knowledge.search',
       'crm.get_context',
       'crm.add_note',

@@ -1,4 +1,4 @@
-import { continueBot, isSafeReturnUrl, verifyBotToken } from '@ai-door/amo';
+import { AmoApiClient, continueBot, isSafeReturnUrl, verifyBotToken } from '@ai-door/amo';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { hasMention } from '@ai-door/shared';
@@ -59,6 +59,28 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
           const draft = await deps.suggestions.takeApproved(accountId, leadId);
           try {
             const token = await deps.tokenService.getAccessToken(accountId);
+            // Нажатие «Отправить» — явная передача агенту, поэтому сам факт участия менеджера
+            // отправку не запрещает. Запрещает только сообщение менеджера ПОСЛЕ одобрения:
+            // пока черновик ждал, менеджер мог ответить клиенту сам.
+            if (draft) {
+              const api = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
+              const since = draft.decidedAt ?? draft.createdAt;
+              const events = await api.getOutgoingChatEvents(leadId, since).catch(() => []);
+              const manager = events.find((e) => e.created_by > 0);
+              if (manager) {
+                await deps.suggestions.markApprovedAgain(accountId, draft.id);
+                await deps.journal.add({
+                  accountId,
+                  leadId,
+                  kind: 'blocked',
+                  summary: 'Черновик не отправлен: менеджер ответил клиенту сам',
+                  details: { draftId: draft.id, approvedBy: draft.decidedBy, createdBy: manager.created_by, text: draft.text },
+                });
+                await deps.dialog.pause(accountId, leadId, 'manager_message');
+                await continueBot(returnUrl, token, [], deps.fetch);
+                return;
+              }
+            }
             await continueBot(returnUrl, token, draft ? [draft.text] : [], deps.fetch);
             if (draft) {
               await deps.dialog.addMessage(accountId, leadId, 'ai', draft.text);
