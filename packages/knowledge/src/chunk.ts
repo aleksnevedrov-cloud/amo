@@ -40,7 +40,7 @@ export function htmlToText(html: string): { title: string | null; text: string }
     /<main[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1] ??
     /<body[^>]*>([\s\S]*?)<\/body>/i.exec(html)?.[1] ??
     html;
-  const text = main
+  let text = main
     .replace(/<(script|style|nav|header|footer|aside|form|noscript)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|li|div|h\d|tr)>/gi, '\n')
@@ -50,10 +50,19 @@ export function htmlToText(html: string): { title: string | null; text: string }
     .replace(/&laquo;/g, '«')
     .replace(/&raquo;/g, '»')
     .replace(/&mdash;/g, '—')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&#39;|&apos;/g, "'")
     .replace(/&amp;/g, '&')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n+/g, '\n\n')
     .trim();
+  // Шапка сайта (меню, блок отзывов, кнопки) лежит не в <header>/<nav>, поэтому
+  // теги её не ловят. Отрезаем всё до хлебных крошек «Главная > …» — ниже начинается сама статья.
+  const crumbs = /(?:^|\n)[ \t]*Главная[ \t]*>[^\n]*\n/.exec(text);
+  if (crumbs && crumbs.index < text.length / 2) {
+    text = text.slice(crumbs.index + crumbs[0].length).trim();
+  }
   const clean = (s: string) => s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
   return { title: title ? clean(title) : null, text };
 }

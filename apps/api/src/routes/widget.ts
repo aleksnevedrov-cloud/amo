@@ -318,6 +318,17 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
     }
   });
 
+  // Перечитать все статьи сразу — после правки правил разбора страницы.
+  api.post('/knowledge/refresh-all', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const p = principal(req);
+    try {
+      return await deps.knowledge.refreshAll(p.accountId, p.userId);
+    } catch (err) {
+      return reply.code(422).send({ error: 'cannot_refresh', message: (err as Error).message });
+    }
+  });
+
   // Перечитать статью по ссылке — когда на сайте поменялся текст.
   api.post('/knowledge/:id/refresh', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;

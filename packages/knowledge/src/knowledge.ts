@@ -143,6 +143,25 @@ export class KnowledgeRepo {
     return fresh;
   }
 
+  /** Перечитать все статьи по ссылке: применяет текущие правила разбора ко всей базе. */
+  async refreshAll(accountId: number, userId?: number): Promise<{ ok: number; failed: number }> {
+    const { rows } = await this.db.query<{ id: string }>(
+      "SELECT id FROM knowledge_items WHERE account_id = $1 AND kind = 'url' AND source IS NOT NULL ORDER BY id",
+      [accountId],
+    );
+    let ok = 0;
+    let failed = 0;
+    for (const r of rows) {
+      try {
+        await this.refreshUrl(accountId, Number(r.id), userId);
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { ok, failed };
+  }
+
   private async add(
     accountId: number,
     kind: KnowledgeKind,

@@ -368,6 +368,8 @@ export class WidgetApi {
     this.call<{ id: number; chars: number; pages: number }>('POST', '/widget/v1/knowledge/file', { name, mime, file });
   /** Перечитать статью по ссылке. */
   refreshKnowledge = (id: number) => this.call<{ id: number }>('POST', `/widget/v1/knowledge/${id}/refresh`);
+  refreshAllKnowledge = () =>
+    this.call<{ ok: number; failed: number }>('POST', '/widget/v1/knowledge/refresh-all');
   sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef, phone?: string) =>
     this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}), ...(phone ? { phone } : {}) });
 
