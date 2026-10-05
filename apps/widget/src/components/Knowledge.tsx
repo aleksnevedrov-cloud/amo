@@ -140,12 +140,15 @@ export function Knowledge({ api }: { api: WidgetApi }) {
         {file && <div style={{ ...s.muted, ...s.small }}>{file.name} · {(file.size / 1024).toFixed(0)} КБ</div>}
       </Block>
 
-      <div style={{ ...s.row, justifyContent: 'space-between', marginTop: 8 }}>
-        <span style={{ fontWeight: 600 }}>Что уже в базе</span>
-        <button type="button" style={s.buttonGhost} disabled={busy === 'all'} onClick={refreshAll}>
-          {busy === 'all' ? 'Читаем…' : 'Обновить все статьи'}
-        </button>
-      </div>
+      <div style={{ fontWeight: 600, marginTop: 8 }}>Что уже в базе (виджет 1.1.12)</div>
+      <button
+        type="button"
+        style={{ ...s.buttonGhost, width: '100%', marginTop: 6 }}
+        disabled={busy === 'all'}
+        onClick={refreshAll}
+      >
+        {busy === 'all' ? 'Читаем…' : 'Обновить все статьи'}
+      </button>
       {msg.all && <div style={s.error}>{msg.all}</div>}
       {ok.all && <div style={s.badgeOk}>{ok.all}</div>}
       {state.status === 'loading' && <div style={s.muted}>Загрузка…</div>}
