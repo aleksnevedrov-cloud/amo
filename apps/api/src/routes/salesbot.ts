@@ -65,7 +65,28 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
             if (draft) {
               const api = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
               const since = draft.decidedAt ?? draft.createdAt;
-              const events = await api.getOutgoingChatEvents(leadId, since).catch(() => []);
+              let events: Awaited<ReturnType<typeof api.getOutgoingChatEvents>>;
+              try {
+                events = await api.getOutgoingChatEvents(leadId, since);
+              } catch {
+                // amo отдаёт 429 при 7 запросах в секунду — одна попытка повтора.
+                try {
+                  await new Promise((r) => setTimeout(r, 400));
+                  events = await api.getOutgoingChatEvents(leadId, since);
+                } catch {
+                  // Черновик остаётся одобренным и уйдёт следующим ходом.
+                  await deps.suggestions.markApprovedAgain(accountId, draft.id);
+                  await deps.journal.add({
+                    accountId,
+                    leadId,
+                    kind: 'blocked',
+                    summary: 'Черновик не отправлен: проверка допуска не прошла',
+                    details: { draftId: draft.id, approvedBy: draft.decidedBy, text: draft.text },
+                  });
+                  await continueBot(returnUrl, token, [], deps.fetch);
+                  return;
+                }
+              }
               const manager = events.find((e) => e.created_by > 0);
               if (manager) {
                 await deps.suggestions.markApprovedAgain(accountId, draft.id);

@@ -11,8 +11,10 @@ function deps(parts: {
   lastAiAt?: Date | null;
   events?: { created_by: number; created_at?: number }[];
   eventsThrow?: boolean;
+  throwTimes?: number;
 }) {
   const asked: Date[] = [];
+  let throwLeft = parts.throwTimes ?? 0;
   return {
     asked,
     deps: {
@@ -22,6 +24,10 @@ function deps(parts: {
       async outgoingChatEvents(_leadId: number, since: Date) {
         asked.push(since);
         if (parts.eventsThrow) throw new Error('amo недоступна');
+        if (throwLeft > 0) {
+          throwLeft -= 1;
+          throw new Error('amo timeout');
+        }
         return parts.events ?? [];
       },
     },
@@ -81,9 +87,25 @@ describe('canReply', () => {
     expect(asked[0]?.toISOString()).toBe('2026-09-27T10:00:00.000Z');
   });
 
-  it('amo недоступна — запрет не накладываем, иначе агент замолчит при сбое API', async () => {
-    const { deps: d } = deps({ eventsThrow: true });
-    expect(await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW })).toEqual({ allowed: true });
+  it('amo недоступна оба раза: отправка запрещена', async () => {
+    const { deps: d, asked } = deps({ eventsThrow: true });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW });
+    expect(r).toEqual({ allowed: false, reason: 'check_failed' });
+    expect(asked).toHaveLength(2);
+    expect(blockSummary(r)).toBe('Ответ не отправлен: проверка допуска не прошла');
+  });
+
+  it('amo ответила со второй попытки: отправка разрешена', async () => {
+    const { deps: d, asked } = deps({ throwTimes: 1 });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW });
+    expect(r).toEqual({ allowed: true });
+    expect(asked).toHaveLength(2);
+  });
+
+  it('сбой проверки не перебивает паузу', async () => {
+    const { deps: d } = deps({ paused: true, pauseReason: 'manager_message', eventsThrow: true });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW });
+    expect(r.reason).toBe('paused');
   });
 
   it('ответ только по почте — события чата не запрашиваются', async () => {

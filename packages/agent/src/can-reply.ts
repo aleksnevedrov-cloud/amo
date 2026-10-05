@@ -10,7 +10,7 @@
  */
 
 /** Причина запрета — попадает в журнал, чтобы видеть, какое правило сработало. */
-export type ReplyBlockReason = 'paused' | 'manager_active';
+export type ReplyBlockReason = 'paused' | 'manager_active' | 'check_failed';
 
 export interface CanReplyResult {
   /** Единственное условие отправки: true. Иначе писать клиенту нельзя. */
@@ -58,8 +58,14 @@ export async function canReply(
   try {
     events = await deps.outgoingChatEvents(leadId, since);
   } catch {
-    // amo недоступна — запрет не накладываем, иначе агент замолчит при любом сбое API.
-    return ALLOWED;
+    // amo отдаёт 429 при 7 запросах в секунду — одна попытка повтора.
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      events = await deps.outgoingChatEvents(leadId, since);
+    } catch {
+      // Допуск не подтверждён: клиенту не пишем, текст уходит менеджеру черновиком.
+      return { allowed: false, reason: 'check_failed' };
+    }
   }
   const manager = events.find((e) => e.created_by > 0);
   if (manager) {
@@ -74,6 +80,7 @@ export async function canReply(
 
 /** Текст для журнала при заблокированной отправке. */
 export function blockSummary(r: CanReplyResult): string {
+  if (r.reason === 'check_failed') return 'Ответ не отправлен: проверка допуска не прошла';
   if (r.reason === 'manager_active') return 'Ответ не отправлен: менеджер ведёт диалог';
   if (r.reason === 'paused') return 'Ответ не отправлен: AI на паузе';
   return 'Ответ не отправлен: нет допуска';
