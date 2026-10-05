@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seeded, type Seeded } from '../../tools/test/fixtures.ts';
 import { Orchestrator } from '../src/orchestrator.ts';
 import { DialogPipeline, type DocumentAnalyzer } from '../src/pipeline.ts';
-import { fakeAmo } from './fake-amo.ts';
+import { fakeAmo, type FakeAmoState } from './fake-amo.ts';
 import { ScriptedLlm, text } from './scripted-llm.ts';
 
 let s: Seeded;
@@ -46,11 +46,13 @@ function analyzer(): DocumentAnalyzer & { inputs: unknown[] } {
   };
 }
 
-function wazzupFake(items: WazzupContentItem[]) {
+function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = []) {
   const calls: { phones: string[]; from: Date; to: Date }[] = [];
+  const leadCalls: { leadId: number; from: Date; to: Date }[] = [];
   const consumed: number[] = [];
   return {
     calls,
+    leadCalls,
     consumed,
     async historyByPhone() {
       return [];
@@ -59,16 +61,20 @@ function wazzupFake(items: WazzupContentItem[]) {
       calls.push({ phones, from, to });
       return items;
     },
+    async incomingContentByLead(_acc: number, leadId: number, from: Date, to: Date) {
+      leadCalls.push({ leadId, from, to });
+      return byLead;
+    },
     async markConsumed(_acc: number, ids: number[]) {
       consumed.push(...ids);
     },
   };
 }
 
-async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], wazzup: ReturnType<typeof wazzupFake>, docs = analyzer()) {
+async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], wazzup: ReturnType<typeof wazzupFake>, docs = analyzer(), amo: Partial<FakeAmoState> = withPhone) {
   await new SettingsRepo(s.db).save(ACC, 1, widgetSettingsSchema.parse({ enabled: true, mode: 'auto' }));
   const llm = new ScriptedLlm(steps);
-  const fake = fakeAmo(withPhone);
+  const fake = fakeAmo(amo);
   const deps = {
     settings: new SettingsRepo(s.db),
     dialog: new DialogRepo(s.db),
@@ -125,5 +131,59 @@ describe('вложения клиента из Wazzup (Salesbot их не пер
     await t.dialog.enqueue(ACC, lead, 'Добрый день', 'https://test.amocrm.ru/c/1', null);
     await t.pipeline.processLead(ACC, lead);
     expect(wz.calls.length).toBe(0);
+  });
+});
+
+const PHONE_FIELD = (v: string) => [{ field_code: 'PHONE', values: [{ value: v }] }];
+
+const twoContacts: Partial<FakeAmoState> = {
+  lead: {
+    id: 0, name: 'x', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0,
+    custom_fields_values: null, _embedded: { contacts: [{ id: 88, is_main: true }, { id: 89 }] },
+  },
+  contact: { id: 88, name: 'Мария', custom_fields_values: PHONE_FIELD('+7 900 000-00-00') },
+  contacts: {
+    88: { id: 88, name: 'Мария', custom_fields_values: PHONE_FIELD('+7 900 000-00-00') },
+    89: { id: 89, name: 'Второй', custom_fields_values: PHONE_FIELD('+7 995 507-29-44') },
+  },
+};
+
+const noContacts: Partial<FakeAmoState> = {
+  lead: {
+    id: 0, name: 'x', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0,
+    custom_fields_values: null, _embedded: { contacts: [] },
+  },
+  contact: null,
+};
+
+describe('вложения: все контакты сделки и запасной поиск по чату', () => {
+  it('телефон у второго контакта тоже идёт в поиск', async () => {
+    const wz = wazzupFake([{ id: 601, contentUri: 'https://store.wazzup24.com/x/IMG_9.jpg', contentType: 'image', text: '[image]', sentAt: new Date() }]);
+    const t = await setup([text('Вижу фото.')], wz, analyzer(), twoContacts);
+    await t.dialog.enqueue(ACC, lead, PLACEHOLDER, 'https://test.amocrm.ru/c/1', null);
+    await t.pipeline.processLead(ACC, lead);
+    expect(wz.calls[0]!.phones).toEqual(['79000000000', '79955072944']);
+    expect(wz.consumed).toEqual([601]);
+  });
+
+  it('телефонов нет — берём вложение по чату, связанному со сделкой', async () => {
+    const wz = wazzupFake([], [{ id: 602, contentUri: 'https://store.wazzup24.com/x/IMG_8.jpg', contentType: 'image', text: '[image]', sentAt: new Date() }]);
+    const t = await setup([text('Вижу фото.')], wz, analyzer(), noContacts);
+    await t.dialog.enqueue(ACC, lead, PLACEHOLDER, 'https://test.amocrm.ru/c/1', null);
+    await t.pipeline.processLead(ACC, lead);
+    expect(wz.calls.length).toBe(0);
+    expect(wz.leadCalls[0]!.leadId).toBe(lead);
+    expect(wz.consumed).toEqual([602]);
+  });
+
+  it('нигде не нашли — в журнале остаётся след с телефонами', async () => {
+    const wz = wazzupFake([], []);
+    const t = await setup([text('Пришлите фото ещё раз.')], wz, analyzer(), twoContacts);
+    await t.dialog.enqueue(ACC, lead, PLACEHOLDER, 'https://test.amocrm.ru/c/1', null);
+    await t.pipeline.processLead(ACC, lead);
+    const log = await t.journal.list(ACC, { leadId: lead });
+    const miss = log.find((e) => e.summary === 'Вложение не найдено');
+    expect(miss).toBeTruthy();
+    expect(JSON.stringify(miss!.details)).toContain('79955072944');
   });
 });

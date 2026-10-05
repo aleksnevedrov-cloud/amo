@@ -5,6 +5,8 @@ export interface FakeAmoState {
   lead: Record<string, unknown> | null;
   /** Основной контакт сделки для GET /api/v4/contacts/:id (телефоны для Wazzup). */
   contact?: Record<string, unknown> | null;
+  /** Контакты сделки по id — когда их несколько. */
+  contacts?: Record<string, Record<string, unknown>>;
   events: { id: string; type: string; entity_id: number; created_by: number; created_at: number }[];
   calls: { method: string; path: string; body: unknown }[];
   sent: { returnUrl: string; messages: string[] }[];
@@ -35,7 +37,11 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
       if (state.lead) state.lead = { ...state.lead, id: Number(url.pathname.split('/').pop()) };
       return state.lead ? json(state.lead) : new Response('', { status: 404 });
     }
-    if (url.pathname.startsWith('/api/v4/contacts/') && method === 'GET') return state.contact ? json(state.contact) : new Response('', { status: 404 });
+    if (url.pathname.startsWith('/api/v4/contacts/') && method === 'GET') {
+      const cid = url.pathname.split('/').pop() ?? '';
+      const c = state.contacts?.[cid] ?? state.contact;
+      return c ? json(c) : new Response('', { status: 404 });
+    }
     if (url.pathname === '/api/v4/events') {
       eventsCalls += 1;
       state.onEventsCall?.(eventsCalls, state);

@@ -119,6 +119,18 @@ export class WazzupRepo {
     return rows.map((r) => ({ id: Number(r.id), contentUri: r.content_uri, contentType: r.content_type, text: r.text, sentAt: r.sent_at }));
   }
 
+  /** Вложения из чата, уже связанного с этой сделкой: телефона клиента может не быть в карточке amo. */
+  async incomingContentByLead(accountId: number, leadId: number, from: Date, to: Date): Promise<WazzupContentItem[]> {
+    const { rows } = await this.db.query<{ id: string; content_uri: string; content_type: string | null; text: string; sent_at: Date }>(
+      `SELECT id, content_uri, content_type, text, sent_at FROM wazzup_messages
+        WHERE account_id = $1 AND direction = 'in' AND content_uri IS NOT NULL AND consumed_at IS NULL
+          AND sent_at BETWEEN $3 AND $4
+          AND chat_id IN (SELECT chat_id FROM wazzup_messages WHERE account_id = $1 AND lead_id = $2)
+        ORDER BY sent_at, id`,
+      [accountId, leadId, from, to],
+    );
+    return rows.map((r) => ({ id: Number(r.id), contentUri: r.content_uri, contentType: r.content_type, text: r.text, sentAt: r.sent_at }));
+  }
   async markConsumed(accountId: number, ids: number[]): Promise<void> {
     if (!ids.length) return;
     await this.db.query('UPDATE wazzup_messages SET consumed_at = now() WHERE account_id = $1 AND id = ANY($2::bigint[])', [accountId, ids]);

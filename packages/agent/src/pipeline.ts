@@ -65,6 +65,7 @@ export interface PipelineDeps {
     managerWroteSince?(accountId: number, phone: string, since: Date): Promise<Date | null>;
     resolveChatKind?(accountId: number, leadId: number | null, text: string): Promise<{ kind: string; chatId: string | null; chatName: string | null }>;
     incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
+    incomingContentByLead?(accountId: number, leadId: number, from: Date, to: Date): Promise<WazzupContentItem[]>;
     markConsumed?(accountId: number, ids: number[]): Promise<void>;
   };
   suggestions: SuggestionsRepo;
@@ -515,15 +516,21 @@ export class DialogPipeline {
     }
   }
 
-  /** Телефоны основного контакта сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
+  /** Телефоны всех контактов сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
   private async leadPhones(t: Turn): Promise<string[]> {
     try {
       const lead = await t.access.api.getLead(t.leadId);
-      const ref = lead?._embedded?.contacts?.find((c) => c.is_main) ?? lead?._embedded?.contacts?.[0];
-      if (!ref) return [];
-      const contact = await t.access.api.getContact(ref.id);
-      const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
-      const phones = values.map((v) => normalizePhone(typeof v.value === 'string' ? v.value : null)).filter((x): x is string => Boolean(x));
+      // Клиент часто пишет с номера второго контакта сделки — перебираем всех, не только основного.
+      const refs = (lead?._embedded?.contacts ?? []).slice(0, 5);
+      const phones: string[] = [];
+      for (const ref of refs) {
+        const contact = await t.access.api.getContact(ref.id);
+        const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
+        for (const v of values) {
+          const p = normalizePhone(typeof v.value === 'string' ? v.value : null);
+          if (p) phones.push(p);
+        }
+      }
       return [...new Set(phones)];
     } catch {
       return [];
@@ -534,16 +541,33 @@ export class DialogPipeline {
   private async wazzupAttachments(t: Turn, m: PendingMessage, retry = true): Promise<PendingMessage[]> {
     const wz = this.d.wazzup;
     if (!wz?.incomingContent) return [];
+    const byPhone = wz.incomingContent.bind(wz);
+    const byLead = wz.incomingContentByLead?.bind(wz);
     const phones = await this.leadPhones(t);
-    if (!phones.length) return [];
     const from = new Date(m.receivedAt.getTime() - WAZZUP_ATTACH_WINDOW_MS);
     const to = new Date(m.receivedAt.getTime() + WAZZUP_ATTACH_WINDOW_MS);
-    let items = await wz.incomingContent(t.accountId, phones, from, to);
+    const look = async () => {
+      const found = phones.length ? await byPhone(t.accountId, phones, from, to) : [];
+      if (found.length) return found;
+      // Телефона клиента может не быть в карточке — ищем по чату, уже связанному с этой сделкой.
+      return byLead ? await byLead(t.accountId, t.leadId, from, to) : found;
+    };
+    let items = await look();
     if (!items.length && retry) {
       await new Promise((r) => setTimeout(r, this.d.wazzupRetryMs ?? WAZZUP_ATTACH_RETRY_MS));
-      items = await wz.incomingContent(t.accountId, phones, from, to);
+      items = await look();
     }
-    if (!items.length) return [];
+    if (!items.length) {
+      // Пустое сообщение значит, что файл точно был: пишем в журнал, где искали.
+      if (retry) {
+        await this.journal(t, {
+          kind: 'note',
+          summary: 'Вложение не найдено',
+          details: { phones, from: from.toISOString(), to: to.toISOString() },
+        });
+      }
+      return [];
+    }
     await wz.markConsumed?.(t.accountId, items.map((i) => i.id));
     await this.journal(t, {
       kind: 'note',
