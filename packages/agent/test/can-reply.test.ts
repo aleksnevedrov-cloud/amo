@@ -12,6 +12,8 @@ function deps(parts: {
   events?: { created_by: number; created_at?: number }[];
   eventsThrow?: boolean;
   throwTimes?: number;
+  messengerAt?: Date | null;
+  messengerThrow?: boolean;
 }) {
   const asked: Date[] = [];
   let throwLeft = parts.throwTimes ?? 0;
@@ -29,6 +31,10 @@ function deps(parts: {
           throw new Error('amo timeout');
         }
         return parts.events ?? [];
+      },
+      async managerWroteSince(_since: Date) {
+        if (parts.messengerThrow) throw new Error('db down');
+        return parts.messengerAt ?? null;
       },
     },
   };
@@ -115,6 +121,28 @@ describe('canReply', () => {
   });
 });
 
+describe('canReply: мессенджер', () => {
+  it('менеджер писал в WhatsApp: отправка запрещена', async () => {
+    const at = new Date('2026-10-04T08:11:00Z');
+    const { deps: d } = deps({ messengerAt: at });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe('manager_active');
+    expect(r.details).toMatchObject({ messengerAt: at.toISOString() });
+  });
+
+  it('мессенджер проверяется и у сделки без чатов amo', async () => {
+    const { deps: d } = deps({ messengerAt: new Date('2026-10-04T08:11:00Z') });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW, checkChat: false });
+    expect(r.reason).toBe('manager_active');
+  });
+
+  it('сбой проверки мессенджера: отправка запрещена', async () => {
+    const { deps: d } = deps({ messengerThrow: true });
+    const r = await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW });
+    expect(r).toEqual({ allowed: false, reason: 'check_failed' });
+  });
+});
 describe('gateReport', () => {
   it('разрешённая отправка без вопроса', () => {
     const r = gateReport(

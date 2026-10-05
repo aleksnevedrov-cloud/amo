@@ -29,7 +29,7 @@ import {
   type ToolContext,
 } from '@ai-door/tools';
 import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
-import { blockSummary, canReply, gateReport, type CanReplyResult } from './can-reply.ts';
+import { ALLOWED, blockSummary, canReply, gateReport, type CanReplyDeps, type CanReplyResult } from './can-reply.ts';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
@@ -62,6 +62,7 @@ export interface PipelineDeps {
   /** Переписка из Wazzup по телефону контакта (RFD-AI-AGENT-WAZZUP-HISTORY); нет — блок не добавляется. */
   wazzup?: {
     historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]>;
+    managerWroteSince?(accountId: number, phone: string, since: Date): Promise<Date | null>;
     resolveChatKind?(accountId: number, leadId: number | null, text: string): Promise<{ kind: string; chatId: string | null; chatName: string | null }>;
     incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
     markConsumed?(accountId: number, ids: number[]): Promise<void>;
@@ -403,7 +404,7 @@ export class DialogPipeline {
     // 17-31 с (склейка, вызов модели, имитация набора) - менеджер мог вступить в диалог.
     // Готовый ответ не теряем: он уходит менеджеру подсказкой, клиенту не отправляется.
     const gate = await canReply(
-      { state: (a, l) => this.d.dialog.state(a, l), outgoingChatEvents: (l, since) => access.api.getOutgoingChatEvents(l, since) },
+      this.gateDeps(accountId, access),
       { accountId, leadId, now: this.d.now?.() ?? new Date(), manualReturn: groupMention, checkChat: chats.length > 0 },
     );
     // Вопрос, на который клиент уже ответил, не уходит даже после перегенерации.
@@ -446,17 +447,22 @@ export class DialogPipeline {
   /** Сколько сообщений Wazzup попало в контекст последнего хода (для журнала). */
   private lastMessengerCount = 0;
 
+  /** Телефон клиента текущего хода: по нему допуск видит ответы менеджера в WhatsApp. */
+  private clientPhone: string | null = null;
+
   private async messengerHistory(
     accountId: number,
     access: AmoAccess,
     contactId: number | null,
     own: { role: string; text: string }[],
   ): Promise<string | null> {
+    this.clientPhone = null;
     if (!this.d.wazzup || !contactId) return null;
     try {
       const contact = await access.api.getContact(contactId);
       const raw = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values?.[0]?.value;
       const phone = normalizePhone(typeof raw === 'string' ? raw : null);
+      this.clientPhone = phone;
       if (!phone) return null;
       const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
       if (!items.length) return null;
@@ -574,6 +580,18 @@ export class DialogPipeline {
   }
 
   /** Передача менеджеру: пауза, задача, резюме (раздел 10), этап (опционально), фраза клиенту. */
+  /** Источники допуска: события чата amo плюс исходящие мессенджера по телефону клиента. */
+  private gateDeps(accountId: number, access: AmoAccess): CanReplyDeps {
+    const wazzup = this.d.wazzup;
+    const seen = wazzup?.managerWroteSince?.bind(wazzup);
+    const phone = this.clientPhone;
+    return {
+      state: (a, l) => this.d.dialog.state(a, l),
+      outgoingChatEvents: (l, since) => access.api.getOutgoingChatEvents(l, since),
+      ...(seen && phone ? { managerWroteSince: (since: Date) => seen(accountId, phone, since) } : {}),
+    };
+  }
+
   private async handoff(
     t: Turn,
     reason: HandoffReason,
@@ -612,8 +630,28 @@ export class DialogPipeline {
     const failed = steps.filter((s) => s.status === 'rejected').map((s) => String((s as PromiseRejectedResult).reason));
     // В «Полуавто» клиенту ничего не уходит без одобрения — фраза передачи тоже.
     const phrase = settings.mode === 'auto' ? [settings.behavior.handoffPhrase] : [];
-    await this.release(t, [...before, ...phrase]);
-    if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
+    // Фраза передачи — тоже сообщение клиенту, значит проходит тот же допуск.
+    const out = [...before, ...phrase];
+    const gate = out.length ? await canReply(this.gateDeps(accountId, access), { accountId, leadId, now }) : ALLOWED;
+    if (gate.allowed) {
+      await this.release(t, out);
+      if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
+    } else {
+      const text = out.join('\n\n');
+      const id = await this.d.suggestions.add(accountId, leadId, 'hint', text, { blockedBy: gate.reason });
+      await this.journal(t, {
+        kind: 'blocked',
+        summary: blockSummary(gate),
+        details: {
+          reason: gate.reason,
+          ...gate.details,
+          text,
+          suggestionId: id,
+          gate: gateReport(gate, { explicitPermission: false, questionTopic: null, dataAlreadyKnown: false }),
+        },
+      });
+      await this.release(t, []);
+    }
     await this.journal(t, { kind: 'handoff', summary: `Передано менеджеру: ${REASON_TEXT[reason]}`, details: { reason, summary, errors: failed, assignee } });
     return { status: 'handoff', reason };
   }

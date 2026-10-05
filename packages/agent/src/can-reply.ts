@@ -27,6 +27,8 @@ export interface CanReplyDeps {
   state(accountId: number, leadId: number): Promise<{ paused: boolean; pauseReason: string | null; lastAiAt: Date | null }>;
   /** Исходящие события чата amo: сообщения менеджера имеют created_by > 0. */
   outgoingChatEvents(leadId: number, since: Date): Promise<{ created_by: number; created_at?: number }[]>;
+  /** Когда сотрудник писал клиенту в мессенджере после since (без ответов самого агента). */
+  managerWroteSince?(since: Date): Promise<Date | null>;
 }
 
 /** Сколько назад смотреть события менеджера, если агент в этой сделке ещё не отвечал. */
@@ -51,9 +53,20 @@ export async function canReply(
     return { allowed: false, reason: 'paused', details: { pauseReason: state.pauseReason } };
   }
 
-  if (args.checkChat === false) return ALLOWED;
-
   const since = state.lastAiAt ?? new Date(now.getTime() - LOOKBACK_MS);
+
+  // Менеджеры отвечают из WhatsApp: в событиях чата amo их нет, в мессенджере есть.
+  if (deps.managerWroteSince) {
+    let at: Date | null = null;
+    try {
+      at = await deps.managerWroteSince(since);
+    } catch {
+      return { allowed: false, reason: 'check_failed' };
+    }
+    if (at) return { allowed: false, reason: 'manager_active', details: { messengerAt: at.toISOString() } };
+  }
+
+  if (args.checkChat === false) return ALLOWED;
   let events: { created_by: number; created_at?: number }[];
   try {
     events = await deps.outgoingChatEvents(leadId, since);

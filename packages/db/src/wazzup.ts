@@ -140,6 +140,29 @@ export class WazzupRepo {
     return rows.map((r) => ({ direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at, chatType: r.chat_type }));
   }
 
+  /**
+   * Писал ли клиенту сотрудник после `since` — кроме самого агента.
+   *
+   * Менеджеры отвечают из WhatsApp, и в amoCRM такое исходящее создаёт интеграция
+   * с created_by = 0, поэтому по событиям чата amo их не видно. author у ответа агента
+   * такой же (manager), так что свои ответы отсеиваются сверкой с dialog_messages.
+   */
+  async managerWroteSince(accountId: number, phone: string, since: Date): Promise<Date | null> {
+    const { rows } = await this.db.query(
+      `SELECT w.sent_at FROM wazzup_messages w
+         WHERE w.account_id = $1 AND w.phone = $2 AND w.direction = 'out'
+           AND NOT w.is_system AND w.text <> '' AND w.sent_at > $3
+           AND NOT EXISTS (
+             SELECT 1 FROM dialog_messages d
+              WHERE d.account_id = w.account_id AND d.role = 'ai'
+                AND left(d.text, 300) = left(w.text, 300)
+           )
+         ORDER BY w.sent_at DESC LIMIT 1`,
+      [accountId, phone, since],
+    );
+    return rows[0] ? new Date(rows[0].sent_at as string) : null;
+  }
+
   /** История переписки конкретного чата — для групп, где нет телефона контакта. */
   async historyByChat(accountId: number, chatId: string, limit = 40): Promise<WazzupHistoryItem[]> {
     const { rows } = await this.db.query(
