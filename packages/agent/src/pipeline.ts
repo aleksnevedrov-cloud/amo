@@ -480,10 +480,15 @@ export class DialogPipeline {
   private async incomingTexts(t: Turn): Promise<string[]> {
     const out: string[] = [];
     for (const m of t.pending) {
-      if (!m.attachmentUrl && isEmptyPlaceholder(m.text)) {
+      if (!m.attachmentUrl) {
         // Salesbot не передаёт вложения: фото/файл/голос берём из вебхуков Wazzup по телефону клиента.
-        const picked = await this.wazzupAttachments(t, m);
+        // Фото часто приходит отдельным сообщением, а подпись к нему — следующим, поэтому
+        // ищем вложения и при непустом тексте. Повторную попытку делаем только там,
+        // где вложение точно ждём — иначе каждый текстовый ход терял бы 5 с.
+        const empty = isEmptyPlaceholder(m.text);
+        const picked = await this.wazzupAttachments(t, m, empty);
         if (picked.length) {
+          if (!empty) out.push(await this.pendingText(t, m));
           for (const pm of picked) out.push(await this.pendingText(t, pm));
           continue;
         }
@@ -526,7 +531,7 @@ export class DialogPipeline {
   }
 
   /** Вложения клиента из Wazzup в окне ±3 мин от получения сообщения; пусто → одна повторная попытка через 5 с. */
-  private async wazzupAttachments(t: Turn, m: PendingMessage): Promise<PendingMessage[]> {
+  private async wazzupAttachments(t: Turn, m: PendingMessage, retry = true): Promise<PendingMessage[]> {
     const wz = this.d.wazzup;
     if (!wz?.incomingContent) return [];
     const phones = await this.leadPhones(t);
@@ -534,7 +539,7 @@ export class DialogPipeline {
     const from = new Date(m.receivedAt.getTime() - WAZZUP_ATTACH_WINDOW_MS);
     const to = new Date(m.receivedAt.getTime() + WAZZUP_ATTACH_WINDOW_MS);
     let items = await wz.incomingContent(t.accountId, phones, from, to);
-    if (!items.length) {
+    if (!items.length && retry) {
       await new Promise((r) => setTimeout(r, this.d.wazzupRetryMs ?? WAZZUP_ATTACH_RETRY_MS));
       items = await wz.incomingContent(t.accountId, phones, from, to);
     }
