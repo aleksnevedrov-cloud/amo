@@ -29,7 +29,7 @@ import {
   type ToolContext,
 } from '@ai-door/tools';
 import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
-import { blockSummary, canReply } from './can-reply.ts';
+import { blockSummary, canReply, gateReport, type CanReplyResult } from './can-reply.ts';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
@@ -406,21 +406,32 @@ export class DialogPipeline {
       { state: (a, l) => this.d.dialog.state(a, l), outgoingChatEvents: (l, since) => access.api.getOutgoingChatEvents(l, since) },
       { accountId, leadId, now: this.d.now?.() ?? new Date(), manualReturn: groupMention, checkChat: chats.length > 0 },
     );
-    if (!gate.allowed) {
-      const id = await this.d.suggestions.add(accountId, leadId, 'hint', result.text, { ...details, blockedBy: gate.reason });
+    // Вопрос, на который клиент уже ответил, не уходит даже после перегенерации.
+    const topic = result.questionTopic ?? null;
+    const repeated = topic !== null && (knownAnswers as readonly string[]).includes(topic);
+    const verdict: CanReplyResult = repeated
+      ? { allowed: false, reason: 'answer_already_in_history', details: { topic } }
+      : gate;
+    const report = gateReport(verdict, {
+      explicitPermission: groupMention === true,
+      questionTopic: topic,
+      dataAlreadyKnown: repeated,
+    });
+    if (!verdict.allowed) {
+      const id = await this.d.suggestions.add(accountId, leadId, 'hint', result.text, { ...details, blockedBy: verdict.reason });
       await this.journal(t, {
         kind: 'blocked',
-        summary: blockSummary(gate),
-        details: { ...details, reason: gate.reason, ...gate.details, text: result.text, suggestionId: id },
+        summary: blockSummary(verdict),
+        details: { ...details, reason: verdict.reason, ...verdict.details, text: result.text, suggestionId: id, gate: report },
         ...cost,
       });
-      if (gate.reason === 'manager_active') await this.d.dialog.pause(accountId, leadId, 'manager_message');
+      if (verdict.reason === 'manager_active') await this.d.dialog.pause(accountId, leadId, 'manager_message');
       await this.release(t, []);
       return { status: 'hinted', id };
     }
 
     const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
-    await this.journal(t, { kind: 'reply', summary: result.text, details, ...cost });
+    await this.journal(t, { kind: 'reply', summary: result.text, details: { ...details, gate: report }, ...cost });
     if (misses >= 2) {
       await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
       return this.handoff(t, 'no_answer', 'AI дважды подряд не нашёл ответа.', [result.text]);

@@ -10,7 +10,7 @@
  */
 
 /** Причина запрета — попадает в журнал, чтобы видеть, какое правило сработало. */
-export type ReplyBlockReason = 'paused' | 'manager_active' | 'check_failed';
+export type ReplyBlockReason = 'paused' | 'manager_active' | 'check_failed' | 'answer_already_in_history';
 
 export interface CanReplyResult {
   /** Единственное условие отправки: true. Иначе писать клиенту нельзя. */
@@ -81,7 +81,36 @@ export async function canReply(
 /** Текст для журнала при заблокированной отправке. */
 export function blockSummary(r: CanReplyResult): string {
   if (r.reason === 'check_failed') return 'Ответ не отправлен: проверка допуска не прошла';
+  if (r.reason === 'answer_already_in_history') return 'Ответ не отправлен: вопрос повторяет данные из истории';
   if (r.reason === 'manager_active') return 'Ответ не отправлен: менеджер ведёт диалог';
   if (r.reason === 'paused') return 'Ответ не отправлен: AI на паузе';
   return 'Ответ не отправлен: нет допуска';
+}
+
+/** Структурный итог проверки перед отправкой — целиком пишется в журнал. */
+export interface GateReport {
+  can_reply_to_client: boolean;
+  manager_active: boolean;
+  explicit_permission: boolean;
+  history_checked: boolean;
+  question_to_client: boolean;
+  question_topic: string | null;
+  data_already_known: boolean;
+  block_reason: ReplyBlockReason | null;
+}
+
+export function gateReport(
+  r: CanReplyResult,
+  x: { explicitPermission: boolean; questionTopic: string | null; dataAlreadyKnown: boolean },
+): GateReport {
+  return {
+    can_reply_to_client: r.allowed,
+    manager_active: r.reason === 'manager_active',
+    explicit_permission: x.explicitPermission,
+    history_checked: r.reason !== 'check_failed',
+    question_to_client: x.questionTopic !== null,
+    question_topic: x.questionTopic,
+    data_already_known: x.dataAlreadyKnown,
+    block_reason: r.reason ?? null,
+  };
 }

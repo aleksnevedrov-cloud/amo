@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blockSummary, canReply } from '../src/can-reply.ts';
+import { blockSummary, canReply, gateReport } from '../src/can-reply.ts';
 
 const ACC = 1;
 const LEAD = 29986849;
@@ -112,5 +112,45 @@ describe('canReply', () => {
     const { deps: d, asked } = deps({ events: [{ created_by: 3 }] });
     expect(await canReply(d, { accountId: ACC, leadId: LEAD, now: NOW, checkChat: false })).toEqual({ allowed: true });
     expect(asked).toHaveLength(0);
+  });
+});
+
+describe('gateReport', () => {
+  it('разрешённая отправка без вопроса', () => {
+    const r = gateReport(
+      { allowed: true },
+      { explicitPermission: false, questionTopic: null, dataAlreadyKnown: false },
+    );
+    expect(r).toEqual({
+      can_reply_to_client: true,
+      manager_active: false,
+      explicit_permission: false,
+      history_checked: true,
+      question_to_client: false,
+      question_topic: null,
+      data_already_known: false,
+      block_reason: null,
+    });
+  });
+
+  it('повторный вопрос виден в отчёте', () => {
+    const r = gateReport(
+      { allowed: false, reason: 'answer_already_in_history' },
+      { explicitPermission: false, questionTopic: 'razmery', dataAlreadyKnown: true },
+    );
+    expect(r.can_reply_to_client).toBe(false);
+    expect(r.block_reason).toBe('answer_already_in_history');
+    expect(r.question_to_client).toBe(true);
+    expect(r.question_topic).toBe('razmery');
+    expect(r.data_already_known).toBe(true);
+  });
+
+  it('сбой проверки: history_checked = false', () => {
+    const r = gateReport(
+      { allowed: false, reason: 'check_failed' },
+      { explicitPermission: true, questionTopic: null, dataAlreadyKnown: false },
+    );
+    expect(r.history_checked).toBe(false);
+    expect(r.explicit_permission).toBe(true);
   });
 });

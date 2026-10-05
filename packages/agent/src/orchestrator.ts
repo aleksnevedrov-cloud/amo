@@ -44,7 +44,7 @@ interface Common {
 }
 
 export type TurnResult =
-  | (Common & { kind: 'reply'; text: string; missed: boolean })
+  | (Common & { kind: 'reply'; text: string; missed: boolean; questionTopic: string | null })
   | (Common & { kind: 'handoff'; handoff: HandoffRequest })
   | (Common & { kind: 'blocked'; reason: string });
 
@@ -189,7 +189,7 @@ export class Orchestrator {
       if (violations.length === 0) {
         const searches = common.toolCalls.filter((c) => SEARCH_TOOLS.has(c.name));
         const missed = searches.length > 0 && searches.every((c) => c.empty || !c.ok);
-        return { ...common, kind: 'reply', text: q.text, missed };
+        return { ...common, kind: 'reply', text: q.text, missed, questionTopic: q.topic };
       }
       common.rejections.push(violations);
       if (common.rejections.length > MAX_REJECTIONS) {
