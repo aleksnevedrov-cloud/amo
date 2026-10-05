@@ -216,7 +216,8 @@ export class WazzupRepo {
     if (!needle) return UNKNOWN_CHAT;
     const { rows } = await this.db.query(
       `SELECT chat_type, chat_id, raw->'contact'->>'name' AS chat_name FROM wazzup_messages
-        WHERE account_id = $1 AND direction = 'in' AND NOT is_system AND btrim(text) = $2
+        WHERE account_id = $1 AND direction = 'in' AND NOT is_system
+          AND (btrim(text) = $2 OR (length(btrim(text)) >= 8 AND position(btrim(text) in $2) > 0))
           AND sent_at > now() - interval '3 minutes' AND sent_at < now() + interval '1 minute'
         ORDER BY sent_at DESC LIMIT 1`,
       [accountId, needle],

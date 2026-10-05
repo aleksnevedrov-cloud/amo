@@ -1,4 +1,4 @@
-import { hasMention, stripMention } from '@ai-door/shared';
+import { hasMention, looksLikeGroupMessage, stripGroupPrefix, stripMention } from '@ai-door/shared';
 import { botIdFromReturnUrl, resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@ai-door/amo';
 import type { CatalogRepo } from '@ai-door/catalog';
 import {
@@ -218,19 +218,29 @@ export class DialogPipeline {
       const groups = settings.where.groups;
       const lastText = t.texts[t.texts.length - 1] ?? '';
       const chat = await wz.resolveChatKind(accountId, leadId, lastText);
-      if (
-        chat.kind === 'group' &&
-        (groups.mode === 'block_all' ||
-          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? '')))
-      ) {
-        return this.skip(t, 'group_chat', `Групповой чат без разрешения: ${chat.chatName ?? chat.chatId ?? 'без названия'}`);
+      // Salesbot тип чата не передаёт. Чат не опознан, но текст с подписью автора — это группа:
+      // молчим, а не считаем личной перепиской.
+      const isGroup = chat.kind === 'group' || (chat.kind !== 'direct' && looksLikeGroupMessage(lastText));
+      const body = stripGroupPrefix(lastText);
+      if (isGroup) {
+        const where = chat.chatName ?? chat.chatId ?? 'без названия';
+        if (
+          groups.mode === 'block_all' ||
+          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? ''))
+        ) {
+          return this.skip(t, 'group_chat', `Групповой чат без разрешения: ${where}`);
+        }
+        // Пункт 8: в группе отвечаем только на обращение по имени.
+        if (groups.mentionOnly && !hasMention(body, groups.mention)) {
+          return this.skip(t, 'group_no_mention', `Группа ${where}: обращения к агенту нет`);
+        }
       }
-      // Пункт 8: в группе отвечаем на обращение по имени; слово-вызов модели не показываем.
-      if (chat.kind === 'group' && hasMention(lastText, groups.mention)) {
+      // Слово-вызов модели не показываем.
+      if (isGroup && hasMention(body, groups.mention)) {
         groupMention = true;
         t.texts = t.texts.map((x) =>
           hasMention(x, groups.mention)
-            ? `${stripMention(x, groups.mention)}\n(сотрудник обратился к агенту напрямую - ответь в чат)`
+            ? `${stripMention(x, groups.mention)}\n(сотрудник обратился к агенту напрямую — ответь в чат)`
             : x,
         );
       }

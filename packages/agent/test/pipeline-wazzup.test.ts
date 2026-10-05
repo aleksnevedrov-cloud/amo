@@ -1,4 +1,4 @@
-import { DialogRepo, JournalRepo, MemoryRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema, type WazzupContentItem } from '@ai-door/db';
+import { DialogRepo, JournalRepo, MemoryRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema, type WazzupChatKind, type WazzupContentItem } from '@ai-door/db';
 import { PricingRepo } from '@ai-door/pricing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seeded, type Seeded } from '../../tools/test/fixtures.ts';
@@ -46,7 +46,7 @@ function analyzer(): DocumentAnalyzer & { inputs: unknown[] } {
   };
 }
 
-function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = []) {
+function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = [], chat: WazzupChatKind | null = null) {
   const calls: { phones: string[]; from: Date; to: Date }[] = [];
   const leadCalls: { leadId: number; from: Date; to: Date }[] = [];
   const consumed: number[] = [];
@@ -64,6 +64,9 @@ function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = []
     async incomingContentByLead(_acc: number, leadId: number, from: Date, to: Date) {
       leadCalls.push({ leadId, from, to });
       return byLead;
+    },
+    async resolveChatKind() {
+      return chat ?? ({ kind: 'unknown', chatType: null, chatId: null, chatName: null } as WazzupChatKind);
     },
     async markConsumed(_acc: number, ids: number[]) {
       consumed.push(...ids);
@@ -102,7 +105,7 @@ describe('вложения клиента из Wazzup (Salesbot их не пер
     const docs = analyzer();
     const t = await setup([text('Вижу: белая глухая дверь в эмали. Подберём похожую.')], wz, docs);
     await t.dialog.enqueue(ACC, lead, PLACEHOLDER, 'https://test.amocrm.ru/c/1', null);
-    const out = await t.pipeline.processLead(ACC, lead);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
     expect(out.status).toBe('replied');
     // Оба номера контакта нормализованы в один chatId.
     expect(wz.calls[0]!.phones).toEqual(['79773793480']);
@@ -119,7 +122,7 @@ describe('вложения клиента из Wazzup (Salesbot их не пер
     const wz = wazzupFake([]);
     const t = await setup([text('Пришлите, пожалуйста, фото ещё раз.')], wz);
     await t.dialog.enqueue(ACC, lead, PLACEHOLDER, 'https://test.amocrm.ru/c/1', null);
-    const out = await t.pipeline.processLead(ACC, lead);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
     expect(out.status).toBe('replied');
     expect(wz.calls.length).toBe(2);
     expect(JSON.stringify(t.llm.requests[0]!.messages)).toContain('без текста');
@@ -204,8 +207,45 @@ describe('бот Salesbot, когда ответа клиенту нет', () =>
   it('ответ отправлен — бота не трогаем', async () => {
     const t = await setup([text('Здравствуйте!')], wazzupFake([]));
     await t.dialog.enqueue(ACC, lead, 'Добрый день', RETURN, null);
-    const out = await t.pipeline.processLead(ACC, lead);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
     expect(out.status).toBe('replied');
     expect(t.fake.state.calls.some((c) => c.path.endsWith('/stop'))).toBe(false);
+  });
+});
+
+const ALLOWED_CHAT = '79296519427-1595920633';
+const GROUP_HEAD = 'Дмитрий +79518884966\n>>>>>>>>>>>>>>>>>>\n';
+const inGroup = (chatId: string): WazzupChatKind =>
+  ({ kind: 'group', chatType: 'whatsgroup', chatId, chatName: 'Бухгалтерия' }) as WazzupChatKind;
+
+describe('групповые чаты', () => {
+  it('чат не опознан, но текст с подписью автора — молчим', async () => {
+    const t = await setup([text('Ответ в группу.')], wazzupFake([]));
+    await t.dialog.enqueue(ACC, lead, `${GROUP_HEAD}Говорят не видят приглашение`, 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
+    expect(out.status).toBe('skipped');
+    expect(out.reason).toBe('group_chat');
+  });
+
+  it('разрешённая группа без обращения — молчим', async () => {
+    const t = await setup([text('Ответ в группу.')], wazzupFake([], [], inGroup(ALLOWED_CHAT)));
+    await t.dialog.enqueue(ACC, lead, `${GROUP_HEAD}Счёт оплатили`, 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
+    expect(out.status).toBe('skipped');
+    expect(out.reason).toBe('group_no_mention');
+  });
+
+  it('разрешённая группа с обращением — отвечаем', async () => {
+    const t = await setup([text('Готово.')], wazzupFake([], [], inGroup(ALLOWED_CHAT)));
+    await t.dialog.enqueue(ACC, lead, `${GROUP_HEAD}@Амма посчитай дверь`, 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
+    expect(out.status).toBe('replied');
+  });
+
+  it('личный чат не задет', async () => {
+    const t = await setup([text('Здравствуйте!')], wazzupFake([]));
+    await t.dialog.enqueue(ACC, lead, 'Добрый день', 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
+    expect(out.status).toBe('replied');
   });
 });

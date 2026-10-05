@@ -30,3 +30,21 @@ export function stripMention(text: string | null | undefined, word: string): str
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
+
+/**
+ * Групповое сообщение Salesbot приходит с подписью автора и строкой-разделителем:
+ * "Дмитрий +79990000000\n>>>>>>>>>>\nтекст". В личном чате такой обвязки нет,
+ * поэтому формат сам по себе — признак группы, даже если чат не опознан по базе Wazzup.
+ */
+const GROUP_PREFIX = /^[^\n]{1,80}\n[ \t]*>{5,}[ \t]*\n/;
+
+export function looksLikeGroupMessage(text: string | null | undefined): boolean {
+  return GROUP_PREFIX.test(text ?? '');
+}
+
+/** Текст без подписи автора: в нём ищем обращение к агенту. */
+export function stripGroupPrefix(text: string | null | undefined): string {
+  const s = text ?? '';
+  const m = GROUP_PREFIX.exec(s);
+  return m ? s.slice(m[0].length) : s;
+}
