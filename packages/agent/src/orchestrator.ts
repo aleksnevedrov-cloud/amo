@@ -2,6 +2,7 @@ import type { ChatRoute, LlmGateway, ProviderId, UnifiedMessage, UnifiedPart, Un
 import type { Role, WidgetSettings } from '@ai-door/db';
 import { toolByName, type AgentTool, type HandoffRequest, type Source, type ToolContext } from '@ai-door/tools';
 import { checkFacts, describeViolations, type FactViolation } from './factcheck.ts';
+import { parseQuestion, TOPIC_LABEL } from './question.ts';
 import { asGateway, type LlmClient } from './llm.ts';
 import { addCost, costOfResponse, ZERO_COST, type Cost } from './pricing.ts';
 import { buildSystem, type DynamicContext } from './prompt.ts';
@@ -58,6 +59,8 @@ export interface TurnInput {
   dynamic?: DynamicContext;
   /** Данные клиента из памяти (бюджет, размеры) — допустимые числа для пост-фильтра. */
   clientFacts?: string[];
+  /** Темы, по которым клиент уже ответил — переспрашивать их нельзя. */
+  knownTopics?: readonly string[];
   /** Провайдер и модель хода; по умолчанию — из настроек (глобально). */
   route?: ChatRoute;
 }
@@ -101,6 +104,8 @@ export class Orchestrator {
   async runTurn(input: TurnInput): Promise<TurnResult> {
     const { settings, ctx, tools } = input;
     const route = input.route ?? resolveRoute(settings);
+    const known = input.knownTopics ?? [];
+    let repeats = 0;
     const messages = toApiMessages(input.history, input.incoming);
     const clientTexts = [
       ...input.history.filter((m) => m.role === 'client').map((m) => m.text),
@@ -162,9 +167,20 @@ export class Orchestrator {
 
       const text = (res.text ?? '').trim();
       if (!text) return { ...common, kind: 'blocked', reason: 'empty_reply' };
+      const q = parseQuestion(text);
+      if (q.topic && known.includes(q.topic) && repeats < 1) {
+        repeats += 1;
+        messages.push({
+          role: 'user',
+          content:
+            `[Автоматическая проверка — это не сообщение клиента] Эти данные уже есть: ${TOPIC_LABEL[q.topic]}. ` +
+            'Ответ клиенту не отправлен. Перепиши его без этого вопроса.',
+        });
+        continue;
+      }
 
       const violations = checkFacts({
-        reply: text,
+        reply: q.text,
         toolResults,
         clientTexts,
         catalogConsulted: common.toolCalls.some((c) => CATALOG_TOOLS.has(c.name) && c.ok),
@@ -173,7 +189,7 @@ export class Orchestrator {
       if (violations.length === 0) {
         const searches = common.toolCalls.filter((c) => SEARCH_TOOLS.has(c.name));
         const missed = searches.length > 0 && searches.every((c) => c.empty || !c.ok);
-        return { ...common, kind: 'reply', text, missed };
+        return { ...common, kind: 'reply', text: q.text, missed };
       }
       common.rejections.push(violations);
       if (common.rejections.length > MAX_REJECTIONS) {

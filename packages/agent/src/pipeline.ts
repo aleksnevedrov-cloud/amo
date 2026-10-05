@@ -33,6 +33,7 @@ import { blockSummary, canReply } from './can-reply.ts';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
+import { knownTopics } from './question.ts';
 import { resolveRoute } from './route.ts';
 import { formatCalculation, summarizeDialog } from './summary.ts';
 
@@ -288,6 +289,7 @@ export class DialogPipeline {
       mem.data.budget_rub ? String(mem.data.budget_rub) : '',
       ...mem.data.openings.map((o) => `${o.width_mm ?? ''} ${o.height_mm ?? ''} ${o.wall_mm ?? ''} ${o.qty ?? ''}`),
     ].filter((x) => x.trim());
+    const knownAnswers = knownTopics(mem.data);
     const tools: readonly AgentTool[] = delivery === 'hint' ? PHASE2_TOOLS.filter((x) => READ_ONLY.has(x.name)) : PHASE2_TOOLS;
     const ctx: ToolContext = {
       accountId,
@@ -321,6 +323,7 @@ export class DialogPipeline {
         now,
         dynamic: { memory: memoryText, messenger: messengerText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
         clientFacts,
+        knownTopics: knownAnswers,
         route: t.route,
       });
     } catch (err) {
