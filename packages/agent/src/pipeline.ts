@@ -1,5 +1,5 @@
 import { hasMention, stripMention } from '@ai-door/shared';
-import { resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@ai-door/amo';
+import { botIdFromReturnUrl, resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@ai-door/amo';
 import type { CatalogRepo } from '@ai-door/catalog';
 import {
   memorySubject,
@@ -708,6 +708,17 @@ export class DialogPipeline {
         await this.d.send(t.access, m.returnUrl as string, i === withUrl.length - 1 ? messages : []);
       } catch (err) {
         t.sendErrors.push((err as Error).message);
+      }
+    }
+    // Ответа нет — бот остался бы висеть на шаге виджета, и amo не запустила бы его на следующее сообщение клиента.
+    if (!messages.length) {
+      const bots = new Set(withUrl.map((m) => botIdFromReturnUrl(m.returnUrl as string)).filter((x): x is number => x !== null));
+      for (const botId of bots) {
+        try {
+          await t.access.api.stopBot(botId, t.leadId);
+        } catch (err) {
+          t.sendErrors.push((err as Error).message);
+        }
       }
     }
     // Повторно не отвечаем тем же ботам.

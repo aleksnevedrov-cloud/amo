@@ -232,6 +232,11 @@ export class AmoApiClient {
     await this.request('POST', '/api/v2/salesbot/run', [{ bot_id: botId, entity_id: leadId, entity_type: 2 }]);
   }
 
+  /** Остановить бота по сделке: пока он ждёт на шаге виджета, amo не запускает его на новые сообщения клиента. */
+  async stopBot(botId: number, leadId: number): Promise<void> {
+    await this.request('POST', `/api/v4/bots/${botId}/stop`, { entity_id: leadId, entity_type: 'leads' });
+  }
+
   async setLeadStatus(leadId: number, statusId: number): Promise<void> {
     await this.request('PATCH', `/api/v4/leads/${leadId}`, { status_id: statusId });
   }
@@ -276,6 +281,7 @@ export class AmoApiClient {
       }
       // amo отвечает 204 на пустые списки.
       if (res.status === 204) return null;
+        if (res.status === 202) return null; // 202 Accepted без тела: запуск/остановка бота.
       if (res.status === 404 && opts.allow404) return null;
       if (!res.ok) {
         throw new AmoError(`amo API ${method} ${path.split('?')[0]}: HTTP ${res.status}`, res.status, await res.text().catch(() => ''));

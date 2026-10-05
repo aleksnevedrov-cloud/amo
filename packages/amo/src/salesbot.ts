@@ -72,3 +72,9 @@ export async function continueBot(
     throw new AmoError(`Salesbot continue: HTTP ${res.status} ${body.slice(0, 300)}`, res.status, body);
   }
 }
+
+/** id бота из return_url шага виджета: https://{acc}.amocrm.ru/api/v4/salesbot/{bot}/continue/{run}. */
+export function botIdFromReturnUrl(returnUrl: string): number | null {
+  const m = /\/salesbot\/(\d+)\/continue\//.exec(returnUrl);
+  return m ? Number(m[1]) : null;
+}

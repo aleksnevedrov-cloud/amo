@@ -71,8 +71,8 @@ function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = []
   };
 }
 
-async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], wazzup: ReturnType<typeof wazzupFake>, docs = analyzer(), amo: Partial<FakeAmoState> = withPhone) {
-  await new SettingsRepo(s.db).save(ACC, 1, widgetSettingsSchema.parse({ enabled: true, mode: 'auto' }));
+async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], wazzup: ReturnType<typeof wazzupFake>, docs = analyzer(), amo: Partial<FakeAmoState> = withPhone, mode: 'auto' | 'semi' | 'hints' = 'auto') {
+  await new SettingsRepo(s.db).save(ACC, 1, widgetSettingsSchema.parse({ enabled: true, mode }));
   const llm = new ScriptedLlm(steps);
   const fake = fakeAmo(amo);
   const deps = {
@@ -185,5 +185,27 @@ describe('вложения: все контакты сделки и запасн
     const miss = log.find((e) => e.summary === 'Вложение не найдено');
     expect(miss).toBeTruthy();
     expect(JSON.stringify(miss!.details)).toContain('79955072944');
+  });
+});
+
+describe('бот Salesbot, когда ответа клиенту нет', () => {
+  const RETURN = 'https://test.amocrm.ru/api/v4/salesbot/8147/continue/555';
+
+  it('режим подсказки: бота останавливаем, чтобы следующее сообщение клиента запустило его заново', async () => {
+    const t = await setup([text('Подсказка менеджеру.')], wazzupFake([]), analyzer(), withPhone, 'hints');
+    await t.dialog.enqueue(ACC, lead, 'Сделаете дешевле?', RETURN, null);
+    await t.pipeline.processLead(ACC, lead);
+    const stop = t.fake.state.calls.find((c) => c.path === '/api/v4/bots/8147/stop');
+    expect(stop).toBeTruthy();
+    expect(stop!.method).toBe('POST');
+    expect(stop!.body).toEqual({ entity_id: lead, entity_type: 'leads' });
+  });
+
+  it('ответ отправлен — бота не трогаем', async () => {
+    const t = await setup([text('Здравствуйте!')], wazzupFake([]));
+    await t.dialog.enqueue(ACC, lead, 'Добрый день', RETURN, null);
+    const out = await t.pipeline.processLead(ACC, lead);
+    expect(out.status).toBe('replied');
+    expect(t.fake.state.calls.some((c) => c.path.endsWith('/stop'))).toBe(false);
   });
 });
