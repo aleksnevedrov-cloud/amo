@@ -78,6 +78,8 @@ export interface PipelineDeps {
   amo(accountId: number): Promise<AmoAccess>;
   /** Ответ в чат через Salesbot (continue). Пустой список — просто продолжить бота. */
   send(access: AmoAccess, returnUrl: string, messages: string[]): Promise<void>;
+  /** Клиенту не ответили: запланировать проверку «ответил ли менеджер» через час. */
+  onUnanswered?(accountId: number, leadId: number, info: UnansweredInfo): Promise<void>;
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(provider: WidgetSettings['stt']['provider']): SttProvider | null;
   download?: typeof downloadAttachment;
@@ -166,6 +168,45 @@ interface Turn {
   /** Получатель задач агента на этом ходу (считается один раз, лениво). */
   assignee?: Promise<TaskAssignee>;
 }
+
+
+/** Задача менеджеру, когда клиент написал, а ответа нет. Префикс общий со всеми задачами агента. */
+export const UNANSWERED_PREFIX = 'AI:';
+/** Тип задачи amo «Связаться», если типы в настройках не заданы. */
+const UNANSWERED_TASK_TYPE_ID = 1;
+
+export interface UnansweredInfo {
+  /** Когда пришло сообщение клиента, на которое агент не ответил. */
+  at: string;
+  text: string;
+}
+
+export type UnansweredOutcome =
+  | { status: 'answered' }
+  | { status: 'task_exists' }
+  | { status: 'task_created'; taskId: number }
+  | { status: 'skipped'; reason: string };
+
+const UNANSWERED_REASON: Record<string, string> = {
+  manager_active: 'Агент не отвечал: менеджер ведёт диалог.',
+  paused: 'Агент не отвечал: агент на паузе.',
+  check_failed: 'Агент не отвечал: проверка допуска не прошла.',
+  answer_already_in_history: 'Агент не отвечал: ответ уже был в переписке.',
+  limit: 'Агент не отвечал: исчерпан лимит по сделке.',
+  group_chat: 'Агент не отвечал: групповой чат без разрешения.',
+  group_no_mention: 'Агент не отвечал: в группе к нему не обращались.',
+};
+
+const UNANSWERED_KIND: Record<string, string> = {
+  hint: 'Агент не отвечал: агент в режиме подсказки.',
+  handoff: 'Агент передал диалог менеджеру.',
+  pause: 'Агент не отвечал: агент на паузе.',
+  blocked: 'Агент не отвечал: ответ заблокирован проверкой.',
+  skipped: 'Агент не отвечал.',
+};
+
+const hhmm = (d: Date) =>
+  d.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
 
 export class DialogPipeline {
   constructor(private readonly d: PipelineDeps) {}
@@ -722,6 +763,15 @@ export class DialogPipeline {
     }
     // Ответа нет — бот остался бы висеть на шаге виджета, и amo не запустила бы его на следующее сообщение клиента.
     if (!messages.length) {
+      // Клиенту ничего не ушло: через час проверим, ответил ли менеджер сам.
+      if (t.texts.length && this.d.onUnanswered) {
+        await this.d
+          .onUnanswered(t.accountId, t.leadId, {
+            at: (this.d.now?.() ?? new Date()).toISOString(),
+            text: t.texts[t.texts.length - 1] ?? '',
+          })
+          .catch(() => undefined);
+      }
       const bots = new Set(withUrl.map((m) => botIdFromReturnUrl(m.returnUrl as string)).filter((x): x is number => x !== null));
       for (const botId of bots) {
         try {
@@ -794,6 +844,89 @@ export class DialogPipeline {
 
   private journal(t: Turn, e: Omit<JournalEntry, 'accountId' | 'leadId'>) {
     return this.d.journal.add({ accountId: t.accountId, leadId: t.leadId, ...e });
+  }
+
+  /**
+   * Через час после хода без ответа: если менеджер так и не написал клиенту — ставим ему задачу.
+   * Задача одна на сделку: пока прошлая не выполнена, новую не создаём.
+   */
+  async checkUnanswered(accountId: number, leadId: number, info: UnansweredInfo): Promise<UnansweredOutcome> {
+    const since = new Date(info.at);
+    const access = await this.d.amo(accountId);
+    const lead = await access.api.getLead(leadId);
+    if (!lead) return { status: 'skipped', reason: 'no_lead' };
+
+    const events = await access.api.getOutgoingChatEvents(leadId, since).catch(() => null);
+    if (events === null) return { status: 'skipped', reason: 'check_failed' };
+    if (events.some((e) => e.created_by > 0)) return { status: 'answered' };
+
+    // Менеджеры отвечают из WhatsApp: в событиях чата amo их нет, в мессенджере есть.
+    const seen = this.d.wazzup?.managerWroteSince;
+    if (seen) {
+      for (const phone of await this.phonesOfLead(access, leadId)) {
+        const at = await seen.call(this.d.wazzup, accountId, phone, since).catch(() => null);
+        if (at) return { status: 'answered' };
+      }
+    }
+
+    const open = await access.api.openLeadTasks(leadId).catch(() => []);
+    if (open.some((t) => t.text.startsWith(UNANSWERED_PREFIX))) return { status: 'task_exists' };
+
+    const { settings } = await this.d.settings.get(accountId);
+    const now = this.d.now?.() ?? new Date();
+    const text = [
+      `${UNANSWERED_PREFIX} клиент написал ${hhmm(since)}, ответа нет больше часа.`,
+      await this.unansweredReason(accountId, leadId),
+      info.text ? `Последнее сообщение клиента: «${info.text.slice(0, 200)}»` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const taskId = await access.api.createTask({
+      leadId,
+      text,
+      completeTill: now,
+      taskTypeId: settings.tasks?.callback?.taskTypeId ?? UNANSWERED_TASK_TYPE_ID,
+      ...(lead.responsible_user_id ? { responsibleUserId: Number(lead.responsible_user_id) } : {}),
+    });
+    await this.d.journal.add({
+      accountId,
+      leadId,
+      kind: 'note',
+      summary: 'Задача менеджеру: клиент без ответа',
+      details: { taskId, at: info.at },
+    });
+    return { status: 'task_created', taskId };
+  }
+
+  /** Почему агент не ответил — берём из последней записи журнала по сделке. */
+  private async unansweredReason(accountId: number, leadId: number): Promise<string> {
+    const log = await this.d.journal.list(accountId, { leadId, limit: 20 }).catch(() => []);
+    for (const row of log) {
+      const reason = (row.details as { reason?: string } | null)?.reason;
+      if (reason && UNANSWERED_REASON[reason]) return UNANSWERED_REASON[reason] as string;
+      if (UNANSWERED_KIND[row.kind]) return UNANSWERED_KIND[row.kind] as string;
+    }
+    return 'Агент не отвечал.';
+  }
+
+  /** Телефоны всех контактов сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
+  private async phonesOfLead(access: AmoAccess, leadId: number): Promise<string[]> {
+    try {
+      const lead = await access.api.getLead(leadId);
+      const refs = (lead?._embedded?.contacts ?? []).slice(0, 5);
+      const phones: string[] = [];
+      for (const ref of refs) {
+        const contact = await access.api.getContact(ref.id);
+        const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
+        for (const v of values) {
+          const p = normalizePhone(typeof v.value === 'string' ? v.value : null);
+          if (p) phones.push(p);
+        }
+      }
+      return [...new Set(phones)];
+    } catch {
+      return [];
+    }
   }
 }
 

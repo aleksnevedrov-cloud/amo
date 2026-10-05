@@ -5,6 +5,7 @@ import {
   INCOMING_QUEUE,
   Orchestrator,
   scheduleLead,
+  scheduleUnanswered,
   type AmoAccess,
   type IncomingJob,
 } from '@ai-door/agent';
@@ -173,6 +174,9 @@ const pipeline = new DialogPipeline({
       const accessToken = () => tokenService.getAccessToken(accountId);
       return { api: new AmoApiClient(account.accountDomain, accessToken), accessToken, accountDomain: account.accountDomain };
     },
+  async onUnanswered(accountId, leadId, info) {
+    await scheduleUnanswered(incoming, { accountId, leadId, unanswered: info });
+  },
     async send(access, returnUrl, messages) {
       await continueBot(returnUrl, await access.accessToken(), messages);
     },
@@ -181,6 +185,11 @@ if (!env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY) log.warn('ANTHROPIC_API_KEY �
 const incomingWorker = new Worker<IncomingJob>(
   INCOMING_QUEUE,
   async (job) => {
+    if (job.data.unanswered) {
+      const r = await pipeline.checkUnanswered(job.data.accountId, job.data.leadId, job.data.unanswered);
+      log.info({ ...job.data, result: r.status }, 'без ответа: проверено');
+      return r;
+    }
     const outcome = await runIncoming(job.data, { pipeline, dialog, settings }, (j, w) => scheduleLead(incoming, j, w));
     log.info({ ...job.data, outcome: outcome.status }, 'incoming: обработано');
     return outcome;

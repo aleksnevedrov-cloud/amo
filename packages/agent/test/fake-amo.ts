@@ -7,6 +7,8 @@ export interface FakeAmoState {
   contact?: Record<string, unknown> | null;
   /** Контакты сделки по id — когда их несколько. */
   contacts?: Record<string, Record<string, unknown>>;
+  /** Незакрытые задачи сделки для GET /api/v4/tasks. */
+  openTasks?: { id: number; text: string }[];
   events: { id: string; type: string; entity_id: number; created_by: number; created_at: number }[];
   calls: { method: string; path: string; body: unknown }[];
   sent: { returnUrl: string; messages: string[] }[];
@@ -49,6 +51,8 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
     }
     if (url.pathname.endsWith('/notes') && method === 'GET') return new Response(null, { status: 204 });
     if (url.pathname.endsWith('/notes')) return json({ _embedded: { notes: [{ id: 1 }] } });
+    if (url.pathname === '/api/v4/tasks' && method === 'GET')
+      return json({ _embedded: { tasks: state.openTasks ?? [] } });
     if (url.pathname === '/api/v4/tasks') return json({ _embedded: { tasks: [{ id: 2 }] } });
     return json({});
   }) as typeof fetch;

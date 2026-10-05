@@ -249,3 +249,45 @@ describe('групповые чаты', () => {
     expect(out.status).toBe('replied');
   });
 });
+
+describe('задача менеджеру, когда ответа клиенту нет', () => {
+  const client = () => ({ at: new Date().toISOString(), text: 'Сможем добавить?' });
+
+  it('менеджер ответил в чате — задачу не ставим', async () => {
+    const t = await setup([text('x')], wazzupFake([]), analyzer(), {
+      ...withPhone,
+      events: [
+        { id: '1', type: 'outgoing_chat_message', entity_id: lead, created_by: 7, created_at: Math.floor(Date.now() / 1000) },
+      ],
+    });
+    const r = await t.pipeline.checkUnanswered(ACC, lead, client());
+    expect(r.status).toBe('answered');
+  });
+
+  it('ответа нет — ставим задачу с причиной и текстом клиента', async () => {
+    const t = await setup([text('x')], wazzupFake([]));
+    await t.journal.add({
+      accountId: ACC,
+      leadId: lead,
+      kind: 'blocked',
+      summary: 'Ответ не отправлен',
+      details: { reason: 'manager_active' },
+    });
+    const r = await t.pipeline.checkUnanswered(ACC, lead, client());
+    expect(r.status).toBe('task_created');
+    const post = t.fake.state.calls.find((c) => c.path === '/api/v4/tasks' && c.method === 'POST');
+    expect(post).toBeTruthy();
+    const body = (post!.body as { text: string }[])[0];
+    expect(body!.text).toContain('менеджер ведёт диалог');
+    expect(body!.text).toContain('Сможем добавить?');
+  });
+
+  it('незакрытая задача агента есть — вторую не создаём', async () => {
+    const t = await setup([text('x')], wazzupFake([]), analyzer(), {
+      ...withPhone,
+      openTasks: [{ id: 5, text: 'AI: клиент написал 10:00, ответа нет больше часа.' }],
+    });
+    const r = await t.pipeline.checkUnanswered(ACC, lead, client());
+    expect(r.status).toBe('task_exists');
+  });
+});

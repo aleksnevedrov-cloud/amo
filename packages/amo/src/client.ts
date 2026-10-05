@@ -224,6 +224,15 @@ export class AmoApiClient {
     return res?._embedded.tasks[0]?.id ?? 0;
   }
 
+  /** Незакрытые задачи сделки: по ним решаем, нужна ли ещё одна. */
+  async openLeadTasks(leadId: number): Promise<{ id: number; text: string }[]> {
+    const res = await this.request<{ _embedded?: { tasks?: { id: number; text: string }[] } }>(
+      'GET',
+      `/api/v4/tasks?filter[entity_type]=leads&filter[entity_id]=${leadId}&filter[is_completed]=0&limit=50`,
+    );
+    return res?._embedded?.tasks ?? [];
+  }
+
   /**
    * Запуск бота Salesbot по сделке (API v2). Через бота-отправщика уходят одобренные черновики.
    * Формат запроса сверить с документацией amo при установке.
