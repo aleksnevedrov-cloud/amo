@@ -135,14 +135,18 @@ async function ensureTask(
   api: AmoApiClient,
   accountId: number,
   s: WidgetSettings,
-  lead: { id: number; responsible_user_id: number },
+  lead: { id: number; responsible_user_id: number; updated_at?: number },
   reason: string,
   now: Date,
+  freshCounts: boolean,
 ): Promise<'created' | 'has_task' | 'has_activity' | 'error'> {
   try {
     const open = await api.openLeadTasks(lead.id);
     if (open.length) return 'has_task';
-    if (await hadActivity(d, api, accountId, lead.id, startOfMskDay(now))) return 'has_activity';
+    const since = startOfMskDay(now);
+    if (freshCounts && lead.updated_at && lead.updated_at * 1000 >= since.getTime())
+      return 'has_activity';
+    if (await hadActivity(d, api, accountId, lead.id, since)) return 'has_activity';
     const comment = await buildComment(d, accountId, lead.id, s, now);
     const text = cut(`${SWEEP_PREFIX} ${reason}\n${comment}`, 1000);
     await api.createTask({
@@ -190,7 +194,7 @@ export async function sweepNewLeads(d: SweepDeps, accountId: number): Promise<Sw
       res.skipped += 1;
       continue;
     }
-    const r = await ensureTask(d, api, accountId, s, lead, 'сделка создана, задачи нет', now);
+    const r = await ensureTask(d, api, accountId, s, lead, 'сделка создана, задачи нет', now, false);
     if (r === 'created') res.created += 1;
     else if (r === 'error') res.errors += 1;
     else res.skipped += 1;
@@ -216,7 +220,7 @@ export async function sweepStages(d: SweepDeps, accountId: number): Promise<Swee
     for (const lead of leads) {
       if (res.created >= s.taskSweep.maxPerRun) return res;
       res.checked += 1;
-      const r = await ensureTask(d, api, accountId, s, lead, 'вечерний обход: задачи в сделке нет', now);
+      const r = await ensureTask(d, api, accountId, s, lead, 'вечерний обход: задачи в сделке нет', now, true);
       if (r === 'created') res.created += 1;
       else if (r === 'error') res.errors += 1;
       else res.skipped += 1;

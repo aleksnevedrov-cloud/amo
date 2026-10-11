@@ -11,6 +11,7 @@ interface FakeLead {
   pipeline_id: number;
   responsible_user_id: number;
   created_at: number;
+  updated_at?: number;
 }
 
 function deps(opts: {
@@ -91,6 +92,36 @@ describe('автопостановка задач', () => {
     const res = await sweepStages(d, ACC);
     expect(res.created).toBe(0);
     expect(created).toHaveLength(0);
+  });
+
+  it('вечерний обход пропускает сделку, обновлённую сегодня', async () => {
+    const ts = Math.floor(new Date('2026-10-07T09:00:00Z').getTime() / 1000);
+    const { d, created } = deps({
+      leads: [lead(13, { updated_at: ts })],
+      sweep: { pipelineId: 10, statusIds: [100], maxPerRun: 5 },
+      summary: null,
+    });
+    const res = await sweepStages(d, ACC);
+    expect(res.created).toBe(0);
+    expect(created).toHaveLength(0);
+  });
+
+  it('вечерний обход ставит задачу по сделке без движения за день', async () => {
+    const ts = Math.floor(new Date('2026-10-05T09:00:00Z').getTime() / 1000);
+    const { d, created } = deps({
+      leads: [lead(14, { updated_at: ts })],
+      sweep: { pipelineId: 10, statusIds: [100], maxPerRun: 5 },
+      summary: null,
+    });
+    const res = await sweepStages(d, ACC);
+    expect(res.created).toBe(1);
+  });
+
+  it('постановка по новой сделке не смотрит на дату обновления', async () => {
+    const ts = Math.floor(new Date('2026-10-07T09:00:00Z').getTime() / 1000);
+    const { d, created } = deps({ leads: [lead(15, { updated_at: ts })], summary: null });
+    await sweepNewLeads(d, ACC);
+    expect(created).toHaveLength(1);
   });
 
   it('кладёт в комментарий сводку переписки за день', async () => {
