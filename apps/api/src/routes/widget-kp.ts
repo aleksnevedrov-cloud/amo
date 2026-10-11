@@ -3,7 +3,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { KpRepo } from '@ai-door/db';
+import { buildKpDraft, type KpLine, type KpPayload } from '@ai-door/agent';
+import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
 import type { WidgetPrincipal } from '@ai-door/amo';
 import type { Deps } from '../deps.ts';
 
@@ -39,7 +40,27 @@ const templateSchema = z.object({
   contentBase64: z.string().min(1),
 });
 
-/** Вкладка «КП» в настройках виджета: константы, нумерация, файл-шаблон. */
+const leadBody = z.object({ leadId: z.coerce.number().int().positive() });
+
+/** Правки менеджера: только то, что он вправе менять руками. */
+const linesSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        request_index: z.number().int().min(-1),
+        page_id: z.string().max(100).nullable(),
+        name: z.string().max(300),
+        size: z.string().max(100),
+        qty: z.number().int().min(1).max(10_000),
+        price: z.number().min(0).max(100_000_000).nullable(),
+        lead_time: z.string().max(100),
+        discount: z.number().min(0).max(100),
+      }),
+    )
+    .max(200),
+});
+
+/** Вкладка «КП» в настройках виджета и черновик КП в карточке сделки. */
 export function widgetKpRoutes(
   api: FastifyInstance,
   deps: Deps,
@@ -47,6 +68,7 @@ export function widgetKpRoutes(
   requireAdmin: (req: FastifyRequest, reply: FastifyReply) => boolean,
 ) {
   const repo = new KpRepo(deps.db);
+  const attachments = new MailAttachmentsRepo(deps.db);
   const root = process.env.KP_FILES_ROOT ?? process.env.MAIL_FILES_ROOT ?? '/data';
   const templatePath = (accountId: number) => join(root, 'kp', String(accountId), 'template.docx');
 
@@ -110,4 +132,101 @@ export function widgetKpRoutes(
       )
       .send(bytes);
   });
+
+  api.get('/kp/draft', async (req, reply) => {
+    const q = leadBody.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const d = await repo.latestByLead(principal(req).accountId, q.data.leadId);
+    return { draft: d ? view(d) : null };
+  });
+
+  /**
+   * Кнопка «Подготовить КП». Единственный шаг темы, который тратит токены.
+   * Документ здесь не собирается: сборка — отдельная кнопка после правок менеджера.
+   */
+  api.post('/kp/draft', async (req, reply) => {
+    const p = principal(req);
+    const b = leadBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const leadId = b.data.leadId;
+    const ai = await deps.ai(p.accountId);
+    if (!ai?.llm) return reply.code(409).send({ error: 'no_llm' });
+    const { settings } = await deps.settings.get(p.accountId);
+    try {
+      const r = await buildKpDraft(
+        ai.llm,
+        settings,
+        { accountId: p.accountId, leadId },
+        {
+          catalog: deps.catalog,
+          dialog: deps.dialog,
+          attachments,
+          components: deps.doorComponents,
+        },
+      );
+      const id = await repo.createDraft(p.accountId, leadId, r.payload as unknown as Record<string, unknown>, p.userId);
+      await deps.journal.add({
+        accountId: p.accountId,
+        leadId,
+        kind: 'kp_draft',
+        summary:
+          `Черновик КП: позиций ${r.payload.request_items.length}` +
+          (r.payload.needs_manager.length ? `, нужен менеджер по ${r.payload.needs_manager.length}` : ''),
+        details: { draftId: id, model: r.model, provider: r.provider },
+        inputTokens: r.cost.inputTokens,
+        outputTokens: r.cost.outputTokens,
+        costUsd: r.cost.usd,
+        costRub: r.cost.usd * settings.billing.usdRubRate,
+      });
+      const d = await repo.byId(p.accountId, id);
+      return { draft: d ? view(d) : null };
+    } catch (err) {
+      await deps.journal.add({
+        accountId: p.accountId,
+        leadId,
+        kind: 'kp_error',
+        summary: `Черновик КП не собран: ${(err as Error).message}`,
+      });
+      return reply.code(502).send({ error: 'draft_failed', message: (err as Error).message });
+    }
+  });
+
+  /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */
+  api.put('/kp/draft/:id', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const b = linesSchema.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    if (d.status !== 'draft' && d.status !== 'built') return reply.code(409).send({ error: 'locked' });
+    const payload = { ...(d.payload as unknown as KpPayload), items: b.data.items as KpLine[] };
+    await repo.setPayload(id, payload as unknown as Record<string, unknown>);
+    const fresh = await repo.byId(p.accountId, id);
+    return { draft: fresh ? view(fresh) : null };
+  });
+}
+
+function view(d: KpDraft) {
+  const p = d.payload as unknown as Partial<KpPayload>;
+  return {
+    id: d.id,
+    leadId: d.leadId,
+    status: d.status,
+    kpNo: d.kpNo,
+    createdAt: d.createdAt,
+    builtAt: d.builtAt,
+    sentAt: d.sentAt,
+    hasDocx: Boolean(d.docxPath),
+    hasPdf: Boolean(d.pdfPath),
+    client: p.client ?? { org: '', fio: '', email: '', phone: '' },
+    requestItems: p.request_items ?? [],
+    candidates: p.candidates ?? [],
+    items: p.items ?? [],
+    components: p.components ?? [],
+    requiredBlocks: p.required_blocks ?? [],
+    questions: p.questions ?? [],
+    needsManager: p.needs_manager ?? [],
+  };
 }
