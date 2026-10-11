@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@ai-door/agent';
+import { buildKpMail, ourAddress, replySubject, serverConfig, type Mailbox } from '@ai-door/mail';
 import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
 import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
 import type { Deps } from '../deps.ts';
@@ -283,6 +284,140 @@ export function widgetKpRoutes(
     }
   });
 
+
+  /**
+   * Кнопка «Отправить». Письмо уходит в ту же цепочку, что и запрос клиента,
+   * с PDF коммерческого предложения и сертификатами. Автоотправки нет: только по кнопке.
+   */
+  api.post('/kp/send', async (req, reply) => {
+    const p = principal(req);
+    const b = z.object({ draftId: z.coerce.number().int().positive() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const draft = await repo.byId(p.accountId, b.data.draftId);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    if (draft.status === 'sent') return reply.code(409).send({ error: 'already_sent' });
+    if (draft.status !== 'built' || !draft.docxPath) return reply.code(409).send({ error: 'not_built' });
+
+    const { settings } = await deps.settings.get(p.accountId);
+    const e = settings.email;
+    if (!e.enabled || !e.smtpHost || !e.username) return reply.code(409).send({ error: 'mail_off' });
+    const password = await deps.mail.getPassword(p.accountId);
+    if (!password) return reply.code(409).send({ error: 'no_password' });
+
+    const s = await repo.getSettings(p.accountId);
+    const c = s.constants;
+    const payload = draft.payload as unknown as KpPayload;
+    const thread = await deps.mail.lastThread(p.accountId, draft.leadId);
+    const to = (payload.source?.from || thread?.from || '').trim();
+    if (!to.includes('@')) return reply.code(409).send({ error: 'no_recipient' });
+
+    const kpNo = draft.kpNo ?? '';
+    const docPath = draft.pdfPath ?? draft.docxPath;
+    const lines = (payload.items ?? []).filter((l) => l.price !== null);
+    const ids = new Set(lines.map((l) => l.page_id).filter(Boolean));
+    const factories = (payload.candidates ?? [])
+      .filter((x) => ids.has(x.page_id))
+      .map((x) => x.factory)
+      .filter(Boolean);
+    const certs = await findCertificates(s.certsDir, [...new Set(factories)]);
+
+    const files: { filename: string; content: Buffer }[] = [];
+    for (const f of [docPath, ...certs]) {
+      const bytes = await readFile(f).catch(() => null);
+      if (bytes) files.push({ filename: basename(f), content: bytes });
+    }
+    if (!files.length) return reply.code(409).send({ error: 'no_files' });
+
+    const body = [
+      (c.coverLetter || 'Здравствуйте!\n\nНаправляем коммерческое предложение по вашему запросу — документ во вложении.').trim(),
+      kpNo ? `Номер предложения: ${kpNo}.` : '',
+      c.validDays ? `Предложение действительно ${c.validDays} дн.` : '',
+      c.paymentTerms ? `Оплата: ${c.paymentTerms}` : '',
+      c.delivery ? `Доставка: ${c.delivery}` : '',
+      c.warranty ? `Гарантия: ${c.warranty}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const subject = thread?.subject
+      ? replySubject(thread.subject)
+      : `Коммерческое предложение${kpNo ? ` ${kpNo}` : ''}`;
+    const mail = buildKpMail(
+      { name: e.fromName, address: ourAddress(e) },
+      {
+        to,
+        toName: thread?.fromName ?? payload.client?.fio ?? '',
+        subject,
+        inReplyTo: thread?.messageId ?? null,
+        references: thread?.references ?? [],
+      },
+      body,
+      c.signature || e.signature,
+      files,
+    );
+
+    const cfg = serverConfig(e, password);
+    let raw: Buffer;
+    try {
+      raw = await deps.mailSender(cfg).send(mail);
+    } catch (err) {
+      await deps.journal.add({
+        accountId: p.accountId,
+        leadId: draft.leadId,
+        kind: 'kp_error',
+        summary: `КП ${kpNo} не отправлено: ${(err as Error).message}`,
+        details: { draftId: draft.id, to },
+      });
+      return reply.code(502).send({ error: 'send_failed', message: (err as Error).message });
+    }
+
+    // Копия в «Отправленные»: письмо должно быть видно в почте и в карточке amo.
+    if (e.saveToSent) {
+      let box: Mailbox | null = null;
+      try {
+        box = await deps.mailConnect(cfg);
+        const sent = e.sentFolder || (await box.findSentFolder());
+        if (sent) await box.append(sent, raw);
+      } catch {
+        // не критично: письмо уже ушло
+      } finally {
+        await box?.close().catch(() => undefined);
+      }
+    }
+
+    await repo.setStatus(draft.id, 'sent');
+
+    const amo = await amoFor(p.accountId).catch(() => undefined);
+    let taskAt: Date | null = null;
+    if (amo) {
+      const lead = (await amo.getLeadsByIds([draft.leadId]).catch(() => []))[0];
+      taskAt = addWorkdays(new Date(), 2);
+      await amo
+        .createTask({
+          text: `Контроль ответа по КП${kpNo ? ` ${kpNo}` : ''}: клиент ${to}`,
+          completeTill: taskAt,
+          leadId: draft.leadId,
+          taskTypeId: settings.taskSweep.taskTypeId,
+          responsibleUserId: lead?.responsible_user_id || undefined,
+        })
+        .catch(() => undefined);
+      await amo
+        .addLeadNote(draft.leadId, `[AI] КП${kpNo ? ` ${kpNo}` : ''} отправлено на ${to}. Вложений: ${files.length}.`)
+        .catch(() => undefined);
+    }
+
+    await deps.journal.add({
+      accountId: p.accountId,
+      leadId: draft.leadId,
+      kind: 'kp_sent',
+      summary: `КП ${kpNo} отправлено на ${to}, вложений ${files.length}`,
+      details: { draftId: draft.id, to, attachments: files.map((f) => f.filename), taskAt },
+    });
+
+    const fresh = await repo.byId(p.accountId, draft.id);
+    return { draft: fresh ? view(fresh) : null, to, attachments: files.map((f) => f.filename) };
+  });
+
   /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */
   api.put('/kp/draft/:id', async (req, reply) => {
     const p = principal(req);
@@ -321,4 +456,15 @@ function view(d: KpDraft) {
     questions: p.questions ?? [],
     needsManager: p.needs_manager ?? [],
   };
+}
+
+/** Срок контроля: +N рабочих дней, суббота и воскресенье пропускаются. */
+function addWorkdays(from: Date, days: number): Date {
+  const d = new Date(from);
+  let left = days;
+  while (left > 0) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0 && d.getDay() !== 6) left -= 1;
+  }
+  return d;
 }

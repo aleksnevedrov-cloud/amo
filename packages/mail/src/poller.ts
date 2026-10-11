@@ -277,6 +277,17 @@ async function enqueueLetter(
   d: PollDeps,
 ) {
   await d.dialog.addMessage(accountId, leadId, 'client', l.text);
+  // Заголовки цепочки нужны этапу 5: КП уходит ответом на это же письмо.
+  const meta = l.meta as { messageId?: string | null; references?: string[] } | undefined;
+  await d.mail
+    .rememberThread(accountId, leadId, {
+      messageId: meta?.messageId ?? null,
+      references: Array.isArray(meta?.references) ? (meta?.references as string[]) : [],
+      from: l.from,
+      fromName: l.fromName,
+      subject: l.subject,
+    })
+    .catch(() => undefined);
   await d.journal.add({
     accountId,
     leadId,

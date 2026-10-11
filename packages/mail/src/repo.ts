@@ -9,6 +9,16 @@ export interface FolderState {
   lastErrorAt: Date | null;
 }
 
+/** Письмо клиента, на которое отвечаем при отправке КП. */
+export interface MailThread {
+  messageId: string | null;
+  references: string[];
+  from: string;
+  fromName: string | null;
+  subject: string | null;
+  receivedAt: Date;
+}
+
 export class MailRepo {
   constructor(
     private readonly db: Db,
@@ -104,6 +114,42 @@ export class MailRepo {
   }
 
   /** Письмо ждёт, пока почта amo создаст сделку. */
+  /** Нить письма клиента — чтобы ответ с КП ушёл в ту же цепочку, а не новым письмом. */
+  async rememberThread(
+    accountId: number,
+    leadId: number,
+    t: { messageId: string | null; references: string[]; from: string; fromName?: string; subject?: string },
+  ): Promise<void> {
+    await this.db.query(
+      `INSERT INTO mail_threads (account_id, lead_id, message_id, refs, from_addr, from_name, subject)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
+      [accountId, leadId, t.messageId, JSON.stringify(t.references ?? []), t.from, t.fromName ?? null, t.subject ?? null],
+    );
+  }
+
+  /** Последнее письмо клиента по сделке: адрес, тема и заголовки цепочки. */
+  async lastThread(accountId: number, leadId: number): Promise<MailThread | null> {
+    const { rows } = await this.db.query(
+      `SELECT message_id, refs, from_addr, from_name, subject, received_at
+         FROM mail_threads
+        WHERE account_id = $1 AND lead_id = $2
+        ORDER BY received_at DESC, id DESC
+        LIMIT 1`,
+      [accountId, leadId],
+    );
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const refs = row.refs;
+    return {
+      messageId: (row.message_id as string | null) ?? null,
+      references: Array.isArray(refs) ? (refs as string[]) : [],
+      from: String(row.from_addr ?? ''),
+      fromName: (row.from_name as string | null) ?? null,
+      subject: (row.subject as string | null) ?? null,
+      receivedAt: row.received_at as Date,
+    };
+  }
+
   async addWaiting(accountId: number, w: { from: string; fromName: string; subject: string; text: string; meta: Record<string, unknown> }): Promise<void> {
     await this.db.query(
       'INSERT INTO email_waiting (account_id, from_address, from_name, subject, text, meta) VALUES ($1, $2, $3, $4, $5, $6)',

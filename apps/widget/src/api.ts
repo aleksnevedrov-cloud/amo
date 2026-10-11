@@ -509,6 +509,10 @@ export class WidgetApi {
   /** Кнопка «Подготовить КП»: единственный шаг, который тратит токены. */
   makeKpDraft = (leadId: number) =>
     this.call<{ draft: KpDraftInfo | null }>('POST', '/widget/v1/kp/draft', { leadId });
+  /** Кнопка «Отправить»: письмо с КП в ту же цепочку, задача на контроль через 2 рабочих дня. */
+  sendKp = (draftId: number) =>
+    this.call<{ draft: KpDraftInfo | null; to: string; attachments: string[] }>('POST', '/widget/v1/kp/send', { draftId });
+
   /** Кнопка «Собрать КП»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
   buildKpDoc = (draftId: number) =>
     this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[] }>('POST', '/widget/v1/kp/build', { draftId });

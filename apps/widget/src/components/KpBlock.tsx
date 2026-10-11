@@ -190,10 +190,19 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
         >
           {busy ? 'Собираю…' : 'Собрать КП'}
         </button>
-        <button type="button" className="ai-door-btn" disabled title="Этап 5 темы: отправка по кнопке">
-          Отправить
+        <button
+          type="button"
+          className="ai-door-btn"
+          disabled={busy || draft.status !== 'built'}
+          title={draft.status === 'built' ? 'Отправить письмо с КП клиенту' : 'Доступно после сборки документа'}
+          onClick={() => {
+            if (window.confirm('Отправить КП клиенту письмом?')) void act(() => api.sendKp(draft.id));
+          }}
+        >
+          {busy ? 'Отправляю…' : 'Отправить'}
         </button>
       </div>
+      {draft.status === 'sent' && <div className="ai-door-muted">КП отправлено клиенту.</div>}
       {draft.status === 'built' && (
         <div className="ai-door-muted">
           Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки.
