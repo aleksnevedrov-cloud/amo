@@ -250,7 +250,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
       });
     }
   }
-  await enqueueLetter(accountId, link.leadId, letter, link.created, settings, d);
+  await enqueueLetter(accountId, link.leadId, letter, link.created, d);
   return 'queued';
 }
 
@@ -262,22 +262,27 @@ interface Letter {
   meta: Record<string, unknown>;
 }
 
+/**
+ * Почта в режиме «только читать» (решение заказчика 11.10.2026, тема RFD-AI-AGENT-KP).
+ *
+ * Письмо ложится в историю сделки — оттуда его берёт черновик КП, — вложения уже сохранены
+ * выше. Ответ клиенту агент не готовит и в очередь ничего не ставит: по почте пишет менеджер,
+ * а готовое КП уходит только по кнопке.
+ */
 async function enqueueLetter(
   accountId: number,
   leadId: number,
   l: Letter,
   created: 'none' | 'lead' | 'contact_and_lead',
-  settings: WidgetSettings,
   d: PollDeps,
 ) {
-  await d.dialog.enqueue(accountId, leadId, l.text, null, null, { channel: 'email', meta: l.meta });
+  await d.dialog.addMessage(accountId, leadId, 'client', l.text);
   await d.journal.add({
     accountId,
     leadId,
     kind: 'note',
-    summary: `Письмо от ${l.from}: «${l.subject}»${created === 'none' ? '' : created === 'lead' ? ' — создана сделка' : ' — созданы контакт и сделка'}`,
+    summary: `Письмо от ${l.from}: «${l.subject}»${created === 'none' ? '' : created === 'lead' ? ' — создана сделка' : ' — созданы контакт и сделка'} — прочитано, ответ не готовится`,
   });
-  await d.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
 }
 
 /** Повторный поиск сделки для ожидающих писем; по истечении ожидания — действие из настроек. */
@@ -298,7 +303,7 @@ async function retryWaiting(accountId: number, settings: WidgetSettings, d: Poll
       out.push('skipped');
       continue;
     }
-    await enqueueLetter(accountId, link.leadId, w, link.created, settings, d);
+    await enqueueLetter(accountId, link.leadId, w, link.created, d);
     out.push('queued');
   }
   return out;
