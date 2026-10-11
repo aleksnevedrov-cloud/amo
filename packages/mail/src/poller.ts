@@ -1,3 +1,4 @@
+import { buildKpNote, classifyKpRequest } from './kp-request.ts';
 import { saveMailAttachments, type SaveAttachmentsDeps } from './attachments.ts';
 import type { AmoApiClient } from '@ai-door/amo';
 import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@ai-door/db';
@@ -145,8 +146,18 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   }
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
   const openings: unknown[] = [];
+  // Запрос КП разбираем даже при выключенном авторазборе, рассылки — не разбираем вовсе.
+  const kp = classifyKpRequest({
+    fromAddress: from.address,
+    subject: msg.subject,
+    text: msg.text,
+  });
+  const extracts = new Map<string, { text?: string; error?: string }>();
   if (msg.attachments.length) {
-    const docs = d.documents && settings.vision.autoParse ? d.documents : null;
+    const docs =
+      d.documents && !kp.isBulk && (settings.vision.autoParse || kp.isRequest)
+        ? d.documents
+        : null;
     for (const a of msg.attachments.slice(0, MAX_ATTACHMENTS)) {
       const name = a.filename ?? a.contentType;
       if (!docs) {
@@ -156,10 +167,12 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
       try {
         const r = await docs.analyze({ accountId, leadId: null, source: 'email', filename: name, mime: a.contentType, bytes: new Uint8Array(a.content), settings });
         parts.push(r.text);
+        extracts.set(name, { text: r.text });
         openings.push(...r.memoryOpenings);
         await d.journal.add({ accountId, kind: 'document', summary: `Разобрано вложение «${name}» из письма от ${from.address} (${r.kind})`, details: { documentId: r.id, model: r.model }, costUsd: r.costUsd, costRub: r.costUsd * settings.billing.usdRubRate });
       } catch (err) {
         parts.push(`(во вложении файл «${name}», разобрать не удалось: ${(err as Error).message})`);
+        extracts.set(name, { error: (err as Error).message });
         await d.journal.add({ accountId, kind: 'error', summary: `Вложение «${name}» из письма от ${from.address}: ${(err as Error).message}` });
       }
     }
@@ -186,7 +199,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   }
   if (d.attachments && msg.attachments.length) {
     // Файлы кладём в сделку всегда, даже когда разбор текста выключен.
-    await saveMailAttachments(
+    const saved = await saveMailAttachments(
       {
         accountId,
         leadId: link.leadId,
@@ -194,6 +207,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
         messageUid: null,
         files: msg.attachments,
         api,
+        extracts,
       },
       d.attachments,
     ).catch(async (err) => {
@@ -205,6 +219,36 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
       });
       return undefined;
     });
+  }
+  if (kp.isRequest && msg.attachments.length) {
+    // Менеджер должен видеть в карточке, что просят, не открывая вложения.
+    try {
+      await api.addLeadNote(
+        link.leadId,
+        buildKpNote({
+          subject: msg.subject,
+          fromName: from.name,
+          fromAddress: from.address,
+          text: msg.text,
+          matched: kp.matched,
+          files: [...extracts.entries()].map(([filename, r]) => ({ filename, ...r })),
+        }),
+      );
+      await d.journal.add({
+        accountId,
+        leadId: link.leadId,
+        kind: 'mail_extract',
+        summary: `Запрос КП из письма от ${from.address}: примечание добавлено`,
+        details: { matched: kp.matched, files: extracts.size },
+      });
+    } catch (err) {
+      await d.journal.add({
+        accountId,
+        leadId: link.leadId,
+        kind: 'kp_error',
+        summary: `Примечание по запросу КП не добавлено: ${(err as Error).message}`,
+      });
+    }
   }
   await enqueueLetter(accountId, link.leadId, letter, link.created, settings, d);
   return 'queued';

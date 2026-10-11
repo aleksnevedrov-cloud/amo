@@ -54,6 +54,22 @@ export class MailAttachmentsRepo {
     await this.db.query('UPDATE mail_attachments SET lead_id = $2 WHERE id = $1', [id, leadId]);
   }
 
+  /** Текст вложения, извлечённый при разборе письма (этап 2 темы RFD-AI-AGENT-KP). */
+  async setExtract(
+    id: number,
+    r: { text?: string | null; error?: string | null },
+  ): Promise<void> {
+    await this.db.query(
+      `UPDATE mail_attachments
+          SET extracted_text = $2,
+              extract_status = $3,
+              extract_error = $4,
+              extracted_at = now()
+        WHERE id = $1`,
+      [id, r.text ?? null, r.error ? 'error' : 'done', r.error ? r.error.slice(0, 500) : null],
+    );
+  }
+
   async markUploaded(id: number, fileUuid: string): Promise<void> {
     await this.db.query(
       'UPDATE mail_attachments SET amo_file_uuid = $2, amo_error = NULL WHERE id = $1',

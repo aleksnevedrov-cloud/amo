@@ -115,6 +115,8 @@ export async function saveMailAttachments(
     messageUid: number | null;
     files: IncomingAttachment[];
     api: AmoApiClient;
+    /** Текст вложений, уже извлечённый при разборе письма: имя файла → результат. */
+    extracts?: Map<string, { text?: string; error?: string }>;
   },
   d: SaveAttachmentsDeps,
 ): Promise<SaveAttachmentsResult> {
@@ -153,6 +155,13 @@ export async function saveMailAttachments(
     if (!row.created) {
       res.duplicates += 1;
       continue;
+    }
+
+    const extract = args.extracts?.get(filename) ?? args.extracts?.get(f.filename ?? '');
+    if (extract) {
+      await d.attachments
+        .setExtract(row.id, { text: extract.text ?? null, error: extract.error ?? null })
+        .catch(() => undefined);
     }
 
     try {
