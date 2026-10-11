@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { buildKpDraft, type KpLine, type KpPayload } from '@ai-door/agent';
+import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@ai-door/agent';
 import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
 import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
 import type { Deps } from '../deps.ts';
@@ -195,6 +196,90 @@ export function widgetKpRoutes(
         summary: `Черновик КП не собран: ${(err as Error).message}`,
       });
       return reply.code(502).send({ error: 'draft_failed', message: (err as Error).message });
+    }
+  });
+
+
+  /**
+   * Кнопка «Собрать КП». Документ строится из строк, которые менеджер подтвердил:
+   * цены и количества берутся из черновика, а не из каталога. Автосборки нет.
+   */
+  api.post('/kp/build', async (req, reply) => {
+    const p = principal(req);
+    const b = z.object({ draftId: z.coerce.number().int().positive() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const draft = await repo.byId(p.accountId, b.data.draftId);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    if (draft.status === 'sent') return reply.code(409).send({ error: 'already_sent' });
+
+    const s = await repo.getSettings(p.accountId);
+    if (!s.templatePath) return reply.code(409).send({ error: 'no_template' });
+    const payload = draft.payload as unknown as KpPayload;
+    const lines = (payload.items ?? []).filter((l) => l.price !== null);
+    if (!lines.length) return reply.code(409).send({ error: 'no_priced_lines' });
+
+    const kpNo = draft.kpNo ?? (await repo.nextNumber(p.accountId));
+    const letterAt = payload.source?.letterAt ? new Date(payload.source.letterAt) : null;
+    const data = templateData({
+      kpNo,
+      date: new Date(),
+      basis: letterAt ? `запрос от ${letterAt.toLocaleDateString('ru-RU')}` : 'запрос клиента',
+      clientName: payload.client?.org || payload.client?.fio || '',
+      clientPhone: payload.client?.phone || '',
+      lines: lines.map((l) => ({ name: l.name, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
+      vatRate: s.constants.vatRate ?? 0,
+    });
+
+    const outDir = join(root, 'kp', String(p.accountId), String(draft.leadId));
+    const baseName = `KP-${kpNo.replace(/[^0-9A-Za-zА-Яа-я._-]+/g, '_')}`;
+    try {
+      const built = await buildKp(s.templatePath, data, outDir, baseName);
+      const ids = new Set(lines.map((l) => l.page_id).filter(Boolean));
+      const factories = (payload.candidates ?? [])
+        .filter((c) => ids.has(c.page_id))
+        .map((c) => c.factory)
+        .filter(Boolean);
+      const certs = await findCertificates(s.certsDir, [...new Set(factories)]);
+
+      // Файлы — в карточку сделки: менеджер открывает их там же, где письмо.
+      const amo = await amoFor(p.accountId).catch(() => undefined);
+      const attached: string[] = [];
+      if (amo) {
+        const files = [built.pdfPath ?? built.docxPath, ...certs];
+        for (const f of files) {
+          const bytes = await readFile(f).catch(() => null);
+          if (!bytes) continue;
+          const mime = f.endsWith('.pdf')
+            ? 'application/pdf'
+            : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+          await amo
+            .uploadFileToLead(draft.leadId, { filename: basename(f), mime, bytes })
+            .then(() => attached.push(basename(f)))
+            .catch(() => undefined);
+        }
+      }
+
+      await repo.setBuilt(draft.id, { docxPath: built.docxPath, pdfPath: built.pdfPath, kpNo });
+      await deps.journal.add({
+        accountId: p.accountId,
+        leadId: draft.leadId,
+        kind: 'kp_build',
+        summary: `КП ${kpNo} собрано: позиций ${lines.length}` +
+          (built.pdfPath ? '' : ', PDF не собран') +
+          (attached.length ? `, в сделку ${attached.length}` : ''),
+        details: { draftId: draft.id, certificates: certs.length, attached, pdfError: built.pdfError },
+      });
+      const fresh = await repo.byId(p.accountId, draft.id);
+      return { draft: fresh ? view(fresh) : null, pdf: Boolean(built.pdfPath), attached };
+    } catch (err) {
+      await deps.journal.add({
+        accountId: p.accountId,
+        leadId: draft.leadId,
+        kind: 'kp_error',
+        summary: `КП не собрано: ${(err as Error).message}`,
+        details: { draftId: draft.id },
+      });
+      return reply.code(502).send({ error: 'build_failed', message: (err as Error).message });
     }
   });
 

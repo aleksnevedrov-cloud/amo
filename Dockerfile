@@ -28,6 +28,8 @@ FROM node:22-alpine
 WORKDIR /app
 # LibreDWG — конвертация чертежей DWG → DXF (фаза 4). Если пакета нет в репозитории — разбор DWG отключится с понятной ошибкой.
 RUN apk add --no-cache libredwg || true
+# Сборка КП: DOCX -> PDF через LibreOffice (тема RFD-AI-AGENT-KP, этап 4).
+RUN apk add --no-cache libreoffice-writer ttf-dejavu font-noto || true
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations
 COPY --from=build /out/api apps/api
 COPY --from=build /out/worker apps/worker

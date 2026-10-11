@@ -199,7 +199,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   }
   if (d.attachments && msg.attachments.length) {
     // Файлы кладём в сделку всегда, даже когда разбор текста выключен.
-    const saved = await saveMailAttachments(
+    await saveMailAttachments(
       {
         accountId,
         leadId: link.leadId,

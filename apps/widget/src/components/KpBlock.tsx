@@ -181,13 +181,24 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
         >
           Сохранить правки
         </button>
-        <button type="button" className="ai-door-btn ai-door-btn-green" disabled title="Этап 5 темы" >
-          Собрать КП
+        <button
+          type="button"
+          className="ai-door-btn ai-door-btn-green"
+          disabled={busy || dirty || !ready}
+          title={dirty ? 'Сначала сохраните правки' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать документ по шаблону'}
+          onClick={() => void act(() => api.buildKpDoc(draft.id))}
+        >
+          {busy ? 'Собираю…' : 'Собрать КП'}
         </button>
-        <button type="button" className="ai-door-btn" disabled title="Доступно после сборки">
+        <button type="button" className="ai-door-btn" disabled title="Этап 5 темы: отправка по кнопке">
           Отправить
         </button>
       </div>
+      {draft.status === 'built' && (
+        <div className="ai-door-muted">
+          Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки.
+        </div>
+      )}
       {!ready && lines.length > 0 && (
         <div className="ai-door-muted">Сборка включится, когда у каждой позиции будет цена.</div>
       )}
