@@ -333,6 +333,47 @@ export interface Dictionaries {
   users?: { id: number; name: string; email: string | null; isActive: boolean; isAdmin: boolean }[];
 }
 
+/** Строка будущего КП: её правит менеджер перед сборкой. */
+export interface KpDraftLine {
+  request_index: number;
+  page_id: string | null;
+  name: string;
+  size: string;
+  qty: number;
+  price: number | null;
+  lead_time: string;
+  discount: number;
+}
+
+export interface KpDraftInfo {
+  id: number;
+  leadId: number;
+  status: 'draft' | 'built' | 'sent' | 'cancelled';
+  kpNo: string | null;
+  createdAt: string;
+  builtAt: string | null;
+  sentAt: string | null;
+  hasDocx: boolean;
+  hasPdf: boolean;
+  client: { org: string; fio: string; email: string; phone: string };
+  requestItems: { raw: string; name: string; width_mm: number | null; height_mm: number | null; qty: number }[];
+  candidates: {
+    request_index: number;
+    page_id: string;
+    title: string;
+    price: number | null;
+    available: boolean | null;
+    lead_time: string;
+    factory: string;
+    url: string | null;
+  }[];
+  items: KpDraftLine[];
+  components: { request_index: number; page_id: string; groups: Record<string, { name: string; price: number }[]> }[];
+  requiredBlocks: string[];
+  questions: string[];
+  needsManager: { request_index: number; reason: string }[];
+}
+
 export interface KpSettingsInfo {
   constants: {
     sellerName?: string;
@@ -462,6 +503,14 @@ export class WidgetApi {
   wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
     this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
   wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
+  /** Черновик КП по сделке (тема RFD-AI-AGENT-KP). */
+  kpDraft = (leadId: number) =>
+    this.call<{ draft: KpDraftInfo | null }>('GET', `/widget/v1/kp/draft?leadId=${leadId}`);
+  /** Кнопка «Подготовить КП»: единственный шаг, который тратит токены. */
+  makeKpDraft = (leadId: number) =>
+    this.call<{ draft: KpDraftInfo | null }>('POST', '/widget/v1/kp/draft', { leadId });
+  saveKpDraftItems = (id: number, items: KpDraftLine[]) =>
+    this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   kpSettings = () =>
     this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
   saveKpSettings = (patch: {
