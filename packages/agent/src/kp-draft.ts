@@ -28,6 +28,13 @@ export interface KpDraftDeps {
   catalog: {
     search(accountId: number, q: { query?: string; limit?: number }): Promise<KpProduct[]>;
   };
+  /** Письма сделки из amoCRM — основной источник запроса (RFD-AI-AGENT-KP). */
+  mail?: {
+    leadMailNotes(
+      leadId: number,
+      limit?: number,
+    ): Promise<{ id: number; createdAt: Date; income: boolean; subject: string; text: string; from: string; attachments: string[] }[]>;
+  };
   dialog: {
     history(
       accountId: number,
@@ -99,7 +106,7 @@ export interface KpPayload {
   required_blocks: string[];
   questions: string[];
   needs_manager: { request_index: number; reason: string }[];
-  source: { letterAt: string | null; attachments: string[] };
+  source: { from: string; mails: number; letterAt: string | null; attachments: string[] };
   generatedAt: string;
 }
 
@@ -142,9 +149,17 @@ export async function buildKpDraft(
   input: { accountId: number; leadId: number },
   d: KpDraftDeps,
 ): Promise<KpDraftResult> {
-  const history = await d.dialog.history(input.accountId, input.leadId, 30);
-  const letters = history.filter((m) => m.role === 'client');
-  const last = letters.at(-1) ?? null;
+  // Письма берём из карточки сделки: их туда положила сама amoCRM.
+  const mails = (await d.mail?.leadMailNotes(input.leadId, 20).catch(() => [])) ?? [];
+  const incoming = mails.filter((m) => m.income).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  const lastMail = incoming.at(-1) ?? null;
+
+  // Запасной источник: переписка в карточке, если писем в amo нет.
+  const history = lastMail ? [] : await d.dialog.history(input.accountId, input.leadId, 30);
+  const last = lastMail
+    ? { text: [lastMail.subject ? `Тема: ${lastMail.subject}` : '', lastMail.text].filter(Boolean).join('\n'), createdAt: lastMail.createdAt }
+    : (history.filter((m) => m.role === 'client').at(-1) ?? null);
+  const source = lastMail ? 'amo_mail' : history.length ? 'dialog' : 'none';
   const files = (await d.attachments?.listByLead(input.accountId, input.leadId, 20).catch(() => [])) ?? [];
   const extracts = files.filter((f) => f.extractedText);
 
@@ -220,8 +235,10 @@ export async function buildKpDraft(
       questions: parsed.questions,
       needs_manager: needs,
       source: {
+        from: source,
+        mails: mails.length,
         letterAt: last?.createdAt ? new Date(last.createdAt).toISOString() : null,
-        attachments: files.map((f) => f.filename),
+        attachments: [...files.map((f) => f.filename), ...(lastMail?.attachments ?? [])],
       },
       generatedAt: new Date().toISOString(),
     },

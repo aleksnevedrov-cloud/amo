@@ -5,7 +5,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { buildKpDraft, type KpLine, type KpPayload } from '@ai-door/agent';
 import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
-import type { WidgetPrincipal } from '@ai-door/amo';
+import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
 import type { Deps } from '../deps.ts';
 
 /** Шаблон КП — обычный DOCX, то есть zip: первые байты PK. */
@@ -69,6 +69,12 @@ export function widgetKpRoutes(
 ) {
   const repo = new KpRepo(deps.db);
   const attachments = new MailAttachmentsRepo(deps.db);
+  /** Клиент amoCRM аккаунта: письма сделки читаем прямо из карточки. */
+  const amoFor = async (accountId: number) => {
+    const a = await deps.accounts.get(accountId);
+    if (!a) return undefined;
+    return new AmoApiClient(a.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
+  };
   const root = process.env.KP_FILES_ROOT ?? process.env.MAIL_FILES_ROOT ?? '/data';
   const templatePath = (accountId: number) => join(root, 'kp', String(accountId), 'template.docx');
 
@@ -160,6 +166,7 @@ export function widgetKpRoutes(
         {
           catalog: deps.catalog,
           dialog: deps.dialog,
+          mail: await amoFor(p.accountId).catch(() => undefined),
           attachments,
           components: deps.doorComponents,
         },

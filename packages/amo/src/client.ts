@@ -210,6 +210,21 @@ export class AmoApiClient {
     return res?._embedded.notes[0]?.id ?? 0;
   }
 
+  /**
+   * Письма сделки из самой amoCRM (примечания типа amomail_message).
+   * Почту опрашивает amo, агенту отдельный заход в ящик не нужен: читаем то,
+   * что уже лежит в карточке и что видит менеджер (тема RFD-AI-AGENT-KP).
+   */
+  async leadMailNotes(leadId: number, limit = 20): Promise<LeadMail[]> {
+    const q = `?filter[note_type][]=amomail_message&order[created_at]=desc&limit=${Math.min(limit, 250)}`;
+    const res = await this.request<{ _embedded?: { notes?: Record<string, unknown>[] } }>(
+      'GET',
+      `/api/v4/leads/${leadId}/notes${q}`,
+    ).catch(() => null);
+    const rows = res?._embedded?.notes ?? [];
+    return rows.map(toLeadMail).filter((m): m is LeadMail => m !== null);
+  }
+
   /** Сделки по фильтру: воронка, этапы, интервал создания. */
   async listLeads(f: {
     pipelineId?: number;
@@ -415,3 +430,58 @@ export function fieldValues(fields: CustomFieldValue[] | null | undefined, codeO
     .filter((f) => f.field_code === codeOrName || f.field_name === codeOrName)
     .flatMap((f) => f.values.map((v) => String(v.value)));
 }
+
+/** Письмо в карточке сделки amoCRM. */
+export interface LeadMail {
+  id: number;
+  createdAt: Date;
+  /** true — входящее от клиента, false — наш ответ. */
+  income: boolean;
+  subject: string;
+  text: string;
+  from: string;
+  to: string;
+  attachments: string[];
+}
+
+const mailText = (p: Record<string, unknown>): string => {
+  for (const k of ['text', 'content', 'body', 'message']) {
+    const v = p[k];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return '';
+};
+
+const mailAddress = (v: unknown): string => {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(mailAddress).filter(Boolean).join(', ');
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const mail = typeof o.email === 'string' ? o.email : '';
+    const name = typeof o.name === 'string' ? o.name : '';
+    return [name, mail].filter(Boolean).join(' ');
+  }
+  return '';
+};
+
+/** Разбор примечания-письма: формат params у amo отличается между версиями почты. */
+function toLeadMail(row: Record<string, unknown>): LeadMail | null {
+  const p = (row.params ?? {}) as Record<string, unknown>;
+  const text = mailText(p);
+  const subject = typeof p.subject === 'string' ? p.subject : '';
+  if (!text && !subject) return null;
+  const att = p.attachments;
+  return {
+    id: Number(row.id ?? 0),
+    createdAt: new Date(Number(row.created_at ?? 0) * 1000),
+    income: p.income === true || p.income === 1 || p.income === '1',
+    subject,
+    text,
+    from: mailAddress(p.from),
+    to: mailAddress(p.to),
+    attachments: Array.isArray(att)
+      ? att.map((a) => (typeof a === 'string' ? a : String((a as Record<string, unknown>)?.name ?? ''))).filter(Boolean)
+      : [],
+  };
+}
+
