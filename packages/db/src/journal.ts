@@ -13,6 +13,13 @@ export type JournalKind =
   | 'sandbox'
   | 'draft'
   | 'hint'
+  // Тема RFD-AI-AGENT-KP: письма с запросом КП и сборка предложения.
+  | 'mail_attachment'
+  | 'mail_extract'
+  | 'kp_draft'
+  | 'kp_build'
+  | 'kp_sent'
+  | 'kp_error'
   | 'summary'
   | 'task'
   | 'document';

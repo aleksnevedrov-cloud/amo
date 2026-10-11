@@ -1,3 +1,5 @@
+import { rm } from 'node:fs/promises';
+import type { MailAttachmentsRepo } from '@ai-door/db';
 import { sweepNewLeads, sweepStages, type DialogPipeline, type IncomingJob, type SweepDeps } from '@ai-door/agent';
 import type { TokenService } from '@ai-door/amo';
 import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
@@ -138,6 +140,30 @@ export async function runPurgeUninstalled(d: { accounts: AccountsRepo }, afterDa
 
 /** Выгрузки истории Wazzup (messages_dump): проверка заявок раз в минуту. */
 export const WAZZUP_DUMP_JOB = 'wazzup-dumps';
+
+/** Чистка диска от старых вложений писем: файл удаляем, строку оставляем как след. */
+export const MAIL_CLEANUP_JOB = 'mail-cleanup';
+export const MAIL_CLEANUP_EVERY_MS = 24 * 3600_000;
+
+export async function runMailCleanup(
+  d: { attachments: MailAttachmentsRepo },
+  log: JobLogger,
+  days = Number(process.env.MAIL_FILES_TTL_DAYS ?? 180),
+): Promise<{ removed: number }> {
+  const rows = await d.attachments.pathsOlderThan(days);
+  let removed = 0;
+  for (const r of rows) {
+    try {
+      await rm(r.path, { force: true });
+    } catch {
+      // файла уже нет — путь всё равно гасим, чтобы не возвращаться к нему
+    }
+    await d.attachments.clearPath(r.id);
+    removed += 1;
+  }
+  if (removed) log.info({ removed, days }, 'вложения писем: чистка диска');
+  return { removed };
+}
 export const WAZZUP_DUMP_EVERY_MS = 60_000;
 export { runWazzupDumps } from './wazzup-dump.ts';
 

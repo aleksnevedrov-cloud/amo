@@ -326,6 +326,55 @@ export class AmoApiClient {
     return res?._embedded?.tasks ?? [];
   }
 
+  /**
+   * Загрузка файла в карточку сделки через Files API amoCRM: сессия загрузки,
+   * заливка частями, привязка к сделке. Возвращает uuid файла или null,
+   * если amo не принял файл (вызывающий сам решает про запасной путь).
+   */
+  async uploadFileToLead(
+    leadId: number,
+    file: { filename: string; mime: string; bytes: Uint8Array },
+  ): Promise<string | null> {
+    const session = await this.request<{ upload_url?: string; max_part_size?: number }>(
+      'POST',
+      '/api/v4/files/sessions',
+      {
+        file_name: file.filename,
+        file_size: file.bytes.byteLength,
+        content_type: file.mime || 'application/octet-stream',
+        with_preview: false,
+      },
+    );
+    const first = session?.upload_url;
+    if (!first) return null;
+
+    const partSize = Math.max(1, Number(session?.max_part_size ?? file.bytes.byteLength));
+    let url = first;
+    let uuid: string | null = null;
+    for (let offset = 0; offset < file.bytes.byteLength; ) {
+      const chunk = file.bytes.subarray(offset, offset + partSize);
+      const res = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        // ArrayBuffer, а не Uint8Array: типы fetch в сборке виджета строже.
+        body: chunk.slice().buffer as ArrayBuffer,
+      });
+      if (!res.ok) {
+        throw new Error(`amo upload ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      }
+      const body = (await res.json().catch(() => null)) as
+        | { uuid?: string; next_url?: string }
+        | null;
+      offset += chunk.byteLength;
+      if (body?.uuid) uuid = body.uuid;
+      if (body?.next_url) url = body.next_url;
+    }
+    if (!uuid) return null;
+
+    await this.request('POST', `/api/v4/leads/${leadId}/files`, [{ file_uuid: uuid }]);
+    return uuid;
+  }
+
   private async request<T>(
     method: string,
     path: string,

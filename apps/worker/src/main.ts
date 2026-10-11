@@ -1,3 +1,4 @@
+import { MAIL_CLEANUP_JOB, MAIL_CLEANUP_EVERY_MS, runMailCleanup } from './jobs.ts';
 import {
   AnthropicLlm,
   createAiProvider,
@@ -14,6 +15,7 @@ import {
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
+  MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
@@ -148,6 +150,11 @@ const sweepDeps: SweepDeps = {
     return res.text || null;
   },
 };
+await maintenance.upsertJobScheduler(
+  MAIL_CLEANUP_JOB,
+  { every: MAIL_CLEANUP_EVERY_MS },
+  { name: MAIL_CLEANUP_JOB },
+);
 await maintenance.upsertJobScheduler(TASKS_NEW_JOB, { every: TASKS_NEW_EVERY_MS }, { name: TASKS_NEW_JOB });
 await maintenance.upsertJobScheduler(TASKS_EVENING_JOB, { every: TASKS_EVENING_EVERY_MS }, { name: TASKS_EVENING_JOB });
 
@@ -159,6 +166,7 @@ const maintenanceWorker = new Worker(
     if (job.name === REFRESH_OUTCOMES_JOB) return runRefreshOutcomes({ outcomes, amo: amoClient }, log);
     if (job.name === PURGE_UNINSTALLED_JOB) return runPurgeUninstalled({ accounts }, env.PURGE_UNINSTALLED_AFTER_DAYS, log);
     if (job.name === WAZZUP_DUMP_JOB) return runWazzupDumps({ dumps: wazzupDumps, secrets, journal }, log);
+    if (job.name === MAIL_CLEANUP_JOB) return runMailCleanup({ attachments: new MailAttachmentsRepo(db) }, log);
       if (job.name === TASKS_NEW_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'new', log);
       if (job.name === TASKS_EVENING_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'evening', log);
     if (job.name === POLL_MAIL_JOB) {
@@ -172,6 +180,14 @@ const maintenanceWorker = new Worker(
           connect: (cfg) => ImapMailbox.connect(cfg),
           schedule: (j, w) => scheduleLead(incoming, j, w),
           documents: docs,
+        // Вложения писем: файл на диск, строка в mail_attachments, копия в сделке.
+        attachments: {
+          attachments: new MailAttachmentsRepo(db),
+          journal,
+          root: process.env.MAIL_FILES_ROOT ?? '/data',
+          publicUrl: process.env.PUBLIC_URL,
+          linkSecret: process.env.MAIL_FILES_SECRET ?? process.env.TOKEN_ENCRYPTION_KEY,
+        },
         },
         log,
       );

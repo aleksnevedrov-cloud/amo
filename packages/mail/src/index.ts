@@ -5,3 +5,4 @@ export * from './transport.ts';
 export * from './channel.ts';
 export * from './link.ts';
 export * from './poller.ts';
+export * from './attachments.ts';

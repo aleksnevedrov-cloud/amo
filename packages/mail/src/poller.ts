@@ -1,3 +1,4 @@
+import { saveMailAttachments, type SaveAttachmentsDeps } from './attachments.ts';
 import type { AmoApiClient } from '@ai-door/amo';
 import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@ai-door/db';
 import { linkEmailToLead } from './link.ts';
@@ -13,6 +14,8 @@ export interface PollDeps {
   amo(accountId: number): Promise<AmoApiClient>;
   connect(cfg: MailServerConfig): Promise<Mailbox>;
   schedule(job: { accountId: number; leadId: number }, windowMs: number): Promise<void>;
+  /** Вложения письма на диск и в карточку сделки (тема RFD-AI-AGENT-KP, этап 1). */
+  attachments?: SaveAttachmentsDeps;
   /** Разбор вложений письма (фаза 3). */
   documents?: {
     analyze(input: { accountId: number; leadId: null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings }): Promise<{
@@ -25,6 +28,9 @@ export interface PollDeps {
     }>;
   };
 }
+
+/** Вложения письма: сохранение на диск и загрузка в карточку сделки. */
+export interface PollAttachmentsDeps extends SaveAttachmentsDeps {}
 
 /** Вложений из одного письма разбираем не больше. */
 const MAX_ATTACHMENTS = 5;
@@ -177,6 +183,28 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   if ('skip' in link) {
     await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address} не обработано: ${link.skip}` });
     return 'skipped';
+  }
+  if (d.attachments && msg.attachments.length) {
+    // Файлы кладём в сделку всегда, даже когда разбор текста выключен.
+    await saveMailAttachments(
+      {
+        accountId,
+        leadId: link.leadId,
+        messageId: msg.messageId || `${from.address}:${msg.subject}`,
+        messageUid: null,
+        files: msg.attachments,
+        api,
+      },
+      d.attachments,
+    ).catch(async (err) => {
+      await d.journal.add({
+        accountId,
+        leadId: link.leadId,
+        kind: 'mail_attachment',
+        summary: `Вложения письма не сохранены: ${(err as Error).message}`,
+      });
+      return undefined;
+    });
   }
   await enqueueLetter(accountId, link.leadId, letter, link.created, settings, d);
   return 'queued';
