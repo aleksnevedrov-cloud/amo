@@ -21,6 +21,8 @@ export interface AmoLead {
   pipeline_id: number;
   responsible_user_id: number;
   created_at: number;
+  /** Unix-секунды закрытия сделки; 0 или null — сделка открыта. */
+  closed_at?: number | null;
   custom_fields_values: CustomFieldValue[] | null;
   _embedded?: { contacts?: { id: number; is_main?: boolean }[]; tags?: { name: string }[] };
 }
@@ -241,6 +243,8 @@ export class AmoApiClient {
       pipeline_id: number;
       responsible_user_id: number;
       created_at: number;
+      updated_at?: number;
+      closed_at?: number | null;
     }[]
   > {
     const q: string[] = [`limit=${f.limit ?? 250}`, `page=${f.page ?? 1}`];
@@ -260,6 +264,8 @@ export class AmoApiClient {
           pipeline_id: number;
           responsible_user_id: number;
           created_at: number;
+          updated_at?: number;
+          closed_at?: number | null;
         }[];
       };
     }>('GET', `/api/v4/leads?${q.join('&')}`);

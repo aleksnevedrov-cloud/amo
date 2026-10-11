@@ -30,6 +30,7 @@ import {
 } from '@ai-door/tools';
 import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
 import { ALLOWED, blockSummary, canReply, gateReport, type CanReplyDeps, type CanReplyResult } from './can-reply.ts';
+import { canCreateTask, taskBlockSummary, taskScope } from './task-guard.ts';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
@@ -712,7 +713,12 @@ export class DialogPipeline {
     const phrase = settings.mode === 'auto' ? [settings.behavior.handoffPhrase] : [];
     // Фраза передачи — тоже сообщение клиенту, значит проходит тот же допуск.
     const out = [...before, ...phrase];
-    const gate = out.length ? await canReply(this.gateDeps(accountId, access), { accountId, leadId, now }) : ALLOWED;
+    // manualReturn: паузу «handoff:*» несколькими строками выше поставил сам агент —
+    // она не должна блокировать его же прощальную фразу. Запрет по активному менеджеру
+    // при этом остаётся в силе.
+    const gate = out.length
+      ? await canReply(this.gateDeps(accountId, access), { accountId, leadId, now, manualReturn: true })
+      : ALLOWED;
     if (gate.allowed) {
       await this.release(t, out);
       if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
@@ -856,6 +862,19 @@ export class DialogPipeline {
     const lead = await access.api.getLead(leadId);
     if (!lead) return { status: 'skipped', reason: 'no_lead' };
 
+    // Та же область работы, что у обходов: открытая сделка, своя воронка и этап,
+    // задачи в сделке ещё нет (RFD-AI-AGENT-ZADACHI-ZAKRYTYE-SDELKI).
+    const { settings: scopeSettings } = await this.d.settings.get(accountId);
+    const gate = await canCreateTask(access.api, lead, taskScope(scopeSettings));
+    if (!gate.allowed) {
+      if (gate.reason !== 'has_task') {
+        await this.d.journal
+          .add({ accountId, leadId, kind: 'skipped', summary: taskBlockSummary(gate), details: { reason: gate.reason, ...gate.details } })
+          .catch(() => undefined);
+      }
+      return gate.reason === 'has_task' ? { status: 'task_exists' } : { status: 'skipped', reason: gate.reason ?? 'blocked' };
+    }
+
     const events = await access.api.getOutgoingChatEvents(leadId, since).catch(() => null);
     if (events === null) return { status: 'skipped', reason: 'check_failed' };
     if (events.some((e) => e.created_by > 0)) return { status: 'answered' };
@@ -869,10 +888,7 @@ export class DialogPipeline {
       }
     }
 
-    const open = await access.api.openLeadTasks(leadId).catch(() => []);
-    if (open.some((t) => t.text.startsWith(UNANSWERED_PREFIX))) return { status: 'task_exists' };
-
-    const { settings } = await this.d.settings.get(accountId);
+    const settings = scopeSettings;
     const now = this.d.now?.() ?? new Date();
     const text = [
       `${UNANSWERED_PREFIX} клиент написал ${hhmm(since)}, ответа нет больше часа.`,

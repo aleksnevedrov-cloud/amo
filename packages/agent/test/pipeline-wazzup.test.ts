@@ -128,12 +128,15 @@ describe('вложения клиента из Wazzup (Salesbot их не пер
     expect(JSON.stringify(t.llm.requests[0]!.messages)).toContain('без текста');
   });
 
-  it('обычный текст без вложения в Wazzup не ищется', async () => {
+  it('текст без вложения: ищем один раз, повторной попытки через 5 с нет', async () => {
+    // Фото и подпись к нему приходят разными сообщениями (коммит 5851aee), поэтому вложения
+    // ищем и при непустом тексте. Но повтор делаем только там, где вложение точно ждём, —
+    // иначе каждый текстовый ход терял бы 5 секунд.
     const wz = wazzupFake([]);
     const t = await setup([text('Здравствуйте!')], wz);
     await t.dialog.enqueue(ACC, lead, 'Добрый день', 'https://test.amocrm.ru/c/1', null);
     await t.pipeline.processLead(ACC, lead);
-    expect(wz.calls.length).toBe(0);
+    expect(wz.calls.length).toBe(1);
   });
 });
 

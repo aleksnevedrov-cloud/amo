@@ -1,5 +1,6 @@
 import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@ai-door/db';
 import type { AmoApiClient } from '@ai-door/amo';
+import { canCreateTask, taskBlockSummary, taskScope, type TaskBlockReason } from './task-guard.ts';
 
 /** Префикс задач, поставленных агентом. */
 export const SWEEP_PREFIX = 'AI:';
@@ -135,14 +136,20 @@ async function ensureTask(
   api: AmoApiClient,
   accountId: number,
   s: WidgetSettings,
-  lead: { id: number; responsible_user_id: number; updated_at?: number },
+  lead: { id: number; responsible_user_id: number; status_id: number; pipeline_id: number; updated_at?: number; closed_at?: number | null },
   reason: string,
   now: Date,
   freshCounts: boolean,
-): Promise<'created' | 'has_task' | 'has_activity' | 'error'> {
+): Promise<'created' | 'has_task' | 'has_activity' | 'error' | TaskBlockReason> {
   try {
-    const open = await api.openLeadTasks(lead.id);
-    if (open.length) return 'has_task';
+    // Единое правило: открытая сделка, своя воронка и этап, задачи в сделке ещё нет.
+    const gate = await canCreateTask(api, lead, taskScope(s));
+    if (!gate.allowed) {
+      await d.journal
+        .add({ accountId, leadId: lead.id, kind: 'skipped', summary: taskBlockSummary(gate), details: { reason: gate.reason, ...gate.details } })
+        .catch(() => undefined);
+      return gate.reason ?? 'has_task';
+    }
     const since = startOfMskDay(now);
     if (freshCounts && lead.updated_at && lead.updated_at * 1000 >= since.getTime())
       return 'has_activity';
@@ -186,7 +193,14 @@ export async function sweepNewLeads(d: SweepDeps, accountId: number): Promise<Sw
   const { api } = await d.amo(accountId);
   const to = new Date(now.getTime() - s.taskSweep.newLeadAfterMin * 60_000);
   const from = new Date(to.getTime() - 60 * 60_000);
-  const leads = await api.listLeads({ createdFrom: from, createdTo: to, limit: 250 });
+  // Новые сделки берём только из воронки агента: без фильтра под обход попадали
+  // «Фабрики» и «Спам» (замер 11.10.2026).
+  const leads = await api.listLeads({
+    ...(s.taskSweep.pipelineId ? { pipelineId: s.taskSweep.pipelineId } : {}),
+    createdFrom: from,
+    createdTo: to,
+    limit: 250,
+  });
   for (const lead of leads) {
     if (res.created >= s.taskSweep.maxPerRun) break;
     res.checked += 1;

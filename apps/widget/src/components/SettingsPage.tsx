@@ -6,6 +6,7 @@ import { Field, linesToList, NumberInput } from './fields.tsx';
 import { Drafts } from './Drafts.tsx';
 import { EmailSettings } from './EmailSettings.tsx';
 import { KpSettings } from './KpSettings.tsx';
+import { TaskScopeSettings } from './TaskScope.tsx';
 import { WazzupSettings } from './WazzupSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
@@ -254,6 +255,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               <div style={s.muted}>Загрузка воронок…</div>
             )}
           </Field>
+          <TaskScopeSettings sweep={draft.taskSweep} dict={dict} onChange={(patch) => set('taskSweep', patch)} />
           <Field label="Этапы без AI" hint="На этих этапах AI не пишет клиенту.">
             <div style={s.col}>
               {statuses.map((st) => (
