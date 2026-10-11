@@ -30,7 +30,7 @@ import {
 } from '@ai-door/tools';
 import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@ai-door/llm';
 import { ALLOWED, blockSummary, canReply, gateReport, type CanReplyDeps, type CanReplyResult } from './can-reply.ts';
-import { canCreateTask, taskBlockSummary, taskScope } from './task-guard.ts';
+import { canCreateTask, taskBlockSummary, taskScope } from '@ai-door/amo';
 import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
 import type { AccountAi, AiProvider } from './provider.ts';
 import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
@@ -350,7 +350,7 @@ export class DialogPipeline {
       catalog: this.d.catalog,
       components: this.d.doorComponents ?? null,
       knowledge: this.d.knowledge,
-      crm: new AmoCrm(access.api, leadId, () => this.taskAssignee(t)),
+      crm: new AmoCrm(access.api, leadId, () => this.taskAssignee(t), taskScope(settings)),
       pricing: rules,
       tasks: settings.tasks,
       memory: {
@@ -697,14 +697,24 @@ export class DialogPipeline {
       }
     }
     const assignee = await this.taskAssignee(t);
+    // Задача при передаче подчиняется тем же правилам, что и обходы: своя воронка и этап,
+    // открытая сделка, и вторая задача не ставится, если одна уже есть. Примечание и перевод
+    // этапа делаются в любом случае — сама передача менеджеру не отменяется.
+    const lead = await access.api.getLead(leadId).catch(() => null);
+    const taskGate = lead ? await canCreateTask(access.api, lead, taskScope(settings)) : { allowed: true as const };
+    if (!taskGate.allowed) {
+      await this.journal(t, { kind: 'skipped', summary: taskBlockSummary(taskGate), details: { reason: taskGate.reason, ...taskGate.details, at: 'handoff' } });
+    }
     const steps = await Promise.allSettled([
-      access.api.createTask({
-        text: `AI: ${REASON_TEXT[reason]}. ${summary}`.slice(0, 1000),
-        completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
-        leadId,
-        taskTypeId: h.taskTypeId,
-        ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
-      }),
+      taskGate.allowed
+        ? access.api.createTask({
+            text: `AI: ${REASON_TEXT[reason]}. ${summary}`.slice(0, 1000),
+            completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
+            leadId,
+            taskTypeId: h.taskTypeId,
+            ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
+          })
+        : Promise.resolve(),
       access.api.addLeadNote(leadId, note),
       h.statusId ? access.api.setLeadStatus(leadId, h.statusId) : Promise.resolve(),
     ]);

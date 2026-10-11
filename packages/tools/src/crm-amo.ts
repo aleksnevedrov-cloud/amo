@@ -1,7 +1,18 @@
-import { fieldValues, type AmoApiClient } from '@ai-door/amo';
+import { canCreateTask, fieldValues, taskBlockSummary, type AmoApiClient, type TaskScope } from '@ai-door/amo';
 import { maskPii } from '@ai-door/shared';
 import { memorySchema, mergeMemory, type ClientMemory, type MemoryPatch } from '@ai-door/db';
 import type { CrmPort, LeadContext, MemoryPort } from './types.ts';
+
+/** Задачу ставить нельзя: сделка закрыта, чужая воронка или этап, либо задача уже есть. */
+export class TaskNotAllowedError extends Error {
+  constructor(
+    message: string,
+    readonly reason: string,
+  ) {
+    super(message);
+    this.name = 'TaskNotAllowedError';
+  }
+}
 
 /** CRM-порт поверх amo API. Телефоны и e-mail в LLM не передаются (152-ФЗ). */
 export class AmoCrm implements CrmPort {
@@ -10,6 +21,8 @@ export class AmoCrm implements CrmPort {
     private readonly leadId: number,
     /** Получатель задач (ответственный / администратор) — считает pipeline один раз на ход. */
     private readonly assignee?: () => Promise<{ userId: number | null } | null>,
+    /** Где агенту разрешено ставить задачи; не задано — ограничений нет. */
+    private readonly scope?: TaskScope,
   ) {}
 
   async getContext(): Promise<LeadContext | null> {
@@ -39,6 +52,15 @@ export class AmoCrm implements CrmPort {
   }
 
   async createTask(t: { text: string; taskTypeId: number; deadlineMin: number }): Promise<void> {
+    // Те же правила, что у обходов: своя воронка и этап, открытая сделка, второй задачи не плодим
+    // (RFD-AI-AGENT-ZADACHI-ZAKRYTYE-SDELKI). Инструмент агента раньше ставил задачи без проверок.
+    if (this.scope) {
+      const lead = await this.api.getLead(this.leadId).catch(() => null);
+      if (lead) {
+        const gate = await canCreateTask(this.api, lead, this.scope);
+        if (!gate.allowed) throw new TaskNotAllowedError(taskBlockSummary(gate), gate.reason ?? 'blocked');
+      }
+    }
     // Получателя выбирает код: ответственный по сделке, иначе администратор (см. resolveTaskAssignee).
     const a = this.assignee ? await this.assignee().catch(() => null) : null;
     await this.api.createTask({

@@ -113,7 +113,7 @@ describe('DialogPipeline', () => {
     await t.dialog.enqueue(ACC, lead, 'Нужно 40 дверей для гостиницы', 'https://test.amocrm.ru/c/4');
     expect(await t.pipeline.processLead(ACC, lead)).toEqual({ status: 'handoff', reason: 'wholesale' });
 
-    const task = t.fake.state.calls.find((c) => c.path === '/api/v4/tasks');
+    const task = t.fake.state.calls.find((c) => c.path === '/api/v4/tasks' && c.method === 'POST');
     expect(task?.body).toEqual([expect.objectContaining({ task_type_id: 2, entity_id: lead, text: expect.stringContaining('Оптовый заказ') })]);
     expect(t.fake.state.calls.some((c) => c.method === 'PATCH' && (c.body as { status_id: number }).status_id === 777)).toBe(true);
     expect(t.fake.state.calls.some((c) => c.method === 'POST' && c.path.endsWith('/notes'))).toBe(true);
@@ -176,7 +176,7 @@ describe('DialogPipeline', () => {
     const t = await setup([err, err]);
     await t.dialog.enqueue(ACC, lead, 'Привет', null);
     expect(await t.pipeline.processLead(ACC, lead)).toEqual({ status: 'handoff', reason: 'no_answer' });
-    expect(t.fake.state.calls.some((c) => c.path === '/api/v4/tasks')).toBe(true);
+    expect(t.fake.state.calls.some((c) => c.path === '/api/v4/tasks' && c.method === 'POST')).toBe(true);
   });
 
   it('дневной лимит ₽', async () => {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool, TASK_KINDS } from './types.ts';
+import { TaskNotAllowedError } from './crm-amo.ts';
 
 const LABEL: Record<(typeof TASK_KINDS)[number], string> = {
   callback: 'Перезвонить клиенту',
@@ -31,7 +32,14 @@ export const crmCreateTask = defineTool({
   input: z.object({ type: z.enum(TASK_KINDS), text: z.string().min(3).max(1000) }),
   async run(ctx, i) {
     const cfg = ctx.tasks?.[i.type] ?? DEFAULT;
-    await ctx.crm.createTask({ text: `AI: ${LABEL[i.type]}. ${i.text}`, ...cfg });
+    try {
+      await ctx.crm.createTask({ text: `AI: ${LABEL[i.type]}. ${i.text}`, ...cfg });
+    } catch (err) {
+      // Задача запрещена правилами (закрытая сделка, чужая воронка, задача уже есть) —
+      // это не сбой: модель должна узнать причину и не повторять попытку.
+      if (err instanceof TaskNotAllowedError) return { content: { ok: false, reason: err.message } };
+      throw err;
+    }
     return { content: { ok: true, task: LABEL[i.type] } };
   },
 });

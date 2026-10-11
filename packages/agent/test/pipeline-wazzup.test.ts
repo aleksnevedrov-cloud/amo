@@ -278,7 +278,7 @@ describe('задача менеджеру, когда ответа клиент�
     });
     const r = await t.pipeline.checkUnanswered(ACC, lead, client());
     expect(r.status).toBe('task_created');
-    const post = t.fake.state.calls.find((c) => c.path === '/api/v4/tasks' && c.method === 'POST');
+    const post = t.fake.state.calls.find((c) => c.path === '/api/v4/tasks' && c.method === 'POST' && c.method === 'POST');
     expect(post).toBeTruthy();
     const body = (post!.body as { text: string }[])[0];
     expect(body!.text).toContain('менеджер ведёт диалог');

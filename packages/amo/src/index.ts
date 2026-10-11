@@ -1,4 +1,5 @@
 export * from './assignee.ts';
+export * from './task-guard.ts';
 export * from './client.ts';
 export * from './disposable-token.ts';
 export * from './domain.ts';

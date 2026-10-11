@@ -122,3 +122,64 @@ describe('AmoCrm', () => {
     expect(json).not.toContain('ivan@mail.ru');
   });
 });
+
+describe('AmoCrm.createTask — область работы агента', () => {
+  const SCOPE = { pipelineId: 1873498, statusIds: [50, 51, 52] };
+
+  /** amo-клиент с подменой сделки и списка открытых задач. */
+  function crmFor(lead: Record<string, unknown>, openTasks: unknown[] = []) {
+    const calls: string[] = [];
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+      if (url.pathname === '/api/v4/leads/5') return new Response(JSON.stringify(lead), { status: 200 });
+      if (url.pathname === '/api/v4/tasks' && (init?.method ?? 'GET') === 'GET') {
+        return openTasks.length ? new Response(JSON.stringify({ _embedded: { tasks: openTasks } }), { status: 200 }) : new Response(null, { status: 204 });
+      }
+      if (url.pathname === '/api/v4/tasks') return new Response(JSON.stringify({ _embedded: { tasks: [{ id: 9 }] } }), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    return { calls, crm: new AmoCrm(new AmoApiClient('test.amocrm.ru', async () => 'T', f), 5, undefined, SCOPE) };
+  }
+
+  const open = { id: 5, name: 'Сделка', status_id: 50, pipeline_id: 1873498, responsible_user_id: 3, created_at: 0, custom_fields_values: null };
+
+  it('открытая сделка в своей воронке и на своём этапе — задача ставится', async () => {
+    const { crm, calls } = crmFor(open);
+    await crm.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 });
+    expect(calls).toContain('POST /api/v4/tasks');
+  });
+
+  it('закрытая сделка — отказ, POST не уходит', async () => {
+    const { crm, calls } = crmFor({ ...open, status_id: 143 });
+    await expect(crm.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 })).rejects.toThrow(/сделка закрыта/);
+    expect(calls).not.toContain('POST /api/v4/tasks');
+  });
+
+  it('чужая воронка — отказ', async () => {
+    const { crm } = crmFor({ ...open, pipeline_id: 777 });
+    await expect(crm.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 })).rejects.toThrow(/воронка/);
+  });
+
+  it('этап вне списка — отказ', async () => {
+    const { crm } = crmFor({ ...open, status_id: 53 });
+    await expect(crm.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 })).rejects.toThrow(/этап/);
+  });
+
+  it('задача в сделке уже есть — вторую не ставим', async () => {
+    const { crm, calls } = crmFor(open, [{ id: 42, text: 'AI: клиент написал', complete_till: 0, entity_id: 5, is_completed: false }]);
+    await expect(crm.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 })).rejects.toThrow(/уже есть/);
+    expect(calls).not.toContain('POST /api/v4/tasks');
+  });
+
+  it('без области работы (scope не задан) проверок нет — прежнее поведение', async () => {
+    const calls: string[] = [];
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+      return new Response(JSON.stringify({ _embedded: { tasks: [{ id: 9 }] } }), { status: 200 });
+    }) as typeof fetch;
+    const c = new AmoCrm(new AmoApiClient('test.amocrm.ru', async () => 'T', f), 5);
+    await c.createTask({ text: 'AI: перезвонить', taskTypeId: 1, deadlineMin: 60 });
+    expect(calls).toContain('POST /api/v4/tasks');
+  });
+});

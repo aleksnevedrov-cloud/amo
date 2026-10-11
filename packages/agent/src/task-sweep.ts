@@ -1,6 +1,6 @@
 import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@ai-door/db';
 import type { AmoApiClient } from '@ai-door/amo';
-import { canCreateTask, taskBlockSummary, taskScope, type TaskBlockReason } from './task-guard.ts';
+import { canCreateTask, taskBlockSummary, taskScope, type TaskBlockReason } from '@ai-door/amo';
 
 /** Префикс задач, поставленных агентом. */
 export const SWEEP_PREFIX = 'AI:';

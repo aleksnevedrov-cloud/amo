@@ -1,4 +1,4 @@
-import type { AmoApiClient } from '@ai-door/amo';
+import type { AmoApiClient } from './client.ts';
 
 /**
  * Где агенту разрешено ставить задачи (RFD-AI-AGENT-ZADACHI-ZAKRYTYE-SDELKI).

@@ -53,6 +53,11 @@ export function fakeAmo(overrides: Partial<FakeAmoState> = {}): { state: FakeAmo
     if (url.pathname.endsWith('/notes')) return json({ _embedded: { notes: [{ id: 1 }] } });
     if (url.pathname === '/api/v4/tasks' && method === 'GET')
       return json({ _embedded: { tasks: state.openTasks ?? [] } });
+    // GET /api/v4/tasks — список открытых задач сделки (его читает guard перед постановкой).
+    // По умолчанию задач нет; тест может положить свои в state.openTasks.
+    if (url.pathname === '/api/v4/tasks' && method === 'GET') {
+      return state.openTasks?.length ? json({ _embedded: { tasks: state.openTasks } }) : new Response(null, { status: 204 });
+    }
     if (url.pathname === '/api/v4/tasks') return json({ _embedded: { tasks: [{ id: 2 }] } });
     return json({});
   }) as typeof fetch;
