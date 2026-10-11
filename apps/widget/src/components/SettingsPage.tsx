@@ -5,6 +5,7 @@ import { CatalogStatus } from './Catalog.tsx';
 import { Field, linesToList, NumberInput } from './fields.tsx';
 import { Drafts } from './Drafts.tsx';
 import { EmailSettings } from './EmailSettings.tsx';
+import { KpSettings } from './KpSettings.tsx';
 import { WazzupSettings } from './WazzupSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
@@ -35,6 +36,7 @@ const TABS = [
   ['handoff', 'Передача менеджеру'],
   ['email', 'Почта'],
   ['wazzup', 'Wazzup'],
+  ['kp', 'КП'],
   ['catalog', 'Каталог'],
   ['pricing', 'Правила цен'],
   ['knowledge', 'База знаний'],
@@ -463,6 +465,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
         />
       )}
       {tab === 'wazzup' && <WazzupSettings api={api} />}
+      {tab === 'kp' && <KpSettings api={api} />}
       {tab === 'knowledge' && <Knowledge api={api} />}
       {tab === 'pricing' && <PricingEditor api={api} />}
       {tab === 'drafts' && <Drafts api={api} />}

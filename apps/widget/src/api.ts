@@ -333,6 +333,23 @@ export interface Dictionaries {
   users?: { id: number; name: string; email: string | null; isActive: boolean; isAdmin: boolean }[];
 }
 
+export interface KpSettingsInfo {
+  constants: {
+    sellerName?: string;
+    sellerRequisites?: string;
+    vatRate?: number;
+    paymentTerms?: string;
+    warranty?: string;
+    delivery?: string;
+    validDays?: number;
+    coverLetter?: string;
+    signature?: string;
+  };
+  certsDir: string | null;
+  numbering: { prefix: string; year: number | null; counter: number };
+  template: { exists: boolean; name: string | null; md5: string | null; updatedAt: string | null };
+}
+
 export interface WazzupDumpInfo {
   id: number; status: string; startAt: string; endAt: string; channelId: string | null;
   rowsTotal: number; inserted: number; skipped: number; columns: string | null; error: string | null;
@@ -445,6 +462,19 @@ export class WidgetApi {
   wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
     this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
   wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
+  kpSettings = () =>
+    this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
+  saveKpSettings = (patch: {
+    constants?: Record<string, string | number | undefined>;
+    certsDir?: string | null;
+    numbering?: { prefix?: string; counter?: number };
+  }) => this.call<{ ok: true }>('PUT', '/widget/v1/kp/settings', patch);
+  uploadKpTemplate = (filename: string, contentBase64: string) =>
+    this.call<{ ok: true; md5: string; size: number }>('POST', '/widget/v1/kp/template', {
+      filename,
+      contentBase64,
+    });
+
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
