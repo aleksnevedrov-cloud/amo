@@ -66,16 +66,27 @@ export async function analyzeDocument(llm: LlmClient | LlmGateway, settings: Wid
   content.push({ type: 'text', text: parts.join('\n\n') });
 
   const route = pickVisionRoute(input.route ?? resolveRoute(settings), Boolean(input.image));
-  const res = await asGateway(llm).chat(
-    {
-      system: [{ text: SYSTEM, cache: true }],
-      messages: [{ role: 'user', content }],
-      maxTokens: Math.max(settings.model.maxTokens, 4096),
-      effort: 'medium',
-      outputSchema: { name: 'document', schema: documentJsonSchema() },
-    },
-    route,
-  );
+  const gateway = asGateway(llm);
+  // Бюджет ответа у gpt-5 включает рассуждения: на 4096 длинный документ обрывался с пустым текстом.
+  const ask = (maxTokens: number, effort: 'low' | 'medium'): ReturnType<typeof gateway.chat> =>
+    gateway.chat(
+      {
+        system: [{ text: SYSTEM, cache: true }],
+        messages: [{ role: 'user', content }],
+        maxTokens,
+        effort,
+        outputSchema: { name: 'document', schema: documentJsonSchema() },
+      },
+      route,
+    );
+  let res = await ask(Math.max(settings.model.maxTokens, 16_000), 'medium');
+  // Обрыв по лимиту даёт пустой текст — одна попытка с большим запасом и меньшей глубиной.
+  if (res.stopReason === 'max_tokens' || !(res.text ?? '').trim()) res = await ask(24_000, 'low');
+  if (!(res.text ?? '').trim()) {
+    throw new AnalyzeError(
+      'Документ слишком объёмный для разбора — модель не уложилась в лимит ответа. Разбейте файл или пришлите нужную страницу.',
+    );
+  }
   const parsed = documentSchema.safeParse(tryJson(res.text ?? ''));
   if (!parsed.success) throw new AnalyzeError(`Ответ модели не соответствует схеме: ${parsed.error.issues[0]?.message ?? ''}`);
   return {

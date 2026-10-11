@@ -54,7 +54,7 @@ async function setup(
     send: fake.send,
     ...(extra.stt
       ? {
-          stt: () => ({ name: 'fake', transcribe: async () => 'Нужна белая дверь в спальню' }),
+          stt: async () => ({ name: 'fake', transcribe: async () => 'Нужна белая дверь в спальню' }),
           download: async () => ({ bytes: new Uint8Array([1]), mime: 'audio/ogg' }),
         }
       : {}),

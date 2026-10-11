@@ -210,6 +210,47 @@ export class AmoApiClient {
     return res?._embedded.notes[0]?.id ?? 0;
   }
 
+  /** Сделки по фильтру: воронка, этапы, интервал создания. */
+  async listLeads(f: {
+    pipelineId?: number;
+    statusIds?: number[];
+    createdFrom?: Date;
+    createdTo?: Date;
+    page?: number;
+    limit?: number;
+  }): Promise<
+    {
+      id: number;
+      name: string;
+      status_id: number;
+      pipeline_id: number;
+      responsible_user_id: number;
+      created_at: number;
+    }[]
+  > {
+    const q: string[] = [`limit=${f.limit ?? 250}`, `page=${f.page ?? 1}`];
+    if (f.pipelineId) q.push(`filter[pipeline_id]=${f.pipelineId}`);
+    (f.statusIds ?? []).forEach((s, i) => {
+      if (f.pipelineId) q.push(`filter[statuses][${i}][pipeline_id]=${f.pipelineId}`);
+      q.push(`filter[statuses][${i}][status_id]=${s}`);
+    });
+    if (f.createdFrom) q.push(`filter[created_at][from]=${Math.floor(f.createdFrom.getTime() / 1000)}`);
+    if (f.createdTo) q.push(`filter[created_at][to]=${Math.floor(f.createdTo.getTime() / 1000)}`);
+    const res = await this.request<{
+      _embedded?: {
+        leads?: {
+          id: number;
+          name: string;
+          status_id: number;
+          pipeline_id: number;
+          responsible_user_id: number;
+          created_at: number;
+        }[];
+      };
+    }>('GET', `/api/v4/leads?${q.join('&')}`);
+    return res?._embedded?.leads ?? [];
+  }
+
   async createTask(t: NewTask): Promise<number> {
     const res = await this.request<{ _embedded: { tasks: { id: number }[] } }>('POST', '/api/v4/tasks', [
       {
@@ -264,6 +305,25 @@ export class AmoApiClient {
     });
     const res = await this.request<{ _embedded?: { events?: AmoEvent[] } }>('GET', `/api/v4/events?${q}`);
     return res?._embedded?.events ?? [];
+  }
+
+  /** Задачи по сделке, закрытые после `since`. */
+  async completedLeadTasksSince(
+    leadId: number,
+    since: Date,
+  ): Promise<{ id: number; text: string }[]> {
+    const q = new URLSearchParams({
+      'filter[entity_type]': 'leads',
+      'filter[entity_id]': String(leadId),
+      'filter[is_completed]': '1',
+      'filter[updated_at][from]': String(Math.floor(since.getTime() / 1000)),
+      limit: '50',
+    });
+    const res = await this.request<{ _embedded?: { tasks?: { id: number; text: string }[] } }>(
+      'GET',
+      `/api/v4/tasks?${q}`,
+    );
+    return res?._embedded?.tasks ?? [];
   }
 
   private async request<T>(

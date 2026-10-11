@@ -1,4 +1,4 @@
-import type { DialogPipeline, IncomingJob } from '@ai-door/agent';
+import { sweepNewLeads, sweepStages, type DialogPipeline, type IncomingJob, type SweepDeps } from '@ai-door/agent';
 import type { TokenService } from '@ai-door/amo';
 import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
 import type { AmoApiClient } from '@ai-door/amo';
@@ -140,3 +140,42 @@ export async function runPurgeUninstalled(d: { accounts: AccountsRepo }, afterDa
 export const WAZZUP_DUMP_JOB = 'wazzup-dumps';
 export const WAZZUP_DUMP_EVERY_MS = 60_000;
 export { runWazzupDumps } from './wazzup-dump.ts';
+
+/** Проверка новых сделок без задач. */
+export const TASKS_NEW_JOB = 'tasks-new';
+export const TASKS_NEW_EVERY_MS = 10 * 60_000;
+/** Вечерний обход этапов: будим раз в час, работаем только в нужный час по Москве. */
+export const TASKS_EVENING_JOB = 'tasks-evening';
+export const TASKS_EVENING_EVERY_MS = 60 * 60_000;
+
+/** Обходы автопостановки задач по всем аккаунтам. */
+export async function runTaskSweeps(
+  d: { settings: SettingsRepo; sweep: SweepDeps },
+  kind: 'new' | 'evening',
+  log: JobLogger,
+): Promise<{ accounts: number; created: number; errors: number }> {
+  const ids = await d.settings.listAccountIds();
+  let created = 0;
+  let errors = 0;
+  for (const id of ids) {
+    try {
+      if (kind === 'evening') {
+        const { settings } = await d.settings.get(id);
+        const hour = Number(
+          new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', hour12: false }).format(
+            new Date(),
+          ),
+        );
+        if (hour !== settings.taskSweep.eveningHour) continue;
+      }
+      const r = kind === 'new' ? await sweepNewLeads(d.sweep, id) : await sweepStages(d.sweep, id);
+      created += r.created;
+      errors += r.errors;
+    } catch (err) {
+      errors += 1;
+      log.warn({ accountId: id, err: (err as Error).message }, 'обход задач: сбой');
+    }
+  }
+  log.info({ accounts: ids.length, created, errors }, kind === 'new' ? 'задачи: новые сделки' : 'задачи: вечерний обход');
+  return { accounts: ids.length, created, errors };
+}

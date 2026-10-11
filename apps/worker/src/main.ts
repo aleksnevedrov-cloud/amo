@@ -7,7 +7,9 @@ import {
   scheduleLead,
   scheduleUnanswered,
   type AmoAccess,
+  summarizeDialog,
   type IncomingJob,
+  type SweepDeps,
 } from '@ai-door/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
 import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
@@ -43,6 +45,11 @@ import {
   WAZZUP_DUMP_EVERY_MS,
   WAZZUP_DUMP_JOB,
   runRefreshTokens,
+  TASKS_NEW_JOB,
+  TASKS_NEW_EVERY_MS,
+  TASKS_EVENING_JOB,
+  TASKS_EVENING_EVERY_MS,
+  runTaskSweeps,
 } from './jobs.ts';
 
 const env = loadEnv();
@@ -112,6 +119,38 @@ await maintenance.upsertJobScheduler(POLL_MAIL_JOB, { every: POLL_MAIL_EVERY_MS 
 await maintenance.upsertJobScheduler(REFRESH_OUTCOMES_JOB, { every: REFRESH_OUTCOMES_EVERY_MS }, { name: REFRESH_OUTCOMES_JOB });
 await maintenance.upsertJobScheduler(PURGE_UNINSTALLED_JOB, { every: PURGE_CHECK_EVERY_MS }, { name: PURGE_UNINSTALLED_JOB });
 await maintenance.upsertJobScheduler(WAZZUP_DUMP_JOB, { every: WAZZUP_DUMP_EVERY_MS }, { name: WAZZUP_DUMP_JOB });
+// Зависимости обходов автопостановки задач.
+const wazzupRepo = new WazzupRepo(db);
+
+const sweepDeps: SweepDeps = {
+  messengerSince: async (accountId: number, leadId: number, since: Date) =>
+    (await wazzupRepo.historyByLead(accountId, leadId, since, 40)).map((m) => ({
+      role: m.direction === 'in' ? 'client' : 'manager',
+      text: m.text,
+      createdAt: m.sentAt,
+    })),
+  managerWroteSince: (accountId: number, leadId: number, since: Date) =>
+    wazzupRepo.managerWroteSinceByLead(accountId, leadId, since),
+  settings,
+  dialog,
+  journal,
+  amo: async (accountId: number) => ({ api: await amoClient(accountId) }),
+  summarize: async (accountId: number, history) => {
+    const a = await ai(accountId);
+    if (!a) return null;
+    const { settings: s } = await settings.get(accountId);
+    const res = await summarizeDialog(a.llm, s, {
+      history: history.map((m) => ({
+        role: (m.role === 'call' ? 'manager' : m.role) as 'client' | 'ai' | 'manager',
+        text: m.text,
+      })),
+    });
+    return res.text || null;
+  },
+};
+await maintenance.upsertJobScheduler(TASKS_NEW_JOB, { every: TASKS_NEW_EVERY_MS }, { name: TASKS_NEW_JOB });
+await maintenance.upsertJobScheduler(TASKS_EVENING_JOB, { every: TASKS_EVENING_EVERY_MS }, { name: TASKS_EVENING_JOB });
+
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
   async (job) => {
@@ -120,6 +159,8 @@ const maintenanceWorker = new Worker(
     if (job.name === REFRESH_OUTCOMES_JOB) return runRefreshOutcomes({ outcomes, amo: amoClient }, log);
     if (job.name === PURGE_UNINSTALLED_JOB) return runPurgeUninstalled({ accounts }, env.PURGE_UNINSTALLED_AFTER_DAYS, log);
     if (job.name === WAZZUP_DUMP_JOB) return runWazzupDumps({ dumps: wazzupDumps, secrets, journal }, log);
+      if (job.name === TASKS_NEW_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'new', log);
+      if (job.name === TASKS_EVENING_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'evening', log);
     if (job.name === POLL_MAIL_JOB) {
       return runPollMail(
         {
@@ -161,11 +202,15 @@ const pipeline = new DialogPipeline({
       reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),
       managerRepliedSince: (a, addrs, since) => emailChannel.managerRepliedSince(a, addrs, since),
     },
-    stt(provider) {
+    async stt(accountId: number, provider: 'off' | 'yandex' | 'openai') {
       if (provider === 'yandex' && env.YANDEX_SPEECHKIT_API_KEY && env.YANDEX_FOLDER_ID) {
         return new YandexStt(env.YANDEX_SPEECHKIT_API_KEY, env.YANDEX_FOLDER_ID);
       }
-      if (provider === 'openai' && env.OPENAI_API_KEY) return new WhisperStt(env.OPENAI_API_KEY);
+      if (provider === 'openai') {
+        // Ключ Whisper: сначала переменная окружения, иначе ключ OpenAI, подключённый для LLM.
+        const key = env.OPENAI_API_KEY || (await secrets.get(accountId, 'openai'));
+        if (key) return new WhisperStt(key);
+      }
       return null;
     },
     async amo(accountId): Promise<AmoAccess> {

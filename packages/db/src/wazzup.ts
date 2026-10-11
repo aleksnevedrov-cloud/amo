@@ -175,6 +175,56 @@ export class WazzupRepo {
     return rows[0] ? new Date(rows[0].sent_at as string) : null;
   }
 
+  /** Писал ли сотрудник клиенту по сделке после `since` — кроме самого агента. */
+  async managerWroteSinceByLead(
+    accountId: number,
+    leadId: number,
+    since: Date,
+  ): Promise<Date | null> {
+    const { rows } = await this.db.query(
+      `SELECT w.sent_at FROM wazzup_messages w
+         WHERE w.account_id = $1 AND w.lead_id = $2 AND w.direction = 'out'
+           AND NOT w.is_system AND w.text <> '' AND w.sent_at > $3
+           AND NOT EXISTS (
+             SELECT 1 FROM dialog_messages d
+               WHERE d.account_id = w.account_id AND d.role = 'ai'
+                 AND left(d.text, 300) = left(w.text, 300)
+           )
+         ORDER BY w.sent_at DESC LIMIT 1`,
+      [accountId, leadId, since],
+    );
+    return rows[0] ? new Date(rows[0].sent_at as string) : null;
+  }
+
+  /** История переписки по сделке за период — для задачи вечернего обхода. */
+  async historyByLead(
+    accountId: number,
+    leadId: number,
+    since: Date,
+    limit = 40,
+  ): Promise<WazzupHistoryItem[]> {
+    const { rows } = await this.db.query(
+      `SELECT direction, author, text, sent_at, chat_type FROM (
+         SELECT w.direction, w.author, w.text, w.sent_at, w.chat_type FROM wazzup_messages w
+           WHERE w.account_id = $1 AND w.lead_id = $2 AND w.sent_at >= $3
+             AND NOT w.is_system AND w.text <> ''
+             AND NOT EXISTS (
+               SELECT 1 FROM dialog_messages d
+                 WHERE d.account_id = w.account_id AND d.role = 'ai'
+                   AND left(d.text, 300) = left(w.text, 300)
+             )
+           ORDER BY w.sent_at DESC LIMIT $4) t ORDER BY sent_at ASC`,
+      [accountId, leadId, since, limit],
+    );
+    return rows.map((r) => ({
+      direction: r.direction,
+      author: r.author,
+      text: r.text,
+      sentAt: r.sent_at,
+      chatType: r.chat_type,
+    }));
+  }
+
   /** История переписки конкретного чата — для групп, где нет телефона контакта. */
   async historyByChat(accountId: number, chatId: string, limit = 40): Promise<WazzupHistoryItem[]> {
     const { rows } = await this.db.query(

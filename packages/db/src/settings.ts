@@ -119,7 +119,32 @@ export const widgetSettingsSchema = z
         z.object({ taskTypeId: z.number().int().positive(), deadlineMin: z.number().int().min(5).max(30 * 24 * 60) }).strict(),
       )
       .default({}),
-    hints: z
+    /** Автопостановка задач в сделки, где задач нет. */
+  taskSweep: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Через сколько минут после создания сделки проверять наличие задачи. */
+      newLeadAfterMin: z.number().int().min(5).max(24 * 60).default(60),
+      /** Ставить ли задачу сделкам в «Неразобранном». */
+      includeUnsorted: z.boolean().default(false),
+      /** Час вечернего обхода по Москве. */
+      eveningHour: z.number().int().min(0).max(23).default(20),
+      /** Воронка вечернего обхода. */
+      pipelineId: z.number().int().positive().nullable().default(null),
+      /** Этапы вечернего обхода. */
+      statusIds: z.array(z.number().int().positive()).default([]),
+      /** Тип задачи amoCRM. */
+      taskTypeId: z.number().int().positive().default(1),
+      /** Потолок задач за один обход. */
+      maxPerRun: z.number().int().min(1).max(1000).default(50),
+      /** Срок задачи в часах от постановки. */
+      dueHours: z.number().int().min(1).max(240).default(18),
+      /** Собирать комментарий моделью (дороже, но содержательнее). */
+      llmComment: z.boolean().default(true),
+    })
+    .strict()
+    .default({}),
+  hints: z
       .object({
         /** Готовить подсказки менеджеру, когда AI на паузе (раздел 6 ТЗ). */
         whenPaused: z.boolean().default(true),
@@ -305,6 +330,12 @@ export class SettingsRepo {
   }
 
   /** Аккаунты с включённой почтой — для опроса ящиков. */
+  /** Все аккаунты с сохранёнными настройками. */
+  async listAccountIds(): Promise<number[]> {
+    const { rows } = await this.db.query<{ account_id: number }>('SELECT account_id FROM widget_settings ORDER BY account_id');
+    return rows.map((r) => Number(r.account_id));
+  }
+
   async listWithEmail(): Promise<number[]> {
     const { rows } = await this.db.query(
       `SELECT s.account_id FROM widget_settings s JOIN accounts a ON a.id = s.account_id

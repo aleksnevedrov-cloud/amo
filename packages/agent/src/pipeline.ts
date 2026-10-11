@@ -81,7 +81,7 @@ export interface PipelineDeps {
   /** Клиенту не ответили: запланировать проверку «ответил ли менеджер» через час. */
   onUnanswered?(accountId: number, leadId: number, info: UnansweredInfo): Promise<void>;
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
-  stt?(provider: WidgetSettings['stt']['provider']): SttProvider | null;
+  stt?(accountId: number, provider: WidgetSettings['stt']['provider']): Promise<SttProvider | null>;
   download?: typeof downloadAttachment;
   /** Пауза перед повторным поиском вложения в Wazzup (мс); в тестах 0. */
   wazzupRetryMs?: number;
@@ -554,7 +554,7 @@ export class DialogPipeline {
   private async pendingText(t: Turn, m: PendingMessage): Promise<string> {
     if (!m.attachmentUrl) return m.text;
     if (!isAudio(m.attachmentType)) return this.attachmentText(t, m);
-    const stt = this.d.stt?.(t.settings.stt.provider) ?? null;
+    const stt = (await this.d.stt?.(t.accountId, t.settings.stt.provider)) ?? null;
     if (!stt) return [m.text, '(клиент отправил голосовое сообщение; расшифровка выключена — попросите написать текстом)'].filter(Boolean).join('\n');
     try {
       const file = await (this.d.download ?? downloadAttachment)(m.attachmentUrl);
