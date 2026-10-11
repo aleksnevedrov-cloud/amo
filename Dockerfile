@@ -32,6 +32,8 @@ ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations
 COPY --from=build /out/api apps/api
 COPY --from=build /out/worker apps/worker
 COPY packages/db/migrations migrations
+# Хранилище вложений писем: том монтируется сюда, владелец — пользователь приложения.
+RUN mkdir -p /data && chown -R node:node /data
 USER node
 EXPOSE 3000
 CMD ["node", "apps/api/dist/server.js"]
