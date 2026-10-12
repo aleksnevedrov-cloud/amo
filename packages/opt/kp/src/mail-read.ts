@@ -9,6 +9,8 @@ import { simpleParser } from 'mailparser';
  * папка открывается через EXAMINE (readOnly), тело берётся BODY.PEEK, флаги \Seen не ставятся,
  * письма не перемещаются и не удаляются. Фонового опроса нет: ящик читается только по кнопке.
  * Логин и пароль — те же, что для SMTP во вкладке «Письмо» (пароль приложения Яндекса).
+ * Поиск (RFD-AI-AGENT-OPT-MAIL-READ-2): все папки кроме Отправленных/Черновиков/Корзины, FROM по адресу
+ * или домену, окно ±2 дня и запасной поиск без даты; при «не найдено» — диагностика без содержимого писем.
  */
 
 export interface MailReadConfig {
@@ -37,8 +39,25 @@ export interface MailAttachment {
   inline: boolean;
 }
 
+/** Диагностика поиска (без содержимого писем) — в mail_fetch при «не найдено». */
+export interface MailSearchDiag {
+  criteria: { from: string; domain: string; since: string; before: string; subject: string | null };
+  /** Папки в порядке просмотра: сколько писем от адреса/домена всего и сколько в окне дат. */
+  folders: { path: string; specialUse: string | null; byFrom: number; inWindow: number }[];
+  /** Папки, которые не смотрели (Отправленные, Черновики, Корзина, несёлектируемые). */
+  skippedFolders: string[];
+  /** Сработал ли запасной поиск без даты. */
+  fallbackWithoutDate: boolean;
+}
+
+export interface MailReadResult {
+  mail: FetchedMail | null;
+  diag: MailSearchDiag;
+}
+
 export interface FetchedMail {
   uid: number;
+  folder: string;
   messageId: string | null;
   from: string;
   subject: string;
@@ -57,7 +76,12 @@ export const MAIL_MIN_INLINE_BYTES = 20 * 1024;
 /** Пауза после ошибки входа: Яндекс блокирует IP при частых неверных входах (как в рознице). */
 export const MAIL_AUTH_PAUSE_MS = 30 * 60_000;
 const MAX_TEXT = 12_000;
-const MAX_CANDIDATES = 50;
+/** Кандидатов из папки: при поиске по дате и при запасном поиске без даты (последние N писем). */
+const MAX_CANDIDATES = 200;
+/** Окно даты: ±2 дня (SINCE/BEFORE в IMAP — по дате сервера, без времени и пояса). */
+const DATE_WINDOW_DAYS = 2;
+/** Папки, где письма заявок не ищем, по special-use. */
+const SKIP_SPECIAL_USE = new Set(['\\Sent', '\\Drafts', '\\Trash']);
 
 /** Ошибка входа в ящик; retryAt — когда можно пробовать снова. */
 export class MailAuthError extends Error {
@@ -179,11 +203,12 @@ export function htmlToPlain(html: string): string {
 }
 
 /** Разбор сырого письма (MIME) в FetchedMail. */
-export async function parseMail(uid: number, source: Buffer): Promise<FetchedMail> {
+export async function parseMail(uid: number, source: Buffer, folder = 'INBOX'): Promise<FetchedMail> {
   const m = await simpleParser(source, { skipImageLinks: true, skipTextToHtml: true });
   const raw = m.text?.trim() ? m.text : m.html ? htmlToPlain(m.html) : '';
   return {
     uid,
+    folder,
     messageId: m.messageId ?? null,
     from: (m.from?.value[0]?.address ?? '').toLowerCase(),
     subject: (m.subject ?? '').trim(),
@@ -199,18 +224,26 @@ export async function parseMail(uid: number, source: Buffer): Promise<FetchedMai
   };
 }
 
-interface Candidate {
+export interface Candidate {
   uid: number;
+  folder: string;
   subject: string;
   date: Date | null;
+  /** Адрес отправителя совпал точно (иначе — только домен). */
+  exact: boolean;
 }
 
-/** Среди писем отправителя за окно выбирает самое свежее; при известной теме — сначала с той же темой. */
+/**
+ * Выбор письма: сначала письма с точным адресом отправителя (совпадение только по домену — запасной
+ * вариант), среди них — с той же темой, если тема известна, затем самое свежее по дате.
+ */
 export function chooseLatest(candidates: Candidate[], subject: string | null | undefined): Candidate | null {
   if (!candidates.length) return null;
+  const exact = candidates.filter((c) => c.exact);
+  const tier = exact.length ? exact : candidates;
   const want = normalizeSubject(subject);
-  const same = want ? candidates.filter((c) => normalizeSubject(c.subject) === want || normalizeSubject(c.subject).includes(want)) : [];
-  const pool = same.length ? same : candidates;
+  const same = want ? tier.filter((c) => normalizeSubject(c.subject) === want || normalizeSubject(c.subject).includes(want)) : [];
+  const pool = same.length ? same : tier;
   return pool.reduce((best, c) => {
     const bt = best.date?.getTime() ?? 0;
     const ct = c.date?.getTime() ?? 0;
@@ -225,12 +258,35 @@ const dayStart = (d: Date, shiftDays: number) => {
   return x;
 };
 
+export const domainOf = (address: string) => address.split('@')[1]?.toLowerCase() ?? '';
+
+/** Папки для поиска: всё из LIST, кроме Отправленных, Черновиков, Корзины и несёлектируемых; INBOX первой. */
+export function searchableFolders(list: { path: string; specialUse?: string | null; flags?: Set<string> | string[] }[]): { use: { path: string; specialUse: string | null }[]; skipped: string[] } {
+  const use: { path: string; specialUse: string | null }[] = [];
+  const skipped: string[] = [];
+  for (const f of list) {
+    const flags = new Set(f.flags instanceof Set ? [...f.flags] : (f.flags ?? []));
+    const su = f.specialUse ?? null;
+    if ((su && SKIP_SPECIAL_USE.has(su)) || flags.has('\\Noselect') || flags.has('\\NonExistent')) {
+      skipped.push(f.path);
+      continue;
+    }
+    use.push({ path: f.path, specialUse: su });
+  }
+  use.sort((a, b) => (a.path.toUpperCase() === 'INBOX' ? -1 : b.path.toUpperCase() === 'INBOX' ? 1 : a.path.localeCompare(b.path)));
+  return { use, skipped };
+}
+
 /** Ящик по IMAP, только чтение. */
 export class ImapMailReader {
   constructor(private readonly cfg: MailReadConfig) {}
 
-  /** Самое свежее письмо отправителя за окно ±1 день; readOnly — как открыта папка (всегда EXAMINE). */
-  async findLatest(search: MailSearch, folder = 'INBOX'): Promise<{ mail: FetchedMail | null; readOnly: boolean }> {
+  /**
+   * Самое свежее письмо отправителя: все папки ящика кроме Отправленных/Черновиков/Корзины, каждая через
+   * EXAMINE; FROM по адресу или домену; окно ±2 дня, если по дате пусто — последние 200 писем папки без даты.
+   * readOnly — как открывались папки (всегда EXAMINE), diag — что просмотрено, без содержимого писем.
+   */
+  async findLatest(search: MailSearch): Promise<MailReadResult & { readOnly: boolean }> {
     const key = pauseKey(this.cfg);
     const until = authPause.get(key);
     if (until && Date.now() < until) throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался, следующая попытка не раньше ${moscowTime(until)} МСК`, new Date(until));
@@ -258,29 +314,58 @@ export class ImapMailReader {
       throw err;
     }
     authPause.delete(key);
+    const from = search.from.toLowerCase();
+    const domain = domainOf(from);
+    const since = dayStart(search.around, -DATE_WINDOW_DAYS);
+    const before = dayStart(search.around, DATE_WINDOW_DAYS + 1);
+    const diag: MailSearchDiag = {
+      criteria: { from, domain, since: since.toISOString().slice(0, 10), before: before.toISOString().slice(0, 10), subject: search.subject ?? null },
+      folders: [],
+      skippedFolders: [],
+      fallbackWithoutDate: false,
+    };
+    let readOnly = true;
     try {
-      const box = await client.mailboxOpen(folder, { readOnly: true });
-      const readOnly = Boolean(box.readOnly);
-      const uids = (await client.search({ from: search.from, since: dayStart(search.around, -1), before: dayStart(search.around, 2) }, { uid: true })) || [];
-      const recent = uids.slice(-MAX_CANDIDATES);
-      if (!recent.length) return { mail: null, readOnly };
+      const listed = await client.list();
+      const { use, skipped } = searchableFolders(listed);
+      diag.skippedFolders = skipped;
+      const fromQuery = domain ? { or: [{ from }, { from: `@${domain}` }] } : { from };
       const candidates: Candidate[] = [];
-      for await (const m of client.fetch(recent, { uid: true, envelope: true }, { uid: true })) {
-        const d = m.envelope?.date;
-        candidates.push({ uid: m.uid, subject: m.envelope?.subject ?? '', date: d instanceof Date ? d : d ? new Date(d) : null });
+      for (const folder of use) {
+        let box;
+        try {
+          box = await client.mailboxOpen(folder.path, { readOnly: true });
+        } catch {
+          diag.skippedFolders.push(folder.path);
+          continue;
+        }
+        readOnly = readOnly && Boolean(box.readOnly);
+        const byFrom = ((await client.search(fromQuery, { uid: true })) || []) as number[];
+        const inWindow = ((await client.search({ ...fromQuery, since, before }, { uid: true })) || []) as number[];
+        diag.folders.push({ path: folder.path, specialUse: folder.specialUse, byFrom: byFrom.length, inWindow: inWindow.length });
+        const uids = inWindow.length ? inWindow.slice(-MAX_CANDIDATES) : byFrom.slice(-MAX_CANDIDATES);
+        if (!inWindow.length && byFrom.length) diag.fallbackWithoutDate = true;
+        if (!uids.length) continue;
+        for await (const m of client.fetch(uids, { uid: true, envelope: true }, { uid: true })) {
+          const d = m.envelope?.date;
+          const sender = (m.envelope?.from?.[0]?.address ?? '').toLowerCase();
+          candidates.push({ uid: m.uid, folder: folder.path, subject: m.envelope?.subject ?? '', date: d instanceof Date ? d : d ? new Date(d) : null, exact: sender === from });
+        }
       }
       const chosen = chooseLatest(candidates, search.subject);
-      if (!chosen) return { mail: null, readOnly };
+      if (!chosen) return { mail: null, diag, readOnly };
+      await client.mailboxOpen(chosen.folder, { readOnly: true });
       const one = await client.fetchOne(String(chosen.uid), { uid: true, source: true }, { uid: true });
-      if (!one || !one.source) return { mail: null, readOnly };
-      return { mail: await parseMail(chosen.uid, one.source), readOnly };
+      if (!one || !one.source) return { mail: null, diag, readOnly };
+      return { mail: await parseMail(chosen.uid, one.source, chosen.folder), diag, readOnly };
     } finally {
       await client.logout().catch(() => client.close());
     }
   }
 }
 
-/** Удобная обёртка для черновика: письмо или null. */
-export async function readLatestMail(cfg: MailReadConfig, search: MailSearch): Promise<FetchedMail | null> {
-  return (await new ImapMailReader(cfg).findLatest(search)).mail;
+/** Удобная обёртка для черновика: письмо (или null) и диагностика поиска. */
+export async function readLatestMail(cfg: MailReadConfig, search: MailSearch): Promise<MailReadResult> {
+  const { mail, diag } = await new ImapMailReader(cfg).findLatest(search);
+  return { mail, diag };
 }

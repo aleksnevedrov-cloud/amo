@@ -2,7 +2,7 @@ import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
-import { MailAuthError, pickMailAttachments, type FetchedMail, type MailSearch } from './mail-read.ts';
+import { MailAuthError, pickMailAttachments, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -74,6 +74,10 @@ export interface MailSource {
   error: string | null;
   /** Пауза после ошибки входа: раньше этого времени ящик не читаем. */
   retryAt: string | null;
+  /** Папка, где найдено письмо. */
+  folder: string | null;
+  /** Диагностика поиска (папки, критерии, совпадения по FROM) — без содержимого писем. */
+  diag: MailSearchDiag | null;
 }
 
 export interface ParsedFile {
@@ -91,7 +95,7 @@ export interface KpDraftDeps {
    * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
    * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
    */
-  mail?: ((search: MailSearch) => Promise<FetchedMail | null>) | null;
+  mail?: ((search: MailSearch) => Promise<MailReadResult>) | null;
   /** Разбор файла спецификации (@core/docs); null — разбор недоступен. */
   analyze: ((file: { filename: string; mime: string; bytes: Uint8Array }) => Promise<ParsedFile>) | null;
   /**
@@ -242,16 +246,17 @@ const sameFile = (a: { name: string; size: number }, b: { name: string; size: nu
  */
 async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
   const from = (card.letter?.from || card.contact.email).toLowerCase();
-  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null };
+  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, diag: null };
   if (!from) return { source: { ...base, error: 'в карточке нет адреса отправителя' }, files: [] };
-  let found: FetchedMail | null;
+  let result: MailReadResult;
   try {
-    found = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject ?? null });
+    result = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject ?? null });
   } catch (err) {
     const retryAt = err instanceof MailAuthError ? err.retryAt.toISOString() : null;
     return { source: { ...base, status: 'error', error: (err as Error).message, retryAt }, files: [] };
   }
-  if (!found) return { source: base, files: [] };
+  const found = result.mail;
+  if (!found) return { source: { ...base, diag: result.diag }, files: [] };
   card.letter = {
     text: [found.subject ? `Тема: ${found.subject}` : '', found.text].filter(Boolean).join('\n'),
     createdAt: found.date ?? card.letter?.createdAt ?? new Date(),
@@ -259,7 +264,7 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
     subject: found.subject,
   };
   const { take, skipped } = pickMailAttachments(found.attachments);
-  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped };
+  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, diag: result.diag };
   const files: SourceFile[] = [];
   for (const a of take) {
     const name = a.filename ?? `attachment-${files.length + 1}`;

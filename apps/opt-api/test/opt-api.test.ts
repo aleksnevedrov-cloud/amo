@@ -89,7 +89,7 @@ describe('opt-api: от подключения интеграции до пис�
     expect(got.draft.needsManager).toHaveLength(3);
     expect(got.draft.needsManager[2]).toEqual({ request_index: -1, reason: 'письмо в ящике не найдено (искали от ivanov@romashka.ru) — черновик по тому, что есть в карточке' });
     expect(got.draft.source).toMatchObject({ from: 'amo_card', mails: 1, documents: [], skipped: [], mail: { status: 'not_found', searchedFrom: 'ivanov@romashka.ru' } });
-    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=mail_fetch', headers })).json().items.map((i: { summary: string }) => i.summary)).toEqual(['Письмо в ящике не найдено (искали от ivanov@romashka.ru)']);
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=mail_fetch', headers })).json().items.map((i: { summary: string }) => i.summary)).toEqual(['Письмо в ящике не найдено (искали от ivanov@romashka.ru, папок просмотрено 0, совпадений по отправителю 0)']);
     expect(requests).toHaveLength(1);
     draftId = got.draft.id;
     const journal = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_draft', headers })).json().items;

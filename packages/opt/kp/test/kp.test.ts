@@ -3,7 +3,9 @@ import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
 import { buildKpDraft, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
-import { MailAuthError } from '../src/mail-read.ts';
+import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
+
+const noDiag: MailSearchDiag = { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false };
 
 describe('сборка КП: значения для шаблона', () => {
   it('сумма прописью и формы слов', () => {
@@ -168,8 +170,9 @@ describe('черновик КП опта: источник — карточка 
     const searches: unknown[] = [];
     const mail: KpDraftDeps['mail'] = async (search) => {
       searches.push(search);
-      return {
+      return { diag: noDiag, mail: {
         uid: 7,
+        folder: 'INBOX',
         messageId: '<m7@yandex.ru>',
         from: 'stoptpostavka@yandex.ru',
         subject: 'Запрос',
@@ -180,7 +183,7 @@ describe('черновик КП опта: источник — карточка 
           { filename: 'already.pdf', contentType: 'application/pdf', size: spec.byteLength, content: spec, inline: false },
           { filename: 'logo.png', contentType: 'image/png', size: 3_000, content: Buffer.alloc(3_000), inline: true },
         ],
-      };
+      } };
     };
     const analyzed: string[] = [];
     const analyze: KpDraftDeps['analyze'] = async (f) => {
@@ -196,20 +199,20 @@ describe('черновик КП опта: источник — карточка 
     expect(amo.downloaded).toEqual([]);
     expect(analyzed).toEqual(['tz.pdf:621000', `already.pdf:${spec.byteLength}`]);
     expect(r.payload.source).toMatchObject({ from: 'mailbox', attachments: ['tz.pdf', 'already.pdf'], documents: [901, 902] });
-    expect(r.payload.source.mail).toMatchObject({ status: 'found', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
+    expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
     expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
   });
 
   it('письмо в ящике не найдено — пометка, черновик по карточке; ошибка входа — пометка с временем повтора', async () => {
     const { gateway } = fakeGateway(JSON.stringify({ client: { org: '', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 1 }], required_blocks: [], questions: [] }));
-    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null, mail: async () => null });
-    expect(r.payload.source.mail).toMatchObject({ status: 'not_found', searchedFrom: 'ivanov@romashka.ru' });
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null, mail: async () => ({ mail: null, diag: noDiag }) });
+    expect(r.payload.source.mail).toMatchObject({ status: 'not_found', searchedFrom: 'ivanov@romashka.ru', diag: noDiag });
     expect(r.payload.source.from).toBe('amo_card');
     expect(r.payload.items.map((l) => l.name)).toEqual(['добор']);
     expect(r.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'письмо в ящике не найдено (искали от ivanov@romashka.ru) — черновик по тому, что есть в карточке' });
     // Писем в карточке нет — ищем по email контакта.
-    const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo(), analyze: null, mail: async () => null });
+    const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo(), analyze: null, mail: async () => ({ mail: null, diag: noDiag }) });
     expect(r2.payload.source.mail?.searchedFrom).toBe('ivanov@romashka.ru');
     const retryAt = new Date(Date.now() + 30 * 60_000);
     const r3 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, {
