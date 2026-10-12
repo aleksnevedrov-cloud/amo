@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "AI quote agent",
+    "short_description": "Commercial quote from a customer request: parses the letter, picks items, builds the document from a template",
+    "description": "The AI quote agent reads the customer's request from the email and attachments, breaks it into line items, fills in products and prices from the catalog, builds a DOCX/PDF quote from a template and sends it only after the manager confirms."
+  },
+  "settings": {
+    "custom": "Quote settings"
+  },
+  "advanced": {
+    "title": "AI quote agent: settings"
+  }
+}

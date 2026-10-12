@@ -91,8 +91,38 @@ amoМаркет → «Создать интеграцию» (или сущест
 - Ссылка для хука об отключении: `https://ai.rf-dveri.ru/oauth/amo/disconnect`
 - Доступ: «Доступ к данным аккаунта»
 - Загрузить архив: собрать `WIDGET_API_URL=https://ai.rf-dveri.ru pnpm widget:build` → `apps/widget/dist/widget.zip`
+  (для второй интеграции «АИ-агент КП» — `pnpm widget-kp:build` → `apps/widget-kp/dist/widget.zip`, раздел 5.1)
 - «Ключи и доступы»: ID интеграции и секретный ключ → в `.env` (`AMO_CLIENT_ID`, `AMO_CLIENT_SECRET`) → `docker compose up -d`
 - Установить виджет → amo откроет `/oauth/amo/callback` → «Интеграция подключена»
+
+## 5.1. Второй виджет «АИ-агент КП»
+
+Это отдельная интеграция в amoМаркет с своим `widget_code`, тем же адресом API и теми же ссылками
+перенаправления/отключения, что у агента. Локации: карточка сделки и настройки; шага Salesbot у него нет.
+
+Сборка — тем же образом `ai-door-build`, что и у виджета агента, только пакет другой:
+
+```bash
+cd /opt/ai-door/src
+docker run --rm -v "$PWD":/app -w /app -e WIDGET_API_URL=https://ai.rf-dveri.ru ai-door-build pnpm widget-kp:build
+# → apps/widget-kp/dist/widget.zip
+```
+
+Перед каждой выдачей архива поднять `version` в `apps/widget-kp/package.json` (на старте 1.0.0), иначе amoCRM
+отдаст старый код. То же правило для агента: `apps/widget/package.json` (после разделения — 1.2.0).
+
+Постоянная ссылка на архив — рядом с архивом агента (`/dl/widget-9f2c.zip`), имя не меняется от версии к версии:
+
+```bash
+mkdir -p /opt/ai-door/dl && cp apps/widget-kp/dist/widget.zip /opt/ai-door/dl/widget-kp-a41d.zip
+```
+
+```nginx
+# в server-блоке ai.rf-dveri.ru, если раздачи /dl/ ещё нет
+location /dl/ { alias /opt/ai-door/dl/; autoindex off; }
+```
+
+`nginx -t && systemctl reload nginx`, проверка: `curl -sI https://ai.rf-dveri.ru/dl/widget-kp-a41d.zip | head -1`.
 
 ## 6. После установки — по docs/install.md
 

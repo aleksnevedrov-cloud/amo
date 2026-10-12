@@ -36,12 +36,16 @@ amo передаёт `redirect_uri` при каждом обмене и обно
 ## 3. Архив виджета
 
 ```bash
-WIDGET_API_URL=https://ai.rf-dveri.ru pnpm widget:build
-# → apps/widget/dist/widget.zip (версия 1.1.0)
+WIDGET_API_URL=https://ai.rf-dveri.ru pnpm widget:build      # → apps/widget/dist/widget.zip (агент)
+WIDGET_API_URL=https://ai.rf-dveri.ru pnpm widget-kp:build   # → apps/widget-kp/dist/widget.zip (АИ-агент КП)
 ```
 
-Логотипы в архиве — фирменные, нарезаны из логотипа РФ-Двери (`apps/widget/static/images/`, 130×100, 400×272,
-240×84; квадратные 84×84 и 108×108 — знак «РФ»). Чтобы заменить, положите PNG тех же размеров с теми же именами.
+Два архива — две интеграции в amoМаркет с одинаковыми ссылками перенаправления и адресом API.
+Перед каждой выдачей архива поднимайте `version` в `package.json` виджета, иначе amo отдаст старый код.
+
+Логотипы в архивах — фирменные, нарезаны из логотипа РФ-Двери (`packages/widget-core/static/images/`, 130×100,
+400×272, 240×84; квадратные 84×84 и 108×108 — знак «РФ»), общие для обоих виджетов. Чтобы дать виджету свои,
+положите PNG тех же размеров с теми же именами в `apps/<виджет>/static/images/`.
 
 ## 4. Каталог (фиды YML)
 
