@@ -38,6 +38,12 @@ export class MailRepo {
     return rows[0] ? this.box.decrypt(rows[0].password_enc) : null;
   }
 
+  /** Пароль и когда он менялся: по дате опрос понимает, что после отказа входа заказчик ввёл новый пароль. */
+  async credentials(accountId: number): Promise<{ password: string; updatedAt: Date } | null> {
+    const { rows } = await this.db.query('SELECT password_enc, updated_at FROM mailbox_credentials WHERE account_id = $1', [accountId]);
+    return rows[0] ? { password: this.box.decrypt(rows[0].password_enc), updatedAt: rows[0].updated_at } : null;
+  }
+
   async hasPassword(accountId: number): Promise<boolean> {
     const { rows } = await this.db.query('SELECT 1 FROM mailbox_credentials WHERE account_id = $1', [accountId]);
     return rows.length > 0;

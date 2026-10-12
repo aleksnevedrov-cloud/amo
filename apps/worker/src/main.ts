@@ -177,8 +177,9 @@ const maintenanceWorker = new Worker(
           dialog,
           journal,
           amo: amoClient,
-          connect: (cfg) => ImapMailbox.connect(cfg),
+          connect: (cfg, hooks) => ImapMailbox.connect(cfg, hooks),
           schedule: (j, w) => scheduleLead(incoming, j, w),
+          log,
           documents: docs,
         // Вложения писем: файл на диск, строка в mail_attachments, копия в сделке.
         attachments: {

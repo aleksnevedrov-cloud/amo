@@ -30,6 +30,38 @@ export interface Mailbox {
   close(): Promise<void>;
 }
 
+/** Ошибка imapflow: поля, по которым отличаем отказ входа и причину закрытия соединения. */
+export interface ImapError extends Error {
+  code?: string;
+  /** Сервер отверг логин и пароль (imapflow ставит при LOGIN/AUTHENTICATE, а также при «Already logged out»). */
+  authenticationFailed?: boolean;
+  serverResponseCode?: string;
+  responseText?: string;
+  /** Причина BYE от сервера при неожиданном закрытии, например «Too many connections». */
+  reason?: string;
+}
+
+/** Обратные вызовы ящика; все необязательные. */
+export interface MailboxHooks {
+  /** Событие 'error' imapflow: соединение уже закрыто библиотекой, ящик дальше не используется. */
+  onError?(err: ImapError): void;
+}
+
+const AUTH_ERROR_RE = /AUTHENTICATIONFAILED|authentication failed|invalid credentials|Login denied|\b535\b/i;
+
+/** Отказ входа: по флагу imapflow или по тексту ответа сервера. */
+export function isAuthFailure(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as ImapError;
+  return e.authenticationFailed === true || AUTH_ERROR_RE.test(imapErrorText(e));
+}
+
+/** Текст ошибки для журнала и статуса: сообщение, код ответа сервера, причина BYE. */
+export function imapErrorText(err: unknown): string {
+  const e = (err ?? {}) as ImapError;
+  return [e.message, e.serverResponseCode, e.responseText, e.reason ? `BYE: ${e.reason}` : null].filter(Boolean).join(' ');
+}
+
 export interface MailSender {
   /** Отправка готового письма; возвращает сырой MIME для «Отправленных». */
   send(mail: OutgoingEmail): Promise<Buffer>;
@@ -72,7 +104,14 @@ export class SmtpSender implements MailSender {
 export class ImapMailbox implements Mailbox {
   private constructor(private readonly client: ImapFlow) {}
 
-  static async connect(cfg: MailServerConfig): Promise<ImapMailbox> {
+  /**
+   * Подключение и вход. Обработчик 'error' вешается до connect(): imapflow выпускает это событие
+   * и после отказа connect() — когда сервер закрыл сокет во время входа (BYE между CAPABILITY и LOGIN),
+   * библиотека отклоняет connect() ошибкой «Unexpected close», а следом выпускает 'error'
+   * с authenticationFailed («Already logged out»). Без обработчика Node роняет весь процесс —
+   * так падал worker розницы 12.10.2026.
+   */
+  static async connect(cfg: MailServerConfig, hooks: MailboxHooks = {}): Promise<ImapMailbox> {
     const client = new ImapFlow({
       host: cfg.imapHost,
       port: cfg.imapPort,
@@ -81,7 +120,19 @@ export class ImapMailbox implements Mailbox {
       logger: false,
       disableAutoIdle: true,
     });
-    await client.connect();
+    let emitted: ImapError | null = null;
+    client.on('error', (err: ImapError) => {
+      emitted ??= err;
+      hooks.onError?.(err);
+    });
+    try {
+      await client.connect();
+    } catch (err) {
+      // Хвостовое событие 'error' приходит на следующем тике — ждём его, чтобы отказ входа не потерялся.
+      await new Promise((resolve) => setImmediate(resolve));
+      client.close();
+      throw mergeEmitted(err as ImapError, emitted);
+    }
     return new ImapMailbox(client);
   }
 
@@ -118,4 +169,12 @@ export class ImapMailbox implements Mailbox {
   async close(): Promise<void> {
     await this.client.logout().catch(() => this.client.close());
   }
+}
+
+/** Ошибка connect() дополняется тем, что imapflow сообщил событием 'error' (флаг отказа входа и текст). */
+function mergeEmitted(err: ImapError, emitted: ImapError | null): ImapError {
+  if (!emitted || emitted === err) return err;
+  if (emitted.authenticationFailed && !err.authenticationFailed) err.authenticationFailed = true;
+  if (emitted.message && !err.message.includes(emitted.message)) err.message = `${err.message}; ${emitted.message}`;
+  return err;
 }

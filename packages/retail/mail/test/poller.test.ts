@@ -2,9 +2,20 @@ import { randomBytes } from 'node:crypto';
 import { AmoApiClient } from '@core/amo';
 import { AccountsRepo, DialogRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db, type WidgetSettingsInput } from '@core/db';
 import { SecretBox } from '@core/shared';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { freshDb } from '../../../core/db/test/setup.ts';
-import { composeRaw, EmailChannel, MailRepo, pollMailbox, type Mailbox, type OutgoingEmail, type PollDeps } from '../src/index.ts';
+import {
+  AUTH_MAX_FAILURES,
+  authBackoffMs,
+  composeRaw,
+  EmailChannel,
+  MailRepo,
+  pollMailbox,
+  resetAuthBackoff,
+  type Mailbox,
+  type OutgoingEmail,
+  type PollDeps,
+} from '../src/index.ts';
 
 /** Ящик в памяти: папки с письмами по UID. */
 class FakeMailbox implements Mailbox {
@@ -117,6 +128,7 @@ const knownContact = {
 };
 
 beforeEach(async () => {
+  resetAuthBackoff();
   await db.query('DELETE FROM pending_messages');
   await db.query('DELETE FROM email_outbound');
 });
@@ -233,11 +245,25 @@ describe('pollMailbox', () => {
 
   it('ошибка подключения сохраняется для статуса', async () => {
     const t = await setup();
+    let attempts = 0;
+    t.deps.connect = async () => {
+      attempts += 1;
+      throw new Error('ECONNRESET');
+    };
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ error: 'ECONNRESET' });
+    expect((await mail.status(1)).find((x) => x.folder === 'INBOX')?.lastError).toBe('ECONNRESET');
+    // Сетевая ошибка — не отказ входа: следующий проход подключается снова.
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ error: 'ECONNRESET' });
+    expect(attempts).toBe(2);
+  });
+
+  it('отказ входа по тексту ответа сервера: статус «ошибка входа», повтор отложен', async () => {
+    const t = await setup();
     t.deps.connect = async () => {
       throw new Error('AUTHENTICATIONFAILED');
     };
-    expect((await pollMailbox(1, t.deps)).error).toBe('AUTHENTICATIONFAILED');
-    expect((await mail.status(1)).find((x) => x.folder === 'INBOX')?.lastError).toBe('AUTHENTICATIONFAILED');
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ error: 'AUTHENTICATIONFAILED', authFailures: 1 });
+    expect((await mail.status(1)).find((x) => x.folder === 'INBOX')?.lastError).toMatch(/^ошибка входа \(1 из 5, следующая попытка в \d\d:\d\d МСК\): AUTHENTICATIONFAILED$/);
   });
 
   it('выключенная почта или нет пароля — ничего не делает', async () => {
@@ -345,5 +371,119 @@ describe('EmailChannel', () => {
       sender: () => ({ send: async () => Buffer.from(''), verify: async () => undefined }),
     });
     await expect(ch.reply(1, 1, { from: 'a@b.ru' }, 'x')).rejects.toThrow(/не подключена/);
+  });
+});
+
+
+describe('отказ входа: нарастающая пауза и блокировка ящика', () => {
+  /** Так imapflow сообщает о сокете, закрытом сервером во время входа (падение worker 12.10.2026). */
+  const authError = () => Object.assign(new Error('Unexpected close; Already logged out'), { authenticationFailed: true, code: 'ClosedAfterConnectTLS' });
+  const inbox = async () => (await mail.status(1)).find((x) => x.folder === 'INBOX');
+
+  afterEach(() => vi.useRealTimers());
+
+  it('после отказа входа ящик не дёргается до конца паузы, журнал без пароля', async () => {
+    const t = await setup();
+    let attempts = 0;
+    const logs: { obj: object; msg: string }[] = [];
+    t.deps.log = { warn: (obj, msg) => void logs.push({ obj, msg }) };
+    t.deps.connect = async () => {
+      attempts += 1;
+      throw authError();
+    };
+    const r1 = await pollMailbox(1, t.deps);
+    expect(r1).toMatchObject({ error: 'Unexpected close; Already logged out', authFailures: 1 });
+    expect(r1.authLocked).toBeUndefined();
+    expect(r1.retryAt!.getTime() - Date.now()).toBeGreaterThan(29 * 60_000);
+    expect((await inbox())?.lastError).toMatch(/^ошибка входа \(1 из 5, следующая попытка в \d\d:\d\d МСК\): Unexpected close; Already logged out$/);
+    // Повтор запланирован: второй проход к серверу не идёт.
+    const r2 = await pollMailbox(1, t.deps);
+    expect(attempts).toBe(1);
+    expect(r2).toMatchObject({ authFailures: 1, retryAt: r1.retryAt });
+    expect(r2.error).toBeUndefined();
+    expect(logs).toEqual([
+      {
+        obj: { accountId: 1, mailbox: 'shop@rf-dveri.ru@imap.yandex.ru:993', failures: 1, err: 'Unexpected close; Already logged out', code: 'ClosedAfterConnectTLS', retryAt: r1.retryAt!.toISOString() },
+        msg: 'mail: ошибка входа, повтор отложен',
+      },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain('secret');
+  });
+
+  it('пауза удваивается: 30, 60, 120, 240 минут; после пяти отказов подряд — опрос остановлен', async () => {
+    const t = await setup();
+    let attempts = 0;
+    t.deps.connect = async () => {
+      attempts += 1;
+      throw authError();
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    vi.setSystemTime(start);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: 1 });
+    let failedAt = start;
+    for (let n = 1; n < AUTH_MAX_FAILURES; n += 1) {
+      expect(authBackoffMs(n)).toBe(Math.min(30 * 60_000 * 2 ** (n - 1), 240 * 60_000));
+      // За минуту до конца паузы — пропуск, через минуту после — новая попытка.
+      vi.setSystemTime(failedAt + authBackoffMs(n) - 60_000);
+      expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: n, retryAt: new Date(failedAt + authBackoffMs(n)) });
+      expect(attempts).toBe(n);
+      vi.setSystemTime(failedAt + authBackoffMs(n) + 60_000);
+      failedAt = Date.now();
+      expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: n + 1 });
+      expect(attempts).toBe(n + 1);
+    }
+    expect(attempts).toBe(AUTH_MAX_FAILURES);
+    expect((await inbox())?.lastError).toMatch(/^ошибка входа: Unexpected close; Already logged out — 5 отказов подряд, опрос остановлен/);
+    const { rows } = await db.query(`SELECT summary FROM ai_journal WHERE account_id = 1 AND kind = 'error' ORDER BY id DESC LIMIT 1`);
+    expect(rows[0]?.summary).toBe('Почта shop@rf-dveri.ru@imap.yandex.ru:993: 5 отказов входа подряд, опрос остановлен — проверьте логин и пароль ящика');
+    // Блокировка не снимается временем.
+    vi.setSystemTime(failedAt + 48 * 60 * 60_000);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: AUTH_MAX_FAILURES, authLocked: true });
+    expect(attempts).toBe(AUTH_MAX_FAILURES);
+    // Новый пароль снимает блокировку: счёт отказов начинается заново.
+    vi.useRealTimers();
+    await mail.setPassword(1, 'new-secret', 1);
+    const again = await pollMailbox(1, t.deps);
+    expect(again).toMatchObject({ authFailures: 1 });
+    expect(again.authLocked).toBeUndefined();
+    expect(attempts).toBe(AUTH_MAX_FAILURES + 1);
+  });
+
+  it('после перезапуска процесса первая пауза берётся из последней ошибки в базе', async () => {
+    const t = await setup();
+    let attempts = 0;
+    t.deps.connect = async () => {
+      attempts += 1;
+      throw authError();
+    };
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: 1 });
+    resetAuthBackoff();
+    const r = await pollMailbox(1, t.deps);
+    expect(r).toMatchObject({ authFailures: 1 });
+    expect(r.error).toBeUndefined();
+    expect(r.retryAt).toBeInstanceOf(Date);
+    expect(attempts).toBe(1);
+  });
+
+  it('успешный вход сбрасывает счётчик отказов', async () => {
+    const t = await setup();
+    let fail = true;
+    t.deps.connect = async () => {
+      if (fail) throw authError();
+      return t.mb;
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: 1 });
+    vi.setSystemTime(start + authBackoffMs(1) + 60_000);
+    fail = false;
+    const ok = await pollMailbox(1, t.deps);
+    expect(ok).toMatchObject({ received: 0 });
+    expect(ok.authFailures).toBeUndefined();
+    expect(ok.retryAt).toBeUndefined();
+    expect((await inbox())?.lastError).toBeNull();
+    fail = true;
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ authFailures: 1 });
   });
 });

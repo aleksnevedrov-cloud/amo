@@ -5,7 +5,7 @@ import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@cor
 import { linkEmailToLead } from './link.ts';
 import { isIgnored, parseEmail, type IncomingEmail } from './parse.ts';
 import type { MailRepo } from './repo.ts';
-import type { Mailbox, MailServerConfig } from './transport.ts';
+import { imapErrorText, isAuthFailure, type ImapError, type Mailbox, type MailboxHooks, type MailServerConfig } from './transport.ts';
 
 export interface PollDeps {
   settings: SettingsRepo;
@@ -13,8 +13,10 @@ export interface PollDeps {
   dialog: DialogRepo;
   journal: JournalRepo;
   amo(accountId: number): Promise<AmoApiClient>;
-  connect(cfg: MailServerConfig): Promise<Mailbox>;
+  connect(cfg: MailServerConfig, hooks?: MailboxHooks): Promise<Mailbox>;
   schedule(job: { accountId: number; leadId: number }, windowMs: number): Promise<void>;
+  /** Журнал процесса (pino worker'а); пароль в записи не попадает никогда. */
+  log?: PollLogger;
   /** Вложения письма на диск и в карточку сделки (тема RFD-AI-AGENT-KP, этап 1). */
   attachments?: SaveAttachmentsDeps;
   /** Разбор вложений письма (фаза 3). */
@@ -30,8 +32,12 @@ export interface PollDeps {
   };
 }
 
+export interface PollLogger {
+  warn(obj: object, msg: string): void;
+}
+
 /** Вложения письма: сохранение на диск и загрузка в карточку сделки. */
-export interface PollAttachmentsDeps extends SaveAttachmentsDeps {}
+export type PollAttachmentsDeps = SaveAttachmentsDeps;
 
 /** Вложений из одного письма разбираем не больше. */
 const MAX_ATTACHMENTS = 5;
@@ -45,6 +51,12 @@ export interface PollResult {
   waiting: number;
   managerReplies: number;
   error?: string;
+  /** Отказов входа подряд (после этого прохода). */
+  authFailures?: number;
+  /** Ящик пропущен или отложен: раньше этого времени к серверу не подключаемся. */
+  retryAt?: Date;
+  /** Ящик помечен «ошибка входа»: опрос остановлен до смены пароля или настроек. */
+  authLocked?: boolean;
 }
 
 /** Писем за один проход — остальные в следующий. */
@@ -66,28 +78,97 @@ export function serverConfig(e: WidgetSettings['email'], password: string): Mail
 export const ourAddress = (e: WidgetSettings['email']) => (e.fromAddress || e.username).toLowerCase();
 
 /**
+ * Отказ входа (неверный пароль, «Already logged out», блокировка провайдером).
+ *
+ * Первая пауза — 30 минут: Яндекс блокирует IP после серии неудачных входов (RFD-AI-AGENT-DEPLOY-112).
+ * Дальше пауза удваивается до потолка, после AUTH_MAX_FAILURES отказов подряд ящик помечается
+ * «ошибка входа» и опрос останавливается — до смены пароля (вкладка «Почта») или настроек ящика.
+ */
+export const AUTH_BACKOFF_MIN_MS = 30 * 60_000;
+export const AUTH_BACKOFF_MAX_MS = 4 * 60 * 60_000;
+export const AUTH_MAX_FAILURES = 5;
+
+/** Пауза перед следующей попыткой после n отказов подряд: 30, 60, 120, 240, 240 минут. */
+export const authBackoffMs = (failures: number) => Math.min(AUTH_BACKOFF_MIN_MS * 2 ** Math.max(failures - 1, 0), AUTH_BACKOFF_MAX_MS);
+
+interface AuthState {
+  failures: number;
+  /** Время последнего отказа. */
+  at: number;
+  /** Дата пароля на момент отказа: новый пароль снимает блокировку. */
+  passwordAt: number;
+}
+
+/**
+ * Счётчик отказов живёт в памяти процесса (worker — один процесс): без новой колонки в БД.
+ * После перезапуска в базе остаётся текст и время последнего отказа — первая 30-минутная пауза
+ * соблюдается и тогда. Ключ включает ящик и сервер: смена настроек начинает отсчёт заново.
+ */
+const authState = new Map<string, AuthState>();
+
+/** Сброс счётчиков отказов (для тестов). */
+export function resetAuthBackoff(): void {
+  authState.clear();
+}
+
+const AUTH_LOCK_PREFIX = 'ошибка входа';
+const moscowTime = (ms: number) => new Date(ms).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+
+/** Состояние отказов по ящику: из памяти, а после перезапуска — из последней ошибки в базе. */
+function authStateFor(key: string, st: { lastError: string | null; lastErrorAt: Date | null } | null, passwordAt: number): AuthState | null {
+  const mem = authState.get(key);
+  if (mem) {
+    if (passwordAt > mem.passwordAt) {
+      authState.delete(key);
+      return null;
+    }
+    return mem;
+  }
+  if (!st?.lastError || !st.lastErrorAt) return null;
+  const at = new Date(st.lastErrorAt).getTime();
+  if (passwordAt > at) return null;
+  if (st.lastError.startsWith(AUTH_LOCK_PREFIX) || isAuthFailure({ message: st.lastError })) return { failures: 1, at, passwordAt };
+  return null;
+}
+
+/**
  * Один проход по ящику аккаунта. Первый запуск (или смена UIDVALIDITY) только запоминает
  * позицию — старая переписка не обрабатывается.
  */
-const AUTH_ERROR_RE = /AUTHENTICATIONFAILED|authentication failed|invalid credentials|Login denied|\b535\b/i;
-const AUTH_BACKOFF_MS = 30 * 60_000;
-
 export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollResult> {
   const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0 };
   const { settings } = await d.settings.get(accountId);
   const e = settings.email;
   if (!e.enabled || !e.imapHost || !e.username) return res;
-  const password = await d.mail.getPassword(accountId);
-  if (!password) return res;
-  // Защита от блокировки адреса провайдером: после ошибки авторизации не подключаемся 30 минут —
-  // Яндекс блокирует IP после серии неудачных входов (RFD-AI-AGENT-DEPLOY-112). Ошибка остаётся видна на вкладке «Почта».
+  const cred = await d.mail.credentials(accountId);
+  if (!cred) return res;
+  const mailbox = `${e.username}@${e.imapHost}:${e.imapPort}`;
+  const authKey = `${accountId}:${mailbox}`;
+  const passwordAt = new Date(cred.updatedAt).getTime();
   const st = await d.mail.folderState(accountId, e.inboxFolder);
-  if (st?.lastError && AUTH_ERROR_RE.test(st.lastError) && st.lastErrorAt
-    && Date.now() - new Date(st.lastErrorAt).getTime() < AUTH_BACKOFF_MS) return res;
+  const auth = authStateFor(authKey, st, passwordAt);
+  if (auth) {
+    // Ошибка остаётся видна на вкладке «Почта»; к серверу не ходим, пока не истечёт пауза.
+    if (auth.failures >= AUTH_MAX_FAILURES) {
+      res.authFailures = auth.failures;
+      res.authLocked = true;
+      return res;
+    }
+    const retryAt = auth.at + authBackoffMs(auth.failures);
+    if (Date.now() < retryAt) {
+      res.authFailures = auth.failures;
+      res.retryAt = new Date(retryAt);
+      return res;
+    }
+  }
 
   let box: Mailbox | null = null;
   try {
-    box = await d.connect(serverConfig(e, password));
+    box = await d.connect(serverConfig(e, cred.password), {
+      // Соединение уже закрыто imapflow; процесс жив, запись в журнал без пароля.
+      onError: (err) => d.log?.warn({ accountId, mailbox, err: err.message, code: err.code, authenticationFailed: err.authenticationFailed === true }, 'mail: ошибка IMAP-соединения'),
+    });
+    authState.delete(authKey);
     // Сначала — письма, которые ждали сделку от amo.
     for (const r of await retryWaiting(accountId, settings, d)) res[r] += 1;
     await readFolder(box, accountId, e.inboxFolder, d, async (msg) => {
@@ -106,13 +187,46 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
     }
   } catch (err) {
     // imapflow: текст ответа сервера (например «[AUTHENTICATIONFAILED] LOGIN invalid credentials») лежит не в message.
-    const e2 = err as Error & { serverResponseCode?: string; responseText?: string };
-    res.error = [e2.message, e2.serverResponseCode, e2.responseText].filter(Boolean).join(' ');
-    await d.mail.markError(accountId, e.inboxFolder, res.error);
+    res.error = imapErrorText(err) || String(err);
+    const text = isAuthFailure(err) ? await noteAuthFailure(accountId, mailbox, authKey, auth, passwordAt, err as ImapError, res, d) : res.error;
+    await d.mail.markError(accountId, e.inboxFolder, text);
   } finally {
     await box?.close().catch(() => undefined);
   }
   return res;
+}
+
+/** Отказ входа: счётчик, пауза или блокировка, запись в журнал процесса; возвращает текст для статуса ящика. */
+async function noteAuthFailure(
+  accountId: number,
+  mailbox: string,
+  authKey: string,
+  prev: AuthState | null,
+  passwordAt: number,
+  err: ImapError,
+  res: PollResult,
+  d: PollDeps,
+): Promise<string> {
+  const failures = (prev?.failures ?? 0) + 1;
+  const now = Date.now();
+  authState.set(authKey, { failures, at: now, passwordAt });
+  res.authFailures = failures;
+  const base = { accountId, mailbox, failures, err: res.error, code: err.code };
+  if (failures >= AUTH_MAX_FAILURES) {
+    res.authLocked = true;
+    d.log?.warn(base, 'mail: ошибка входа, опрос ящика остановлен');
+    await d.journal.add({
+      accountId,
+      kind: 'error',
+      summary: `Почта ${mailbox}: ${failures} отказов входа подряд, опрос остановлен — проверьте логин и пароль ящика`,
+      details: { error: res.error },
+    });
+    return `${AUTH_LOCK_PREFIX}: ${res.error} — ${failures} отказов подряд, опрос остановлен; проверьте логин и пароль на вкладке «Почта»`;
+  }
+  const retryAt = now + authBackoffMs(failures);
+  res.retryAt = new Date(retryAt);
+  d.log?.warn({ ...base, retryAt: new Date(retryAt).toISOString() }, 'mail: ошибка входа, повтор отложен');
+  return `${AUTH_LOCK_PREFIX} (${failures} из ${AUTH_MAX_FAILURES}, следующая попытка в ${moscowTime(retryAt)} МСК): ${res.error}`;
 }
 
 async function readFolder(box: Mailbox, accountId: number, folder: string, d: PollDeps, onMessage: (m: IncomingEmail) => Promise<void>) {
