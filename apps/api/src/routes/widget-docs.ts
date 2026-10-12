@@ -1,7 +1,7 @@
-import { resolveRoute } from '@ai-door/agent';
-import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
-import { memorySubject } from '@ai-door/db';
-import { DocumentError } from '@ai-door/docs';
+import { resolveRoute } from '@retail/agent';
+import { AmoApiClient, type WidgetPrincipal } from '@core/amo';
+import { memorySubject } from '@core/db';
+import { DocumentError } from '@core/docs';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';

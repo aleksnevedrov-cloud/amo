@@ -1,7 +1,7 @@
-import { AmoApiClient, continueBot, isSafeReturnUrl, verifyBotToken } from '@ai-door/amo';
+import { AmoApiClient, continueBot, isSafeReturnUrl, verifyBotToken } from '@core/amo';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { hasMention } from '@ai-door/shared';
+import { hasMention } from '@core/shared';
 import type { Deps } from '../deps.ts';
 
 const bodySchema = z.object({

@@ -4,10 +4,10 @@ import { basename } from 'node:path';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@ai-door/agent';
-import { buildKpMail, ourAddress, replySubject, serverConfig, type Mailbox } from '@ai-door/mail';
-import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
-import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
+import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@retail/agent';
+import { buildKpMail, ourAddress, replySubject, serverConfig, type Mailbox } from '@retail/mail';
+import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@core/db';
+import { AmoApiClient, type WidgetPrincipal } from '@core/amo';
 import type { Deps } from '../deps.ts';
 
 /** Шаблон КП — обычный DOCX, то есть zip: первые байты PK. */

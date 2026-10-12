@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ScriptedLlm, text } from '../../../packages/agent/test/scripted-llm.ts';
+import { ScriptedLlm, text } from '../../../packages/retail/agent/test/scripted-llm.ts';
 import { setup, widgetToken } from './helpers.ts';
 
 let ctx: Awaited<ReturnType<typeof setup>>;

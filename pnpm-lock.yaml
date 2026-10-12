@@ -38,54 +38,54 @@ importers:
 
   apps/api:
     dependencies:
-      '@ai-door/agent':
-        specifier: workspace:*
-        version: link:../../packages/agent
-      '@ai-door/amo':
-        specifier: workspace:*
-        version: link:../../packages/amo
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../../packages/catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../../packages/db
-      '@ai-door/docs':
-        specifier: workspace:*
-        version: link:../../packages/docs
       '@ai-door/evals':
         specifier: workspace:*
         version: link:../../evals
-      '@ai-door/knowledge':
-        specifier: workspace:*
-        version: link:../../packages/knowledge
-      '@ai-door/llm':
-        specifier: workspace:*
-        version: link:../../packages/llm
-      '@ai-door/mail':
-        specifier: workspace:*
-        version: link:../../packages/mail
-      '@ai-door/media':
-        specifier: workspace:*
-        version: link:../../packages/media
-      '@ai-door/pricing':
-        specifier: workspace:*
-        version: link:../../packages/pricing
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
-      '@ai-door/tools':
-        specifier: workspace:*
-        version: link:../../packages/tools
       '@anthropic-ai/sdk':
         specifier: ^0.128.0
         version: 0.128.0(zod@3.25.76)
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../../packages/core/amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../packages/core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../packages/core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../packages/core/llm
+      '@core/media':
+        specifier: workspace:*
+        version: link:../../packages/core/media
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../packages/core/shared
+      '@core/tools':
+        specifier: workspace:*
+        version: link:../../packages/core/tools
       '@fastify/cors':
         specifier: ^11.3.0
         version: 11.3.0
       '@fastify/rate-limit':
         specifier: ^10.3.0
         version: 10.3.0
+      '@retail/agent':
+        specifier: workspace:*
+        version: link:../../packages/retail/agent
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../../packages/retail/catalog
+      '@retail/knowledge':
+        specifier: workspace:*
+        version: link:../../packages/retail/knowledge
+      '@retail/mail':
+        specifier: workspace:*
+        version: link:../../packages/retail/mail
+      '@retail/pricing':
+        specifier: workspace:*
+        version: link:../../packages/retail/pricing
       bullmq:
         specifier: ^5.81.5
         version: 5.81.5
@@ -139,15 +139,15 @@ importers:
         specifier: ^19.3.0
         version: 19.3.0(react@19.3.0)
     devDependencies:
-      '@ai-door/db':
+      '@core/db':
         specifier: workspace:*
-        version: link:../../packages/db
-      '@ai-door/llm':
+        version: link:../../packages/core/db
+      '@core/llm':
         specifier: workspace:*
-        version: link:../../packages/llm
-      '@ai-door/pricing':
+        version: link:../../packages/core/llm
+      '@retail/pricing':
         specifier: workspace:*
-        version: link:../../packages/pricing
+        version: link:../../packages/retail/pricing
       '@types/react':
         specifier: ^19.3.0
         version: 19.3.0
@@ -166,45 +166,45 @@ importers:
 
   apps/worker:
     dependencies:
-      '@ai-door/agent':
-        specifier: workspace:*
-        version: link:../../packages/agent
-      '@ai-door/amo':
-        specifier: workspace:*
-        version: link:../../packages/amo
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../../packages/catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../../packages/db
-      '@ai-door/docs':
-        specifier: workspace:*
-        version: link:../../packages/docs
-      '@ai-door/knowledge':
-        specifier: workspace:*
-        version: link:../../packages/knowledge
-      '@ai-door/llm':
-        specifier: workspace:*
-        version: link:../../packages/llm
-      '@ai-door/mail':
-        specifier: workspace:*
-        version: link:../../packages/mail
-      '@ai-door/media':
-        specifier: workspace:*
-        version: link:../../packages/media
-      '@ai-door/pricing':
-        specifier: workspace:*
-        version: link:../../packages/pricing
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
-      '@ai-door/tools':
-        specifier: workspace:*
-        version: link:../../packages/tools
       '@anthropic-ai/sdk':
         specifier: ^0.128.0
         version: 0.128.0(zod@3.25.76)
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../../packages/core/amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../packages/core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../packages/core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../packages/core/llm
+      '@core/media':
+        specifier: workspace:*
+        version: link:../../packages/core/media
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../packages/core/shared
+      '@core/tools':
+        specifier: workspace:*
+        version: link:../../packages/core/tools
+      '@retail/agent':
+        specifier: workspace:*
+        version: link:../../packages/retail/agent
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../../packages/retail/catalog
+      '@retail/knowledge':
+        specifier: workspace:*
+        version: link:../../packages/retail/knowledge
+      '@retail/mail':
+        specifier: workspace:*
+        version: link:../../packages/retail/mail
+      '@retail/pricing':
+        specifier: workspace:*
+        version: link:../../packages/retail/pricing
       bullmq:
         specifier: ^5.81.5
         version: 5.81.5
@@ -238,33 +238,33 @@ importers:
 
   evals:
     dependencies:
-      '@ai-door/agent':
+      '@core/amo':
         specifier: workspace:*
-        version: link:../packages/agent
-      '@ai-door/amo':
+        version: link:../packages/core/amo
+      '@core/db':
         specifier: workspace:*
-        version: link:../packages/amo
-      '@ai-door/catalog':
+        version: link:../packages/core/db
+      '@core/docs':
         specifier: workspace:*
-        version: link:../packages/catalog
-      '@ai-door/db':
+        version: link:../packages/core/docs
+      '@core/llm':
         specifier: workspace:*
-        version: link:../packages/db
-      '@ai-door/docs':
+        version: link:../packages/core/llm
+      '@core/tools':
         specifier: workspace:*
-        version: link:../packages/docs
-      '@ai-door/knowledge':
+        version: link:../packages/core/tools
+      '@retail/agent':
         specifier: workspace:*
-        version: link:../packages/knowledge
-      '@ai-door/llm':
+        version: link:../packages/retail/agent
+      '@retail/catalog':
         specifier: workspace:*
-        version: link:../packages/llm
-      '@ai-door/pricing':
+        version: link:../packages/retail/catalog
+      '@retail/knowledge':
         specifier: workspace:*
-        version: link:../packages/pricing
-      '@ai-door/tools':
+        version: link:../packages/retail/knowledge
+      '@retail/pricing':
         specifier: workspace:*
-        version: link:../packages/tools
+        version: link:../packages/retail/pricing
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -276,38 +276,174 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
-  packages/agent:
+  packages/core/amo:
     dependencies:
-      '@ai-door/amo':
-        specifier: workspace:*
-        version: link:../amo
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
-      '@ai-door/knowledge':
-        specifier: workspace:*
-        version: link:../knowledge
-      '@ai-door/llm':
-        specifier: workspace:*
-        version: link:../llm
-      '@ai-door/media':
-        specifier: workspace:*
-        version: link:../media
-      '@ai-door/pricing':
-        specifier: workspace:*
-        version: link:../pricing
-      '@ai-door/shared':
+      '@core/shared':
         specifier: workspace:*
         version: link:../shared
-      '@ai-door/tools':
+      jose:
+        specifier: ^6.2.12
+        version: 6.2.12
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/core/db:
+    dependencies:
+      '@core/amo':
         specifier: workspace:*
-        version: link:../tools
+        version: link:../amo
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../shared
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+
+  packages/core/docs:
+    dependencies:
+      '@core/db':
+        specifier: workspace:*
+        version: link:../db
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@retail/agent':
+        specifier: workspace:*
+        version: link:../../retail/agent
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../../retail/catalog
+      '@retail/knowledge':
+        specifier: workspace:*
+        version: link:../../retail/knowledge
+      exceljs:
+        specifier: ^4.4.0
+        version: 4.4.0
+      mammoth:
+        specifier: ^1.12.3
+        version: 1.12.3
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
+      unpdf:
+        specifier: ^1.8.1
+        version: 1.8.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+
+  packages/core/llm:
+    dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.128.0
         version: 0.128.0(zod@3.25.76)
+      openai:
+        specifier: ^7.23.0
+        version: 7.23.0(ws@8.21.3)(zod@3.25.76)
+
+  packages/core/media:
+    dependencies:
+      '@core/db':
+        specifier: workspace:*
+        version: link:../db
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../../retail/catalog
+      fast-xml-parser:
+        specifier: ^5.11.1
+        version: 5.11.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+
+  packages/core/shared:
+    dependencies:
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/core/tools:
+    dependencies:
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../db
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../../retail/catalog
+      '@retail/knowledge':
+        specifier: workspace:*
+        version: link:../../retail/knowledge
+      '@retail/pricing':
+        specifier: workspace:*
+        version: link:../../retail/pricing
+      fast-xml-parser:
+        specifier: ^5.11.1
+        version: 5.11.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+
+  packages/retail/agent:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.128.0
+        version: 0.128.0(zod@3.25.76)
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../../core/amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../core/llm
+      '@core/media':
+        specifier: workspace:*
+        version: link:../../core/media
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../core/shared
+      '@core/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
+      '@retail/catalog':
+        specifier: workspace:*
+        version: link:../catalog
+      '@retail/knowledge':
+        specifier: workspace:*
+        version: link:../knowledge
+      '@retail/pricing':
+        specifier: workspace:*
+        version: link:../pricing
       bullmq:
         specifier: ^5.81.5
         version: 5.81.5
@@ -331,23 +467,11 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
-  packages/amo:
+  packages/retail/catalog:
     dependencies:
-      '@ai-door/shared':
+      '@core/db':
         specifier: workspace:*
-        version: link:../shared
-      jose:
-        specifier: ^6.2.12
-        version: 6.2.12
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-
-  packages/catalog:
-    dependencies:
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
+        version: link:../../core/db
       fast-xml-parser:
         specifier: ^5.11.1
         version: 5.11.1
@@ -359,73 +483,14 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
-  packages/db:
+  packages/retail/knowledge:
     dependencies:
-      '@ai-door/amo':
+      '@core/db':
         specifier: workspace:*
-        version: link:../amo
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../shared
-      pg:
-        specifier: ^8.23.0
-        version: 8.23.0
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
-
-  packages/docs:
-    dependencies:
-      '@ai-door/agent':
-        specifier: workspace:*
-        version: link:../agent
-      '@ai-door/catalog':
+        version: link:../../core/db
+      '@retail/catalog':
         specifier: workspace:*
         version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
-      '@ai-door/knowledge':
-        specifier: workspace:*
-        version: link:../knowledge
-      '@ai-door/llm':
-        specifier: workspace:*
-        version: link:../llm
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../shared
-      exceljs:
-        specifier: ^4.4.0
-        version: 4.4.0
-      mammoth:
-        specifier: ^1.12.3
-        version: 1.12.3
-      tesseract.js:
-        specifier: ^7.0.0
-        version: 7.0.0
-      unpdf:
-        specifier: ^1.8.1
-        version: 1.8.1
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
-
-  packages/knowledge:
-    dependencies:
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
       fast-xml-parser:
         specifier: ^5.11.1
         version: 5.11.1
@@ -437,29 +502,20 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
-  packages/llm:
+  packages/retail/mail:
     dependencies:
-      '@anthropic-ai/sdk':
-        specifier: ^0.128.0
-        version: 0.128.0(zod@3.25.76)
-      openai:
-        specifier: ^7.23.0
-        version: 7.23.0(ws@8.21.3)(zod@3.25.76)
-
-  packages/mail:
-    dependencies:
-      '@ai-door/amo':
+      '@core/amo':
         specifier: workspace:*
-        version: link:../amo
-      '@ai-door/db':
+        version: link:../../core/amo
+      '@core/db':
         specifier: workspace:*
-        version: link:../db
-      '@ai-door/knowledge':
+        version: link:../../core/db
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../core/shared
+      '@retail/knowledge':
         specifier: workspace:*
         version: link:../knowledge
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../shared
       fast-xml-parser:
         specifier: ^5.11.1
         version: 5.11.1
@@ -492,73 +548,17 @@ importers:
         specifier: ^3.19.13
         version: 3.19.13
 
-  packages/media:
+  packages/retail/pricing:
     dependencies:
-      '@ai-door/catalog':
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@retail/catalog':
         specifier: workspace:*
         version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
-      fast-xml-parser:
-        specifier: ^5.11.1
-        version: 5.11.1
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
-
-  packages/pricing:
-    dependencies:
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
       exceljs:
         specifier: ^4.4.0
         version: 4.4.0
-      fast-xml-parser:
-        specifier: ^5.11.1
-        version: 5.11.1
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
-
-  packages/shared:
-    dependencies:
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-
-  packages/tools:
-    dependencies:
-      '@ai-door/amo':
-        specifier: workspace:*
-        version: link:../amo
-      '@ai-door/catalog':
-        specifier: workspace:*
-        version: link:../catalog
-      '@ai-door/db':
-        specifier: workspace:*
-        version: link:../db
-      '@ai-door/knowledge':
-        specifier: workspace:*
-        version: link:../knowledge
-      '@ai-door/pricing':
-        specifier: workspace:*
-        version: link:../pricing
-      '@ai-door/shared':
-        specifier: workspace:*
-        version: link:../shared
       fast-xml-parser:
         specifier: ^5.11.1
         version: 5.11.1
@@ -1680,6 +1680,7 @@ packages:
 
   hoodiecrow-imap@2.1.0:
     resolution: {integrity: sha512-2RKZR0WN9ec+UWI1k2VBeH8IYIxFRKBcSZszVL9upwmirZ2/oRMwjvnLMVJiCrI2O5hBEp4ipB3rOumCahoOMA==}
+    deprecated: Renamed to imapkit, see https://imapkit.com
     hasBin: true
 
   html-encoding-sniffer@4.0.0:

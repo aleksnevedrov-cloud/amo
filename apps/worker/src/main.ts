@@ -11,18 +11,18 @@ import {
   summarizeDialog,
   type IncomingJob,
   type SweepDeps,
-} from '@ai-door/agent';
-import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
+} from '@retail/agent';
+import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@core/amo';
+import { CatalogImporter, CatalogRepo } from '@retail/catalog';
 import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
   MailAttachmentsRepo,
-  WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
-import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
-import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
-import { WhisperStt, YandexStt } from '@ai-door/media';
-import { PricingRepo } from '@ai-door/pricing';
-import { KnowledgeRepo } from '@ai-door/knowledge';
-import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@ai-door/shared';
+  WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
+import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
+import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@retail/mail';
+import { WhisperStt, YandexStt } from '@core/media';
+import { PricingRepo } from '@retail/pricing';
+import { KnowledgeRepo } from '@retail/knowledge';
+import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';

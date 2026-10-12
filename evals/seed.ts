@@ -3,9 +3,9 @@
  * Файлы fixtures в образ не попадают, поэтому каталог встроен байтами (catalog-yml.ts), база знаний — JSON-модуль.
  */
 import { randomBytes } from 'node:crypto';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, migrate, type Db } from '@ai-door/db';
-import { KnowledgeRepo } from '@ai-door/knowledge';
+import { CatalogImporter, CatalogRepo } from '@retail/catalog';
+import { AccountsRepo, createPool, migrate, type Db } from '@core/db';
+import { KnowledgeRepo } from '@retail/knowledge';
 import pg from 'pg';
 import { CATALOG_YML_BASE64 } from './fixtures/catalog-yml.ts';
 import knowledgeFixture from './fixtures/knowledge.json' with { type: 'json' };

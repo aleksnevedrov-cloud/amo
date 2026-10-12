@@ -3,11 +3,11 @@
 // Без ANTHROPIC_API_KEY проверяется извлечение текста, чистка ПДн и маркировки; с ключом — ещё и структура от модели.
 // Для сканов и фото нужен ключ Yandex Vision (YANDEX_VISION_API_KEY или YANDEX_SPEECHKIT_API_KEY + YANDEX_FOLDER_ID).
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { AnthropicLlm } from '@ai-door/agent';
-import { defaultSettings, type DocumentsRepo, type NewDocument } from '@ai-door/db';
-import { cleanPersonalData, DocumentService, extract, findMarkings, YandexVision } from '@ai-door/docs';
+import { AnthropicLlm } from '@retail/agent';
+import { defaultSettings, type DocumentsRepo, type NewDocument } from '@core/db';
+import { cleanPersonalData, DocumentService, extract, findMarkings, YandexVision } from '@core/docs';
 import { z } from 'zod';
-import { seeded } from '../../packages/tools/test/fixtures.ts';
+import { seeded } from '../../packages/core/tools/test/fixtures.ts';
 
 const expectedSchema = z.object({
   id: z.string(),

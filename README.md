@@ -10,18 +10,19 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `apps/api` | API Gateway (Fastify): OAuth 2.0 amo, приём Salesbot, API виджета (песочница, журнал, каталог, база знаний), `/health` |
 | `apps/worker` | BullMQ: обработка входящих, обновление токенов amo, импорт фидов по расписанию |
 | `apps/widget` | Виджет amo (React + TS) 1.1.0: настройки (вкладка «Модель» с двумя провайдерами), песочница со сравнением моделей и прогоном eval, журнал, аналитика по моделям, панель сделки, шаг Salesbot; сборка `widget.zip` |
-| `packages/llm` | Единый интерфейс провайдера LLM: адаптеры Anthropic и OpenAI (Responses API), реестр провайдеров, таблица тарифов, резервная модель любого провайдера |
-| `packages/agent` | Оркестратор на единых типах (провайдер выбирается настройкой аккаунта), пост-фильтр фактов, учёт стоимости, конвейер диалога, очередь склейки |
-| `packages/tools` | Инструменты агента (по файлу на инструмент), CRM-порты amo и песочницы |
-| `packages/catalog` | Импорт фида YML, поиск по каталогу |
-| `packages/pricing` | Правила цен, расчёт черновика детализации, импорт/экспорт XLSX |
-| `packages/media` | Расшифровка голосовых (Yandex SpeechKit, Whisper) |
-| `packages/docs` | Разбор файлов клиентов: PDF/XLSX/DOCX, чертежи DWG/DXF, OCR сканов и фото (Yandex Vision, Tesseract), чистка ПДн, ГОСТ-маркировки, структура через Claude, комплект по замеру |
-| `packages/mail` | Почта: опрос ящика (IMAP), ответы (SMTP), привязка писем к сделкам |
-| `packages/knowledge` | База знаний: FAQ, тексты, статьи по URL |
-| `packages/amo` | Клиент amoCRM: OAuth, токены, API v4, Salesbot |
-| `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
-| `packages/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
+| `packages/core/*` | Общее для розницы и опта (имена пакетов `@core/*`); `packages/retail/*` — только розница (`@retail/*`); `packages/opt/*` — только опт (`@opt/*`), появится на этапе 2 разделения |
+| `packages/core/llm` | Единый интерфейс провайдера LLM: адаптеры Anthropic и OpenAI (Responses API), реестр провайдеров, таблица тарифов, резервная модель любого провайдера |
+| `packages/retail/agent` | Оркестратор на единых типах (провайдер выбирается настройкой аккаунта), пост-фильтр фактов, учёт стоимости, конвейер диалога, очередь склейки |
+| `packages/core/tools` | Инструменты агента (по файлу на инструмент), CRM-порты amo и песочницы |
+| `packages/retail/catalog` | Импорт фида YML, поиск по каталогу |
+| `packages/retail/pricing` | Правила цен, расчёт черновика детализации, импорт/экспорт XLSX |
+| `packages/core/media` | Расшифровка голосовых (Yandex SpeechKit, Whisper) |
+| `packages/core/docs` | Разбор файлов клиентов: PDF/XLSX/DOCX, чертежи DWG/DXF, OCR сканов и фото (Yandex Vision, Tesseract), чистка ПДн, ГОСТ-маркировки, структура через Claude, комплект по замеру |
+| `packages/retail/mail` | Почта: опрос ящика (IMAP), ответы (SMTP), привязка писем к сделкам |
+| `packages/retail/knowledge` | База знаний: FAQ, тексты, статьи по URL |
+| `packages/core/amo` | Клиент amoCRM: OAuth, токены, API v4, Salesbot |
+| `packages/core/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
+| `packages/core/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
 | `evals` | 52 эталонных диалога и прогон на реальной модели любого провайдера (`--model openai:gpt-5`, `--compare a,b`); нагрузочный прогон (`perf.ts`); обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
 | `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md), [материалы для amoМаркета](docs/marketplace/) |
 
@@ -57,7 +58,7 @@ pnpm build            # api, worker, widget.zip
 У каждой двери свой набор комплектующих и свои цены, общие «Правила цен» для них не годятся.
 
 - связки нет ни в YML-фиде, ни в `/upage/<id>.json` - единственный источник - HTML карточки
-- парсер: `packages/catalog/src/components.ts`, блок `ComponentsInTheFormOfTradeOffers`, заголовок `Title FBB_CA`, инпуты `ComponentInTheFormOfTradeOffer`; первый вариант группы («не выбрано») пропускается
+- парсер: `packages/retail/catalog/src/components.ts`, блок `ComponentsInTheFormOfTradeOffers`, заголовок `Title FBB_CA`, инпуты `ComponentInTheFormOfTradeOffer`; первый вариант группы («не выбрано») пропускается
 - хранение: таблицы `door_components` и `door_components_state` (миграция 013), TTL 24 ч, сайт не опрашивается на каждый ответ
 - инструмент агента: `door_components(id)` - группы с вариантами и ценами; пустой результат - не ошибка
 - `DoorComponentsRepo.stats()` даёт счётчик карточек без связки и с ошибкой разбора - вёрстка сайта может поменяться
@@ -72,7 +73,7 @@ pnpm build            # api, worker, widget.zip
   `price_calculate`, `door_components`. В amoCRM не пишется ничего: ни сделок, ни задач, ни примечаний.
 - Нить переписки группы — таблица `group_turns` (миграция 014), репозиторий `GroupTurnsRepo`.
   Входящие пишутся всегда, даже когда агент молчит; потолок — 20 ответов в одном чате за час.
-- распознавание: `hasMention` / `stripMention` в `packages/shared/src/mention.ts`, регистр и собака не важны, «Аммадин» не срабатывает
+- распознавание: `hasMention` / `stripMention` в `packages/core/shared/src/mention.ts`, регистр и собака не важны, «Аммадин» не срабатывает
 - без обращения сообщение не доходит до модели: журнал «Группа: нет обращения к агенту», ответ hook `skipped: group_no_mention`
 - с обращением слово вырезается, к тексту добавляется строка «сотрудник обратился к агенту напрямую - ответь в чат»
 - после «Передачи менеджеру» обращение работает как команда: проверка паузы в `pipeline.ts` пропускается, «Возврат AI» не нужен

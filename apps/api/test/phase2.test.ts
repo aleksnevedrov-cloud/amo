@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { exportRulesXlsx, pricingRulesSchema } from '@ai-door/pricing';
+import { exportRulesXlsx, pricingRulesSchema } from '@retail/pricing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ScriptedLlm, text, toolUse } from '../../../packages/agent/test/scripted-llm.ts';
+import { ScriptedLlm, text, toolUse } from '../../../packages/retail/agent/test/scripted-llm.ts';
 import { botToken, setup, widgetToken } from './helpers.ts';
 
 let ctx: Awaited<ReturnType<typeof setup>>;

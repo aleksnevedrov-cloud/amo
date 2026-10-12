@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { isGroupChatType, normalizePhone, type WazzupMessage } from '@ai-door/db';
+import { isGroupChatType, normalizePhone, type WazzupMessage } from '@core/db';
 import type { Deps } from '../deps.ts';
 import { replyInGroup } from '../group-reply.ts';
 

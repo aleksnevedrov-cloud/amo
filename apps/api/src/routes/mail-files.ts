@@ -1,8 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
-import { MailAttachmentsRepo } from '@ai-door/db';
-import { checkDownloadSignature } from '@ai-door/mail';
+import { MailAttachmentsRepo } from '@core/db';
+import { checkDownloadSignature } from '@retail/mail';
 import type { Deps } from '../deps.ts';
 
 /**

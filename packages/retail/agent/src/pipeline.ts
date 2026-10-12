@@ -1,0 +1,959 @@
+import { hasMention, looksLikeGroupMessage, stripGroupPrefix, stripMention } from '@core/shared';
+import { botIdFromReturnUrl, resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@core/amo';
+import type { CatalogRepo } from '@retail/catalog';
+import {
+  memorySubject,
+  memoryToText,
+  type DialogRepo,
+  type JournalEntry,
+  type JournalRepo,
+  type MemoryRepo,
+  type PendingMessage,
+  type SettingsRepo,
+  type SuggestionsRepo,
+  type WidgetSettings,
+  formatWazzupHistory,
+  normalizePhone,
+  type WazzupContentItem,
+  type WazzupHistoryItem,
+} from '@core/db';
+import type { KnowledgeRepo } from '@retail/knowledge';
+import { downloadAttachment, isAudio, type SttProvider } from '@core/media';
+import type { PricingRepo } from '@retail/pricing';
+import {
+  AmoCrm,
+  PHASE2_TOOLS,
+  pricingCodesHint,
+  type AgentTool,
+  type HandoffReason,
+  type ToolContext,
+} from '@core/tools';
+import { PROVIDER_LABELS, type ChatRoute, type LlmGateway } from '@core/llm';
+import { ALLOWED, blockSummary, canReply, gateReport, type CanReplyDeps, type CanReplyResult } from './can-reply.ts';
+import { canCreateTask, taskBlockSummary, taskScope } from '@core/amo';
+import { asGateway, LlmUnavailableError, type LlmClient } from './llm.ts';
+import type { AccountAi, AiProvider } from './provider.ts';
+import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts';
+import { knownTopics } from './question.ts';
+import { resolveRoute } from './route.ts';
+import { formatCalculation, summarizeDialog } from './summary.ts';
+
+export interface AmoAccess {
+  api: AmoApiClient;
+  accessToken(): Promise<string>;
+  accountDomain: string;
+}
+
+export interface PipelineDeps {
+  settings: SettingsRepo;
+  dialog: DialogRepo;
+  journal: JournalRepo;
+  catalog: CatalogRepo;
+  /** Комплектующие конкретной двери из её карточки (RFD-AI-AGENT-KOMPLEKTUYUWIE). */
+  doorComponents?: {
+    forProduct(
+      accountId: number,
+      productId: string,
+      url: string,
+    ): Promise<{ group: string; name: string; price: number }[]>;
+  } | null;
+  knowledge: KnowledgeRepo;
+  pricing: PricingRepo;
+  memory: MemoryRepo;
+  /** Переписка из Wazzup по телефону контакта (RFD-AI-AGENT-WAZZUP-HISTORY); нет — блок не добавляется. */
+  wazzup?: {
+    historyByPhone(accountId: number, phone: string, limit?: number): Promise<WazzupHistoryItem[]>;
+    managerWroteSince?(accountId: number, phone: string, since: Date): Promise<Date | null>;
+    resolveChatKind?(accountId: number, leadId: number | null, text: string): Promise<{ kind: string; chatId: string | null; chatName: string | null }>;
+    incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
+    incomingContentByLead?(accountId: number, leadId: number, from: Date, to: Date): Promise<WazzupContentItem[]>;
+    markConsumed?(accountId: number, ids: number[]): Promise<void>;
+  };
+  suggestions: SuggestionsRepo;
+  /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
+  orchestrator: Orchestrator | null;
+  /** Для резюме диалога (сырой клиент Anthropic или единый шлюз). */
+  llm: LlmClient | LlmGateway | null;
+  /** LLM по аккаунту (свой ключ или серверный) — приоритетнее общих. */
+  ai?: AiProvider;
+  amo(accountId: number): Promise<AmoAccess>;
+  /** Ответ в чат через Salesbot (continue). Пустой список — просто продолжить бота. */
+  send(access: AmoAccess, returnUrl: string, messages: string[]): Promise<void>;
+  /** Клиенту не ответили: запланировать проверку «ответил ли менеджер» через час. */
+  onUnanswered?(accountId: number, leadId: number, info: UnansweredInfo): Promise<void>;
+  /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
+  stt?(accountId: number, provider: WidgetSettings['stt']['provider']): Promise<SttProvider | null>;
+  download?: typeof downloadAttachment;
+  /** Пауза перед повторным поиском вложения в Wazzup (мс); в тестах 0. */
+  wazzupRetryMs?: number;
+  /** Почта: ответы письмом и признак ответа менеджера. */
+  email?: {
+    reply(accountId: number, leadId: number, meta: Record<string, unknown>, text: string): Promise<unknown>;
+    managerRepliedSince(accountId: number, addresses: string[], since: Date): Promise<boolean>;
+  };
+  /** Разбор вложений (фаза 3): фото, сканы, PDF/XLSX/DOCX → факты для агента и примечание менеджеру. */
+  documents?: DocumentAnalyzer;
+  /** Аналитика (фаза 4): стартовый этап сделки при первом контакте AI. */
+  outcomes?: { start(accountId: number, leadId: number, pipelineId: number, statusId: number): Promise<void> };
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+}
+
+export interface DocumentAnalyzer {
+  analyze(input: {
+    accountId: number;
+    leadId: number;
+    source: 'chat';
+    filename: string;
+    mime: string;
+    bytes: Uint8Array;
+    settings: WidgetSettings;
+  }): Promise<{ id: number; kind: string; text: string; note: string; memoryOpenings: MemoryOpening[]; costUsd: number; model: string }>;
+}
+
+type MemoryOpening = { room?: string; width_mm?: number; height_mm?: number; wall_mm?: number; qty?: number };
+
+export type PipelineOutcome =
+  | { status: 'empty' }
+  | { status: 'skipped'; reason: string }
+  | { status: 'replied'; text: string }
+  | { status: 'drafted'; id: number }
+  | { status: 'hinted'; id: number }
+  | { status: 'handoff'; reason: HandoffReason };
+
+export const REASON_TEXT: Record<HandoffReason, string> = {
+  client_request: 'Клиент просит связаться с менеджером',
+  complaint: 'Жалоба / недовольство клиента',
+  discount: 'Вопрос о скидке',
+  custom_order: 'Нестандартный заказ',
+  legal_entity: 'Покупка на юрлицо',
+  wholesale: 'Оптовый заказ',
+  return: 'Возврат / рекламация',
+  no_answer: 'AI не нашёл ответа',
+  other: 'Нужен менеджер',
+};
+
+/** Куда идёт ответ AI: клиенту, в черновик на одобрение или подсказкой менеджеру. */
+type Delivery = 'send' | 'draft' | 'hint';
+
+/** В режиме подсказок AI ничего не меняет в CRM — только читает. */
+const READ_ONLY = new Set(['catalog_search', 'catalog_get_product', 'knowledge_search', 'crm_get_context', 'price_calculate']);
+
+/** Сколько смотреть назад, если AI ещё не отвечал в сделке. */
+const MANAGER_LOOKBACK_MS = 7 * 24 * 3600_000;
+
+/** Заглушка hook'а Salesbot для сообщения без текста (вложение, стикер) — повод искать вложение в Wazzup. */
+const isEmptyPlaceholder = (text: string): boolean => {
+  const v = text.trim();
+  return !v || v.startsWith('(клиент отправил сообщение без текста');
+};
+const WAZZUP_ATTACH_WINDOW_MS = 3 * 60_000;
+const WAZZUP_ATTACH_RETRY_MS = 5_000;
+/** Тип вложения Wazzup → MIME для существующих веток разбора (vision/документы/STT). */
+const wazzupMime = (type: string | null): string =>
+  type === 'image' ? 'image/jpeg' : type === 'audio' ? 'audio/ogg' : type === 'video' ? 'video/mp4' : 'application/octet-stream';
+
+interface Turn {
+  accountId: number;
+  leadId: number;
+  settings: WidgetSettings;
+  access: AmoAccess;
+  pending: PendingMessage[];
+  texts: string[];
+  sendErrors: string[];
+  /** Проёмы из разобранных замерных листов — в память клиента. */
+  openings: MemoryOpening[];
+  ai: AccountAi | null;
+  /** Провайдер и модель хода: сделка > этап > воронка > настройки (раздел 3 ТЗ 1.1.0). */
+  route: ChatRoute;
+  /** Получатель задач агента на этом ходу (считается один раз, лениво). */
+  assignee?: Promise<TaskAssignee>;
+}
+
+
+/** Задача менеджеру, когда клиент написал, а ответа нет. Префикс общий со всеми задачами агента. */
+export const UNANSWERED_PREFIX = 'AI:';
+/** Тип задачи amo «Связаться», если типы в настройках не заданы. */
+const UNANSWERED_TASK_TYPE_ID = 1;
+
+export interface UnansweredInfo {
+  /** Когда пришло сообщение клиента, на которое агент не ответил. */
+  at: string;
+  text: string;
+}
+
+export type UnansweredOutcome =
+  | { status: 'answered' }
+  | { status: 'task_exists' }
+  | { status: 'task_created'; taskId: number }
+  | { status: 'skipped'; reason: string };
+
+const UNANSWERED_REASON: Record<string, string> = {
+  manager_active: 'Агент не отвечал: менеджер ведёт диалог.',
+  paused: 'Агент не отвечал: агент на паузе.',
+  check_failed: 'Агент не отвечал: проверка допуска не прошла.',
+  answer_already_in_history: 'Агент не отвечал: ответ уже был в переписке.',
+  limit: 'Агент не отвечал: исчерпан лимит по сделке.',
+  group_chat: 'Агент не отвечал: групповой чат без разрешения.',
+  group_no_mention: 'Агент не отвечал: в группе к нему не обращались.',
+};
+
+const UNANSWERED_KIND: Record<string, string> = {
+  hint: 'Агент не отвечал: агент в режиме подсказки.',
+  handoff: 'Агент передал диалог менеджеру.',
+  pause: 'Агент не отвечал: агент на паузе.',
+  blocked: 'Агент не отвечал: ответ заблокирован проверкой.',
+  skipped: 'Агент не отвечал.',
+};
+
+const hhmm = (d: Date) =>
+  d.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+
+export class DialogPipeline {
+  constructor(private readonly d: PipelineDeps) {}
+
+  /** Обрабатывает накопившуюся серию сообщений клиента по сделке. */
+  async processLead(accountId: number, leadId: number): Promise<PipelineOutcome> {
+    const pending = await this.d.dialog.takePending(accountId, leadId);
+    if (!pending.length) return { status: 'empty' };
+    const { settings } = await this.d.settings.get(accountId);
+    const access = await this.d.amo(accountId);
+    const ai: AccountAi | null =
+      (await this.d.ai?.(accountId)) ??
+      (this.d.orchestrator && this.d.llm
+        ? { llm: asGateway(this.d.llm), orchestrator: this.d.orchestrator, source: 'server' as const, providers: ['anthropic'], keySources: { anthropic: 'server' } }
+        : null);
+    const t: Turn = { accountId, leadId, settings, access, pending, texts: [], sendErrors: [], openings: [], ai, route: resolveRoute(settings) };
+    try {
+      t.texts = await this.incomingTexts(t);
+      for (const text of t.texts) await this.d.dialog.addMessage(accountId, leadId, 'client', text);
+      return await this.process(t);
+    } finally {
+      if (t.sendErrors.length) {
+        await this.journal(t, { kind: 'error', summary: 'Не удалось отправить ответ клиенту', details: { errors: t.sendErrors } });
+      }
+    }
+  }
+
+  private async process(t: Turn): Promise<PipelineOutcome> {
+    const { settings, access, accountId, leadId } = t;
+    if (!settings.enabled || settings.mode === 'off') return this.skip(t, 'disabled', 'AI выключен');
+    if (!t.ai) {
+      const label = PROVIDER_LABELS[settings.model.provider]?.split(' ')[0] ?? 'Anthropic';
+      await this.journal(t, { kind: 'error', summary: `Ключ ${label} не задан — ни у аккаунта, ни на сервере` });
+      return this.handoff(t, 'no_answer', `AI не настроен: нет ключа ${label}. Клиент ждёт ответа.`);
+    }
+
+    const lead = await access.api.getLead(leadId);
+    if (!lead) return this.skip(t, 'no_lead', 'Сделка не найдена');
+    if (settings.where.pipelineIds && !settings.where.pipelineIds.includes(lead.pipeline_id)) {
+      return this.skip(t, 'pipeline', 'Воронка не входит в список работы AI');
+    }
+    if (settings.where.disabledStatusIds.includes(lead.status_id)) {
+      await this.d.dialog.pause(accountId, leadId, 'status_without_ai');
+      return this.skip(t, 'status', 'Этап сделки — «без AI»');
+    }
+    // Вторая линия после hook: групповой чат без разрешения (RFD-AI-AGENT-GRUPPOVYE-CHATY).
+    let groupMention = false;
+    const wz = this.d.wazzup;
+    if (wz?.resolveChatKind) {
+      const groups = settings.where.groups;
+      const lastText = t.texts[t.texts.length - 1] ?? '';
+      const chat = await wz.resolveChatKind(accountId, leadId, lastText);
+      // Salesbot тип чата не передаёт. Чат не опознан, но текст с подписью автора — это группа:
+      // молчим, а не считаем личной перепиской.
+      const isGroup = chat.kind === 'group' || (chat.kind !== 'direct' && looksLikeGroupMessage(lastText));
+      const body = stripGroupPrefix(lastText);
+      if (isGroup) {
+        const where = chat.chatName ?? chat.chatId ?? 'без названия';
+        if (
+          groups.mode === 'block_all' ||
+          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? ''))
+        ) {
+          return this.skip(t, 'group_chat', `Групповой чат без разрешения: ${where}`);
+        }
+        // Пункт 8: в группе отвечаем только на обращение по имени.
+        if (groups.mentionOnly && !hasMention(body, groups.mention)) {
+          return this.skip(t, 'group_no_mention', `Группа ${where}: обращения к агенту нет`);
+        }
+      }
+      // Слово-вызов модели не показываем.
+      if (isGroup && hasMention(body, groups.mention)) {
+        groupMention = true;
+        t.texts = t.texts.map((x) =>
+          hasMention(x, groups.mention)
+            ? `${stripMention(x, groups.mention)}\n(сотрудник обратился к агенту напрямую — ответь в чат)`
+            : x,
+        );
+      }
+    }
+    await this.d.outcomes?.start(accountId, leadId, lead.pipeline_id, lead.status_id).catch(() => undefined);
+
+    let state = await this.d.dialog.state(accountId, leadId);
+    t.route = resolveRoute(settings, { pipelineId: lead.pipeline_id, statusId: lead.status_id, lead: state.llm });
+    const now = this.d.now?.() ?? new Date();
+    const emails = t.pending.filter((m) => m.channel === 'email');
+    const chats = t.pending.filter((m) => m.channel !== 'email');
+    if (!state.paused) {
+      // Менеджер уже пишет клиенту — AI замолкает (раздел 6 ТЗ): в чате — события amo, в почте — «Отправленные».
+      const since = state.lastAiAt ?? new Date(now.getTime() - MANAGER_LOOKBACK_MS);
+      const chatManager = chats.length ? (await access.api.getOutgoingChatEvents(leadId, since)).some((e) => e.created_by > 0) : false;
+      const addresses = emails.map((m) => String(m.meta.from ?? '')).filter(Boolean);
+      const mailManager = addresses.length && this.d.email ? await this.d.email.managerRepliedSince(accountId, addresses, since) : false;
+      if (chatManager || mailManager) {
+        await this.d.dialog.pause(accountId, leadId, 'manager_message');
+        await this.journal(t, { kind: 'pause', summary: 'Менеджер написал клиенту — AI на паузе' });
+        state = await this.d.dialog.state(accountId, leadId);
+      }
+    }
+
+    let delivery: Delivery = settings.mode === 'auto' ? 'send' : settings.mode === 'semi' ? 'draft' : 'hint';
+    if (state.paused && !groupMention) {
+      if (!settings.hints.whenPaused) {
+        return this.skip(t, state.pauseReason === 'manager_message' ? 'manager' : 'paused', `AI на паузе: ${state.pauseReason ?? ''}`);
+      }
+      delivery = 'hint';
+    }
+
+    if (settings.limits.dailyRub !== null) {
+      const spent = await this.d.journal.spentTodayRub(accountId);
+      if (spent >= settings.limits.dailyRub) {
+        const note = `Дневной лимит ${settings.limits.dailyRub} ₽ исчерпан (${spent.toFixed(2)} ₽)`;
+        if (settings.limits.onExceed === 'stop' || delivery === 'hint') return this.skip(t, 'limit', note);
+        if (settings.limits.onExceed === 'handoff') return this.handoff(t, 'other', note);
+        delivery = 'hint';
+      }
+    }
+    if (delivery !== 'hint' && settings.limits.maxAiMessagesPerLead !== null) {
+      const count = await this.d.dialog.aiMessagesCount(accountId, leadId);
+      if (count >= settings.limits.maxAiMessagesPerLead) {
+        return this.handoff(t, 'other', `Достигнут лимит ответов AI в сделке (${count}).`);
+      }
+    }
+
+    // Контекст: память клиента по основному контакту, правила цен.
+    const contactRef = lead._embedded?.contacts?.find((c) => c.is_main) ?? lead._embedded?.contacts?.[0];
+    const subject = memorySubject(contactRef?.id ?? null, leadId);
+    // Проёмы из вложений (чат — разобраны здесь, почта — при опросе ящика) сохраняем до ответа.
+    const fromEmail = emails.flatMap((m) => (Array.isArray(m.meta.openings) ? (m.meta.openings as MemoryOpening[]) : []));
+    if (t.openings.length || fromEmail.length) await this.d.memory.update(accountId, subject, { openings: [...t.openings, ...fromEmail].slice(0, 50) });
+    const [mem, { rules }] = await Promise.all([this.d.memory.get(accountId, subject), this.d.pricing.get(accountId)]);
+    const memoryText = memoryToText(mem.data, mem.summary);
+    const clientFacts = [
+      mem.data.budget_rub ? String(mem.data.budget_rub) : '',
+      ...mem.data.openings.map((o) => `${o.width_mm ?? ''} ${o.height_mm ?? ''} ${o.wall_mm ?? ''} ${o.qty ?? ''}`),
+    ].filter((x) => x.trim());
+    const knownAnswers = knownTopics(mem.data);
+    const tools: readonly AgentTool[] = delivery === 'hint' ? PHASE2_TOOLS.filter((x) => READ_ONLY.has(x.name)) : PHASE2_TOOLS;
+    const ctx: ToolContext = {
+      accountId,
+      catalog: this.d.catalog,
+      components: this.d.doorComponents ?? null,
+      knowledge: this.d.knowledge,
+      crm: new AmoCrm(access.api, leadId, () => this.taskAssignee(t), taskScope(settings)),
+      pricing: rules,
+      tasks: settings.tasks,
+      memory: {
+        get: async () => (await this.d.memory.get(accountId, subject)).data,
+        update: (patch) => this.d.memory.update(accountId, subject, patch),
+      },
+    };
+
+    const history = (await this.d.dialog.history(accountId, leadId, 40)).map((m) => ({ role: m.role, text: m.text }));
+    // Новые сообщения уже в истории — отдаём историю без них и их отдельно.
+    const past = history.slice(0, history.length - t.texts.length);
+    // Переписка менеджера с клиентом в мессенджере (Wazzup) — по телефону основного контакта сделки.
+    this.lastMessengerCount = 0;
+    const messengerText = await this.messengerHistory(accountId, access, contactRef?.id ?? null, history);
+
+    let result: TurnResult;
+    try {
+      result = await t.ai.orchestrator.runTurn({
+        settings,
+        history: past,
+        incoming: t.texts,
+        ctx,
+        tools,
+        now,
+        dynamic: { memory: memoryText, messenger: messengerText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
+        clientFacts,
+        knownTopics: knownAnswers,
+        route: t.route,
+      });
+    } catch (err) {
+      const unavailable = err instanceof LlmUnavailableError ? err : null;
+      await this.journal(t, {
+        kind: 'error',
+        summary: unavailable ? `LLM недоступна (основная и резервная модели): ${unavailable.message}`.slice(0, 500) : `Ошибка AI: ${(err as Error).message}`,
+        details: { provider: t.route.primary.provider, model: t.route.primary.model, ...(unavailable ? { attempts: unavailable.attempts } : {}) },
+      });
+      const missing = unavailable?.attempts.find((a) => a.code === 'not_found');
+      if (missing) await this.modelMissing(t, missing.ref);
+      if (delivery === 'hint') return this.skip(t, 'error', 'Подсказка не подготовлена: ошибка AI');
+      return this.handoff(t, 'no_answer', 'AI временно недоступен. Клиент ждёт ответа.');
+    }
+
+    const cost = {
+      inputTokens: result.cost.inputTokens,
+      outputTokens: result.cost.outputTokens,
+      costUsd: result.cost.usd,
+      costRub: result.cost.usd * settings.billing.usdRubRate,
+    };
+    const lastEmail = emails.at(-1);
+    if (result.fallbackUsed && result.model !== result.requestedModel) await this.noteFallback(t, result);
+    const details = {
+      wazzupMessages: this.lastMessengerCount,
+      provider: result.provider,
+      model: result.model,
+      requestedModel: result.requestedModel,
+      fallbackUsed: result.fallbackUsed,
+      latencyMs: result.latencyMs,
+      delivery,
+      channel: lastEmail && !chats.length ? 'email' : 'chat',
+      ...(lastEmail ? { emailMeta: lastEmail.meta } : {}),
+      toolCalls: result.toolCalls,
+      sources: result.sources,
+      rejections: result.rejections,
+      incoming: t.texts,
+      ...(result.calculation ? { calculation: result.calculation } : {}),
+    };
+
+    if (result.calculation && delivery !== 'hint') {
+      await this.d.memory.update(accountId, subject, {
+        last_calculation: { total_rub: result.calculation.total, complete: result.calculation.complete, at: now.toISOString() },
+      });
+      await access.api.addLeadNote(leadId, formatCalculation(result.calculation)).catch(() => undefined);
+    }
+
+    if (result.kind === 'handoff') {
+      if (delivery === 'hint') {
+        const id = await this.d.suggestions.add(accountId, leadId, 'hint', `AI рекомендует передать диалог менеджеру: ${REASON_TEXT[result.handoff.reason]}. ${result.handoff.summary}`, details);
+        await this.journal(t, { kind: 'hint', summary: `Подсказка: ${REASON_TEXT[result.handoff.reason]}`, details, ...cost });
+        await this.release(t, []);
+        return { status: 'hinted', id };
+      }
+      await this.journal(t, { kind: 'handoff', summary: REASON_TEXT[result.handoff.reason], details, ...cost });
+      return this.handoff(t, result.handoff.reason, result.handoff.summary, [], { history: [...past, ...t.texts.map((x) => ({ role: 'client' as const, text: x }))], memoryText, subject });
+    }
+    if (result.kind === 'blocked') {
+      await this.journal(t, { kind: 'blocked', summary: `Ответ не отправлен: ${result.reason}`, details, ...cost });
+      if (delivery !== 'send') {
+        await this.release(t, []);
+        return { status: 'skipped', reason: 'blocked' };
+      }
+      return this.handoff(t, 'no_answer', `AI не смог дать проверенный ответ (${result.reason}).`);
+    }
+
+    if (delivery === 'hint' || delivery === 'draft') {
+      const id = await this.d.suggestions.add(accountId, leadId, delivery, result.text, details);
+      await this.journal(t, { kind: delivery, summary: result.text, details, ...cost });
+      if (delivery === 'draft') await this.d.dialog.registerTurn(accountId, leadId, result.missed);
+      await this.release(t, []);
+      return delivery === 'draft' ? { status: 'drafted', id } : { status: 'hinted', id };
+    }
+
+    if (settings.where.typingDelay && chats.length) await (this.d.sleep ?? defaultSleep)(Math.min(1500 + result.text.length * 25, 8000));
+    // Жёсткий допуск перед отправкой: между проверкой в начале хода и этим местом прошло
+    // 17-31 с (склейка, вызов модели, имитация набора) - менеджер мог вступить в диалог.
+    // Готовый ответ не теряем: он уходит менеджеру подсказкой, клиенту не отправляется.
+    const gate = await canReply(
+      this.gateDeps(accountId, access),
+      { accountId, leadId, now: this.d.now?.() ?? new Date(), manualReturn: groupMention, checkChat: chats.length > 0 },
+    );
+    // Вопрос, на который клиент уже ответил, не уходит даже после перегенерации.
+    const topic = result.questionTopic ?? null;
+    const repeated = topic !== null && (knownAnswers as readonly string[]).includes(topic);
+    const verdict: CanReplyResult = repeated
+      ? { allowed: false, reason: 'answer_already_in_history', details: { topic } }
+      : gate;
+    const report = gateReport(verdict, {
+      explicitPermission: groupMention === true,
+      questionTopic: topic,
+      dataAlreadyKnown: repeated,
+    });
+    if (!verdict.allowed) {
+      const id = await this.d.suggestions.add(accountId, leadId, 'hint', result.text, { ...details, blockedBy: verdict.reason });
+      await this.journal(t, {
+        kind: 'blocked',
+        summary: blockSummary(verdict),
+        details: { ...details, reason: verdict.reason, ...verdict.details, text: result.text, suggestionId: id, gate: report },
+        ...cost,
+      });
+      if (verdict.reason === 'manager_active') await this.d.dialog.pause(accountId, leadId, 'manager_message');
+      await this.release(t, []);
+      return { status: 'hinted', id };
+    }
+
+    const misses = await this.d.dialog.registerTurn(accountId, leadId, result.missed);
+    await this.journal(t, { kind: 'reply', summary: result.text, details: { ...details, gate: report }, ...cost });
+    if (misses >= 2) {
+      await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
+      return this.handoff(t, 'no_answer', 'AI дважды подряд не нашёл ответа.', [result.text]);
+    }
+    await this.release(t, [result.text]);
+    await this.d.dialog.addMessage(accountId, leadId, 'ai', result.text);
+    return { status: 'replied', text: result.text };
+  }
+
+  /** Тексты входящих: голосовые расшифровываются, прочие вложения помечаются (раздел 5, шаг 4). */
+  /** История мессенджера для промпта: телефон контакта → последние сообщения без собственных ответов агента. */
+  /** Сколько сообщений Wazzup попало в контекст последнего хода (для журнала). */
+  private lastMessengerCount = 0;
+
+  /** Телефон клиента текущего хода: по нему допуск видит ответы менеджера в WhatsApp. */
+  private clientPhone: string | null = null;
+
+  private async messengerHistory(
+    accountId: number,
+    access: AmoAccess,
+    contactId: number | null,
+    own: { role: string; text: string }[],
+  ): Promise<string | null> {
+    this.clientPhone = null;
+    if (!this.d.wazzup || !contactId) return null;
+    try {
+      const contact = await access.api.getContact(contactId);
+      const raw = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values?.[0]?.value;
+      const phone = normalizePhone(typeof raw === 'string' ? raw : null);
+      this.clientPhone = phone;
+      if (!phone) return null;
+      const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
+      if (!items.length) return null;
+      // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
+      const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
+      const { text, count } = formatWazzupHistory(items, ownTexts);
+      this.lastMessengerCount = count;
+      return text;
+    } catch (err) {
+      await this.d.journal.add({ accountId, kind: 'error', summary: `Wazzup: не удалось собрать историю мессенджера: ${(err as Error).message}` }).catch(() => undefined);
+      return null;
+    }
+  }
+
+  private async incomingTexts(t: Turn): Promise<string[]> {
+    const out: string[] = [];
+    for (const m of t.pending) {
+      if (!m.attachmentUrl) {
+        // Salesbot не передаёт вложения: фото/файл/голос берём из вебхуков Wazzup по телефону клиента.
+        // Фото часто приходит отдельным сообщением, а подпись к нему — следующим, поэтому
+        // ищем вложения и при непустом тексте. Повторную попытку делаем только там,
+        // где вложение точно ждём — иначе каждый текстовый ход терял бы 5 с.
+        const empty = isEmptyPlaceholder(m.text);
+        const picked = await this.wazzupAttachments(t, m, empty);
+        if (picked.length) {
+          if (!empty) out.push(await this.pendingText(t, m));
+          for (const pm of picked) out.push(await this.pendingText(t, pm));
+          continue;
+        }
+      }
+      out.push(await this.pendingText(t, m));
+    }
+    return out;
+  }
+
+  /** Текст одного входящего: как есть, разбор файла/фото или расшифровка голосового. */
+  private async pendingText(t: Turn, m: PendingMessage): Promise<string> {
+    if (!m.attachmentUrl) return m.text;
+    if (!isAudio(m.attachmentType)) return this.attachmentText(t, m);
+    const stt = (await this.d.stt?.(t.accountId, t.settings.stt.provider)) ?? null;
+    if (!stt) return [m.text, '(клиент отправил голосовое сообщение; расшифровка выключена — попросите написать текстом)'].filter(Boolean).join('\n');
+    try {
+      const file = await (this.d.download ?? downloadAttachment)(m.attachmentUrl);
+      const text = await stt.transcribe(file.bytes, file.mime);
+      await this.journal(t, { kind: 'note', summary: `Голосовое расшифровано (${stt.name})`, details: { text } });
+      return text ? `[Голосовое сообщение] ${text}` : '(голосовое сообщение без распознанной речи)';
+    } catch (err) {
+      await this.journal(t, { kind: 'error', summary: `Расшифровка голосового: ${(err as Error).message}` });
+      return '(клиент отправил голосовое сообщение, расшифровать не удалось — попросите написать текстом)';
+    }
+  }
+
+  /** Телефоны всех контактов сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
+  private async leadPhones(t: Turn): Promise<string[]> {
+    try {
+      const lead = await t.access.api.getLead(t.leadId);
+      // Клиент часто пишет с номера второго контакта сделки — перебираем всех, не только основного.
+      const refs = (lead?._embedded?.contacts ?? []).slice(0, 5);
+      const phones: string[] = [];
+      for (const ref of refs) {
+        const contact = await t.access.api.getContact(ref.id);
+        const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
+        for (const v of values) {
+          const p = normalizePhone(typeof v.value === 'string' ? v.value : null);
+          if (p) phones.push(p);
+        }
+      }
+      return [...new Set(phones)];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Вложения клиента из Wazzup в окне ±3 мин от получения сообщения; пусто → одна повторная попытка через 5 с. */
+  private async wazzupAttachments(t: Turn, m: PendingMessage, retry = true): Promise<PendingMessage[]> {
+    const wz = this.d.wazzup;
+    if (!wz?.incomingContent) return [];
+    const byPhone = wz.incomingContent.bind(wz);
+    const byLead = wz.incomingContentByLead?.bind(wz);
+    const phones = await this.leadPhones(t);
+    const from = new Date(m.receivedAt.getTime() - WAZZUP_ATTACH_WINDOW_MS);
+    const to = new Date(m.receivedAt.getTime() + WAZZUP_ATTACH_WINDOW_MS);
+    const look = async () => {
+      const found = phones.length ? await byPhone(t.accountId, phones, from, to) : [];
+      if (found.length) return found;
+      // Телефона клиента может не быть в карточке — ищем по чату, уже связанному с этой сделкой.
+      return byLead ? await byLead(t.accountId, t.leadId, from, to) : found;
+    };
+    let items = await look();
+    if (!items.length && retry) {
+      await new Promise((r) => setTimeout(r, this.d.wazzupRetryMs ?? WAZZUP_ATTACH_RETRY_MS));
+      items = await look();
+    }
+    if (!items.length) {
+      // Пустое сообщение значит, что файл точно был: пишем в журнал, где искали.
+      if (retry) {
+        await this.journal(t, {
+          kind: 'note',
+          summary: 'Вложение не найдено',
+          details: { phones, from: from.toISOString(), to: to.toISOString() },
+        });
+      }
+      return [];
+    }
+    await wz.markConsumed?.(t.accountId, items.map((i) => i.id));
+    await this.journal(t, {
+      kind: 'note',
+      summary: `Вложение из Wazzup: ${items.map((i) => i.contentType ?? 'file').join(', ')} — ${items.length} шт.`,
+      details: { items: items.map((i) => ({ id: i.id, contentUri: i.contentUri, type: i.contentType })) },
+    });
+    return items.map((i) => ({
+      ...m,
+      text: /^\[[a-z_]+\]$/i.test(i.text.trim()) ? '' : i.text,
+      attachmentUrl: i.contentUri,
+      attachmentType: wazzupMime(i.contentType),
+    }));
+  }
+
+  /** Файл или фото из чата: разбор (фаза 3) или пометка, если разбор недоступен. */
+  private async attachmentText(t: Turn, m: PendingMessage): Promise<string> {
+    const url = m.attachmentUrl as string;
+    const filename = decodeURIComponent(new URL(url, 'https://x').pathname.split('/').pop() ?? '') || 'файл';
+    if (!this.d.documents || !t.settings.vision.autoParse) {
+      return [m.text, `(клиент отправил файл «${filename}» — разбор вложений выключен, попросите описать словами)`].filter(Boolean).join('\n');
+    }
+    try {
+      const file = await (this.d.download ?? downloadAttachment)(url);
+      const r = await this.d.documents.analyze({ accountId: t.accountId, leadId: t.leadId, source: 'chat', filename, mime: file.mime, bytes: file.bytes, settings: t.settings });
+      t.openings.push(...r.memoryOpenings);
+      await this.journal(t, { kind: 'document', summary: `Разобран файл «${filename}» (${r.kind})`, details: { documentId: r.id, model: r.model, text: r.text }, costUsd: r.costUsd, costRub: r.costUsd * t.settings.billing.usdRubRate });
+      if (t.settings.vision.noteInLead) await t.access.api.addLeadNote(t.leadId, r.note).catch(() => undefined);
+      return [m.text, r.text].filter(Boolean).join('\n');
+    } catch (err) {
+      await this.journal(t, { kind: 'error', summary: `Разбор файла «${filename}»: ${(err as Error).message}` });
+      return [m.text, `(клиент отправил файл «${filename}», разобрать не удалось — попросите описать словами или передайте менеджеру)`].filter(Boolean).join('\n');
+    }
+  }
+
+  private async skip(t: Turn, reason: string, summary: string): Promise<PipelineOutcome> {
+    await this.release(t, []);
+    await this.journal(t, { kind: 'skipped', summary, details: { reason } });
+    return { status: 'skipped', reason };
+  }
+
+  /** Передача менеджеру: пауза, задача, резюме (раздел 10), этап (опционально), фраза клиенту. */
+  /** Источники допуска: события чата amo плюс исходящие мессенджера по телефону клиента. */
+  private gateDeps(accountId: number, access: AmoAccess): CanReplyDeps {
+    const wazzup = this.d.wazzup;
+    const seen = wazzup?.managerWroteSince?.bind(wazzup);
+    const phone = this.clientPhone;
+    return {
+      state: (a, l) => this.d.dialog.state(a, l),
+      outgoingChatEvents: (l, since) => access.api.getOutgoingChatEvents(l, since),
+      ...(seen && phone ? { managerWroteSince: (since: Date) => seen(accountId, phone, since) } : {}),
+    };
+  }
+
+  private async handoff(
+    t: Turn,
+    reason: HandoffReason,
+    summary: string,
+    before: string[] = [],
+    ctx?: { history: HistoryMessage[]; memoryText: string | null; subject: string },
+  ): Promise<PipelineOutcome> {
+    const { accountId, leadId, settings, access } = t;
+    await this.d.dialog.pause(accountId, leadId, `handoff:${reason}`);
+    const h = settings.handoff;
+    const now = this.d.now?.() ?? new Date();
+
+    let note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n${summary}`;
+    if (ctx && t.ai) {
+      try {
+        const s = await summarizeDialog(t.ai.llm, settings, { history: ctx.history, memoryText: ctx.memoryText, route: t.route });
+        note = `[AI] Передано менеджеру: ${REASON_TEXT[reason]}\n\n${s.text}`;
+        await this.d.memory.setSummary(accountId, ctx.subject, s.text);
+        await this.journal(t, { kind: 'summary', summary: s.text, details: { provider: s.provider, model: s.model, fallbackUsed: s.fallbackUsed }, costUsd: s.cost.usd, costRub: s.cost.usd * settings.billing.usdRubRate, inputTokens: s.cost.inputTokens, outputTokens: s.cost.outputTokens });
+      } catch {
+        // Резюме не критично: остаётся краткое от агента.
+      }
+    }
+    const assignee = await this.taskAssignee(t);
+    // Задача при передаче подчиняется тем же правилам, что и обходы: своя воронка и этап,
+    // открытая сделка, и вторая задача не ставится, если одна уже есть. Примечание и перевод
+    // этапа делаются в любом случае — сама передача менеджеру не отменяется.
+    const lead = await access.api.getLead(leadId).catch(() => null);
+    const taskGate = lead ? await canCreateTask(access.api, lead, taskScope(settings)) : { allowed: true as const };
+    if (!taskGate.allowed) {
+      await this.journal(t, { kind: 'skipped', summary: taskBlockSummary(taskGate), details: { reason: taskGate.reason, ...taskGate.details, at: 'handoff' } });
+    }
+    const steps = await Promise.allSettled([
+      taskGate.allowed
+        ? access.api.createTask({
+            text: `AI: ${REASON_TEXT[reason]}. ${summary}`.slice(0, 1000),
+            completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
+            leadId,
+            taskTypeId: h.taskTypeId,
+            ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
+          })
+        : Promise.resolve(),
+      access.api.addLeadNote(leadId, note),
+      h.statusId ? access.api.setLeadStatus(leadId, h.statusId) : Promise.resolve(),
+    ]);
+    const failed = steps.filter((s) => s.status === 'rejected').map((s) => String((s as PromiseRejectedResult).reason));
+    // В «Полуавто» клиенту ничего не уходит без одобрения — фраза передачи тоже.
+    const phrase = settings.mode === 'auto' ? [settings.behavior.handoffPhrase] : [];
+    // Фраза передачи — тоже сообщение клиенту, значит проходит тот же допуск.
+    const out = [...before, ...phrase];
+    // manualReturn: паузу «handoff:*» несколькими строками выше поставил сам агент —
+    // она не должна блокировать его же прощальную фразу. Запрет по активному менеджеру
+    // при этом остаётся в силе.
+    const gate = out.length
+      ? await canReply(this.gateDeps(accountId, access), { accountId, leadId, now, manualReturn: true })
+      : ALLOWED;
+    if (gate.allowed) {
+      await this.release(t, out);
+      if (phrase.length) await this.d.dialog.addMessage(accountId, leadId, 'ai', phrase[0] as string);
+    } else {
+      const text = out.join('\n\n');
+      const id = await this.d.suggestions.add(accountId, leadId, 'hint', text, { blockedBy: gate.reason });
+      await this.journal(t, {
+        kind: 'blocked',
+        summary: blockSummary(gate),
+        details: {
+          reason: gate.reason,
+          ...gate.details,
+          text,
+          suggestionId: id,
+          gate: gateReport(gate, { explicitPermission: false, questionTopic: null, dataAlreadyKnown: false }),
+        },
+      });
+      await this.release(t, []);
+    }
+    await this.journal(t, { kind: 'handoff', summary: `Передано менеджеру: ${REASON_TEXT[reason]}`, details: { reason, summary, errors: failed, assignee } });
+    return { status: 'handoff', reason };
+  }
+
+  /** Отвечает последнему боту пачки (остальные просто продолжает) или письмом на последнее письмо клиента. */
+  private async release(t: Turn, messages: string[]): Promise<void> {
+    const emails = t.pending.filter((m) => m.channel === 'email');
+    const chatsWithUrl = t.pending.filter((m) => m.channel !== 'email' && m.returnUrl);
+    // Ответ письмом, если клиент писал только по почте (в смешанной пачке отвечаем в чат).
+    const lastEmail = emails.at(-1);
+    if (lastEmail && !lastEmail.meta.answered && !chatsWithUrl.length && messages.length) {
+      if (!this.d.email) t.sendErrors.push('Почта не подключена');
+      else {
+        try {
+          await this.d.email.reply(t.accountId, t.leadId, lastEmail.meta, messages.join('\n\n'));
+        } catch (err) {
+          t.sendErrors.push((err as Error).message);
+        }
+      }
+      for (const m of emails) m.meta = { ...m.meta, answered: true };
+    }
+    const withUrl = chatsWithUrl;
+    for (const [i, m] of withUrl.entries()) {
+      try {
+        await this.d.send(t.access, m.returnUrl as string, i === withUrl.length - 1 ? messages : []);
+      } catch (err) {
+        t.sendErrors.push((err as Error).message);
+      }
+    }
+    // Ответа нет — бот остался бы висеть на шаге виджета, и amo не запустила бы его на следующее сообщение клиента.
+    if (!messages.length) {
+      // Клиенту ничего не ушло: через час проверим, ответил ли менеджер сам.
+      if (t.texts.length && this.d.onUnanswered) {
+        await this.d
+          .onUnanswered(t.accountId, t.leadId, {
+            at: (this.d.now?.() ?? new Date()).toISOString(),
+            text: t.texts[t.texts.length - 1] ?? '',
+          })
+          .catch(() => undefined);
+      }
+      const bots = new Set(withUrl.map((m) => botIdFromReturnUrl(m.returnUrl as string)).filter((x): x is number => x !== null));
+      for (const botId of bots) {
+        try {
+          await t.access.api.stopBot(botId, t.leadId);
+        } catch (err) {
+          t.sendErrors.push((err as Error).message);
+        }
+      }
+    }
+    // Повторно не отвечаем тем же ботам.
+    for (const m of withUrl) m.returnUrl = null;
+  }
+
+  /** Ответ дала резервная модель — отметка «fallback» в журнале (критерий 6 приёмки 1.1.0). */
+  private async noteFallback(t: Turn, r: TurnResult): Promise<void> {
+    await this.journal(t, {
+      kind: 'note',
+      summary: `fallback: ${t.route.primary.provider}/${r.requestedModel} недоступна, ответ дала ${r.provider}/${r.model}`,
+      details: { fallback: true, provider: r.provider, model: r.model, requestedModel: r.requestedModel, requestedProvider: t.route.primary.provider },
+    });
+  }
+
+  /**
+   * Модель пропала из API провайдера (раздел 4 ТЗ): предупреждение в журнал (видно в статусе здоровья интеграций)
+   * и задача ответственному по настройке — не чаще раза в сутки на модель.
+   */
+  private async modelMissing(t: Turn, ref: { provider: string; model: string }): Promise<void> {
+    const summary = `Модель ${ref.provider}/${ref.model} недоступна у провайдера — проверьте настройки «Модель»`;
+    const recent = await this.d.journal.countRecent(t.accountId, 'error', summary, 24 * 3600_000).catch(() => 1);
+    if (recent > 0) return;
+    await this.journal(t, { kind: 'error', summary, details: { modelMissing: true, provider: ref.provider, model: ref.model } });
+    const h = t.settings.handoff;
+    const now = this.d.now?.() ?? new Date();
+    const assignee = await this.taskAssignee(t);
+    await t.access.api
+      .createTask({
+        text: `AI: ${summary}. Выберите другую модель в настройках AI-агента.`,
+        completeTill: new Date(now.getTime() + h.taskDeadlineMin * 60_000),
+        leadId: t.leadId,
+        taskTypeId: h.taskTypeId,
+        ...(assignee.userId ? { responsibleUserId: assignee.userId } : {}),
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Получатель задач агента: ответственный по сделке, иначе «администратор для задач», иначе первый активный
+   * администратор. Считается один раз на ход; при подмене — примечание в сделку.
+   */
+  private taskAssignee(t: Turn): Promise<TaskAssignee> {
+    if (!t.assignee) {
+      const h = t.settings.handoff;
+      t.assignee = resolveTaskAssignee(t.access.api, t.leadId, { forcedUserId: h.responsibleUserId, fallbackUserId: h.fallbackUserId })
+        .then(async (a) => {
+          if (a.reason === 'fallback' || a.reason === 'admin') {
+            await t.access.api
+              .addLeadNote(t.leadId, `AI: у сделки нет активного ответственного, задача поставлена администратору ${a.name ?? a.userId}`)
+              .catch(() => undefined);
+          }
+          if (a.reason === 'none') await this.journal(t, { kind: 'error', summary: 'Некому поставить задачу: нет активного ответственного и администратора', details: { assignee: a } });
+          return a;
+        })
+        .catch(async (err) => {
+          await this.journal(t, { kind: 'error', summary: `Получатель задачи: ${(err as Error).message}` });
+          return { userId: h.responsibleUserId, name: null, reason: 'none' as const };
+        });
+    }
+    return t.assignee;
+  }
+
+  private journal(t: Turn, e: Omit<JournalEntry, 'accountId' | 'leadId'>) {
+    return this.d.journal.add({ accountId: t.accountId, leadId: t.leadId, ...e });
+  }
+
+  /**
+   * Через час после хода без ответа: если менеджер так и не написал клиенту — ставим ему задачу.
+   * Задача одна на сделку: пока прошлая не выполнена, новую не создаём.
+   */
+  async checkUnanswered(accountId: number, leadId: number, info: UnansweredInfo): Promise<UnansweredOutcome> {
+    const since = new Date(info.at);
+    const access = await this.d.amo(accountId);
+    const lead = await access.api.getLead(leadId);
+    if (!lead) return { status: 'skipped', reason: 'no_lead' };
+
+    // Та же область работы, что у обходов: открытая сделка, своя воронка и этап,
+    // задачи в сделке ещё нет (RFD-AI-AGENT-ZADACHI-ZAKRYTYE-SDELKI).
+    const { settings: scopeSettings } = await this.d.settings.get(accountId);
+    const gate = await canCreateTask(access.api, lead, taskScope(scopeSettings));
+    if (!gate.allowed) {
+      if (gate.reason !== 'has_task') {
+        await this.d.journal
+          .add({ accountId, leadId, kind: 'skipped', summary: taskBlockSummary(gate), details: { reason: gate.reason, ...gate.details } })
+          .catch(() => undefined);
+      }
+      return gate.reason === 'has_task' ? { status: 'task_exists' } : { status: 'skipped', reason: gate.reason ?? 'blocked' };
+    }
+
+    const events = await access.api.getOutgoingChatEvents(leadId, since).catch(() => null);
+    if (events === null) return { status: 'skipped', reason: 'check_failed' };
+    if (events.some((e) => e.created_by > 0)) return { status: 'answered' };
+
+    // Менеджеры отвечают из WhatsApp: в событиях чата amo их нет, в мессенджере есть.
+    const seen = this.d.wazzup?.managerWroteSince;
+    if (seen) {
+      for (const phone of await this.phonesOfLead(access, leadId)) {
+        const at = await seen.call(this.d.wazzup, accountId, phone, since).catch(() => null);
+        if (at) return { status: 'answered' };
+      }
+    }
+
+    const settings = scopeSettings;
+    const now = this.d.now?.() ?? new Date();
+    const text = [
+      `${UNANSWERED_PREFIX} клиент написал ${hhmm(since)}, ответа нет больше часа.`,
+      await this.unansweredReason(accountId, leadId),
+      info.text ? `Последнее сообщение клиента: «${info.text.slice(0, 200)}»` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const taskId = await access.api.createTask({
+      leadId,
+      text,
+      completeTill: now,
+      taskTypeId: settings.tasks?.callback?.taskTypeId ?? UNANSWERED_TASK_TYPE_ID,
+      ...(lead.responsible_user_id ? { responsibleUserId: Number(lead.responsible_user_id) } : {}),
+    });
+    await this.d.journal.add({
+      accountId,
+      leadId,
+      kind: 'note',
+      summary: 'Задача менеджеру: клиент без ответа',
+      details: { taskId, at: info.at },
+    });
+    return { status: 'task_created', taskId };
+  }
+
+  /** Почему агент не ответил — берём из последней записи журнала по сделке. */
+  private async unansweredReason(accountId: number, leadId: number): Promise<string> {
+    const log = await this.d.journal.list(accountId, { leadId, limit: 20 }).catch(() => []);
+    for (const row of log) {
+      const reason = (row.details as { reason?: string } | null)?.reason;
+      if (reason && UNANSWERED_REASON[reason]) return UNANSWERED_REASON[reason] as string;
+      if (UNANSWERED_KIND[row.kind]) return UNANSWERED_KIND[row.kind] as string;
+    }
+    return 'Агент не отвечал.';
+  }
+
+  /** Телефоны всех контактов сделки (все значения поля PHONE), нормализованные под chatId Wazzup. */
+  private async phonesOfLead(access: AmoAccess, leadId: number): Promise<string[]> {
+    try {
+      const lead = await access.api.getLead(leadId);
+      const refs = (lead?._embedded?.contacts ?? []).slice(0, 5);
+      const phones: string[] = [];
+      for (const ref of refs) {
+        const contact = await access.api.getContact(ref.id);
+        const values = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values ?? [];
+        for (const v of values) {
+          const p = normalizePhone(typeof v.value === 'string' ? v.value : null);
+          if (p) phones.push(p);
+        }
+      }
+      return [...new Set(phones)];
+    } catch {
+      return [];
+    }
+  }
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

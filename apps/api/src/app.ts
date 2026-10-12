@@ -1,6 +1,6 @@
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
-import { normalizeAccountDomain } from '@ai-door/amo';
+import { normalizeAccountDomain } from '@core/amo';
 import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify';
 import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';

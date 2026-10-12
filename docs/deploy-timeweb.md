@@ -51,7 +51,7 @@ cp .env.example .env
 ```bash
 cd /opt/ai-door/src
 docker compose up -d --build            # postgres, redis, api (127.0.0.1:3000), worker
-docker compose exec api node packages/db/dist/migrate.js 2>/dev/null || docker compose run --rm api pnpm db:migrate
+docker compose exec api node packages/core/db/dist/migrate.js 2>/dev/null || docker compose run --rm api pnpm db:migrate
 curl -s http://127.0.0.1:3000/health    # {"status":"ok","checks":{"db":"ok","redis":"ok"}}
 docker compose logs --tail=50 worker    # «worker запущен»
 ```

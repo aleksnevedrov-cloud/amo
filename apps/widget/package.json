@@ -13,9 +13,9 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@ai-door/db": "workspace:*",
-    "@ai-door/llm": "workspace:*",
-    "@ai-door/pricing": "workspace:*",
+    "@core/db": "workspace:*",
+    "@core/llm": "workspace:*",
+    "@retail/pricing": "workspace:*",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "esbuild": "^0.28.2",

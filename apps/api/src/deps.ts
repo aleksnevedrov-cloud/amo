@@ -7,12 +7,12 @@ import {
   type AiProvider,
   type IncomingJob,
   type LlmClient,
-} from '@ai-door/agent';
+} from '@retail/agent';
 import { evalFixtures, type EvalFixtures } from '@ai-door/evals/seed';
-import { AnthropicProvider, createProvider, type ProviderId } from '@ai-door/llm';
-import { downloadAttachment } from '@ai-door/media';
-import { AmoOAuth, TokenService } from '@ai-door/amo';
-import { CatalogImporter, CatalogRepo, fetchDoorComponents } from '@ai-door/catalog';
+import { AnthropicProvider, createProvider, type ProviderId } from '@core/llm';
+import { downloadAttachment } from '@core/media';
+import { AmoOAuth, TokenService } from '@core/amo';
+import { CatalogImporter, CatalogRepo, fetchDoorComponents } from '@retail/catalog';
 import {
   AccountsRepo,
   AnalyticsRepo,
@@ -32,13 +32,13 @@ import {
   SuggestionsRepo,
   type Db,
   DoorComponentsRepo,
-} from '@ai-door/db';
-import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@ai-door/docs';
-import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
-import { PricingRepo } from '@ai-door/pricing';
-import { AmoApiClient } from '@ai-door/amo';
-import { KnowledgeRepo } from '@ai-door/knowledge';
-import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@ai-door/shared';
+} from '@core/db';
+import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@core/docs';
+import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@retail/mail';
+import { PricingRepo } from '@retail/pricing';
+import { AmoApiClient } from '@core/amo';
+import { KnowledgeRepo } from '@retail/knowledge';
+import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import type { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 

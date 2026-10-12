@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { DEFAULT_PRICING } from '@ai-door/llm/pricing';
+import { DEFAULT_PRICING } from '@core/llm/pricing';
 import type { Dictionaries, LlmKeys, Mode, ModelRef, ProviderId, Status, WidgetApi, WidgetSettings } from '../api.ts';
 import { CatalogStatus } from './Catalog.tsx';
 import { Field, linesToList, NumberInput } from './fields.tsx';

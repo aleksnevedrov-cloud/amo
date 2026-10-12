@@ -1,5 +1,5 @@
-import { hasMention, stripMention } from '@ai-door/shared';
-import { PHASE2_TOOLS, type AgentTool, type CrmPort, type ToolContext } from '@ai-door/tools';
+import { hasMention, stripMention } from '@core/shared';
+import { PHASE2_TOOLS, type AgentTool, type CrmPort, type ToolContext } from '@core/tools';
 import type { Deps } from './deps.ts';
 import { sendWazzupMessage } from './wazzup-send.ts';
 

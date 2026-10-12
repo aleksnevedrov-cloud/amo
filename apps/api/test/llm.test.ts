@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { evalFixtures } from '@ai-door/evals/seed';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { FEED_PATH } from '../../../packages/tools/test/fixtures.ts';
-import { TEST_DATABASE_URL } from '../../../packages/db/test/setup.ts';
-import { ScriptedLlm, text, toolUse } from '../../../packages/agent/test/scripted-llm.ts';
+import { FEED_PATH } from '../../../packages/core/tools/test/fixtures.ts';
+import { TEST_DATABASE_URL } from '../../../packages/core/db/test/setup.ts';
+import { ScriptedLlm, text, toolUse } from '../../../packages/retail/agent/test/scripted-llm.ts';
 import { setup, widgetToken } from './helpers.ts';
 
 let ctx: Awaited<ReturnType<typeof setup>>;

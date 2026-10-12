@@ -1,0 +1,20 @@
+{
+  "name": "@core/amo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@core/shared": "workspace:*",
+    "jose": "^6.2.12",
+    "zod": "^3.25.76"
+  }
+}

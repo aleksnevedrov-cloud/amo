@@ -5,10 +5,10 @@
 //   pnpm --filter @ai-door/evals eval -- --compare anthropic:claude-opus-5,openai:gpt-5 [--only 01-]
 // Каталог и база знаний — тестовые (fixtures). Резервная модель не используется: измеряется сама модель.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { gatewayFromResolver, createProvider, parseModelKey, PROVIDERS, type ModelRef, type ProviderId } from '@ai-door/llm';
-import { pricingRulesSchema } from '@ai-door/pricing';
-import { widgetSettingsSchema } from '@ai-door/db';
-import { seeded } from '../packages/tools/test/fixtures.ts';
+import { gatewayFromResolver, createProvider, parseModelKey, PROVIDERS, type ModelRef, type ProviderId } from '@core/llm';
+import { pricingRulesSchema } from '@retail/pricing';
+import { widgetSettingsSchema } from '@core/db';
+import { seeded } from '../packages/core/tools/test/fixtures.ts';
 import { dialogSchema, runDialog, summarize, withoutComment, type DialogReport, type EvalSummary } from './runner.ts';
 
 const args = process.argv.slice(2);

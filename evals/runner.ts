@@ -1,10 +1,10 @@
-import { checkFacts, Orchestrator, type HistoryMessage, type LlmClient, type TurnResult } from '@ai-door/agent';
-import type { ChatRoute, LlmGateway } from '@ai-door/llm';
-import type { CatalogRepo } from '@ai-door/catalog';
-import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
-import type { KnowledgeRepo } from '@ai-door/knowledge';
-import type { PricingRules } from '@ai-door/pricing';
-import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@ai-door/tools';
+import { checkFacts, Orchestrator, type HistoryMessage, type LlmClient, type TurnResult } from '@retail/agent';
+import type { ChatRoute, LlmGateway } from '@core/llm';
+import type { CatalogRepo } from '@retail/catalog';
+import { widgetSettingsSchema, type WidgetSettings } from '@core/db';
+import type { KnowledgeRepo } from '@retail/knowledge';
+import type { PricingRules } from '@retail/pricing';
+import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm } from '@core/tools';
 import { z } from 'zod';
 
 const oneOrMany = z.union([z.string(), z.array(z.string())]).transform((v) => (Array.isArray(v) ? v : [v]));

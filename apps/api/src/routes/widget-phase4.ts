@@ -1,4 +1,4 @@
-import type { WidgetPrincipal } from '@ai-door/amo';
+import type { WidgetPrincipal } from '@core/amo';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';

@@ -6,17 +6,18 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
 COPY apps/widget/package.json apps/widget/
-COPY packages/shared/package.json packages/shared/
-COPY packages/amo/package.json packages/amo/
-COPY packages/db/package.json packages/db/
-COPY packages/catalog/package.json packages/catalog/
-COPY packages/knowledge/package.json packages/knowledge/
-COPY packages/tools/package.json packages/tools/
-COPY packages/agent/package.json packages/agent/
-COPY packages/pricing/package.json packages/pricing/
-COPY packages/media/package.json packages/media/
-COPY packages/docs/package.json packages/docs/
-COPY packages/mail/package.json packages/mail/
+COPY packages/core/shared/package.json packages/core/shared/
+COPY packages/core/amo/package.json packages/core/amo/
+COPY packages/core/db/package.json packages/core/db/
+COPY packages/core/llm/package.json packages/core/llm/
+COPY packages/retail/catalog/package.json packages/retail/catalog/
+COPY packages/retail/knowledge/package.json packages/retail/knowledge/
+COPY packages/core/tools/package.json packages/core/tools/
+COPY packages/retail/agent/package.json packages/retail/agent/
+COPY packages/retail/pricing/package.json packages/retail/pricing/
+COPY packages/core/media/package.json packages/core/media/
+COPY packages/core/docs/package.json packages/core/docs/
+COPY packages/retail/mail/package.json packages/retail/mail/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .
@@ -33,7 +34,7 @@ RUN apk add --no-cache libreoffice-writer ttf-dejavu font-noto || true
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations
 COPY --from=build /out/api apps/api
 COPY --from=build /out/worker apps/worker
-COPY packages/db/migrations migrations
+COPY packages/core/db/migrations migrations
 # Хранилище вложений писем: том монтируется сюда, владелец — пользователь приложения.
 RUN mkdir -p /data && chown -R node:node /data
 USER node

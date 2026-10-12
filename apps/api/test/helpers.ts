@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { loadEnv } from '@ai-door/shared';
+import { loadEnv } from '@core/shared';
 import { SignJWT } from 'jose';
-import { freshDb } from '../../../packages/db/test/setup.ts';
+import { freshDb } from '../../../packages/core/db/test/setup.ts';
 import { buildApp } from '../src/app.ts';
-import type { LlmClient } from '@ai-door/agent';
-import type { IncomingJob } from '@ai-door/agent';
+import type { LlmClient } from '@retail/agent';
+import type { IncomingJob } from '@retail/agent';
 import { createDeps, type Deps } from '../src/deps.ts';
 
 export const CLIENT_ID = '8b4f5e3a-2c1d-4e5f-9a8b-7c6d5e4f3a2b';

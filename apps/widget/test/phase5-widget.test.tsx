@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { defaultSettings } from '@ai-door/db';
+import { defaultSettings } from '@core/db';
 import type { AmoWidgetSelf } from '../src/amo.ts';
 import { createCallbacks } from '../src/index.tsx';
 

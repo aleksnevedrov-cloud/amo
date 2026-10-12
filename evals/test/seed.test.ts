@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CATALOG_YML_BASE64 } from '../fixtures/catalog-yml.ts';
 import { evalFixtures, pricingRulesFixture } from '../seed.ts';
-import { TEST_DATABASE_URL } from '../../packages/db/test/setup.ts';
+import { TEST_DATABASE_URL } from '../../packages/core/db/test/setup.ts';
 
 describe('фикстуры eval для прогона из API', () => {
   it('встроенный каталог совпадает с catalog.yml (иначе — pnpm --filter @ai-door/evals run embed)', () => {

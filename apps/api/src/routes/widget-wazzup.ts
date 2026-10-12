@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
-import type { WidgetPrincipal } from '@ai-door/amo';
+import type { WidgetPrincipal } from '@core/amo';
 
 const WAZZUP_API = 'https://api.wazzup24.com/v3';
 

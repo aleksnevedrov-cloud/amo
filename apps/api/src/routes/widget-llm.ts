@@ -1,7 +1,7 @@
-import { resolveRoute } from '@ai-door/agent';
-import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
-import { llmModelRefSchema, llmProviderSchema, type LlmModelRef } from '@ai-door/db';
-import { isProviderId, maskKey, pricePublic, PROVIDER_IDS, PROVIDERS, tariffModels, verifyKey, type ModelInfo, type ProviderId } from '@ai-door/llm';
+import { resolveRoute } from '@retail/agent';
+import { AmoApiClient, type WidgetPrincipal } from '@core/amo';
+import { llmModelRefSchema, llmProviderSchema, type LlmModelRef } from '@core/db';
+import { isProviderId, maskKey, pricePublic, PROVIDER_IDS, PROVIDERS, tariffModels, verifyKey, type ModelInfo, type ProviderId } from '@core/llm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';

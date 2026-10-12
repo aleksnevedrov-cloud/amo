@@ -1,6 +1,6 @@
-import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@ai-door/db';
-import type { ModelInfo, ModelRef, ProviderId } from '@ai-door/llm/types';
-import type { CalcResult, PricingRules } from '@ai-door/pricing';
+import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@core/db';
+import type { ModelInfo, ModelRef, ProviderId } from '@core/llm/types';
+import type { CalcResult, PricingRules } from '@retail/pricing';
 
 export type { CalcResult, PricingRules, ModelInfo, ModelRef, ProviderId };
 export type Suggestion = Omit<DbSuggestion, 'createdAt' | 'decidedAt'> & { createdAt: string; decidedAt: string | null };

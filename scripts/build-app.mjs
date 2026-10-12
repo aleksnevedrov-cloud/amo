@@ -9,7 +9,8 @@ if (!entry || !outfile) throw new Error('usage: build-app.mjs <entry> <outfile>'
 // Зависимости пакетов воркспейса (pg, jose, zod…) встраиваются в бандл — при строгой
 // раскладке pnpm они не видны из каталога приложения.
 const pkg = JSON.parse(readFileSync(new URL('package.json', `file://${process.cwd()}/`), 'utf8'));
-const external = new Set(Object.keys(pkg.dependencies ?? {}).filter((d) => !d.startsWith('@ai-door/')));
+const INTERNAL = /^@(core|retail|opt)\//; // пакеты воркспейса: packages/core, retail, opt
+const external = new Set(Object.keys(pkg.dependencies ?? {}).filter((d) => !INTERNAL.test(d)));
 external.add('pg-native'); // необязательный нативный драйвер pg
 
 await build({

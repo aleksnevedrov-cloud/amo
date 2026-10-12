@@ -1,4 +1,4 @@
-import { normalizePhone, type JournalRepo, type SecretsRepo, type WazzupDump, type WazzupDumpRepo, type WazzupMessage } from '@ai-door/db';
+import { normalizePhone, type JournalRepo, type SecretsRepo, type WazzupDump, type WazzupDumpRepo, type WazzupMessage } from '@core/db';
 import type { JobLogger } from './jobs.ts';
 
 const TECH_API = 'https://tech.wazzup24.com/v2/messages/messages_dump';

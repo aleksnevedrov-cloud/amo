@@ -12,7 +12,7 @@
     "test": "pnpm -r run test",
     "check": "pnpm lint && pnpm secrets && pnpm typecheck && pnpm test",
     "secrets": "node scripts/check-secrets.mjs",
-    "db:migrate": "pnpm --filter @ai-door/db run migrate",
+    "db:migrate": "pnpm --filter @core/db run migrate",
     "widget:build": "pnpm --filter @ai-door/widget run build"
   },
   "devDependencies": {

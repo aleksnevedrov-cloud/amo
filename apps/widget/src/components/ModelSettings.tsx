@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { PROVIDER_LABELS, tariffModels } from '@ai-door/llm/pricing';
+import { PROVIDER_LABELS, tariffModels } from '@core/llm/pricing';
 import type { Dictionaries, LlmKeys, ModelInfo, ModelRef, ProviderId, WidgetApi, WidgetSettings } from '../api.ts';
 import { Field, NumberInput } from './fields.tsx';
 import { PROVIDER_NAME, providerShort, usd } from './StatusBadge.tsx';

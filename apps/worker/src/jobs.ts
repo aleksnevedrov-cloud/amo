@@ -1,11 +1,11 @@
 import { rm } from 'node:fs/promises';
-import type { MailAttachmentsRepo } from '@ai-door/db';
-import { sweepNewLeads, sweepStages, type DialogPipeline, type IncomingJob, type SweepDeps } from '@ai-door/agent';
-import type { TokenService } from '@ai-door/amo';
-import type { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import type { AmoApiClient } from '@ai-door/amo';
-import { classifyOutcome, type AccountsRepo, type DialogRepo, type JournalRepo, type OutcomesRepo, type SettingsRepo } from '@ai-door/db';
-import { pollMailbox, type PollDeps, type PollResult } from '@ai-door/mail';
+import type { MailAttachmentsRepo } from '@core/db';
+import { sweepNewLeads, sweepStages, type DialogPipeline, type IncomingJob, type SweepDeps } from '@retail/agent';
+import type { TokenService } from '@core/amo';
+import type { CatalogImporter, CatalogRepo } from '@retail/catalog';
+import type { AmoApiClient } from '@core/amo';
+import { classifyOutcome, type AccountsRepo, type DialogRepo, type JournalRepo, type OutcomesRepo, type SettingsRepo } from '@core/db';
+import { pollMailbox, type PollDeps, type PollResult } from '@retail/mail';
 
 export const MAINTENANCE_QUEUE = 'maintenance';
 export const REFRESH_TOKENS_JOB = 'refresh-tokens';

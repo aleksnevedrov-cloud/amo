@@ -1,10 +1,10 @@
-import { asGateway, type AccountAi } from '@ai-door/agent';
-import type { EvalRunsRepo, LlmModelRef } from '@ai-door/db';
-import { pricingRulesSchema } from '@ai-door/pricing';
+import { asGateway, type AccountAi } from '@retail/agent';
+import type { EvalRunsRepo, LlmModelRef } from '@core/db';
+import { pricingRulesSchema } from '@retail/pricing';
 import { dialogSchema, runDialog, summarize, withoutComment, type Dialog, type DialogReport, type EvalSummary } from '@ai-door/evals';
 import dialogsFixture from '@ai-door/evals/dialogs' with { type: 'json' };
 import { type EvalFixtures, pricingRulesFixture } from '@ai-door/evals/seed';
-import { widgetSettingsSchema, type WidgetSettings } from '@ai-door/db';
+import { widgetSettingsSchema, type WidgetSettings } from '@core/db';
 
 /** Все эталонные диалоги eval-набора (evals/dialogs.json). */
 export const EVAL_DIALOGS: Dialog[] = ((dialogsFixture as { dialogs: unknown[] }).dialogs ?? []).map((d) => dialogSchema.parse(d));

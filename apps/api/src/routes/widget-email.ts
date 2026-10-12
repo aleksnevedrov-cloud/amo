@@ -1,5 +1,5 @@
-import type { WidgetPrincipal } from '@ai-door/amo';
-import { serverConfig } from '@ai-door/mail';
+import type { WidgetPrincipal } from '@core/amo';
+import { serverConfig } from '@retail/mail';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
