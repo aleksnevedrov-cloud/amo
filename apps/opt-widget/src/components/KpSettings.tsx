@@ -12,6 +12,7 @@ const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; k
   { key: 'warranty', label: 'Гарантия', kind: 'textarea' },
   { key: 'delivery', label: 'Доставка', kind: 'textarea' },
   { key: 'coverLetter', label: 'Сопроводительный текст письма', hint: 'Модель его не пишет — берётся как есть', kind: 'textarea' },
+  { key: 'analogPriceTolerancePct', label: 'Допуск цены аналога, %', hint: 'Аналог по цене — не дальше этого от цены заявки; не больше 10', kind: 'number' },
   { key: 'priceNote', label: 'Фраза о ценах', hint: 'Печатается в каждом КП под итогом — плейсхолдер {{price_note}} в шаблоне; пусто — без фразы', kind: 'textarea' },
   { key: 'signature', label: 'Подпись', kind: 'input' },
 ];

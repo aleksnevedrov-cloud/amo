@@ -7,7 +7,7 @@ import type { OptSettings } from '@opt/kp/settings';
 export type { ModelInfo, ModelRef, OptSettings, ProviderId };
 
 /** Константы КП опта: к общему набору добавлена фраза о ценах (плейсхолдер {{price_note}}). */
-export type KpConstants = CoreKpConstants & { priceNote?: string };
+export type KpConstants = CoreKpConstants & { priceNote?: string; analogPriceTolerancePct?: number };
 
 export interface Status {
   accountId: number;

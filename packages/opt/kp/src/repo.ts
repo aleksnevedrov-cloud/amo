@@ -13,6 +13,8 @@ export interface KpConstants {
   signature?: string;
   /** Фраза о ценах под итогом КП (плейсхолдер {{price_note}}); не задана — текст по умолчанию из build.ts. */
   priceNote?: string;
+  /** Допуск цены аналога, % (не больше 10); не задан — 10. */
+  analogPriceTolerancePct?: number;
 }
 
 export interface KpNumbering {

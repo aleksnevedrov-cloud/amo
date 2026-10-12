@@ -145,11 +145,11 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.needs_manager.map((n) => [n.request_index, n.reason.replace(/\u00a0/g, ' ')])).toEqual([
       [0, 'цена не задана'],
       [1, 'цена не задана'],
-      [0, 'аналог по дизайну (общие признаки «шпон, венге»): Фабрика В Милан, 8 500 ₽ — предложение, в КП не подставлено'],
+      [0, 'предварительно, по аналогу: Фабрика В Милан, источник не указан; 8 500 ₽; совпадение по дизайну (общие признаки «шпон, венге»)'],
     ]);
     // Без источника кандидатов черновик собирается без предложений.
     const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null });
-    expect(r2.payload.needs_manager.some((n) => n.reason.startsWith('аналог'))).toBe(false);
+    expect(r2.payload.needs_manager.some((n) => n.reason.includes('по аналогу'))).toBe(false);
   });
 
   it('файлов нет — позиции из письма; разбор недоступен — файлы в skipped', async () => {

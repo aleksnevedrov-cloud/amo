@@ -53,11 +53,14 @@ describe('opt-api: от подключения интеграции до пис�
 
   it('настройки КП и шаблон DOCX', async () => {
     expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { vatRate: 22, sellerName: 'ООО "РУС-ДВЕРИ"' }, numbering: { prefix: 'КП' } } })).json()).toEqual({ ok: true });
+    // Допуск цены аналога: не больше 10 % (решение заказчика 12.10.2026).
+    expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { analogPriceTolerancePct: 15 } } })).statusCode).toBe(400);
+    expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { vatRate: 22, sellerName: 'ООО "РУС-ДВЕРИ"', analogPriceTolerancePct: 7 } } })).json()).toEqual({ ok: true });
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: Buffer.from('not a zip').toString('base64') } })).json()).toEqual({ error: 'not_docx' });
     const up = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
     expect(up.json()).toMatchObject({ ok: true, md5: expect.stringMatching(/^[a-f0-9]{32}$/) });
     const s = await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/settings', headers });
-    expect(s.json()).toMatchObject({ constants: { vatRate: 22, priceNote: 'Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.' }, template: { exists: true, name: 'kp.docx' } });
+    expect(s.json()).toMatchObject({ constants: { vatRate: 22, analogPriceTolerancePct: 7, priceNote: 'Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.' }, template: { exists: true, name: 'kp.docx' } });
   });
 
   it('«Собрать КП»: задание в очередь, черновик из письма в карточке, позиции без цен', async () => {

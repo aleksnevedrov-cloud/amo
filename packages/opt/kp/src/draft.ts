@@ -81,6 +81,8 @@ export interface KpDraftInput {
   leadId: number;
   route: ChatRoute;
   pricing?: PricingOverrides;
+  /** Допуск цены аналога из настроек КП, доля (0.1 = ±10 %); нет — по умолчанию из analog.ts. */
+  analogPriceTolerance?: number;
   /** Сколько файлов сделки разбирать за один черновик и какого размера. */
   maxFiles?: number;
   maxFileBytes?: number;
@@ -139,7 +141,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   if (d.analogs) {
     for (const [i, it] of requestItems.entries()) {
       const candidates = await d.analogs({ name: it.name, raw: it.raw, price: null, requirements }).catch(() => [] as AnalogCandidate[]);
-      const s = suggestAnalog({ name: it.name, raw: it.raw, price: null, requirements }, candidates);
+      const s = suggestAnalog({ name: it.name, raw: it.raw, price: null, requirements }, candidates, { priceTolerance: input.analogPriceTolerance });
       if (s) needs.push({ request_index: i, reason: s.reason });
     }
   }
