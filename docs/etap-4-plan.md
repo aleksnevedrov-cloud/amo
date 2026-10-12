@@ -19,7 +19,7 @@
 | № | Что | Куда подставляется | Шаг плана |
 | --- | --- | --- | --- |
 | 1 | Память ≥ 3072 МБ и диск ≥ 15 ГБ свободных (тариф Ultra 4 ГБ — выполнено) | проверяет preflight.sh | 0 |
-| 2 | DNS-запись `opt.rf-dveri.ru` → 186.246.1.169 у регистратора | проверяет preflight.sh; нужна для сертификата | 0, 4 |
+| 2 | DNS-запись `opt.rf-dveri.ru` → 186.246.1.169 у регистратора; сертификат уже выпущен (`certbot certonly`, `/etc/letsencrypt/live/opt.rf-dveri.ru/`) | проверяет preflight.sh | 0, 4 |
 | 3 | Отдельная приватная интеграция amoCRM «Агент опт»: redirect `https://opt.rf-dveri.ru/oauth/amo/callback`, хук отключения `https://opt.rf-dveri.ru/oauth/amo/disconnect`, доступ «Доступ к данным аккаунта». Из «Ключей и доступов» — ID интеграции и секретный ключ | `AMO_CLIENT_ID`, `AMO_CLIENT_SECRET` в `/opt/agent-opt/.env` | 1 |
 | 4 | SMTP ящика, подключённого к amoCRM: хост, порт, логин, пароль | вкладка «Письмо» виджета опта (хост, порт, логин) и поле «Пароль SMTP» там же | 9 |
 | 5 | Пароль для пользователя БД aidoor_opt (придумать) | `OPT_DB_PASSWORD` при запуске create-db.sh и `DATABASE_URL` в `.env` опта | 1, 2 |
@@ -33,7 +33,10 @@
 
 ```bash
 mkdir -p /opt/agent-opt && cd /opt/agent-opt
-git clone https://github.com/aleksnevedrov-cloud/amo.git src && cd src && git checkout claude/new-session-8uzdox   # та же ветка, что у розницы
+# Клон из локальной копии розницы — без обращения к GitHub; затем origin переводится на тот же адрес, что у розницы.
+git clone /opt/ai-door/src src && cd src
+git remote set-url origin "$(git -C /opt/ai-door/src remote get-url origin)"
+git fetch origin && git checkout claude/new-session-8uzdox && git pull origin claude/new-session-8uzdox   # та же ветка, что у розницы
 cp .env.opt.example ../.env && cp docker-compose.opt.yml ../docker-compose.yml
 bash scripts/opt/preflight.sh
 ```
@@ -71,15 +74,18 @@ bash src/scripts/opt/check-bundles.sh --dry-run    # показать коман
 bash src/scripts/opt/check-bundles.sh              # OK по обоим образам — можно запускать
 ```
 
-### Шаг 4. nginx и сертификат
+### Шаг 4. nginx (сертификат уже выпущен, certbot не нужен)
 
 ```bash
-cp /opt/agent-opt/src/scripts/opt/nginx-opt.conf /etc/nginx/conf.d/agent-opt.conf
+cp /opt/agent-opt/src/scripts/opt/nginx-opt.conf /etc/nginx/sites-available/agent-opt
+ln -sf /etc/nginx/sites-available/agent-opt /etc/nginx/sites-enabled/agent-opt
 nginx -t && systemctl reload nginx
-certbot --nginx -d opt.rf-dveri.ru
 ```
 
-Розничный `ai-door.conf` не трогается. Сертификат выпускается только после DNS (п. 2).
+Конфиг: 80 → 301 на https; 443 ssl http2 с `/etc/letsencrypt/live/opt.rf-dveri.ru/fullchain.pem` и `privkey.pem`,
+`options-ssl-nginx.conf` и `ssl_dhparam` как у ai.rf-dveri.ru; `/` → 127.0.0.1:3001; `/dl/widget-opt-7c1e.zip` — архив
+виджета из `/opt/agent-opt/dl/`. Розничный `/etc/nginx/sites-enabled/ai-door` не трогается.
+Проверка: `curl -I https://opt.rf-dveri.ru/health` — 200 (после шага 5), `curl -I http://opt.rf-dveri.ru/` — 301.
 
 ### Шаг 5. Запуск опта (миграции → контейнеры)
 
@@ -100,10 +106,12 @@ docker compose logs --tail=20 opt-worker  # «opt-worker запущен»
 ```bash
 cd /opt/agent-opt/src
 docker run --rm -v "$PWD":/app -w /app -e WIDGET_API_URL=https://opt.rf-dveri.ru ai-door-build pnpm opt-widget:build
-mkdir -p /opt/ai-door/dl && cp apps/opt-widget/dist/widget.zip /opt/ai-door/dl/widget-opt-7c1e.zip
+mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip
+curl -sI https://opt.rf-dveri.ru/dl/widget-opt-7c1e.zip | head -1     # 200 — nginx отдаёт архив (шаг 4)
 ```
 
-В карточку интеграции «Агент опт» (п. 3) загрузить архив по ссылке `https://ai.rf-dveri.ru/dl/widget-opt-7c1e.zip`, установить.
+В карточку интеграции «Агент опт» (п. 3) загрузить архив по ссылке `https://opt.rf-dveri.ru/dl/widget-opt-7c1e.zip`, установить.
+Имя архива с хешем задано и в `nginx-opt.conf` (location `/dl/widget-opt-7c1e.zip`): при новой сборке обновить оба места.
 amo откроет `/oauth/amo/callback` опта → страница «Аккаунт … подключён к «Агенту опт»». В БД опта появляется строка accounts
 и токены — без неё шаг 7 остановится.
 

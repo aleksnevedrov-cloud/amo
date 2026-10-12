@@ -34,11 +34,12 @@ docker compose exec postgres psql -U aidoor -d ai_door_opt -c "CREATE EXTENSION 
 ```bash
 cd /opt/agent-opt/src
 WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build      # → apps/opt-widget/dist/widget.zip
-mkdir -p /opt/ai-door/dl && cp apps/opt-widget/dist/widget.zip /opt/ai-door/dl/widget-opt-7c1e.zip   # постоянная ссылка рядом с розничной
+mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip   # отдаёт nginx опта: location /dl/ в scripts/opt/nginx-opt.conf
 ```
 
 Интеграция «Агент опт» в amoМаркет: те же redirect и хук отключения, что в таблице выше, архив — по ссылке
-`https://ai.rf-dveri.ru/dl/widget-opt-7c1e.zip`. Перед каждой выдачей архива поднять `version` в `apps/opt-widget/package.json`.
+`https://opt.rf-dveri.ru/dl/widget-opt-7c1e.zip`. Перед каждой выдачей архива поднять `version` в `apps/opt-widget/package.json`
+и обновить имя архива в `scripts/opt/nginx-opt.conf`.
 
 ## Запуск
 
@@ -50,7 +51,8 @@ curl -s http://127.0.0.1:3001/health             # {"status":"ok","checks":{"db"
 docker compose logs --tail=20 opt-worker         # «opt-worker запущен»
 ```
 
-nginx: отдельный server-блок для `opt.rf-dveri.ru` с `proxy_pass http://127.0.0.1:3001`, сертификат certbot. Розничный блок не меняется.
+nginx: отдельный server-блок для `opt.rf-dveri.ru` (`scripts/opt/nginx-opt.conf`: 80 → 301, 443 ssl с уже выпущенным сертификатом
+`/etc/letsencrypt/live/opt.rf-dveri.ru/`, `/` → 127.0.0.1:3001, `/dl/` — архив виджета). Розничный `/etc/nginx/sites-enabled/ai-door` не меняется.
 
 ## Перенос данных КП из розницы (скрипт пишется на этапе 4)
 
