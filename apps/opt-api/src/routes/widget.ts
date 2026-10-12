@@ -4,6 +4,7 @@ import { optSettingsSchema, resolveOptRoute } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
+import { knowledgeRoutes } from './knowledge.ts';
 import { kpRoutes } from './kp.ts';
 import { llmRoutes } from './llm.ts';
 
@@ -105,6 +106,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
 
       llmRoutes(api, deps, principal, requireAdmin);
       kpRoutes(api, deps, principal, requireAdmin);
+      knowledgeRoutes(api, deps, principal, requireAdmin);
     },
     { prefix: '/widget/v1' },
   );

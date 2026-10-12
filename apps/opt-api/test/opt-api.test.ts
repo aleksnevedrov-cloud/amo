@@ -159,3 +159,56 @@ describe('opt-api: ошибка SMTP не меняет статус; без LLM 
     }
   });
 });
+
+describe('opt-api: база знаний опта (этап 8)', () => {
+  it('шаблон, загрузка с проверкой, список, подсказки в черновике, удаление; пустые справочники ничего не меняют', async () => {
+    const { ai } = fakeGateway(JSON.stringify({ client: { org: 'ООО Ромашка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Турин 2000*800 срочно — 2 шт', name: 'дверь Турин', width_mm: 800, height_mm: 2000, qty: 2 }], required_blocks: ['delivery'], questions: [] }));
+    const ctx = await setup({ ai });
+    try {
+      const headers = { 'x-auth-token': await widgetToken() };
+      await ctx.app.inject({ method: 'GET', url: '/oauth/amo/callback', query: { code: 'c', referer: 'aleksnevedrov.amocrm.ru', from_widget: '1' } });
+      ctx.amo.mail = { id: 5, created_at: 1_760_000_000, params: { income: true, subject: 'Запрос', text: 'Нужна доставка', from: 'ivanov@romashka.ru' } };
+
+      // Без справочников: черновик без подсказок базы знаний, сводка по нулям.
+      await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+      let d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+      expect(d.needsManager).toEqual([{ request_index: 0, reason: 'цена не задана' }]);
+      expect(d.source.from).toBe('amo_card');
+
+      const list = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge', headers })).json().items;
+      expect(list.map((i: { kind: string; loaded: unknown }) => [i.kind, i.loaded])).toEqual([['delivery', null], ['installation', null], ['b2b', null], ['analogs', null], ['stoplist', null]]);
+      const tpl = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge/stoplist/template', headers })).json();
+      expect(tpl.filename).toBe('stoplist.csv');
+      expect(tpl.content).toContain('тема;правило;ключевые слова');
+      expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge/nope/template', headers })).statusCode).toBe(404);
+
+      // Кривой файл: 422 с номерами строк, ничего не сохранено.
+      const bad = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/knowledge/delivery', headers, payload: { filename: 'd.csv', content: 'зона;цена, ₽\nМосква;дорого' } });
+      expect(bad.statusCode).toBe(422);
+      expect(bad.json().errors[0]).toEqual({ line: 2, message: 'колонка «цена»: не число: «дорого»' });
+      expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge/delivery/file', headers })).statusCode).toBe(404);
+
+      // Правильные файлы: доставка и стоп-лист.
+      expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/knowledge/delivery', headers, payload: { filename: 'delivery.csv', content: 'зона;цена, ₽\nМосква;1500\nМО;2500' } })).json()).toEqual({ ok: true, rows: 2 });
+      expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/knowledge/stoplist', headers, payload: { filename: 'stop.csv', content: 'тема;правило;ключевые слова\nСроки;не обещаем срок без фабрики;срочно' } })).json()).toEqual({ ok: true, rows: 1 });
+      const after = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge', headers })).json().items;
+      expect(after.find((i: { kind: string }) => i.kind === 'delivery').loaded).toMatchObject({ filename: 'delivery.csv', rows: 2, usage: 'reference' });
+      expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/knowledge/delivery/file', headers })).json()).toEqual({ filename: 'delivery.csv', content: 'зона;цена, ₽\nМосква;1500\nМО;2500' });
+
+      // Новый черновик: подсказки из справочников у позиции и у черновика, сводка.
+      await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+      d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+      expect(d.needsManager).toEqual([
+        { request_index: 0, reason: 'цена не задана' },
+        { request_index: 0, reason: 'стоп-лист (Сроки): не обещаем срок без фабрики' },
+        { request_index: -1, reason: 'доставка: в справочнике 2 зон — добавьте строку по адресу клиента' },
+      ]);
+      expect(d.items.map((l: { price: number | null }) => l.price)).toEqual([null]);
+
+      expect((await ctx.app.inject({ method: 'DELETE', url: '/widget/v1/kp/knowledge/delivery', headers })).json()).toEqual({ ok: true, removed: true });
+      expect((await ctx.app.inject({ method: 'DELETE', url: '/widget/v1/kp/knowledge/delivery', headers })).json()).toEqual({ ok: true, removed: false });
+    } finally {
+      await ctx.close();
+    }
+  });
+});

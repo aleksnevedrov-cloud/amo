@@ -2,13 +2,15 @@ import { useState } from 'react';
 import { s } from '@core/widget-core';
 import type { KpApi } from '../api.ts';
 import { Journal } from './Journal.tsx';
+import { Knowledge } from './Knowledge.tsx';
 import { KpSettings } from './KpSettings.tsx';
 import { MailSettings } from './MailSettings.tsx';
 import { ModelSettings } from './ModelSettings.tsx';
 
-/** Вкладки «База знаний» и «Поиск цен» появятся на этапах 8 и 9 ТЗ. */
+/** Вкладка «Поиск цен» появится на этапе 9 ТЗ. */
 const TABS = [
   ['kp', 'КП'],
+  ['knowledge', 'База знаний'],
   ['model', 'Модель'],
   ['mail', 'Письмо'],
   ['journal', 'Журнал сборок'],
@@ -36,6 +38,7 @@ export function SettingsPage({ api, fullPageUrl }: { api: KpApi; fullPageUrl?: s
         ))}
       </div>
       {tab === 'kp' && <KpSettings api={api} />}
+      {tab === 'knowledge' && <Knowledge api={api} />}
       {tab === 'model' && <ModelSettings api={api} />}
       {tab === 'mail' && <MailSettings api={api} />}
       {tab === 'journal' && <Journal api={api} />}

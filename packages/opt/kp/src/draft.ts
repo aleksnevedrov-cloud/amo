@@ -1,6 +1,7 @@
 import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
+import { knowledgeHints, knowledgeSummary, type KnowledgeSet, type KnowledgeSummary } from '@opt/kp-knowledge';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -51,6 +52,8 @@ export interface KpPayload {
     skipped: { name: string; reason: string }[];
   };
   generatedAt: string;
+  /** Сколько строк в каждом справочнике на момент сборки; нет поля — черновик собран без базы знаний. */
+  knowledge?: KnowledgeSummary;
 }
 
 export interface ParsedFile {
@@ -66,6 +69,8 @@ export interface KpDraftDeps {
   amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'listLeadFiles' | 'downloadFile'>;
   /** Разбор файла спецификации (@core/docs); null — разбор недоступен. */
   analyze: ((file: { filename: string; mime: string; bytes: Uint8Array }) => Promise<ParsedFile>) | null;
+  /** Справочники опта (ТЗ раздел 9): подсказки менеджеру; пустые — черновик как без базы знаний. */
+  knowledge?: KnowledgeSet | null;
 }
 
 export interface KpDraftInput {
@@ -125,6 +130,10 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     needs.push({ request_index: -1, reason: card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
   }
   const client = letter?.parsed.client ?? { org: '', fio: '', email: '', phone: '' };
+  const requiredBlocks = letter?.parsed.required_blocks ?? [];
+  if (d.knowledge) {
+    needs.push(...knowledgeHints({ items: items.map((l, i) => ({ request_index: l.request_index, name: l.name, raw: requestItems[i]?.raw })), requiredBlocks, text: [card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'), isLegalEntity: Boolean(client.org) }, d.knowledge));
+  }
 
   return {
     payload: {
@@ -138,7 +147,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
       candidates: [],
       items,
       components: [],
-      required_blocks: letter?.parsed.required_blocks ?? [],
+      required_blocks: requiredBlocks,
       questions: uniq([...(letter?.parsed.questions ?? []), ...files.parsed.flatMap((f) => f.questions)]).slice(0, 20),
       needs_manager: needs,
       source: {
@@ -150,6 +159,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         skipped: files.skipped,
       },
       generatedAt: new Date().toISOString(),
+      ...(d.knowledge ? { knowledge: knowledgeSummary(d.knowledge) } : {}),
     },
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,

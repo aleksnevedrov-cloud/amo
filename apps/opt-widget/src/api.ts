@@ -82,6 +82,15 @@ export interface JournalItem {
   createdAt: string;
 }
 
+export interface KnowledgeKindInfo {
+  kind: 'delivery' | 'installation' | 'b2b' | 'analogs' | 'stoplist';
+  title: string;
+  purpose: string;
+  template: string;
+  format: 'csv' | 'markdown';
+  loaded: { filename: string; rows: number; updatedAt: string; usage: string } | null;
+}
+
 export interface LlmKeys {
   provider: ProviderId;
   fallbackProvider: ProviderId;
@@ -128,6 +137,14 @@ export class KpApi extends ApiClient {
   /** «Проверено, отправить»: письмо уходит только отсюда. */
   send = (body: { draftId: number; to: string; cc?: string; subject: string; text: string; resendConfirmed?: boolean }) =>
     this.call<{ draft: KpDraftInfo | null; to: string }>('POST', '/widget/v1/kp/send', body);
+
+  /** База знаний: справочники, шаблоны и загруженные файлы (текст UTF-8). */
+  knowledge = () => this.call<{ items: KnowledgeKindInfo[] }>('GET', '/widget/v1/kp/knowledge');
+  knowledgeTemplate = (kind: KnowledgeKindInfo['kind']) => this.call<{ filename: string; content: string }>('GET', `/widget/v1/kp/knowledge/${kind}/template`);
+  knowledgeFile = (kind: KnowledgeKindInfo['kind']) => this.call<{ filename: string; content: string }>('GET', `/widget/v1/kp/knowledge/${kind}/file`);
+  uploadKnowledge = (kind: KnowledgeKindInfo['kind'], filename: string, content: string) =>
+    this.call<{ ok: true; rows: number }>('PUT', `/widget/v1/kp/knowledge/${kind}`, { filename, content });
+  removeKnowledge = (kind: KnowledgeKindInfo['kind']) => this.call<{ ok: true; removed: boolean }>('DELETE', `/widget/v1/kp/knowledge/${kind}`);
 
   kpSettings = () => this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
   saveKpSettings = (patch: { constants?: KpConstants; certsDir?: string | null; numbering?: { prefix?: string; counter?: number } }) =>

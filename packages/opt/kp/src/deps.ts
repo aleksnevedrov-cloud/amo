@@ -3,6 +3,7 @@ import { AccountsRepo, createPool, DocumentsRepo, JournalRepo, ModelsCacheRepo, 
 import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, type OcrProvider } from '@core/docs';
 import type { LLMProvider, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
+import { KpKnowledgeRepo } from '@opt/kp-knowledge';
 import { createOptAi, type OptAiProvider } from './llm.ts';
 import { KpRepo } from './repo.ts';
 import { OptSettingsRepo } from './settings.ts';
@@ -27,6 +28,8 @@ export interface OptCore {
   docs: DocumentService;
   ai: OptAiProvider;
   kp: KpRepo;
+  /** База знаний опта: пять справочников (ТЗ раздел 9). */
+  knowledge: KpKnowledgeRepo;
   /** Корень файлов опта: шаблон КП и собранные документы (/data в контейнере, том opt_data). */
   filesRoot: string;
   alerter: Alerter;
@@ -94,6 +97,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     docs,
     ai,
     kp: new KpRepo(db),
+    knowledge: new KpKnowledgeRepo(db),
     filesRoot: overrides.filesRoot ?? process.env.KP_FILES_ROOT ?? '/data',
     alerter,
     fetch: fetchImpl,

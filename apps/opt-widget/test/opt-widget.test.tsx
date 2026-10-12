@@ -197,3 +197,48 @@ describe('виджет «Агент опт»: настройки', () => {
     expect(document.body.textContent).toContain('КП КП-2026-1 отправлено на ivanov@romashka.ru');
   });
 });
+
+describe('виджет «Агент опт»: база знаний', () => {
+  it('пять справочников, шаблон скачивается, кривой файл показывает строки с ошибками, правильный — загружается', async () => {
+    const items = [
+      { kind: 'delivery', title: 'Прайс на доставку по зонам', purpose: 'расчёт строки доставки', template: 'delivery.csv', format: 'csv', loaded: null },
+      { kind: 'stoplist', title: 'Стоп-лист', purpose: 'защита от вымысла', template: 'stoplist.csv', format: 'csv', loaded: { filename: 'stop.csv', rows: 3, updatedAt: '2026-10-12T10:00:00Z', usage: 'reference' } },
+    ];
+    let uploads = 0;
+    const { self } = fakeSelf('settings', {
+      'GET /widget/v1/kp/settings': { constants: {}, certsDir: null, numbering: { prefix: 'КП', year: null, counter: 0 }, template: { exists: false, name: null, md5: null, updatedAt: null } },
+      'GET /widget/v1/kp/knowledge': () => ({ items }),
+      'PUT /widget/v1/kp/knowledge/delivery': (data?: string) => {
+        uploads++;
+        const content = JSON.parse(data ?? '{}').content as string;
+        if (content.includes('дорого')) throw { status: 422, responseJSON: { error: 'invalid_file', errors: [{ line: 2, message: 'колонка «цена»: не число: «дорого»' }] } };
+        items[0]!.loaded = { filename: 'delivery.csv', rows: 1, updatedAt: '2026-10-12T11:00:00Z', usage: 'reference' };
+        return { ok: true, rows: 1 };
+      },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    expect(document.body.textContent).toContain('Прайс на доставку по зонам');
+    expect(document.body.textContent).toContain('Не загружен — КП собирается без этого справочника');
+    expect(document.body.textContent).toContain('Загружен: stop.csv, строк 3');
+    const fileInput = document.querySelector('input[type=file]') as HTMLInputElement;
+    const feed = (name: string, text: string) =>
+      act(async () => {
+        Object.defineProperty(fileInput, 'files', { value: [new File([text], name, { type: 'text/csv' })], configurable: true });
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    await feed('d.csv', 'зона;цена\nМосква;дорого');
+    await flush();
+    expect(document.body.textContent).toContain('строка 2: колонка «цена»: не число: «дорого»');
+    expect(document.body.textContent).toContain('Ничего не сохранено');
+    await feed('delivery.csv', 'зона;цена\nМосква;1500');
+    await flush();
+    expect(uploads).toBe(2);
+    expect(document.body.textContent).toContain('Загружено: delivery.csv, строк 1');
+    expect(document.body.textContent).toContain('Загружен: delivery.csv, строк 1');
+  });
+});
