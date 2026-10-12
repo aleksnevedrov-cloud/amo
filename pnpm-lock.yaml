@@ -170,6 +170,37 @@ importers:
         specifier: ^26.1.0
         version: 26.1.0
 
+  apps/widget-kp:
+    dependencies:
+      react:
+        specifier: ^19.3.0
+        version: 19.3.0
+      react-dom:
+        specifier: ^19.3.0
+        version: 19.3.0(react@19.3.0)
+    devDependencies:
+      '@ai-door/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@ai-door/widget-core':
+        specifier: workspace:*
+        version: link:../../packages/widget-core
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: ^19.3.0
+        version: 19.3.0(@types/react@19.3.0)
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
+      jsdom:
+        specifier: ^26.1.0
+        version: 26.1.0
+
   apps/worker:
     dependencies:
       '@ai-door/agent':

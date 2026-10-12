@@ -333,64 +333,6 @@ export interface Dictionaries {
   users?: { id: number; name: string; email: string | null; isActive: boolean; isAdmin: boolean }[];
 }
 
-/** Строка будущего КП: её правит менеджер перед сборкой. */
-export interface KpDraftLine {
-  request_index: number;
-  page_id: string | null;
-  name: string;
-  size: string;
-  qty: number;
-  price: number | null;
-  lead_time: string;
-  discount: number;
-}
-
-export interface KpDraftInfo {
-  id: number;
-  leadId: number;
-  status: 'draft' | 'built' | 'sent' | 'cancelled';
-  kpNo: string | null;
-  createdAt: string;
-  builtAt: string | null;
-  sentAt: string | null;
-  hasDocx: boolean;
-  hasPdf: boolean;
-  client: { org: string; fio: string; email: string; phone: string };
-  requestItems: { raw: string; name: string; width_mm: number | null; height_mm: number | null; qty: number }[];
-  candidates: {
-    request_index: number;
-    page_id: string;
-    title: string;
-    price: number | null;
-    available: boolean | null;
-    lead_time: string;
-    factory: string;
-    url: string | null;
-  }[];
-  items: KpDraftLine[];
-  components: { request_index: number; page_id: string; groups: Record<string, { name: string; price: number }[]> }[];
-  requiredBlocks: string[];
-  questions: string[];
-  needsManager: { request_index: number; reason: string }[];
-}
-
-export interface KpSettingsInfo {
-  constants: {
-    sellerName?: string;
-    sellerRequisites?: string;
-    vatRate?: number;
-    paymentTerms?: string;
-    warranty?: string;
-    delivery?: string;
-    validDays?: number;
-    coverLetter?: string;
-    signature?: string;
-  };
-  certsDir: string | null;
-  numbering: { prefix: string; year: number | null; counter: number };
-  template: { exists: boolean; name: string | null; md5: string | null; updatedAt: string | null };
-}
-
 export interface WazzupDumpInfo {
   id: number; status: string; startAt: string; endAt: string; channelId: string | null;
   rowsTotal: number; inserted: number; skipped: number; columns: string | null; error: string | null;
@@ -498,33 +440,5 @@ export class WidgetApi extends ApiClient {
   wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
     this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
   wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
-  /** Черновик КП по сделке (тема RFD-AI-AGENT-KP). */
-  kpDraft = (leadId: number) =>
-    this.call<{ draft: KpDraftInfo | null }>('GET', `/widget/v1/kp/draft?leadId=${leadId}`);
-  /** Кнопка «Подготовить КП»: единственный шаг, который тратит токены. */
-  makeKpDraft = (leadId: number) =>
-    this.call<{ draft: KpDraftInfo | null }>('POST', '/widget/v1/kp/draft', { leadId });
-  /** Кнопка «Отправить»: письмо с КП в ту же цепочку, задача на контроль через 2 рабочих дня. */
-  sendKp = (draftId: number) =>
-    this.call<{ draft: KpDraftInfo | null; to: string; attachments: string[] }>('POST', '/widget/v1/kp/send', { draftId });
-
-  /** Кнопка «Собрать КП»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
-  buildKpDoc = (draftId: number) =>
-    this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[] }>('POST', '/widget/v1/kp/build', { draftId });
-  saveKpDraftItems = (id: number, items: KpDraftLine[]) =>
-    this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
-  kpSettings = () =>
-    this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
-  saveKpSettings = (patch: {
-    constants?: Record<string, string | number | undefined>;
-    certsDir?: string | null;
-    numbering?: { prefix?: string; counter?: number };
-  }) => this.call<{ ok: true }>('PUT', '/widget/v1/kp/settings', patch);
-  uploadKpTemplate = (filename: string, contentBase64: string) =>
-    this.call<{ ok: true; md5: string; size: number }>('POST', '/widget/v1/kp/template', {
-      filename,
-      contentBase64,
-    });
-
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
 }

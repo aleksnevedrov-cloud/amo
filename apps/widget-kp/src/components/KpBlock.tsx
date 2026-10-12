@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { KpDraftInfo, KpDraftLine, WidgetApi } from '../api.ts';
+import type { KpApi, KpDraftInfo, KpDraftLine } from '../api.ts';
 import { errorMessage } from '@ai-door/widget-core';
 
 /**
@@ -19,7 +19,7 @@ const STATUS: Record<string, string> = {
 
 const rub = (n: number | null) => (n === null ? '—' : `${n.toLocaleString('ru-RU')} ₽`);
 
-export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
+export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const [draft, setDraft] = useState<KpDraftInfo | null>(null);
   const [lines, setLines] = useState<KpDraftLine[]>([]);
   const [dirty, setDirty] = useState(false);
@@ -36,7 +36,7 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
   useEffect(() => {
     alive.current = true;
     void api
-      .kpDraft(leadId)
+      .draft(leadId)
       .then((r) => {
         if (alive.current) take(r.draft);
       })
@@ -78,7 +78,7 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
       <div className="ai-door-col">
         <div className="ai-door-empty">КП по этой сделке ещё не готовили</div>
         {error && <div className="ai-door-error">{error}</div>}
-        <button type="button" className="ai-door-btn" disabled={busy} onClick={() => void act(() => api.makeKpDraft(leadId))}>
+        <button type="button" className="ai-door-btn" disabled={busy} onClick={() => void act(() => api.makeDraft(leadId))}>
           {busy ? 'Читаю письмо…' : 'Подготовить КП'}
         </button>
       </div>
@@ -170,14 +170,14 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
       )}
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button type="button" className="ai-door-btn" disabled={busy} onClick={() => void act(() => api.makeKpDraft(leadId))}>
+        <button type="button" className="ai-door-btn" disabled={busy} onClick={() => void act(() => api.makeDraft(leadId))}>
           Пересобрать черновик
         </button>
         <button
           type="button"
           className="ai-door-btn"
           disabled={busy || !dirty}
-          onClick={() => void act(() => api.saveKpDraftItems(draft.id, lines))}
+          onClick={() => void act(() => api.saveDraftItems(draft.id, lines))}
         >
           Сохранить правки
         </button>
@@ -186,7 +186,7 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
           className="ai-door-btn ai-door-btn-green"
           disabled={busy || dirty || !ready}
           title={dirty ? 'Сначала сохраните правки' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать документ по шаблону'}
-          onClick={() => void act(() => api.buildKpDoc(draft.id))}
+          onClick={() => void act(() => api.buildDoc(draft.id))}
         >
           {busy ? 'Собираю…' : 'Собрать КП'}
         </button>
@@ -196,7 +196,7 @@ export function KpBlock({ api, leadId }: { api: WidgetApi; leadId: number }) {
           disabled={busy || draft.status !== 'built'}
           title={draft.status === 'built' ? 'Отправить письмо с КП клиенту' : 'Доступно после сборки документа'}
           onClick={() => {
-            if (window.confirm('Отправить КП клиенту письмом?')) void act(() => api.sendKp(draft.id));
+            if (window.confirm('Отправить КП клиенту письмом?')) void act(() => api.send(draft.id));
           }}
         >
           {busy ? 'Отправляю…' : 'Отправить'}

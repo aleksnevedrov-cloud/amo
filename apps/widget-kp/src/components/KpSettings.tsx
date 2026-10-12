@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import type { KpSettingsInfo, WidgetApi } from '../api.ts';
+import type { KpApi, KpSettingsInfo } from '../api.ts';
 import { Field, s } from '@ai-door/widget-core';
 
 type Constants = KpSettingsInfo['constants'];
 
 /** Вкладка «КП»: постоянные части предложения, нумерация и файл-шаблон. */
-export function KpSettings(props: { api: WidgetApi }) {
+export function KpSettings(props: { api: KpApi }) {
   const [data, setData] = useState<KpSettingsInfo | null>(null);
   const [c, setC] = useState<Constants>({});
   const [prefix, setPrefix] = useState('КП');
@@ -16,7 +16,7 @@ export function KpSettings(props: { api: WidgetApi }) {
 
   useEffect(() => {
     props.api
-      .kpSettings()
+      .settings()
       .then((r) => {
         setData(r);
         setC(r.constants ?? {});
@@ -34,8 +34,8 @@ export function KpSettings(props: { api: WidgetApi }) {
     setBusy(true);
     setMsg(null);
     try {
-      await props.api.saveKpSettings({
-        constants: c as Record<string, string | number | undefined>,
+      await props.api.saveSettings({
+        constants: c,
         certsDir: certsDir.trim() === '' ? null : certsDir.trim(),
         numbering: { prefix: prefix.trim() || 'КП', counter: Number(counter) || 0 },
       });
@@ -54,7 +54,7 @@ export function KpSettings(props: { api: WidgetApi }) {
       const buf = new Uint8Array(await file.arrayBuffer());
       let bin = '';
       for (const b of buf) bin += String.fromCharCode(b);
-      const r = await props.api.uploadKpTemplate(file.name, btoa(bin));
+      const r = await props.api.uploadTemplate(file.name, btoa(bin));
       setMsg(`Шаблон загружен: ${file.name}, ${Math.round(r.size / 1024)} КБ`);
       setData((p) =>
         p
