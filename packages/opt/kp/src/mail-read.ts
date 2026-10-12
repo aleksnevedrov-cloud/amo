@@ -49,6 +49,8 @@ export interface MailSearchDiag {
   skippedFolders: string[];
   /** Сработал ли запасной поиск без даты. */
   fallbackWithoutDate: boolean;
+  /** Сбои SEARCH по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
+  errors: string[];
 }
 
 export interface MailReadResult {
@@ -329,7 +331,10 @@ export class ImapMailReader {
       throw err;
     }
     authPause.delete(key);
-    const from = search.from.toLowerCase();
+    const from = search.from.trim().toLowerCase();
+    // В IMAP SEARCH уходят только ASCII-критерии (FROM, SINCE, BEFORE): кириллица в FROM ломает весь запрос,
+    // сервер отвечает BAD и все папки выглядят пустыми. Тема сравнивается на клиенте по envelope, в SEARCH не идёт.
+    if (!/^[\x21-\x7e]+@[\x21-\x7e]+$/.test(from)) throw new Error(`адрес отправителя для поиска должен быть e-mail в ASCII, получено «${search.from}»`);
     // По домену ищем только для корпоративных доменов; публичные (yandex.ru, mail.ru, gmail.com…) — только точный адрес.
     const domainRaw = domainOf(from);
     const domain = domainRaw && !isPublicDomain(domainRaw) ? domainRaw : null;
@@ -340,6 +345,7 @@ export class ImapMailReader {
       folders: [],
       skippedFolders: [],
       fallbackWithoutDate: false,
+      errors: [],
     };
     let readOnly = true;
     try {
@@ -357,8 +363,12 @@ export class ImapMailReader {
           continue;
         }
         readOnly = readOnly && Boolean(box.readOnly);
-        const byFrom = ((await client.search(fromQuery, { uid: true })) || []) as number[];
-        const inWindow = ((await client.search({ ...fromQuery, since, before }, { uid: true })) || []) as number[];
+        // imapflow возвращает false, если сервер отверг SEARCH — фиксируем, а не считаем папку пустой.
+        const byFromRaw = await client.search(fromQuery, { uid: true });
+        const inWindowRaw = await client.search({ ...fromQuery, since, before }, { uid: true });
+        if (byFromRaw === false || inWindowRaw === false) diag.errors.push(`${folder.path}: сервер отверг SEARCH`);
+        const byFrom = (byFromRaw || []) as number[];
+        const inWindow = (inWindowRaw || []) as number[];
         diag.folders.push({ path: folder.path, specialUse: folder.specialUse, byFrom: byFrom.length, inWindow: inWindow.length });
         const uids = inWindow.length ? inWindow.slice(-MAX_CANDIDATES) : byFrom.slice(-MAX_CANDIDATES);
         if (!inWindow.length && byFrom.length) diag.fallbackWithoutDate = true;

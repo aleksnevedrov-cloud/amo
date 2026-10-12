@@ -244,18 +244,29 @@ interface SourceFile {
 const sameFile = (a: { name: string; size: number }, b: { name: string; size: number }) => a.name === b.name && a.size === b.size;
 
 /**
+ * E-mail из строки отправителя amo («Имя <addr>», «Имя addr», просто addr): в поиск по ящику идёт
+ * только адрес в нижнем регистре — имя (и кириллица) в IMAP SEARCH попадать не должны.
+ */
+export function extractEmail(s: string | null | undefined): string {
+  const m = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/.exec(s ?? '');
+  return m ? m[0].toLowerCase() : '';
+}
+
+/**
  * Письмо из ящика (вариант А). Ищем по адресу отправителя последнего входящего письма сделки
  * (иначе email контакта), дате ±1 день и теме. Найдено — текст письма заменяет первую строку из amo,
  * вложения грузятся в файлы сделки (дубли по имени и размеру не заливаются) и разбираются из памяти.
  * Не найдено или ошибка — черновик собирается по карточке, с пометкой.
  */
 async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
-  const from = (card.letter?.from || card.contact.email).toLowerCase();
+  // Адрес: из последнего входящего письма сделки, иначе email главного контакта; только e-mail, без имени.
+  const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email);
   const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, matchedBy: null, diag: null };
-  if (!from) return { source: { ...base, error: 'в карточке нет адреса отправителя' }, files: [] };
+  if (!from) return { source: { ...base, error: 'в карточке нет e-mail отправителя' }, files: [] };
   let result: MailReadResult;
   try {
-    result = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject ?? null });
+    // Тема — из письма в mail-note (не название сделки); пустая — не используется.
+    result = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject || null });
   } catch (err) {
     const retryAt = err instanceof MailAuthError ? err.retryAt.toISOString() : null;
     return { source: { ...base, status: 'error', error: (err as Error).message, retryAt }, files: [] };

@@ -175,6 +175,14 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(none.diag.folders.map((f) => [f.path, f.byFrom, f.inWindow])).toEqual([['INBOX', 0, 0], ['Requests', 0, 0], ['Spam', 0, 0]]);
   });
 
+  it('кириллица в адресе не уходит в SEARCH — понятная ошибка до подключения; кириллическая тема сравнивается на клиенте', async () => {
+    await expect(new ImapMailReader(cfg).findLatest({ from: 'Баринов Михаил Анатольевич 914@rolt.ru', around: d('2026-10-12T16:55:00Z') })).rejects.toThrow(/должен быть e-mail в ASCII/);
+    // Тема с кириллицей: в SEARCH не передаётся, письмо находится по envelope.
+    const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-10-12T16:55:00Z'), subject: 'РОЛТ Михаил — Запрос ООО Стройоптпоставка' });
+    expect(r.mail?.folder).toBe('Spam');
+    expect(r.diag.errors).toEqual([]);
+  });
+
   it('неверный пароль — ошибка входа и пауза 30 минут: повторная попытка не идёт к серверу', async () => {
     resetMailAuthPauses();
     const bad = new ImapMailReader({ ...cfg, password: 'wrong' });

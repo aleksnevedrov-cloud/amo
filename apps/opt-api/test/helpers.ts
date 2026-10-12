@@ -101,7 +101,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
     ...(opts.ai ? { ai: opts.ai } : {}),
     filesRoot: mkdtempSync(join(tmpdir(), 'opt-kp-')),
     // Ящик по IMAP в тестах не читаем: письмо «не найдено», сборка идёт по карточке.
-    mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false } }),
+    mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } }),
     mailer,
     queue: {
       async enqueue(job) {

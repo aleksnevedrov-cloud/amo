@@ -2,10 +2,10 @@ import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
+import { buildKpDraft, extractEmail, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 
-const noDiag: MailSearchDiag = { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false };
+const noDiag: MailSearchDiag = { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] };
 
 describe('сборка КП: значения для шаблона', () => {
   it('сумма прописью и формы слов', () => {
@@ -203,6 +203,25 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
     expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
+  });
+
+  it('адрес отправителя из mail-note amo: только e-mail, без имени и кириллицы; тема — из письма, не название сделки', async () => {
+    expect(extractEmail('Баринов Михаил Анатольевич 914@rolt.ru')).toBe('914@rolt.ru');
+    expect(extractEmail('"Иван Петров" <Ivan.Petrov@Client.RU>')).toBe('ivan.petrov@client.ru');
+    expect(extractEmail('ivan@client.ru')).toBe('ivan@client.ru');
+    expect(extractEmail('Баринов Михаил')).toBe('');
+    expect(extractEmail(null)).toBe('');
+    const { gateway } = fakeGateway(JSON.stringify({ client: { org: '', fio: '', email: '', phone: '' }, request_items: [], required_blocks: [], questions: [] }));
+    const searches: { from: string; subject?: string | null }[] = [];
+    const mail: KpDraftDeps['mail'] = async (search) => {
+      searches.push({ from: search.from, subject: search.subject });
+      return { mail: null, diag: noDiag };
+    };
+    await buildKpDraft(gateway, { accountId: 1, leadId: 30012689, route }, { amo: fakeAmo({ mails: [{ ...letter, from: 'Баринов Михаил Анатольевич 914@rolt.ru', subject: 'Запрос на двери' }] }), analyze: null, mail });
+    expect(searches).toEqual([{ from: '914@rolt.ru', subject: 'Запрос на двери' }]);
+    // В mail-note адреса нет — e-mail главного контакта (у fakeAmo это ivanov@romashka.ru).
+    await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [{ ...letter, from: 'Баринов Михаил', subject: '' }] }), analyze: null, mail });
+    expect(searches[1]).toEqual({ from: 'ivanov@romashka.ru', subject: null });
   });
 
   it('совпадение только по корпоративному домену: текст и вложения в разбор, в сделку ничего не грузится, пометка «проверьте»', async () => {
