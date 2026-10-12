@@ -3,7 +3,7 @@ import { Field, s } from '@core/widget-core';
 import type { KpApi, KpConstants, KpSettingsInfo } from '../api.ts';
 
 /** Поля постоянных частей КП: один источник правды — таблица kp_settings, в коде только подписи. */
-const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; kind: 'input' | 'textarea' | 'number' }[] = [
+const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; kind: 'input' | 'textarea' | 'number' | 'lines' }[] = [
   { key: 'sellerName', label: 'Продавец', kind: 'input' },
   { key: 'sellerRequisites', label: 'Реквизиты продавца', hint: 'Попадают в шапку предложения', kind: 'textarea' },
   { key: 'vatRate', label: 'Ставка НДС, %', hint: 'Берётся отсюда, в коде не зашита', kind: 'number' },
@@ -13,6 +13,7 @@ const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; k
   { key: 'delivery', label: 'Доставка', kind: 'textarea' },
   { key: 'coverLetter', label: 'Сопроводительный текст письма', hint: 'Модель его не пишет — берётся как есть', kind: 'textarea' },
   { key: 'analogPriceTolerancePct', label: 'Допуск цены аналога, %', hint: 'Аналог по цене — не дальше этого от цены заявки; не больше 10', kind: 'number' },
+  { key: 'manufacturerDomains', label: 'Домены производителей', hint: 'По одному в строке, без http и пути; источник с таким доменом всегда считается сайтом производителя. Пусто — вид источника определяет модель', kind: 'lines' },
   { key: 'priceNote', label: 'Фраза о ценах', hint: 'Печатается в каждом КП под итогом — плейсхолдер {{price_note}} в шаблоне; пусто — без фразы', kind: 'textarea' },
   { key: 'signature', label: 'Подпись', kind: 'input' },
 ];
@@ -118,11 +119,13 @@ function ConstantsForm({ value, onChange }: { value: KpConstants; onChange: (pat
     <>
       {CONSTANT_FIELDS.map(({ key, label, hint, kind }) => {
         const v = value[key];
-        const text = v === undefined ? '' : String(v);
-        const set = (raw: string) => onChange({ [key]: raw === '' ? undefined : kind === 'number' ? Number(raw) : raw });
+        const text = v === undefined ? '' : Array.isArray(v) ? v.join('\n') : String(v);
+        // Список (kind lines) — по одному значению в строке; пустой список не сохраняется.
+        const set = (raw: string) =>
+          onChange({ [key]: kind === 'lines' ? raw.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) : raw === '' ? undefined : kind === 'number' ? Number(raw) : raw });
         return (
           <Field key={key} label={label} hint={hint}>
-            {kind === 'textarea' ? (
+            {kind === 'textarea' || kind === 'lines' ? (
               <textarea style={{ ...s.input, minHeight: key === 'sellerRequisites' || key === 'coverLetter' ? 80 : 60 }} value={text} onChange={(e) => set(e.target.value)} />
             ) : (
               <input style={s.input} type={kind === 'number' ? 'number' : 'text'} value={text} onChange={(e) => set(e.target.value)} />

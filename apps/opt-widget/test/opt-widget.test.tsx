@@ -179,6 +179,7 @@ describe('виджет «Агент опт»: настройки', () => {
     expect(document.body.textContent).toContain('Шаблон ещё не загружен');
     // Фраза о ценах редактируется в константах КП; вкладки «База знаний» нет (решение заказчика 12.10.2026).
     expect(document.body.textContent).toContain('Фраза о ценах');
+    expect(document.body.textContent).toContain('Домены производителей');
     expect([...document.querySelectorAll('button')].map((b) => b.textContent)).not.toContain('База знаний');
     await click('Модель');
     await flush();

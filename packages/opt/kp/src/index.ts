@@ -6,5 +6,6 @@ export * from './job.ts';
 export * from './llm.ts';
 export * from './migrations.ts';
 export * from './repo.ts';
+export * from './research-notes.ts';
 export * from './send.ts';
 export * from './settings.ts';

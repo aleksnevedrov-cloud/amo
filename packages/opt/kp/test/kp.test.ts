@@ -136,6 +136,8 @@ describe('черновик КП опта: источник — карточка 
     const analogs: KpDraftDeps['analogs'] = async (item) => {
       asked.push(item.name);
       expect(item.requirements).toEqual(['ГОСТ 6629-88']);
+      // У свежего черновика ни медианы, ни цены менеджера — опорной цены нет.
+      expect(item.price).toBeNull();
       return item.name.includes('венге') ? [{ id: 'p1', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге'], standards: [] }] : [];
     };
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [{ ...letter, text: 'Нужны двери по ГОСТ 6629-88, см. список' }] }), analyze: null, analogs });
@@ -145,7 +147,7 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.needs_manager.map((n) => [n.request_index, n.reason.replace(/\u00a0/g, ' ')])).toEqual([
       [0, 'цена не задана'],
       [1, 'цена не задана'],
-      [0, 'предварительно, по аналогу: Фабрика В Милан, источник не указан; 8 500 ₽; совпадение по дизайну (общие признаки «шпон, венге»)'],
+      [0, 'предварительно, по аналогу: Фабрика В Милан, источник не указан; 8 500 ₽; совпадение по дизайну (общие признаки «шпон, венге»); цена не сравнивалась'],
     ]);
     // Без источника кандидатов черновик собирается без предложений.
     const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null });

@@ -24,6 +24,8 @@ const constantsSchema = z.object({
   priceNote: z.string().max(500).optional(),
   /** Допуск цены аналога: заказчик — не более ±10 %. */
   analogPriceTolerancePct: z.number().min(0).max(10).optional(),
+  /** Домены производителей, без схемы и пути; пусто по умолчанию. */
+  manufacturerDomains: z.array(z.string().trim().min(1).max(100)).max(200).optional(),
 });
 
 const settingsSchema = z.object({
@@ -76,7 +78,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const s = await repo.getSettings(principal(req).accountId);
     return {
       // Фраза о ценах есть в каждом КП: пока заказчик её не менял, показываем текст по умолчанию.
-      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, ...s.constants },
+      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, manufacturerDomains: [], ...s.constants },
       certsDir: s.certsDir,
       numbering: s.numbering,
       template: { exists: Boolean(s.templatePath), name: s.templateName, md5: s.templateMd5, updatedAt: s.templateUpdatedAt },

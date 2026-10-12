@@ -15,6 +15,8 @@ export interface KpConstants {
   priceNote?: string;
   /** Допуск цены аналога, % (не больше 10); не задан — 10. */
   analogPriceTolerancePct?: number;
+  /** Домены производителей: источник с таким доменом всегда считается сайтом производителя; пусто по умолчанию. */
+  manufacturerDomains?: string[];
 }
 
 export interface KpNumbering {

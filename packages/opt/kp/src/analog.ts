@@ -13,8 +13,15 @@
  *
  * Цена аналога идёт в строку КП как предварительная — с пометкой «предварительно, по аналогу:
  * фабрика, модель, источник» в материалах расчёта и в needs_manager; если цена позиции посчитана
- * только по аналогам или по одному источнику — ещё пометка «ограничение расчёта». Саму цену
- * строки считает расчёт этапа 9 (медиана × коэффициент); здесь — только выбор и пометки.
+ * только по аналогам или по одному источнику — ещё пометка «ограничение расчёта» (research-notes.ts).
+ * Саму цену строки считает расчёт этапа 9 (медиана × коэффициент); здесь — только выбор и пометки.
+ *
+ * Опорная цена для критерия «цена» (решение 12.10.2026, referencePrice): медиана по точной модели,
+ * если она найдена; иначе цена, которую менеджер проставил в строке черновика; нет ни того,
+ * ни другого — критерий пропускается, подбор только по ГОСТ и дизайну, в пометке «цена не сравнивалась».
+ *
+ * Вид источника определяет модель по домену и странице; домен из списка «Домены производителей»
+ * в настройках КП всегда считается сайтом производителя (sourceKindOf).
  *
  * Доставка и монтаж в КП не считаются и не ставятся. Цена источника, в которую они включены,
  * в сравнение не берётся; вычитается только явно указанная у источника сумма.
@@ -52,11 +59,34 @@ export interface AnalogCandidate {
   source?: AnalogSource | null;
 }
 
+/** Откуда взята опорная цена для критерия «цена». */
+export type PriceBasis = 'exact_median' | 'manager';
+
+export interface ReferencePrice {
+  value: number;
+  basis: PriceBasis;
+}
+
+export const PRICE_BASIS_TITLE: Record<PriceBasis, string> = {
+  exact_median: 'медиана по точной модели',
+  manager: 'цена менеджера в строке',
+};
+
+/**
+ * Опорная цена по порядку заказчика: медиана по точной модели → цена менеджера → нет (критерий
+ * пропускается). Нули и отрицательные значения считаются отсутствием цены.
+ */
+export function referencePrice(input: { exactMedian?: number | null; managerPrice?: number | null }): ReferencePrice | null {
+  if (input.exactMedian !== null && input.exactMedian !== undefined && input.exactMedian > 0) return { value: input.exactMedian, basis: 'exact_median' };
+  if (input.managerPrice !== null && input.managerPrice !== undefined && input.managerPrice > 0) return { value: input.managerPrice, basis: 'manager' };
+  return null;
+}
+
 export interface AnalogRequest {
   name: string;
   raw: string;
-  /** Цена, с которой сравниваем; null — критерий цены не применяется. */
-  price: number | null;
+  /** Опорная цена (referencePrice); null — критерий цены не применяется, в пометке «цена не сравнивалась». */
+  price: ReferencePrice | null;
   /** ГОСТ, ТУ и прочие требования из заявки (письмо и разобранные спецификации). */
   requirements: string[];
 }
@@ -66,6 +96,8 @@ export type AnalogCriterion = 'standard' | 'design' | 'price';
 export interface AnalogOptions {
   /** Допуск по цене, доля: 0.1 — ±10 %. Больше MAX_PRICE_TOLERANCE не принимается. */
   priceTolerance?: number;
+  /** Домены производителей из настроек КП: источник с таким доменом (или его поддоменом) — всегда сайт производителя. */
+  manufacturerDomains?: string[];
 }
 
 export interface AnalogMatch {
@@ -98,6 +130,27 @@ export const MAX_PRICE_TOLERANCE = 0.1;
 
 /** Приоритет источников: сайт производителя выше любого другого. */
 const SOURCE_RANK: Record<SourceKind, number> = { manufacturer: 3, retail: 2, marketplace: 1, aggregator: 1 };
+
+/** Домен в сравнимом виде: без схемы, пути, «www.» и регистра. */
+export function normalizeDomain(s: string): string {
+  let d = s.trim().toLowerCase();
+  d = d.replace(/^[a-z]+:\/\//, '').split('/')[0] ?? '';
+  return d.replace(/^www\./, '');
+}
+
+/** Хост ссылки входит в список доменов производителей (точно или как поддомен). */
+export function isManufacturerDomain(url: string, domains: string[] | undefined): boolean {
+  if (!domains?.length) return false;
+  const host = normalizeDomain(url);
+  if (!host) return false;
+  return domains.map(normalizeDomain).some((d) => d && (host === d || host.endsWith(`.${d}`)));
+}
+
+/** Вид источника: домен из списка производителей главнее оценки модели; без источника — агрегатор. */
+export function sourceKindOf(source: AnalogSource | null | undefined, domains?: string[]): SourceKind {
+  if (!source) return 'aggregator';
+  return isManufacturerDomain(source.url, domains) ? 'manufacturer' : source.kind;
+}
 
 /** Слова, которые есть почти в каждой позиции и дизайн не описывают. */
 const STOP_WORDS = new Set(['дверь', 'двери', 'дверей', 'дверное', 'полотно', 'полотна', 'блок', 'комплект', 'межкомнатная', 'межкомнатные', 'входная', 'входные', 'размер', 'штук']);
@@ -146,7 +199,7 @@ export function comparablePrice(c: AnalogCandidate): number | null {
 
 const money = (v: number) => `${Math.round(v).toLocaleString('ru-RU')} ₽`;
 
-function matchOne(req: AnalogRequest, c: AnalogCandidate, reqTokens: string[], tolerance: number): AnalogMatch | null {
+function matchOne(req: AnalogRequest, c: AnalogCandidate, reqTokens: string[], tolerance: number, domains: string[] | undefined): AnalogMatch | null {
   const matched: AnalogCriterion[] = [];
   const details: string[] = [];
   let score = 0;
@@ -168,17 +221,17 @@ function matchOne(req: AnalogRequest, c: AnalogCandidate, reqTokens: string[], t
   }
   // 3. Цена: в пределах допуска от цены заявки; цена с включённой доставкой без суммы не сравнивается.
   const price = comparablePrice(c);
-  if (req.price !== null && req.price > 0 && price !== null) {
-    const ratio = Math.abs(price - req.price) / req.price;
+  if (req.price !== null && price !== null) {
+    const ratio = Math.abs(price - req.price.value) / req.price.value;
     if (ratio <= tolerance) {
       matched.push('price');
-      details.push(`${money(price)} против ${money(req.price)} (±${Math.round(ratio * 100)} %)`);
+      details.push(`${money(price)} против ${money(req.price.value)} (±${Math.round(ratio * 100)} %, ${PRICE_BASIS_TITLE[req.price.basis]})`);
       score += 1 + (tolerance - ratio);
     }
   }
   if (!matched.length) return null;
   // Сайт производителя — выше при равных критериях (веса критериев 100 / 10 / 1 не дают источнику их перебить).
-  score += SOURCE_RANK[c.source?.kind ?? 'aggregator'] / 10;
+  score += SOURCE_RANK[sourceKindOf(c.source, domains)] / 10;
   return { candidate: c, criterion: matched[0] ?? 'price', matched, detail: details.join('; '), comparablePrice: price, score };
 }
 
@@ -187,12 +240,15 @@ export function rankAnalogs(req: AnalogRequest, candidates: AnalogCandidate[], o
   const tolerance = priceToleranceOf(opts);
   const reqTokens = designTokens(`${req.name} ${req.raw}`);
   return candidates
-    .map((c) => matchOne(req, c, reqTokens, tolerance))
+    .map((c) => matchOne(req, c, reqTokens, tolerance, opts?.manufacturerDomains))
     .filter((m): m is AnalogMatch => m !== null)
     .sort((a, b) => b.score - a.score);
 }
 
-/** Лучший аналог или null; пометка — «предварительно, по аналогу: фабрика, модель, источник (критерий: …)». */
+/**
+ * Лучший аналог или null; пометка — «предварительно, по аналогу: фабрика, модель, источник; цена;
+ * совпадение …». Без опорной цены — «цена не сравнивалась».
+ */
 export function suggestAnalog(req: AnalogRequest, candidates: AnalogCandidate[], opts?: AnalogOptions): AnalogSuggestion | null {
   const best = rankAnalogs(req, candidates, opts)[0];
   if (!best) return null;
@@ -201,5 +257,6 @@ export function suggestAnalog(req: AnalogRequest, candidates: AnalogCandidate[],
   const source = c.source ? `${c.source.seller}, ${c.source.url}` : 'источник не указан';
   const price = best.comparablePrice === null ? 'цена для сравнения не определена' : money(best.comparablePrice);
   const criteria = best.matched.map((m) => CRITERION_TITLE[m]).join(', ');
-  return { ...best, reason: `предварительно, по аналогу: ${title}, ${source}; ${price}; совпадение ${criteria} (${best.detail})` };
+  const noPrice = req.price === null ? '; цена не сравнивалась' : '';
+  return { ...best, reason: `предварительно, по аналогу: ${title}, ${source}; ${price}; совпадение ${criteria} (${best.detail})${noPrice}` };
 }

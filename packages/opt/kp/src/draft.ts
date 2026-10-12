@@ -1,7 +1,7 @@
 import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
-import { extractRequirements, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
+import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -83,6 +83,8 @@ export interface KpDraftInput {
   pricing?: PricingOverrides;
   /** Допуск цены аналога из настроек КП, доля (0.1 = ±10 %); нет — по умолчанию из analog.ts. */
   analogPriceTolerance?: number;
+  /** Домены производителей из настроек КП: такой источник всегда считается сайтом производителя. */
+  manufacturerDomains?: string[];
   /** Сколько файлов сделки разбирать за один черновик и какого размера. */
   maxFiles?: number;
   maxFileBytes?: number;
@@ -140,8 +142,11 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   // Аналог — только предложение менеджеру с критерием подбора; строка КП остаётся без цены и без замены.
   if (d.analogs) {
     for (const [i, it] of requestItems.entries()) {
-      const candidates = await d.analogs({ name: it.name, raw: it.raw, price: null, requirements }).catch(() => [] as AnalogCandidate[]);
-      const s = suggestAnalog({ name: it.name, raw: it.raw, price: null, requirements }, candidates, { priceTolerance: input.analogPriceTolerance });
+      // Опорная цена: медиана по точной модели появится на этапе 9; у свежего черновика цены менеджера ещё нет —
+      // критерий «цена» пропускается, подбор по ГОСТ и дизайну, в пометке «цена не сравнивалась».
+      const req: AnalogRequest = { name: it.name, raw: it.raw, price: referencePrice({ managerPrice: items[i]?.price }), requirements };
+      const candidates = await d.analogs(req).catch(() => [] as AnalogCandidate[]);
+      const s = suggestAnalog(req, candidates, { priceTolerance: input.analogPriceTolerance, manufacturerDomains: input.manufacturerDomains });
       if (s) needs.push({ request_index: i, reason: s.reason });
     }
   }

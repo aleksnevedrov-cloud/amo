@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { comparablePrice, designTokens, extractRequirements, priceToleranceOf, rankAnalogs, suggestAnalog, type AnalogCandidate, type SourceKind } from '../src/analog.ts';
+import { comparablePrice, designTokens, extractRequirements, isManufacturerDomain, normalizeDomain, priceToleranceOf, rankAnalogs, referencePrice, sourceKindOf, suggestAnalog, type AnalogCandidate, type SourceKind } from '../src/analog.ts';
 
 const plain = (s: string) => s.replace(/\u00a0/g, ' ');
+const ref = (value: number) => ({ value, basis: 'exact_median' as const });
 const cand = (over: Partial<AnalogCandidate>): AnalogCandidate => ({ id: 'x', name: 'Дверь', vendor: null, price: null, design: [], standards: [], ...over });
 const site = (kind: SourceKind, seller: string) => ({ url: `https://${seller}.ru/p`, foundAt: '2026-10-12', seller, kind, vatStated: 'unknown' as const });
 
 describe('подбор аналога по правилу: ГОСТ → дизайн → цена', () => {
   it('ГОСТ из заявки находится в стандартах товара и имеет приоритет над дизайном и ценой', () => {
-    const req = { name: 'дверь белая эмаль', raw: 'Дверь белая эмаль 2000*800 по ГОСТ 475-2016', price: 10_000, requirements: extractRequirements('по ГОСТ 475-2016') };
+    const req = { name: 'дверь белая эмаль', raw: 'Дверь белая эмаль 2000*800 по ГОСТ 475-2016', price: ref(10_000), requirements: extractRequirements('по ГОСТ 475-2016') };
     const s = suggestAnalog(req, [
       cand({ id: 'design', name: 'Турин белая эмаль', vendor: 'Фабрика А', price: 10_100, design: ['эмаль', 'белая'] }),
       cand({ id: 'gost', name: 'Блок дверной ДГ', vendor: 'Фабрика Б', price: 15_000, standards: ['ГОСТ 475-2016'], source: site('manufacturer', 'fabrika-b') }),
@@ -17,18 +18,18 @@ describe('подбор аналога по правилу: ГОСТ → диза
   });
 
   it('без ГОСТ — по общим признакам дизайна; общие слова «дверь», «полотно» не считаются; совпавшие критерии перечисляются', () => {
-    const req = { name: 'дверь межкомнатная, шпон, венге', raw: 'Дверь межкомнатная шпон венге 2000×700', price: 8_000, requirements: [] };
+    const req = { name: 'дверь межкомнатная, шпон, венге', raw: 'Дверь межкомнатная шпон венге 2000×700', price: { value: 8_000, basis: 'manager' as const }, requirements: [] };
     expect(designTokens(req.name)).toEqual(['шпон', 'венге']);
     const s = suggestAnalog(req, [
       cand({ id: 'other', name: 'Полотно дверное', design: ['эмаль', 'белая'] }),
       cand({ id: 'venge', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге', 'остекление'] }),
     ]);
     expect(s).toMatchObject({ criterion: 'design', matched: ['design', 'price'], candidate: { id: 'venge' } });
-    expect(plain(s!.detail)).toBe('общие признаки «шпон, венге»; 8 500 ₽ против 8 000 ₽ (±6 %)');
+    expect(plain(s!.detail)).toBe('общие признаки «шпон, венге»; 8 500 ₽ против 8 000 ₽ (±6 %, цена менеджера в строке)');
   });
 
   it('только цена: допуск по умолчанию ±10 %, из настроек меньше — уже, больше 10 % не принимается', () => {
-    const req = { name: 'дверь', raw: 'Дверь 2000×800', price: 10_000, requirements: [] };
+    const req = { name: 'дверь', raw: 'Дверь 2000×800', price: ref(10_000), requirements: [] };
     expect(priceToleranceOf()).toBe(0.1);
     expect(priceToleranceOf({ priceTolerance: 0.05 })).toBe(0.05);
     expect(priceToleranceOf({ priceTolerance: 0.15 })).toBe(0.1);
@@ -44,7 +45,7 @@ describe('подбор аналога по правилу: ГОСТ → диза
     expect(comparablePrice(cand({ price: 12_000 }))).toBe(12_000);
     expect(comparablePrice(cand({ price: 12_000, includesDelivery: true }))).toBeNull();
     expect(comparablePrice(cand({ price: 12_000, includesDelivery: true, deliveryRub: 2_000 }))).toBe(10_000);
-    const req = { name: 'дверь', raw: 'Дверь', price: 10_000, requirements: [] };
+    const req = { name: 'дверь', raw: 'Дверь', price: ref(10_000), requirements: [] };
     expect(suggestAnalog(req, [cand({ id: 'incl', price: 10_000, includesDelivery: true })])).toBeNull();
     const s = suggestAnalog(req, [cand({ id: 'net', name: 'Прима', price: 12_000, includesDelivery: true, deliveryRub: 2_000 })]);
     expect(s).toMatchObject({ criterion: 'price', comparablePrice: 10_000, candidate: { id: 'net' } });
@@ -60,6 +61,39 @@ describe('подбор аналога по правилу: ГОСТ → диза
     ]);
     expect(ranked.map((m) => m.candidate.id)).toEqual(['maker', 'market']);
     expect(suggestAnalog(req, [])).toBeNull();
+  });
+
+  it('опорная цена по порядку: медиана по точной модели → цена менеджера → нет', () => {
+    expect(referencePrice({ exactMedian: 9_000, managerPrice: 8_000 })).toEqual({ value: 9_000, basis: 'exact_median' });
+    expect(referencePrice({ exactMedian: null, managerPrice: 8_000 })).toEqual({ value: 8_000, basis: 'manager' });
+    expect(referencePrice({ exactMedian: 0, managerPrice: null })).toBeNull();
+    expect(referencePrice({})).toBeNull();
+  });
+
+  it('без опорной цены критерий «цена» пропускается: подбор по ГОСТ и дизайну, в пометке «цена не сравнивалась»', () => {
+    const req = { name: 'дверь шпон венге', raw: 'Дверь шпон венге', price: null, requirements: [] };
+    const s = suggestAnalog(req, [cand({ id: 'cheap', name: 'Эмаль', price: 100 }), cand({ id: 'venge', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге'] })]);
+    expect(s).toMatchObject({ candidate: { id: 'venge' }, matched: ['design'] });
+    expect(plain(s!.reason)).toBe('предварительно, по аналогу: Фабрика В Милан, источник не указан; 8 500 ₽; совпадение по дизайну (общие признаки «шпон, венге»); цена не сравнивалась');
+    // Только цена без опорной — кандидат не подходит вовсе.
+    expect(suggestAnalog({ ...req, name: 'дверь', raw: 'Дверь' }, [cand({ id: 'cheap', price: 100 })])).toBeNull();
+  });
+
+  it('домены производителей из настроек: такой источник — всегда сайт производителя и ранжируется выше', () => {
+    expect(normalizeDomain('https://WWW.Fabrika.ru/catalog/door')).toBe('fabrika.ru');
+    expect(isManufacturerDomain('https://shop.fabrika.ru/p', ['fabrika.ru'])).toBe(true);
+    expect(isManufacturerDomain('https://fabrika.ru.evil.com/p', ['fabrika.ru'])).toBe(false);
+    expect(isManufacturerDomain('https://fabrika.ru/p', [])).toBe(false);
+    expect(sourceKindOf({ ...site('marketplace', 'fabrika'), url: 'https://fabrika.ru/p' }, ['https://fabrika.ru/'])).toBe('manufacturer');
+    expect(sourceKindOf({ ...site('marketplace', 'market') }, ['fabrika.ru'])).toBe('marketplace');
+    expect(sourceKindOf(null, ['fabrika.ru'])).toBe('aggregator');
+    const req = { name: 'дверь шпон', raw: 'Дверь шпон', price: null, requirements: [] };
+    const cands = [
+      cand({ id: 'maker', name: 'Милан шпон', price: 9_500, source: site('retail', 'shop') }),
+      cand({ id: 'listed', name: 'Милан шпон', price: 9_000, source: { ...site('marketplace', 'fabrika'), url: 'https://fabrika.ru/p' } }),
+    ];
+    expect(rankAnalogs(req, cands).map((m) => m.candidate.id)).toEqual(['maker', 'listed']);
+    expect(rankAnalogs(req, cands, { manufacturerDomains: ['fabrika.ru'] }).map((m) => m.candidate.id)).toEqual(['listed', 'maker']);
   });
 
   it('стандарты из текста заявки: ГОСТ, ТУ, СП; дефисы и пробелы приводятся к одному виду', () => {
