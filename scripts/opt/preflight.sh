@@ -18,13 +18,25 @@ echo "Проверка перед этапом 4 ($(date '+%Y-%m-%d %H:%M'))"
 echo "1. Папки и файлы"
 [ -d "$OPT_DIR/src/.git" ] && ok "клон репозитория в $OPT_DIR/src" || bad "нет клона в $OPT_DIR/src (git clone … src)"
 [ -f "$OPT_DIR/docker-compose.yml" ] && ok "docker-compose.yml опта" || bad "нет $OPT_DIR/docker-compose.yml (cp src/docker-compose.opt.yml docker-compose.yml)"
+if [ -f "$OPT_DIR/docker-compose.yml" ]; then
+  grep -qE '^\s*context:\s*\./src\s*$' "$OPT_DIR/docker-compose.yml" && ok "контекст сборки ./src" || bad "в docker-compose.yml контекст сборки должен быть ./src (иначе Dockerfile.opt не найдётся)"
+fi
+[ -f "$OPT_DIR/src/Dockerfile.opt" ] && ok "Dockerfile.opt в клоне" || bad "нет $OPT_DIR/src/Dockerfile.opt"
 [ -f "$ENV_FILE" ] && ok ".env опта" || bad "нет $ENV_FILE (cp src/.env.opt.example .env и заполнить)"
 
 echo "2. Переменные .env (значения не печатаются)"
 if [ -f "$ENV_FILE" ]; then
-  for k in AMO_CLIENT_ID AMO_CLIENT_SECRET TOKEN_ENCRYPTION_KEY DATABASE_URL REDIS_URL PUBLIC_URL; do
+  # Обязательные переменные — те, что помечены ОБЯЗАТЕЛЬНО в .env.opt.example.
+  for k in PUBLIC_URL API_PORT RETAIL_NETWORK DATABASE_URL REDIS_URL AMO_CLIENT_ID AMO_CLIENT_SECRET TOKEN_ENCRYPTION_KEY; do
     [ -n "$(val "$ENV_FILE" $k)" ] && ok "$k задан" || bad "$k пустой"
   done
+  grep -qE '<пароль>|change-me' "$ENV_FILE" && bad "в .env осталась заглушка (<пароль> или change-me)"
+  cid=$(val "$ENV_FILE" AMO_CLIENT_ID)
+  if [ -n "$cid" ]; then
+    printf '%s' "$cid" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' && ok "AMO_CLIENT_ID — UUID" || bad "AMO_CLIENT_ID должен быть UUID (ID интеграции из «Ключей и доступов»)"
+  fi
+  sec=$(val "$ENV_FILE" AMO_CLIENT_SECRET)
+  if [ -n "$sec" ] && [ "${#sec}" -lt 16 ]; then bad "AMO_CLIENT_SECRET слишком короткий (нужен секретный ключ интеграции)"; fi
   case "$(val "$ENV_FILE" DATABASE_URL)" in *ai_door_opt*) ok "DATABASE_URL указывает на ai_door_opt";; *) bad "DATABASE_URL должен вести в БД ai_door_opt";; esac
   case "$(val "$ENV_FILE" REDIS_URL)" in */1) ok "REDIS_URL — база 1";; *) bad "REDIS_URL должен заканчиваться на /1 (у розницы база 0)";; esac
   case "$(val "$ENV_FILE" PUBLIC_URL)" in "https://$OPT_HOST") ok "PUBLIC_URL = https://$OPT_HOST";; *) bad "PUBLIC_URL должен быть https://$OPT_HOST";; esac

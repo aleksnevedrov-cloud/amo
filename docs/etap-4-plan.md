@@ -37,7 +37,7 @@ mkdir -p /opt/agent-opt && cd /opt/agent-opt
 git clone /opt/ai-door/src src && cd src
 git remote set-url origin "$(git -C /opt/ai-door/src remote get-url origin)"
 git fetch origin && git checkout claude/new-session-8uzdox && git pull origin claude/new-session-8uzdox   # та же ветка, что у розницы
-cp .env.opt.example ../.env && cp docker-compose.opt.yml ../docker-compose.yml
+cp .env.opt.example ../.env && cp docker-compose.opt.yml ../docker-compose.yml   # в compose контекст сборки ./src — клон лежит рядом
 bash scripts/opt/preflight.sh
 ```
 
@@ -45,7 +45,8 @@ bash scripts/opt/preflight.sh
 
 ### Шаг 1. `.env` опта
 
-`/opt/agent-opt/.env` по `.env.opt.example`: `PUBLIC_URL=https://opt.rf-dveri.ru`, `API_PORT=3001`, `RETAIL_NETWORK` (имя сети розницы из
+`/opt/agent-opt/.env` по `.env.opt.example` из корня репозитория (все переменные opt-api и opt-worker с комментариями, обязательные
+помечены «ОБЯЗАТЕЛЬНО»; preflight проверяет, что они непустые и без заглушек): `PUBLIC_URL=https://opt.rf-dveri.ru`, `API_PORT=3001`, `RETAIL_NETWORK` (имя сети розницы из
 `docker network ls`, обычно `src_default`), `DATABASE_URL=postgres://aidoor_opt:<пароль из п. 5>@postgres:5432/ai_door_opt`,
 `REDIS_URL=redis://redis:6379/1`, `AMO_CLIENT_ID` и `AMO_CLIENT_SECRET` из п. 3, `TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)` — свой, не розничный.
 Права `chmod 600 /opt/agent-opt/.env`.
@@ -142,7 +143,7 @@ free -m
 | --- | --- |
 | Модель | провайдер и модель (по умолчанию OpenAI gpt-5.5, резерв gpt-5.1); ключ — перенесён шагом 7, иначе ввести |
 | КП | константы перенесены; проверить, что шаблон показан как загруженный, md5 совпадает со старым |
-| Письмо | SMTP из п. 4, отправитель, копия, шаблоны темы и текста, пароль SMTP |
+| Письмо | SMTP из п. 4 (хост, порт, логин), отправитель, копия, шаблоны темы и текста; пароль SMTP вводится здесь же, в поле «Пароль SMTP» — в `.env` его нет, хранится зашифрованным в account_secrets |
 | Фраза о ценах | в константах КП поле «Фраза о ценах» заполнено по умолчанию; в шаблоне kp.docx заказчика есть `{{price_note}}` под итогом (см. docs/opt/kp-analogi-i-fraza-o-cenah.md) |
 
 ### Шаг 10. Приёмка этапа 4

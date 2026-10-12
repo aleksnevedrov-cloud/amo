@@ -1,10 +1,11 @@
 # Стек «Агента опт» (/opt/agent-opt): opt-api и opt-worker. Postgres и Redis — те же контейнеры, что у розницы
 # (ТЗ разделение, раздел 4): отдельная БД ai_door_opt со своим пользователем и Redis база 1.
 # Подключение к сети розничного compose-проекта: имя сети = <папка проекта розницы>_default.
+# Файл копируется в /opt/agent-opt/docker-compose.yml, клон репозитория лежит рядом в ./src — отсюда контекст сборки.
 services:
   opt-api:
     build:
-      context: .
+      context: ./src
       dockerfile: Dockerfile.opt
     image: opt-api
     restart: unless-stopped
@@ -20,7 +21,7 @@ services:
 
   opt-worker:
     build:
-      context: .
+      context: ./src
       dockerfile: Dockerfile.opt
     image: opt-worker
     restart: unless-stopped
