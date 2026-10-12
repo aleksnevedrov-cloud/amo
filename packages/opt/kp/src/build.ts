@@ -30,7 +30,15 @@ export interface KpBuildInput {
   clientPhone: string;
   lines: KpBuildLine[];
   vatRate: number;
+  /** Фраза о ценах; пустая строка — без фразы. */
+  priceNote: string;
 }
+
+/**
+ * Постоянная фраза в каждом КП (решение заказчика 12.10.2026 — вместо стоп-листа обещаний).
+ * Редактируется в настройках КП (константа priceNote), в шаблоне — плейсхолдер {{price_note}} под итогом.
+ */
+export const DEFAULT_PRICE_NOTE = 'Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.';
 
 export interface KpTemplateData {
   kp_number: string;
@@ -43,6 +51,7 @@ export interface KpTemplateData {
   vat_phrase: string;
   grand_total: string;
   total_qty: string;
+  price_note: string;
 }
 
 const run = promisify(execFile);
@@ -128,7 +137,17 @@ export function templateData(input: KpBuildInput): KpTemplateData {
       : 'НДС не облагается',
     grand_total: money(total),
     total_qty: `${qty} ${plural(qty, 'позиция', 'позиции', 'позиций')}`,
+    price_note: input.priceNote.trim(),
   };
+}
+
+/**
+ * Шаблон без {{price_note}}: фраза всё равно должна попасть в каждое КП — добавляется строкой
+ * после фразы об НДС (она стоит под итогом). Возвращает те же данные, если тег в шаблоне есть.
+ */
+export function withPriceNoteFallback(hasTag: boolean, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  if (hasTag || !data.price_note) return { data, fallback: false };
+  return { data: { ...data, vat_phrase: `${data.vat_phrase}\n${data.price_note}` }, fallback: true };
 }
 
 export interface KpBuildResult {
@@ -136,6 +155,8 @@ export interface KpBuildResult {
   pdfPath: string | null;
   pdfError?: string;
   certificates: string[];
+  /** В шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС. */
+  priceNoteFallback: boolean;
 }
 
 /**
@@ -155,7 +176,8 @@ export async function buildKp(
     linebreaks: true,
     nullGetter: () => '',
   });
-  doc.render(data);
+  const { data: rendered, fallback } = withPriceNoteFallback(doc.getFullText().includes('price_note'), data);
+  doc.render(rendered);
   await mkdir(outDir, { recursive: true });
   const docxPath = join(outDir, `${baseName}.docx`);
   await writeFile(docxPath, doc.getZip().generate({ type: 'nodebuffer' }) as Buffer);
@@ -169,9 +191,9 @@ export async function buildKp(
       { timeout: 120_000 },
     );
     await access(pdfPath);
-    return { docxPath, pdfPath, certificates: [] };
+    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback };
   } catch (err) {
-    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [] };
+    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback };
   }
 }
 

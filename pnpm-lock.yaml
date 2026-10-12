@@ -159,9 +159,6 @@ importers:
       '@opt/kp':
         specifier: workspace:*
         version: link:../../packages/opt/kp
-      '@opt/kp-knowledge':
-        specifier: workspace:*
-        version: link:../../packages/opt/kp-knowledge
       bullmq:
         specifier: ^5.81.5
         version: 5.81.5
@@ -610,9 +607,6 @@ importers:
       '@core/shared':
         specifier: workspace:*
         version: link:../../core/shared
-      '@opt/kp-knowledge':
-        specifier: workspace:*
-        version: link:../kp-knowledge
       docxtemplater:
         specifier: 3.50.0
         version: 3.50.0
@@ -622,22 +616,6 @@ importers:
       pizzip:
         specifier: 3.1.7
         version: 3.1.7
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
-      pg:
-        specifier: ^8.23.0
-        version: 8.23.0
-
-  packages/opt/kp-knowledge:
-    dependencies:
-      '@core/db':
-        specifier: workspace:*
-        version: link:../../core/db
       zod:
         specifier: ^3.25.76
         version: 3.25.76

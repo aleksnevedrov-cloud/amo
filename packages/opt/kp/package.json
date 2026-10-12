@@ -19,7 +19,6 @@
     "@core/docs": "workspace:*",
     "@core/llm": "workspace:*",
     "@core/shared": "workspace:*",
-    "@opt/kp-knowledge": "workspace:*",
     "docxtemplater": "3.50.0",
     "nodemailer": "^10.0.10",
     "pizzip": "3.1.7",

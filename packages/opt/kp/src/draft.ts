@@ -1,7 +1,7 @@
 import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
-import { knowledgeHints, knowledgeSummary, type KnowledgeSet, type KnowledgeSummary } from '@opt/kp-knowledge';
+import { extractRequirements, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -52,8 +52,8 @@ export interface KpPayload {
     skipped: { name: string; reason: string }[];
   };
   generatedAt: string;
-  /** Сколько строк в каждом справочнике на момент сборки; нет поля — черновик собран без базы знаний. */
-  knowledge?: KnowledgeSummary;
+  /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
+  requirements: string[];
 }
 
 export interface ParsedFile {
@@ -69,8 +69,11 @@ export interface KpDraftDeps {
   amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'listLeadFiles' | 'downloadFile'>;
   /** Разбор файла спецификации (@core/docs); null — разбор недоступен. */
   analyze: ((file: { filename: string; mime: string; bytes: Uint8Array }) => Promise<ParsedFile>) | null;
-  /** Справочники опта (ТЗ раздел 9): подсказки менеджеру; пустые — черновик как без базы знаний. */
-  knowledge?: KnowledgeSet | null;
+  /**
+   * Кандидаты в аналоги для позиции (правило подбора — analog.ts). У опта своего каталога нет:
+   * источник подключается зависимостью, без него черновик собирается без предложений аналогов.
+   */
+  analogs?: ((item: AnalogRequest) => Promise<AnalogCandidate[]>) | null;
 }
 
 export interface KpDraftInput {
@@ -131,8 +134,14 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   }
   const client = letter?.parsed.client ?? { org: '', fio: '', email: '', phone: '' };
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
-  if (d.knowledge) {
-    needs.push(...knowledgeHints({ items: items.map((l, i) => ({ request_index: l.request_index, name: l.name, raw: requestItems[i]?.raw })), requiredBlocks, text: [card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'), isLegalEntity: Boolean(client.org) }, d.knowledge));
+  const requirements = uniq([...files.parsed.flatMap((f) => f.requirements), ...extractRequirements([card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'))]);
+  // Аналог — только предложение менеджеру с критерием подбора; строка КП остаётся без цены и без замены.
+  if (d.analogs) {
+    for (const [i, it] of requestItems.entries()) {
+      const candidates = await d.analogs({ name: it.name, raw: it.raw, price: null, requirements }).catch(() => [] as AnalogCandidate[]);
+      const s = suggestAnalog({ name: it.name, raw: it.raw, price: null, requirements }, candidates);
+      if (s) needs.push({ request_index: i, reason: s.reason });
+    }
   }
 
   return {
@@ -159,7 +168,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         skipped: files.skipped,
       },
       generatedAt: new Date().toISOString(),
-      ...(d.knowledge ? { knowledge: knowledgeSummary(d.knowledge) } : {}),
+      requirements,
     },
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,

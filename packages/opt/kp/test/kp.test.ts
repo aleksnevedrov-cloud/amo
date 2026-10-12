@@ -1,7 +1,7 @@
 import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { lineSum, plural, rublesInWords, templateData } from '../src/build.ts';
+import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
 import { buildKpDraft, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
 
 describe('сборка КП: значения для шаблона', () => {
@@ -17,14 +17,26 @@ describe('сборка КП: значения для шаблона', () => {
   it('итоги по строкам со скидкой, НДС внутри цены', () => {
     const line = { name: 'Турин 1', size: '2000×800 мм', qty: 2, price: 10_000, discount: 10 };
     expect(lineSum(line)).toBe(18_000);
-    const data = templateData({ kpNo: 'КП-2026-1', date: new Date(2026, 9, 12), basis: 'запрос от 09.10.2026', clientName: 'ООО Ромашка', clientPhone: '+7 900', lines: [line, { ...line, price: null }], vatRate: 22 });
+    const data = templateData({ kpNo: 'КП-2026-1', date: new Date(2026, 9, 12), basis: 'запрос от 09.10.2026', clientName: 'ООО Ромашка', clientPhone: '+7 900', lines: [line, { ...line, price: null }], vatRate: 22, priceNote: DEFAULT_PRICE_NOTE });
     // Разделитель тысяч в ru-RU — неразрывный пробел.
     const plain = (v: string) => v.replace(/\u00a0/g, ' ');
     expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '0 ₽']]);
     expect(plain(data.grand_total)).toBe('18 000 ₽');
     expect(data.total_qty).toBe('4 позиции');
     expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 3 245,90 ₽');
-    expect(templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 0 }).vat_phrase).toBe('НДС не облагается');
+    expect(templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 0, priceNote: '' }).vat_phrase).toBe('НДС не облагается');
+    expect(data.price_note).toBe('Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.');
+  });
+
+  it('фраза о ценах: есть тег — как есть; нет тега — под строкой НДС; пустая фраза — ничего', () => {
+    const line = { name: 'Турин 1', size: '', qty: 1, price: 1_000, discount: 0 };
+    const data = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 0, priceNote: ' Цены ориентировочные. ' });
+    expect(data.price_note).toBe('Цены ориентировочные.');
+    expect(withPriceNoteFallback(true, data)).toEqual({ data, fallback: false });
+    const fb = withPriceNoteFallback(false, data);
+    expect(fb.fallback).toBe(true);
+    expect(fb.data.vat_phrase).toBe('НДС не облагается\nЦены ориентировочные.');
+    expect(withPriceNoteFallback(false, { ...data, price_note: '' })).toEqual({ data: { ...data, price_note: '' }, fallback: false });
   });
 });
 
@@ -116,6 +128,28 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.candidates).toEqual([]);
     expect(r.cost).toEqual({ inputTokens: 1000, outputTokens: 100, usd: expect.any(Number) });
     expect(r).toMatchObject({ provider: 'openai', model: 'gpt-5.5' });
+  });
+
+  it('аналог — только пометка менеджеру с критерием; строка без цены и без замены; требования ГОСТ из письма', async () => {
+    const { gateway } = fakeGateway(JSON.stringify({ client: { org: 'ООО Ромашка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Дверь шпон венге 2000*800 по ГОСТ 6629-88', name: 'дверь шпон венге', width_mm: 800, height_mm: 2000, qty: 1 }, { raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 }], required_blocks: [], questions: [] }));
+    const asked: string[] = [];
+    const analogs: KpDraftDeps['analogs'] = async (item) => {
+      asked.push(item.name);
+      expect(item.requirements).toEqual(['ГОСТ 6629-88']);
+      return item.name.includes('венге') ? [{ id: 'p1', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге'], standards: [] }] : [];
+    };
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [{ ...letter, text: 'Нужны двери по ГОСТ 6629-88, см. список' }] }), analyze: null, analogs });
+    expect(asked).toEqual(['дверь шпон венге', 'добор']);
+    expect(r.payload.requirements).toEqual(['ГОСТ 6629-88']);
+    expect(r.payload.items.map((l) => [l.name, l.price])).toEqual([['дверь шпон венге', null], ['добор', null]]);
+    expect(r.payload.needs_manager.map((n) => [n.request_index, n.reason.replace(/\u00a0/g, ' ')])).toEqual([
+      [0, 'цена не задана'],
+      [1, 'цена не задана'],
+      [0, 'аналог по дизайну (общие признаки «шпон, венге»): Фабрика В Милан, 8 500 ₽ — предложение, в КП не подставлено'],
+    ]);
+    // Без источника кандидатов черновик собирается без предложений.
+    const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null });
+    expect(r2.payload.needs_manager.some((n) => n.reason.startsWith('аналог'))).toBe(false);
   });
 
   it('файлов нет — позиции из письма; разбор недоступен — файлы в skipped', async () => {

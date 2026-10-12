@@ -21,7 +21,6 @@ COPY packages/core/media/package.json packages/core/media/
 COPY packages/core/docs/package.json packages/core/docs/
 COPY packages/retail/mail/package.json packages/retail/mail/
 COPY packages/opt/kp/package.json packages/opt/kp/
-COPY packages/opt/kp-knowledge/package.json packages/opt/kp-knowledge/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .

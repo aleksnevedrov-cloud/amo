@@ -36,8 +36,8 @@ export async function runDraftJob(core: OptCore, job: DraftJob): Promise<{ draft
             const r = await core.docs.analyze({ accountId, leadId, source: 'widget', filename: file.filename, mime: file.mime, bytes: file.bytes, settings: widgetSettings, createdBy: job.userId, hint: 'request', route });
             return { id: r.id, filename: file.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements };
           };
-    const knowledge = await core.knowledge.loadSet(accountId);
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze, knowledge });
+    // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze });
     const draftId = await core.kp.createDraft(accountId, leadId, r.payload as unknown as Record<string, unknown>, job.userId);
     await core.journal.add({
       accountId,

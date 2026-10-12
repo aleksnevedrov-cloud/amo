@@ -1,3 +1,4 @@
+export * from './analog.ts';
 export * from './build.ts';
 export * from './deps.ts';
 export * from './draft.ts';

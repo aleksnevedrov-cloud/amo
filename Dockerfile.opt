@@ -23,7 +23,6 @@ COPY packages/retail/agent/package.json packages/retail/agent/
 COPY packages/retail/pricing/package.json packages/retail/pricing/
 COPY packages/retail/mail/package.json packages/retail/mail/
 COPY packages/opt/kp/package.json packages/opt/kp/
-COPY packages/opt/kp-knowledge/package.json packages/opt/kp-knowledge/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .

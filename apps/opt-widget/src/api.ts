@@ -1,10 +1,13 @@
-import type { KpConstants, KpDraftStatus } from '@core/db';
+import type { KpConstants as CoreKpConstants, KpDraftStatus } from '@core/db';
 import type { ModelInfo, ModelRef, ProviderId } from '@core/llm/types';
 import { ApiClient } from '@core/widget-core';
 // Только схема настроек: остальной @opt/kp — серверный код, виджету он не нужен.
 import type { OptSettings } from '@opt/kp/settings';
 
-export type { KpConstants, ModelInfo, ModelRef, OptSettings, ProviderId };
+export type { ModelInfo, ModelRef, OptSettings, ProviderId };
+
+/** Константы КП опта: к общему набору добавлена фраза о ценах (плейсхолдер {{price_note}}). */
+export type KpConstants = CoreKpConstants & { priceNote?: string };
 
 export interface Status {
   accountId: number;
@@ -82,15 +85,6 @@ export interface JournalItem {
   createdAt: string;
 }
 
-export interface KnowledgeKindInfo {
-  kind: 'delivery' | 'installation' | 'b2b' | 'analogs' | 'stoplist';
-  title: string;
-  purpose: string;
-  template: string;
-  format: 'csv' | 'markdown';
-  loaded: { filename: string; rows: number; updatedAt: string; usage: string } | null;
-}
-
 export interface LlmKeys {
   provider: ProviderId;
   fallbackProvider: ProviderId;
@@ -138,13 +132,6 @@ export class KpApi extends ApiClient {
   send = (body: { draftId: number; to: string; cc?: string; subject: string; text: string; resendConfirmed?: boolean }) =>
     this.call<{ draft: KpDraftInfo | null; to: string }>('POST', '/widget/v1/kp/send', body);
 
-  /** База знаний: справочники, шаблоны и загруженные файлы (текст UTF-8). */
-  knowledge = () => this.call<{ items: KnowledgeKindInfo[] }>('GET', '/widget/v1/kp/knowledge');
-  knowledgeTemplate = (kind: KnowledgeKindInfo['kind']) => this.call<{ filename: string; content: string }>('GET', `/widget/v1/kp/knowledge/${kind}/template`);
-  knowledgeFile = (kind: KnowledgeKindInfo['kind']) => this.call<{ filename: string; content: string }>('GET', `/widget/v1/kp/knowledge/${kind}/file`);
-  uploadKnowledge = (kind: KnowledgeKindInfo['kind'], filename: string, content: string) =>
-    this.call<{ ok: true; rows: number }>('PUT', `/widget/v1/kp/knowledge/${kind}`, { filename, content });
-  removeKnowledge = (kind: KnowledgeKindInfo['kind']) => this.call<{ ok: true; removed: boolean }>('DELETE', `/widget/v1/kp/knowledge/${kind}`);
 
   kpSettings = () => this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
   saveKpSettings = (patch: { constants?: KpConstants; certsDir?: string | null; numbering?: { prefix?: string; counter?: number } }) =>

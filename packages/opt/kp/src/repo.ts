@@ -11,6 +11,8 @@ export interface KpConstants {
   validDays?: number;
   coverLetter?: string;
   signature?: string;
+  /** Фраза о ценах под итогом КП (плейсхолдер {{price_note}}); не задана — текст по умолчанию из build.ts. */
+  priceNote?: string;
 }
 
 export interface KpNumbering {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
-import { buildKp, composeKpMail, findCertificates, renderMailTemplate, sendBlockers, templateData, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { buildKp, composeKpMail, DEFAULT_PRICE_NOTE, findCertificates, renderMailTemplate, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -21,6 +21,7 @@ const constantsSchema = z.object({
   validDays: z.number().int().min(1).max(365).optional(),
   coverLetter: z.string().max(3000).optional(),
   signature: z.string().max(500).optional(),
+  priceNote: z.string().max(500).optional(),
 });
 
 const settingsSchema = z.object({
@@ -72,7 +73,8 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   api.get('/kp/settings', async (req) => {
     const s = await repo.getSettings(principal(req).accountId);
     return {
-      constants: s.constants,
+      // Фраза о ценах есть в каждом КП: пока заказчик её не менял, показываем текст по умолчанию.
+      constants: { priceNote: DEFAULT_PRICE_NOTE, ...s.constants },
       certsDir: s.certsDir,
       numbering: s.numbering,
       template: { exists: Boolean(s.templatePath), name: s.templateName, md5: s.templateMd5, updatedAt: s.templateUpdatedAt },
@@ -167,7 +169,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const lines = (payload.items ?? []).filter((l) => l.price !== null);
     if (!lines.length) return reply.code(409).send({ error: 'no_priced_lines' });
     try {
-      const r = await buildDocument(deps, p, draft, lines, s.templatePath, s.constants.vatRate ?? 0, s.certsDir);
+      const r = await buildDocument(deps, p, draft, lines, s.templatePath, s.constants, s.certsDir);
       const fresh = await repo.byId(p.accountId, draft.id);
       return { draft: fresh ? view(fresh) : null, pdf: r.pdf, attached: r.attached };
     } catch (err) {
@@ -249,7 +251,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
 }
 
 /** DOCX по шаблону и PDF через LibreOffice, сертификаты по фабрикам, файлы — в карточку сделки. */
-async function buildDocument(deps: Deps, p: WidgetPrincipal, draft: KpDraft, lines: KpLine[], template: string, vatRate: number, certsDir: string | null) {
+async function buildDocument(deps: Deps, p: WidgetPrincipal, draft: KpDraft, lines: KpLine[], template: string, constants: KpConstants, certsDir: string | null) {
   const payload = draft.payload as unknown as KpPayload;
   const kpNo = draft.kpNo ?? (await deps.kp.nextNumber(p.accountId));
   const letterAt = payload.source?.letterAt ? new Date(payload.source.letterAt) : null;
@@ -260,7 +262,8 @@ async function buildDocument(deps: Deps, p: WidgetPrincipal, draft: KpDraft, lin
     clientName: payload.client?.org || payload.client?.fio || '',
     clientPhone: payload.client?.phone || '',
     lines: lines.map((l) => ({ name: l.name, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
-    vatRate,
+    vatRate: constants.vatRate ?? 0,
+    priceNote: constants.priceNote ?? DEFAULT_PRICE_NOTE,
   });
   const outDir = join(deps.filesRoot, 'kp', String(p.accountId), String(draft.leadId));
   const built = await buildKp(template, data, outDir, `KP-${kpNo.replace(/[^0-9A-Za-zА-Яа-я._-]+/g, '_')}`);
@@ -272,8 +275,12 @@ async function buildDocument(deps: Deps, p: WidgetPrincipal, draft: KpDraft, lin
     accountId: p.accountId,
     leadId: draft.leadId,
     kind: 'kp_build',
-    summary: `КП ${kpNo} собрано: позиций ${lines.length}` + (built.pdfPath ? '' : ', PDF не собран') + (attached.length ? `, в сделку ${attached.length}` : ''),
-    details: { draftId: draft.id, certificates: certs.length, attached, pdfError: built.pdfError, userId: p.userId },
+    summary:
+      `КП ${kpNo} собрано: позиций ${lines.length}` +
+      (built.pdfPath ? '' : ', PDF не собран') +
+      (attached.length ? `, в сделку ${attached.length}` : '') +
+      (built.priceNoteFallback ? '; в шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС' : ''),
+    details: { draftId: draft.id, certificates: certs.length, attached, pdfError: built.pdfError, priceNoteFallback: built.priceNoteFallback, userId: p.userId },
   });
   return { pdf: Boolean(built.pdfPath), attached };
 }
