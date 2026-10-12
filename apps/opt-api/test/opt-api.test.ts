@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import PizZip from 'pizzip';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ACCOUNT_ID, fakeGateway, LEAD_ID, setup, widgetToken } from './helpers.ts';
+import { decodeTokenClaims } from '../src/routes/widget.ts';
+import { ACCOUNT_ID, CLIENT_ID, fakeGateway, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Минимальный DOCX с плейсхолдерами: номер, покупатель, строки и итог. */
 function templateDocx(): string {
@@ -37,6 +38,16 @@ describe('opt-api: от подключения интеграции до пис�
     expect(cb.statusCode).toBe(200);
     expect(cb.body).toContain('подключён к «Агенту опт»');
     expect(await ctx.deps.accounts.get(ACCOUNT_ID)).toMatchObject({ accountDomain: 'aleksnevedrov.amocrm.ru' });
+  });
+
+  it('виджет: токен, подписанный чужим ключом или выпущенный для другой интеграции, → 401; утверждения читаются без подписи', async () => {
+    const foreign = await widgetToken({}, 'another-integration-secret-0123456789');
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/settings', headers: { 'x-auth-token': foreign } })).json()).toEqual({ error: 'invalid_token' });
+    const otherClient = await widgetToken({ client_uuid: '11111111-2222-3333-4444-555555555555' });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/settings', headers: { 'x-auth-token': otherClient } })).statusCode).toBe(401);
+    expect(decodeTokenClaims(otherClient)).toMatchObject({ client_uuid: '11111111-2222-3333-4444-555555555555', iss: expect.any(String) });
+    expect(decodeTokenClaims(foreign)?.client_uuid).toBe(CLIENT_ID);
+    expect(decodeTokenClaims('not-a-jwt')).toBeNull();
   });
 
   it('виджет: без токена 401; статус, настройки strict, пароль SMTP', async () => {

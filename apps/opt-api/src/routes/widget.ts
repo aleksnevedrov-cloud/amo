@@ -31,6 +31,28 @@ const journalQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+/**
+ * Утверждения JWT без проверки подписи — только для диагностики 401 (RFD-AI-AGENT-OPT-WIDGET-401):
+ * по client_uuid видно, ключом какой интеграции amo подписал токен (опта или розницы), по aud — для какого
+ * адреса. Сам токен, подпись и секрет наружу не отдаются.
+ */
+export function decodeTokenClaims(token: string): { client_uuid?: string; aud?: unknown; iss?: string; exp?: number; jti?: string } | null {
+  const part = token.split('.')[1];
+  if (!part) return null;
+  try {
+    const raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as Record<string, unknown>;
+    return {
+      client_uuid: typeof raw.client_uuid === 'string' ? raw.client_uuid : undefined,
+      aud: raw.aud,
+      iss: typeof raw.iss === 'string' ? raw.iss : undefined,
+      exp: typeof raw.exp === 'number' ? raw.exp : undefined,
+      jti: typeof raw.jti === 'string' ? raw.jti : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** API виджета «Агент опт». Авторизация — одноразовый токен amo в X-Auth-Token, подписанный ключами интеграции опта. */
 export function widgetRoutes(app: FastifyInstance, deps: Deps) {
   const audience = disposableTokenAudience(amoRedirectUri(deps.env));
@@ -43,7 +65,22 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         try {
           req.principal = await verifyDisposableToken(token, { clientSecret: deps.env.AMO_CLIENT_SECRET, clientId: deps.env.AMO_CLIENT_ID, audience });
         } catch (err) {
-          req.log.warn({ err: (err as Error).message }, 'widget: невалидный токен');
+          // Диагностика без секретов: чей client_uuid в токене и совпадает ли он с AMO_CLIENT_ID опта.
+          const c = decodeTokenClaims(token);
+          req.log.warn(
+            {
+              err: (err as Error).message,
+              clientUuid: c?.client_uuid ?? null,
+              sameClientId: c?.client_uuid === deps.env.AMO_CLIENT_ID,
+              aud: c?.aud ?? null,
+              expectedAud: audience,
+              iss: c?.iss ?? null,
+              exp: c?.exp ? new Date(c.exp * 1000).toISOString() : null,
+              jti: c?.jti ?? null,
+              secretLength: deps.env.AMO_CLIENT_SECRET.length,
+            },
+            'widget: невалидный токен',
+          );
           return reply.code(401).send({ error: 'invalid_token' });
         }
       });
