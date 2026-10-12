@@ -133,7 +133,6 @@ const lastClientText = async (leadId: number) => (await new DialogRepo(db).histo
 beforeEach(async () => {
   resetAuthBackoff();
   await db.query('DELETE FROM dialog_messages');
-  await db.query('DELETE FROM mail_threads');
   await db.query('DELETE FROM pending_messages');
   await db.query('DELETE FROM email_outbound');
 });
@@ -144,9 +143,8 @@ describe('pollMailbox', () => {
     await t.mb.put('INBOX', { subject: 'Двери в квартиру', text: 'Нужны 3 белые двери' });
     const r = await pollMailbox(1, t.deps);
     expect(r).toMatchObject({ received: 1, queued: 1 });
-    // Письмо — в историю сделки и в нить для ответа с КП; ответ агент не готовит, очередь пуста.
+    // Письмо — в историю сделки; ответ агент не готовит, очередь пуста.
     expect(await lastClientText(301)).toContain('Тема письма: Двери в квартиру\nНужны 3 белые двери');
-    expect(await mail.lastThread(1, 301)).toMatchObject({ from: 'ivan@client.ru', fromName: 'Иван', subject: 'Двери в квартиру', messageId: '<m2.5@client.ru>' });
     expect(await new DialogRepo(db).takePending(1, 301)).toEqual([]);
     expect(t.scheduled).toEqual([]);
     const { rows } = await db.query("SELECT summary FROM ai_journal WHERE account_id = 1 AND kind = 'note' ORDER BY id DESC LIMIT 1");
@@ -305,7 +303,6 @@ describe('почта уже подключена к amo: ждём сделку �
     amoState.leads = [{ id: 700, status_id: 10, pipeline_id: 1 }];
     expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
     expect(await lastClientText(700)).toContain('Тема письма: Входная дверь');
-    expect(await mail.lastThread(1, 700)).toMatchObject({ from: 'olga@new.ru', subject: 'Входная дверь' });
     expect(await mail.listWaiting(1)).toEqual([]);
   });
 

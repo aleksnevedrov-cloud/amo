@@ -1,4 +1,3 @@
-import { buildKpNote, classifyKpRequest } from './kp-request.ts';
 import { saveMailAttachments, type SaveAttachmentsDeps } from './attachments.ts';
 import type { AmoApiClient } from '@core/amo';
 import type { DialogRepo, JournalRepo, SettingsRepo, WidgetSettings } from '@core/db';
@@ -260,18 +259,10 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   }
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
   const openings: unknown[] = [];
-  // Запрос КП разбираем даже при выключенном авторазборе, рассылки — не разбираем вовсе.
-  const kp = classifyKpRequest({
-    fromAddress: from.address,
-    subject: msg.subject,
-    text: msg.text,
-  });
+  // Раздел КП из розницы убран (решение заказчика 12.10.2026): вложения разбираются только по настройке авторазбора.
   const extracts = new Map<string, { text?: string; error?: string }>();
   if (msg.attachments.length) {
-    const docs =
-      d.documents && !kp.isBulk && (settings.vision.autoParse || kp.isRequest)
-        ? d.documents
-        : null;
+    const docs = d.documents && settings.vision.autoParse ? d.documents : null;
     for (const a of msg.attachments.slice(0, MAX_ATTACHMENTS)) {
       const name = a.filename ?? a.contentType;
       if (!docs) {
@@ -334,36 +325,6 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
       return undefined;
     });
   }
-  if (kp.isRequest && msg.attachments.length) {
-    // Менеджер должен видеть в карточке, что просят, не открывая вложения.
-    try {
-      await api.addLeadNote(
-        link.leadId,
-        buildKpNote({
-          subject: msg.subject,
-          fromName: from.name,
-          fromAddress: from.address,
-          text: msg.text,
-          matched: kp.matched,
-          files: [...extracts.entries()].map(([filename, r]) => ({ filename, ...r })),
-        }),
-      );
-      await d.journal.add({
-        accountId,
-        leadId: link.leadId,
-        kind: 'mail_extract',
-        summary: `Запрос КП из письма от ${from.address}: примечание добавлено`,
-        details: { matched: kp.matched, files: extracts.size },
-      });
-    } catch (err) {
-      await d.journal.add({
-        accountId,
-        leadId: link.leadId,
-        kind: 'kp_error',
-        summary: `Примечание по запросу КП не добавлено: ${(err as Error).message}`,
-      });
-    }
-  }
   await enqueueLetter(accountId, link.leadId, letter, link.created, d);
   return 'queued';
 }
@@ -391,17 +352,6 @@ async function enqueueLetter(
   d: PollDeps,
 ) {
   await d.dialog.addMessage(accountId, leadId, 'client', l.text);
-  // Заголовки цепочки нужны этапу 5: КП уходит ответом на это же письмо.
-  const meta = l.meta as { messageId?: string | null; references?: string[] } | undefined;
-  await d.mail
-    .rememberThread(accountId, leadId, {
-      messageId: meta?.messageId ?? null,
-      references: Array.isArray(meta?.references) ? (meta?.references as string[]) : [],
-      from: l.from,
-      fromName: l.fromName,
-      subject: l.subject,
-    })
-    .catch(() => undefined);
   await d.journal.add({
     accountId,
     leadId,

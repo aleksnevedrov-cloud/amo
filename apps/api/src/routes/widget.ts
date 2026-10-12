@@ -1,4 +1,3 @@
-import { widgetKpRoutes } from './widget-kp.ts';
 import { detectFormat, extract } from '@core/docs';
 import { resolveRoute, type Orchestrator, type TurnResult } from '@retail/agent';
 import { InMemoryMemory, PHASE2_TOOLS, pricingCodesHint, SandboxCrm, type Source } from '@core/tools';
@@ -389,7 +388,6 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
       widgetPhase2Routes(api, deps, principal, requireAdmin);
       widgetEmailRoutes(api, deps, principal, requireAdmin);
       widgetWazzupRoutes(api, deps, principal, requireAdmin);
-    widgetKpRoutes(api, deps, principal, requireAdmin);
       widgetDocsRoutes(api, deps, principal);
       widgetPhase4Routes(api, deps, principal, requireAdmin);
     },

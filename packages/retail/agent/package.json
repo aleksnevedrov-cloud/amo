@@ -24,10 +24,8 @@
     "@core/tools": "workspace:*",
     "@anthropic-ai/sdk": "^0.128.0",
     "bullmq": "^5.81.5",
-    "docxtemplater": "3.50.0",
     "fast-xml-parser": "^5.11.1",
     "ioredis": "^5.11.1",
-    "pizzip": "3.1.7",
     "zod": "^3.25.76"
   },
   "devDependencies": {

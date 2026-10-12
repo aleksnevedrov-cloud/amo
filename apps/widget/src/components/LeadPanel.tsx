@@ -3,7 +3,6 @@ import type { DocumentResult, LeadFile, LeadPanel as Panel, ModelRef, WidgetApi 
 import { fileToBase64, insertIntoChat } from '../chat.ts';
 import { Calculation } from './Calculation.tsx';
 import { DOC_KIND, DocumentView } from './Documents.tsx';
-import { KpBlock } from './KpBlock.tsx';
 import { ModelPicker } from './ModelSettings.tsx';
 import { dateTime, kindLabel, modeLabel, modelLabel, rub } from './StatusBadge.tsx';
 import { SuggestionCard } from './Suggestions.tsx';
@@ -266,10 +265,6 @@ export function LeadPanel({ api, leadId, assetsUrl, settingsUrl }: { api: Widget
         ) : (
           <div className="ai-door-empty">Расчётов нет</div>
         )}
-      </Block>
-
-      <Block id="kp" title="КП" collapsed={collapsed} onToggle={toggle}>
-        <KpBlock api={api} leadId={leadId} />
       </Block>
 
       <Block

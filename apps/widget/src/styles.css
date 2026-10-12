@@ -38,6 +38,9 @@
   background: #fff !important;
   padding: 9px 34px 9px 12px !important;
   position: relative;
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
   margin: 0 !important;
   width: 100% !important;
   box-sizing: border-box !important;
@@ -55,6 +58,13 @@
   object-fit: contain;
 }
 .ai-door-caption img.card-widgets__widget__caption__logo_min { display: none !important; }
+/* Подпись рядом с логотипом: в правой колонке два виджета с одним логотипом «РФ ДВЕРИ» (розница и опт), без неё их не отличить. */
+.ai-door-caption::after {
+  content: 'Агент розница';
+  font: 600 13px/1.2 'Open Sans', 'PT Sans', Arial, sans-serif;
+  color: #28313d;
+  white-space: nowrap;
+}
 /* Стрелка сворачивания: своя «галочка», иначе на белом фоне штатная не видна. */
 .ai-door-caption .card-widgets__widget__caption__arrow {
   position: absolute !important;

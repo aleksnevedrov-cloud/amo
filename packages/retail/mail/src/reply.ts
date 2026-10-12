@@ -56,35 +56,3 @@ export function buildReply(
     headers: { 'X-AI-Door': '1', 'Auto-Submitted': 'auto-replied' },
   };
 }
-
-/**
- * Письмо с коммерческим предложением (тема RFD-AI-AGENT-KP, этап 5).
- *
- * От ответа AI отличается тем, что его отправляет менеджер кнопкой: заголовка
- * Auto-Submitted нет — это не автоответ, и клиентские фильтры не должны его прятать.
- */
-export function buildKpMail(
-  from: { name: string; address: string },
-  target: ReplyTarget,
-  body: string,
-  signature: string,
-  attachments: { filename: string; content: Buffer }[],
-): OutgoingEmail {
-  const domain = from.address.split('@')[1] ?? 'localhost';
-  const messageId = `<ai-door-kp.${Date.now().toString(36)}.${randomBytes(6).toString('hex')}@${domain}>`;
-  const text = signature.trim() ? `${body.trim()}\n\n--\n${signature.trim()}` : body.trim();
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;white-space:pre-wrap">${escapeHtml(text)}</div>`;
-  const refs = [...target.references, ...(target.inReplyTo ? [target.inReplyTo] : [])].slice(-20);
-  return {
-    from,
-    to: { name: target.toName ?? '', address: target.to },
-    subject: target.subject,
-    text,
-    html,
-    messageId,
-    ...(target.inReplyTo ? { inReplyTo: target.inReplyTo } : {}),
-    ...(refs.length ? { references: refs } : {}),
-    headers: { 'X-AI-Door': '1' },
-    ...(attachments.length ? { attachments } : {}),
-  };
-}
