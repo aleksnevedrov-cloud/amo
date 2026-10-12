@@ -130,6 +130,125 @@ importers:
         specifier: ^6.2.12
         version: 6.2.12
 
+  apps/opt-api:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.128.0
+        version: 0.128.0(zod@3.25.76)
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../../packages/core/amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../packages/core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../packages/core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../packages/core/llm
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../packages/core/shared
+      '@fastify/cors':
+        specifier: ^11.3.0
+        version: 11.3.0
+      '@fastify/rate-limit':
+        specifier: ^10.3.0
+        version: 10.3.0
+      '@opt/kp':
+        specifier: workspace:*
+        version: link:../../packages/opt/kp
+      bullmq:
+        specifier: ^5.81.5
+        version: 5.81.5
+      fastify:
+        specifier: ^5.12.5
+        version: 5.12.5
+      ioredis:
+        specifier: ^5.11.1
+        version: 5.11.1
+      mammoth:
+        specifier: ^1.12.3
+        version: 1.12.3
+      nodemailer:
+        specifier: ^10.0.10
+        version: 10.0.10
+      openai:
+        specifier: ^7.23.0
+        version: 7.23.0(ws@8.21.3)(zod@3.25.76)
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
+      unpdf:
+        specifier: ^1.8.1
+        version: 1.8.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      exceljs:
+        specifier: ^4.4.0
+        version: 4.4.0
+      jose:
+        specifier: ^6.2.12
+        version: 6.2.12
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
+      pizzip:
+        specifier: 3.1.7
+        version: 3.1.7
+
+  apps/opt-worker:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.128.0
+        version: 0.128.0(zod@3.25.76)
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../packages/core/shared
+      '@opt/kp':
+        specifier: workspace:*
+        version: link:../../packages/opt/kp
+      bullmq:
+        specifier: ^5.81.5
+        version: 5.81.5
+      ioredis:
+        specifier: ^5.11.1
+        version: 5.11.1
+      mammoth:
+        specifier: ^1.12.3
+        version: 1.12.3
+      nodemailer:
+        specifier: ^10.0.10
+        version: 10.0.10
+      openai:
+        specifier: ^7.23.0
+        version: 7.23.0(ws@8.21.3)(zod@3.25.76)
+      pino:
+        specifier: ^9.14.0
+        version: 9.14.0
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
+      unpdf:
+        specifier: ^1.8.1
+        version: 1.8.1
+    devDependencies:
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      exceljs:
+        specifier: ^4.4.0
+        version: 4.4.0
+
   apps/widget:
     dependencies:
       react:
@@ -411,6 +530,43 @@ importers:
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
+
+  packages/opt/kp:
+    dependencies:
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../../core/amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../core/llm
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../../core/shared
+      docxtemplater:
+        specifier: 3.50.0
+        version: 3.50.0
+      nodemailer:
+        specifier: ^10.0.10
+        version: 10.0.10
+      pizzip:
+        specifier: 3.1.7
+        version: 3.1.7
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
 
   packages/retail/agent:
     dependencies:

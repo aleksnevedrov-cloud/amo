@@ -1,0 +1,46 @@
+# Образ «Агента опт»: один образ для opt-api и opt-worker, команда задаётся в docker-compose.opt.yml.
+# Розницу не трогает: свой стек в /opt/agent-opt, своя БД ai_door_opt, Redis база 1 (ТЗ разделение, раздел 4).
+FROM node:22-alpine AS build
+WORKDIR /app
+RUN corepack enable
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+# Манифесты всех пакетов воркспейса: pnpm install --frozen-lockfile сверяет их с lock-файлом.
+COPY apps/api/package.json apps/api/
+COPY apps/worker/package.json apps/worker/
+COPY apps/widget/package.json apps/widget/
+COPY apps/opt-api/package.json apps/opt-api/
+COPY apps/opt-worker/package.json apps/opt-worker/
+COPY packages/core/shared/package.json packages/core/shared/
+COPY packages/core/amo/package.json packages/core/amo/
+COPY packages/core/db/package.json packages/core/db/
+COPY packages/core/llm/package.json packages/core/llm/
+COPY packages/core/tools/package.json packages/core/tools/
+COPY packages/core/media/package.json packages/core/media/
+COPY packages/core/docs/package.json packages/core/docs/
+COPY packages/retail/catalog/package.json packages/retail/catalog/
+COPY packages/retail/knowledge/package.json packages/retail/knowledge/
+COPY packages/retail/agent/package.json packages/retail/agent/
+COPY packages/retail/pricing/package.json packages/retail/pricing/
+COPY packages/retail/mail/package.json packages/retail/mail/
+COPY packages/opt/kp/package.json packages/opt/kp/
+COPY evals/package.json evals/
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm --filter @opt/api --filter @opt/worker run build \
+ && pnpm deploy --filter @opt/api --prod --legacy /out/opt-api \
+ && pnpm deploy --filter @opt/worker --prod --legacy /out/opt-worker
+
+FROM node:22-alpine
+WORKDIR /app
+# LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП.
+RUN apk add --no-cache libredwg || true
+RUN apk add --no-cache libreoffice-writer ttf-dejavu font-noto || true
+ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data
+COPY --from=build /out/opt-api apps/opt-api
+COPY --from=build /out/opt-worker apps/opt-worker
+COPY packages/opt/kp/migrations migrations
+# Файлы опта: шаблон КП, собранные документы; том opt_data монтируется сюда.
+RUN mkdir -p /data && chown -R node:node /data
+USER node
+EXPOSE 3000
+CMD ["node", "apps/opt-api/dist/server.js"]

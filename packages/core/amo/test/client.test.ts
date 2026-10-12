@@ -101,3 +101,31 @@ describe('Salesbot', () => {
     expect((s.calls[0]?.body as { execute_handlers?: unknown }).execute_handlers).toBeUndefined();
   });
 });
+
+describe('AmoApiClient: файлы сделки (для «Агента опт»)', () => {
+  it('список файлов: uuid из списка, карточка файла — отдельным запросом; скачивание по ссылке из карточки с Bearer', async () => {
+    const s = scripted([
+      { status: 200, body: { _embedded: { files: [{ file_uuid: 'aaa' }, { file_uuid: 'bbb', file: { uuid: 'bbb', name: 'Двери (3).docx', size: 1234, created_at: 1_700_000_000, metadata: { mime_type: 'application/msword', extension: 'docx' }, _links: { download: { href: 'https://drive-b.amocrm.ru/download/bbb' } } } }] } } },
+      { status: 404 },
+    ]);
+    const files = await client(s.fn).listLeadFiles(5);
+    expect(s.calls.map((c) => c.url)).toEqual(['https://acc.amocrm.ru/api/v4/leads/5/files?limit=20', 'https://acc.amocrm.ru/api/v4/files/aaa']);
+    // Файл без карточки (404) пропускается, а не роняет список.
+    expect(files).toEqual([{ uuid: 'bbb', name: 'Двери (3).docx', size: 1234, mime: 'application/msword', createdAt: new Date(1_700_000_000_000), downloadUrl: 'https://drive-b.amocrm.ru/download/bbb' }]);
+
+    const calls: { url: string; auth: string | null }[] = [];
+    const dl = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), auth: new Headers(init?.headers).get('authorization') });
+      return new Response(new Uint8Array([80, 75]), { status: 200, headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary' } });
+    }) as typeof fetch;
+    const got = await client(dl).downloadFile(files[0]!);
+    expect(calls).toEqual([{ url: 'https://drive-b.amocrm.ru/download/bbb', auth: 'Bearer TOKEN' }]);
+    expect([...got.bytes]).toEqual([80, 75]);
+    expect(got.mime).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
+  it('204 на пустой список файлов → []', async () => {
+    const s = scripted([{ status: 204 }]);
+    expect(await client(s.fn).listLeadFiles(5)).toEqual([]);
+  });
+});

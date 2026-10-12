@@ -396,6 +396,39 @@ export class AmoApiClient {
     return uuid;
   }
 
+  /**
+   * Файлы, прикреплённые к сделке (для «Агента опт»: спецификации и письма, которые положила розница).
+   * Список отдаёт только uuid; имя, размер и ссылка на скачивание — в карточке файла.
+   * Формат ответов «Файлов» amo сверить на живом аккаунте при приёмке опта (этап 5).
+   */
+  async listLeadFiles(leadId: number, limit = 20): Promise<LeadFile[]> {
+    const res = await this.request<{ _embedded?: { files?: { file_uuid?: string; uuid?: string; file?: AmoFileInfo }[] } }>(
+      'GET',
+      `/api/v4/leads/${leadId}/files?limit=${Math.min(limit, 100)}`,
+    );
+    const out: LeadFile[] = [];
+    for (const row of res?._embedded?.files ?? []) {
+      const uuid = row.file_uuid ?? row.uuid ?? row.file?.uuid;
+      if (!uuid) continue;
+      const info = row.file ?? (await this.request<AmoFileInfo>('GET', `/api/v4/files/${uuid}`, undefined, { allow404: true }));
+      if (!info) continue;
+      out.push(toLeadFile(uuid, info));
+    }
+    return out;
+  }
+
+  /** Содержимое файла сделки по ссылке из его карточки. */
+  async downloadFile(file: LeadFile): Promise<{ bytes: Uint8Array; mime: string | null }> {
+    const url = file.downloadUrl ?? (await this.request<AmoFileInfo>('GET', `/api/v4/files/${file.uuid}`))?._links?.download?.href;
+    if (!url) throw new AmoError(`amo: у файла ${file.name} нет ссылки на скачивание`, 404, '');
+    const res = await this.fetchImpl(url, {
+      headers: { authorization: `Bearer ${await this.getAccessToken()}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new AmoError(`amo: скачивание файла ${file.name}: HTTP ${res.status}`, res.status, await res.text().catch(() => ''));
+    return { bytes: new Uint8Array(await res.arrayBuffer()), mime: res.headers.get('content-type')?.split(';')[0]?.trim() || file.mime };
+  }
+
   private async request<T>(
     method: string,
     path: string,
@@ -491,3 +524,32 @@ function toLeadMail(row: Record<string, unknown>): LeadMail | null {
   };
 }
 
+/** Карточка файла amo («Файлы», v1.0): имя, размер, тип и ссылка на скачивание. */
+export interface AmoFileInfo {
+  uuid: string;
+  name?: string;
+  size?: number;
+  created_at?: number;
+  metadata?: { mime_type?: string | null; extension?: string | null };
+  _links?: { download?: { href?: string } };
+}
+
+export interface LeadFile {
+  uuid: string;
+  name: string;
+  size: number;
+  mime: string | null;
+  createdAt: Date | null;
+  downloadUrl: string | null;
+}
+
+function toLeadFile(uuid: string, f: AmoFileInfo): LeadFile {
+  return {
+    uuid,
+    name: f.name || `${uuid}${f.metadata?.extension ? `.${f.metadata.extension}` : ''}`,
+    size: Number(f.size ?? 0),
+    mime: f.metadata?.mime_type ?? null,
+    createdAt: f.created_at ? new Date(Number(f.created_at) * 1000) : null,
+    downloadUrl: f._links?.download?.href ?? null,
+  };
+}

@@ -6,6 +6,8 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
 COPY apps/widget/package.json apps/widget/
+COPY apps/opt-api/package.json apps/opt-api/
+COPY apps/opt-worker/package.json apps/opt-worker/
 COPY packages/core/shared/package.json packages/core/shared/
 COPY packages/core/amo/package.json packages/core/amo/
 COPY packages/core/db/package.json packages/core/db/
@@ -18,6 +20,7 @@ COPY packages/retail/pricing/package.json packages/retail/pricing/
 COPY packages/core/media/package.json packages/core/media/
 COPY packages/core/docs/package.json packages/core/docs/
 COPY packages/retail/mail/package.json packages/retail/mail/
+COPY packages/opt/kp/package.json packages/opt/kp/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .

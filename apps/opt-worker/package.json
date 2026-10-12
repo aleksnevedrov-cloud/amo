@@ -1,0 +1,29 @@
+{
+  "name": "@opt/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@core/shared": "workspace:*",
+    "@opt/kp": "workspace:*",
+    "bullmq": "^5.81.5",
+    "ioredis": "^5.11.1",
+    "mammoth": "^1.12.3",
+    "nodemailer": "^10.0.10",
+    "openai": "^7.23.0",
+    "pino": "^9.14.0",
+    "tesseract.js": "^7.0.0",
+    "unpdf": "^1.8.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "exceljs": "^4.4.0"
+  }
+}

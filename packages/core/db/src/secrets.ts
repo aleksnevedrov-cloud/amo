@@ -1,8 +1,8 @@
 import type { SecretBox } from '@core/shared';
 import type { Db } from './pool.ts';
 
-export type SecretKind = 'anthropic' | 'openai' | 'wazzup' | 'wazzup_crm';
-export const SECRET_KINDS: readonly SecretKind[] = ['anthropic', 'openai', 'wazzup', 'wazzup_crm'];
+export type SecretKind = 'anthropic' | 'openai' | 'wazzup' | 'wazzup_crm' | 'smtp';
+export const SECRET_KINDS: readonly SecretKind[] = ['anthropic', 'openai', 'wazzup', 'wazzup_crm', 'smtp'];
 
 /** Секреты аккаунта (ключи провайдеров), зашифрованные; обратно через API не отдаются. */
 export class SecretsRepo {

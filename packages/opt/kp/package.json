@@ -1,0 +1,30 @@
+{
+  "name": "@opt/kp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@core/amo": "workspace:*",
+    "@core/db": "workspace:*",
+    "@core/docs": "workspace:*",
+    "@core/llm": "workspace:*",
+    "@core/shared": "workspace:*",
+    "docxtemplater": "3.50.0",
+    "nodemailer": "^10.0.10",
+    "pizzip": "3.1.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
+  }
+}
