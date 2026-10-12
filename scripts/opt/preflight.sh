@@ -30,7 +30,8 @@ if [ -f "$ENV_FILE" ]; then
   for k in PUBLIC_URL API_PORT RETAIL_NETWORK DATABASE_URL REDIS_URL AMO_CLIENT_ID AMO_CLIENT_SECRET TOKEN_ENCRYPTION_KEY; do
     [ -n "$(val "$ENV_FILE" $k)" ] && ok "$k задан" || bad "$k пустой"
   done
-  grep -qE '<пароль>|change-me' "$ENV_FILE" && bad "в .env осталась заглушка (<пароль> или change-me)"
+  # Заглушки ищем только в строках со значениями, комментарии не считаются.
+  grep -vE '^\s*#' "$ENV_FILE" | grep -qE '<пароль>|change-me' && bad "в .env осталась заглушка (<пароль> или change-me)"
   cid=$(val "$ENV_FILE" AMO_CLIENT_ID)
   if [ -n "$cid" ]; then
     printf '%s' "$cid" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' && ok "AMO_CLIENT_ID — UUID" || bad "AMO_CLIENT_ID должен быть UUID (ID интеграции из «Ключей и доступов»)"
