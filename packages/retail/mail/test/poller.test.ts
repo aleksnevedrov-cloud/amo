@@ -127,8 +127,13 @@ const knownContact = {
   ],
 };
 
+/** Почта в режиме «только читать» (3b0be80): письмо ложится в историю сделки, в очередь ответа не ставится. */
+const lastClientText = async (leadId: number) => (await new DialogRepo(db).history(1, leadId)).filter((m) => m.role === 'client').at(-1)?.text ?? '';
+
 beforeEach(async () => {
   resetAuthBackoff();
+  await db.query('DELETE FROM dialog_messages');
+  await db.query('DELETE FROM mail_threads');
   await db.query('DELETE FROM pending_messages');
   await db.query('DELETE FROM email_outbound');
 });
@@ -139,10 +144,13 @@ describe('pollMailbox', () => {
     await t.mb.put('INBOX', { subject: 'Двери в квартиру', text: 'Нужны 3 белые двери' });
     const r = await pollMailbox(1, t.deps);
     expect(r).toMatchObject({ received: 1, queued: 1 });
-    const pending = await new DialogRepo(db).takePending(1, 301);
-    expect(pending[0]).toMatchObject({ channel: 'email', meta: { from: 'ivan@client.ru', subject: 'Двери в квартиру' } });
-    expect(pending[0]?.text).toContain('Тема письма: Двери в квартиру\nНужны 3 белые двери');
-    expect(t.scheduled).toEqual([[{ accountId: 1, leadId: 301 }, 8000]]);
+    // Письмо — в историю сделки и в нить для ответа с КП; ответ агент не готовит, очередь пуста.
+    expect(await lastClientText(301)).toContain('Тема письма: Двери в квартиру\nНужны 3 белые двери');
+    expect(await mail.lastThread(1, 301)).toMatchObject({ from: 'ivan@client.ru', fromName: 'Иван', subject: 'Двери в квартиру', messageId: '<m2.5@client.ru>' });
+    expect(await new DialogRepo(db).takePending(1, 301)).toEqual([]);
+    expect(t.scheduled).toEqual([]);
+    const { rows } = await db.query("SELECT summary FROM ai_journal WHERE account_id = 1 AND kind = 'note' ORDER BY id DESC LIMIT 1");
+    expect(rows[0]?.summary).toBe('Письмо от ivan@client.ru: «Двери в квартиру» — прочитано, ответ не готовится');
     // Повторный проход ничего не берёт.
     expect(await pollMailbox(1, t.deps)).toMatchObject({ received: 0 });
   });
@@ -201,10 +209,10 @@ describe('pollMailbox', () => {
       { filename: 'замер.pdf', mime: 'application/pdf', bytes: 13, source: 'email' },
       { filename: 'план.dwg', mime: 'application/acad', bytes: 3, source: 'email' },
     ]);
-    const [pending] = await new DialogRepo(db).takePending(1, 301);
-    expect(pending?.text).toContain('Прилагаю замер\n[Файл «замер.pdf»: Замерный лист] Один проём.');
-    expect(pending?.text).toContain('файл «план.dwg», разобрать не удалось: Формат не поддерживается');
-    expect(pending?.meta.openings).toEqual([{ room: 'Кухня', width_mm: 805, height_mm: 2060 }]);
+    const text = await lastClientText(301);
+    expect(text).toContain('Прилагаю замер\n[Файл «замер.pdf»: Замерный лист] Один проём.');
+    expect(text).toContain('файл «план.dwg», разобрать не удалось: Формат не поддерживается');
+    // Проёмы из замера нужны были ответу агента; в режиме «только читать» ответ не готовится, в историю идёт только текст.
     const { rows } = await db.query("SELECT kind, summary FROM ai_journal WHERE account_id = 1 AND kind IN ('document', 'error') ORDER BY id");
     expect(rows.map((r) => r.kind)).toEqual(['document', 'error']);
     expect(rows[0].summary).toContain('Разобрано вложение «замер.pdf»');
@@ -214,8 +222,7 @@ describe('pollMailbox', () => {
     const t = await setup({}, knownContact);
     await t.mb.put('INBOX', { attachments: [{ filename: 'смета.xlsx', contentType: 'application/vnd.ms-excel', content: Buffer.from('x') }] } as unknown as Partial<OutgoingEmail>);
     await pollMailbox(1, t.deps);
-    const [pending] = await new DialogRepo(db).takePending(1, 301);
-    expect(pending?.text).toContain('(во вложении файл «смета.xlsx» — разбор вложений выключен)');
+    expect(await lastClientText(301)).toContain('(во вложении файл «смета.xlsx» — разбор вложений выключен)');
   });
 
   it('лимит ответов на адрес за сутки', async () => {
@@ -297,8 +304,8 @@ describe('почта уже подключена к amo: ждём сделку �
     // Менеджер принял заявку — AI отвечает в сделке.
     amoState.leads = [{ id: 700, status_id: 10, pipeline_id: 1 }];
     expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
-    const pending = await new DialogRepo(db).takePending(1, 700);
-    expect(pending[0]).toMatchObject({ channel: 'email', meta: { from: 'olga@new.ru', subject: 'Входная дверь' } });
+    expect(await lastClientText(700)).toContain('Тема письма: Входная дверь');
+    expect(await mail.lastThread(1, 700)).toMatchObject({ from: 'olga@new.ru', subject: 'Входная дверь' });
     expect(await mail.listWaiting(1)).toEqual([]);
   });
 
