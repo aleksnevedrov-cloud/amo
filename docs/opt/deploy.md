@@ -33,7 +33,7 @@ docker compose exec postgres psql -U aidoor -d ai_door_opt -c "CREATE EXTENSION 
 
 ```bash
 cd /opt/agent-opt/src
-WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build      # → apps/opt-widget/dist/widget.zip
+docker run --rm -v "$PWD":/app -w /app -e WIDGET_API_URL=https://opt.rf-dveri.ru ai-door-build sh -c 'pnpm install --frozen-lockfile && pnpm opt-widget:build'   # → apps/opt-widget/dist/widget.zip; в свежем клоне нет node_modules
 mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip   # отдаёт nginx опта: location /dl/ в scripts/opt/nginx-opt.conf
 ```
 

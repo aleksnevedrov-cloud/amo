@@ -106,7 +106,8 @@ docker compose logs --tail=20 opt-worker  # «opt-worker запущен»
 
 ```bash
 cd /opt/agent-opt/src
-docker run --rm -v "$PWD":/app -w /app -e WIDGET_API_URL=https://opt.rf-dveri.ru ai-door-build pnpm opt-widget:build
+# В свежем клоне нет node_modules — сначала установка зависимостей внутри того же образа.
+docker run --rm -v "$PWD":/app -w /app -e WIDGET_API_URL=https://opt.rf-dveri.ru ai-door-build sh -c 'pnpm install --frozen-lockfile && pnpm opt-widget:build'
 mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip
 curl -sI https://opt.rf-dveri.ru/dl/widget-opt-7c1e.zip | head -1     # 200 — nginx отдаёт архив (шаг 4)
 ```

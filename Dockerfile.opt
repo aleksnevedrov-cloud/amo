@@ -42,5 +42,6 @@ COPY packages/opt/kp/migrations migrations
 # Файлы опта: шаблон КП, собранные документы; том opt_data монтируется сюда.
 RUN mkdir -p /data && chown -R node:node /data
 USER node
-EXPOSE 3000
+# Порт задаёт API_PORT из .env (на сервере 3001); EXPOSE — только справочно.
+EXPOSE 3001
 CMD ["node", "apps/opt-api/dist/server.js"]
