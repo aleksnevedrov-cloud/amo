@@ -1,0 +1,46 @@
+import type { CSSProperties } from 'react';
+
+// Токены макета Figma «Виджет AI РФ Двери»: Open Sans, рамки #E1E5E9, зелёный акцент #61C100/#258500.
+// Те же значения продублированы переменными в src/styles.css (классы .ai-door-*).
+export const s = {
+  root: { fontFamily: '"Open Sans", "PT Sans", Arial, sans-serif', fontSize: 13, color: '#28313D', lineHeight: 1.45 },
+  block: { padding: '12px 0', borderBottom: '1px solid #E1E5E9' },
+  label: { color: '#8A949F', fontSize: 12, fontWeight: 600, marginBottom: 4 },
+  row: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  col: { display: 'flex', flexDirection: 'column', gap: 6 },
+  badgeOk: { display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: '#EDF9E4', color: '#258500' },
+  badgeBad: { display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: '#FDE8E8', color: '#B02A2A' },
+  badgeWarn: { display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: '#FFF4D6', color: '#8A5A00' },
+  muted: { color: '#8A949F' },
+  small: { fontSize: 12 },
+  error: { color: '#B02A2A' },
+  button: {
+    height: 34,
+    padding: '0 16px',
+    border: '1px solid #61C100',
+    borderRadius: 6,
+    background: '#61C100',
+    color: '#fff',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  buttonGhost: {
+    height: 30,
+    padding: '0 12px',
+    border: '1px solid #E1E5E9',
+    borderRadius: 6,
+    background: '#fff',
+    color: '#28313D',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  input: { height: 34, padding: '0 8px', border: '1px solid #E1E5E9', borderRadius: 6, fontFamily: 'inherit', boxSizing: 'border-box', width: '100%' },
+  textarea: { padding: 8, border: '1px solid #E1E5E9', borderRadius: 6, fontFamily: 'inherit', boxSizing: 'border-box', width: '100%', minHeight: 90, resize: 'vertical' },
+  select: { height: 34, padding: '0 8px', border: '1px solid #E1E5E9', borderRadius: 6, fontFamily: 'inherit' },
+  tabs: { display: 'flex', flexWrap: 'wrap', gap: 4, borderBottom: '1px solid #E1E5E9', marginBottom: 16 },
+  tab: { padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, color: '#28313D', borderBottom: '2px solid transparent' },
+  tabActive: { borderBottom: '2px solid #61C100', color: '#258500' },
+  card: { border: '1px solid #E1E5E9', borderRadius: 8, padding: '10px 12px', background: '#fff' },
+} satisfies Record<string, CSSProperties>;

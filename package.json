@@ -14,7 +14,8 @@
     "secrets": "node scripts/check-secrets.mjs",
     "db:migrate": "pnpm --filter @core/db run migrate",
     "widget:build": "pnpm --filter @ai-door/widget run build",
-    "opt:build": "pnpm --filter @opt/api --filter @opt/worker run build"
+    "opt:build": "pnpm --filter @opt/api --filter @opt/worker run build",
+    "opt-widget:build": "pnpm --filter @opt/widget run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

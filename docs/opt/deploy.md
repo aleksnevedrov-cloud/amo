@@ -29,6 +29,17 @@ docker compose exec postgres psql -U aidoor -d aidoor -c "CREATE DATABASE ai_doo
 docker compose exec postgres psql -U aidoor -d ai_door_opt -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 ```
 
+## Архив виджета «Агент опт»
+
+```bash
+cd /opt/agent-opt/src
+WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build      # → apps/opt-widget/dist/widget.zip
+mkdir -p /opt/ai-door/dl && cp apps/opt-widget/dist/widget.zip /opt/ai-door/dl/widget-opt-7c1e.zip   # постоянная ссылка рядом с розничной
+```
+
+Интеграция «Агент опт» в amoМаркет: те же redirect и хук отключения, что в таблице выше, архив — по ссылке
+`https://ai.rf-dveri.ru/dl/widget-opt-7c1e.zip`. Перед каждой выдачей архива поднять `version` в `apps/opt-widget/package.json`.
+
 ## Запуск
 
 ```bash
