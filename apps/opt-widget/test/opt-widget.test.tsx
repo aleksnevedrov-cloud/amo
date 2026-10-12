@@ -85,6 +85,10 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Сторона открывания?');
     expect(button('Собрать документ')?.disabled).toBe(true);
     expect(button('Отправить клиенту')?.disabled).toBe(true);
+    // Раскладка под колонку ~280 px: корень .opt-root, кнопки шагов в .opt-actions столбиком, таблица .opt-table.
+    expect(document.querySelectorAll('.opt-root')).toHaveLength(1);
+    expect([...document.querySelectorAll('.opt-root .opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
+    expect(document.querySelector('.opt-root .opt-table')).not.toBeNull();
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
   });
 

@@ -90,8 +90,10 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const total = lines.reduce((sum, l) => sum + (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100)), 0);
   const ready = lines.length > 0 && lines.every((l) => l.price !== null);
 
+  // Корень .opt-root: переменные макета, ширина колонки виджетов (~280 px), перенос длинных строк.
   if (!draft) {
     return (
+      <div className="opt-root">
       <div className="opt-col">
         {pending ? (
           <div className="opt-muted">{job?.state === 'queued' ? 'В очереди…' : 'Собираю черновик: читаю карточку, письма и файлы…'}</div>
@@ -100,14 +102,16 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         )}
         {job?.state === 'failed' && <div className="opt-error">Черновик не собран: {job.error}</div>}
         {error && <div className="opt-error">{error}</div>}
-        <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending} onClick={start}>
+        <button type="button" className="opt-btn opt-btn-wide opt-btn-green" disabled={busy || pending} onClick={start}>
           Собрать КП
         </button>
+      </div>
       </div>
     );
   }
 
   return (
+    <div className="opt-root">
     <div className="opt-col">
       <div className="opt-row opt-row-tight">
         <span className="opt-muted">{draft.kpNo ?? 'номер будет при сборке документа'} · {STATUS[draft.status] ?? draft.status}</span>
@@ -155,6 +159,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         />
       )}
     </div>
+    </div>
   );
 }
 
@@ -180,7 +185,7 @@ function SourceInfo({ draft }: { draft: KpDraftInfo }) {
 function KpLinesTable({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; onEdit: (i: number, patch: Partial<KpDraftLine>) => void }) {
   const reasons = (i: number) => needsManager.filter((n) => n.request_index === i).map((n) => n.reason);
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+    <table className="opt-table">
       <thead>
         <tr>
           <th style={th}>Позиция</th>
@@ -221,7 +226,7 @@ function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend
   const canSend = (draft.status === 'built' || draft.status === 'sent') && !dirty;
   return (
     <>
-      <div className="opt-row">
+      <div className="opt-actions">
         <button type="button" className="opt-btn" disabled={busy} onClick={onDraft} title="Прочитать карточку заново; правки в позициях будут потеряны">
           Собрать заново
         </button>
