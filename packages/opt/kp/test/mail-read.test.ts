@@ -5,7 +5,7 @@ import hoodiecrow from 'hoodiecrow-imap';
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chooseLatest, domainOf, htmlToPlain, ImapMailReader, MailAuthError, normalizeSubject, parseMail, pickMailAttachments, resetMailAuthPauses, searchableFolders, stripQuoted, type MailAttachment, type MailReadConfig } from '../src/mail-read.ts';
+import { chooseLatest, domainOf, htmlToPlain, ImapMailReader, isPublicDomain, MailAuthError, normalizeSubject, parseMail, pickMailAttachments, resetMailAuthPauses, searchableFolders, stripQuoted, type MailAttachment, type MailReadConfig } from '../src/mail-read.ts';
 
 async function raw(mail: { from: string; subject: string; text?: string; html?: string; date: Date; attachments?: { filename: string; content: Buffer; contentType?: string; cid?: string }[] }): Promise<string> {
   const t = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'windows' });
@@ -19,6 +19,8 @@ describe('выбор письма и разбор', () => {
   it('тема без Re/Fwd; точный адрес выше домена; при известной теме берётся письмо с ней, иначе самое свежее', () => {
     expect(normalizeSubject('Re: Fwd: Запрос КП')).toBe('запрос кп');
     expect(domainOf('Stoptpostavka@Yandex.ru')).toBe('yandex.ru');
+    expect(isPublicDomain('Yandex.ru')).toBe(true);
+    expect(isPublicDomain('stroyopt.ru')).toBe(false);
     const c = [
       { uid: 1, folder: 'INBOX', subject: 'Запрос КП', date: new Date('2026-10-12T10:00:00Z'), exact: true },
       { uid: 2, folder: 'INBOX', subject: 'Другое', date: new Date('2026-10-12T12:00:00Z'), exact: true },
@@ -85,7 +87,8 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     const inbox = [
       { raw: await raw({ from: SENDER, subject: 'Запрос', text: 'Старое письмо', date: d('2026-10-01T10:00:00Z') }), uid: 1 },
       { raw: await raw({ from: 'other@mail.ru', subject: 'Запрос', text: 'Чужое письмо', date: d('2026-10-12T12:00:00Z') }), uid: 2 },
-      { raw: await raw({ from: 'someone@yandex.ru', subject: 'Запрос ООО Стройоптпоставка', text: 'Тот же домен, другой адрес', date: d('2026-10-12T17:00:00Z') }), uid: 3 },
+      { raw: await raw({ from: 'someone@yandex.ru', subject: 'Запрос ООО Стройоптпоставка', text: 'Тот же публичный домен, другой адрес — чужой клиент', date: d('2026-10-12T17:00:00Z') }), uid: 3 },
+      { raw: await raw({ from: 'manager@stroyopt.ru', subject: 'Спецификация', text: 'Корпоративный домен, другой сотрудник', date: d('2026-10-12T14:00:00Z') }), uid: 4 },
     ];
     // Письмо заявки лежит не в INBOX, а в пользовательской папке — так бывает при правилах сортировки в ящике.
     const requests = [
@@ -124,7 +127,9 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(r.mail).toMatchObject({ uid: 1, folder: 'Requests', from: SENDER, subject: 'Запрос ООО Стройоптпоставка' });
     expect(r.mail?.text).toContain('окраска L429 Indigo, 2 шт.');
     expect(r.mail?.attachments.map((a) => [a.filename, a.size])).toEqual([['ТЗ.pdf', 2_000]]);
-    expect(r.diag.criteria).toEqual({ from: SENDER, domain: 'yandex.ru', since: '2026-10-10', before: '2026-10-15', subject: 'Запрос ООО Стройоптпоставка' });
+    expect(r.mail?.matchedBy).toBe('address');
+    // Публичный домен: по домену не ищем — в критериях domain = null.
+    expect(r.diag.criteria).toEqual({ from: SENDER, domain: null, since: '2026-10-10', before: '2026-10-15', subject: 'Запрос ООО Стройоптпоставка' });
     expect(r.diag.folders.map((f) => f.path)).toEqual(['INBOX', 'Requests', 'Spam']);
     expect(r.diag.skippedFolders).toEqual(expect.arrayContaining(['Sent', 'Drafts']));
     expect(r.diag.fallbackWithoutDate).toBe(false);
@@ -149,9 +154,17 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(r.mail?.from).toBe(SENDER);
   });
 
-  it('по домену — когда писем с точного адреса нет; окно дат пустое — запасной поиск без даты по последним письмам', async () => {
-    const byDomain = await new ImapMailReader(cfg).findLatest({ from: 'nobody@yandex.ru', around: d('2026-10-12T16:55:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
-    expect(byDomain.mail).toMatchObject({ folder: 'INBOX', from: 'someone@yandex.ru', subject: 'Запрос ООО Стройоптпоставка' });
+  it('публичный домен без письма с точного адреса — null (чужие письма @yandex.ru не берутся); корпоративный домен — найдено по домену с пометкой', async () => {
+    const pub = await new ImapMailReader(cfg).findLatest({ from: 'nobody@yandex.ru', around: d('2026-10-12T16:55:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
+    expect(pub.mail).toBeNull();
+    expect(pub.diag.criteria.domain).toBeNull();
+    expect(pub.diag.folders.map((f) => [f.path, f.byFrom])).toEqual([['INBOX', 0], ['Requests', 0], ['Spam', 0]]);
+    const corp = await new ImapMailReader(cfg).findLatest({ from: 'buyer@stroyopt.ru', around: d('2026-10-12T16:55:00Z') });
+    expect(corp.mail).toMatchObject({ folder: 'INBOX', from: 'manager@stroyopt.ru', matchedBy: 'domain', subject: 'Спецификация' });
+    expect(corp.diag.criteria.domain).toBe('stroyopt.ru');
+  });
+
+  it('окно дат пустое — запасной поиск без даты по последним письмам', async () => {
     const far = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-11-20T10:00:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
     expect(far.diag.fallbackWithoutDate).toBe(true);
     expect(far.diag.folders.find((f) => f.path === 'Requests')).toEqual({ path: 'Requests', specialUse: null, byFrom: 1, inWindow: 0 });

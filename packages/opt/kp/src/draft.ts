@@ -76,6 +76,8 @@ export interface MailSource {
   retryAt: string | null;
   /** Папка, где найдено письмо. */
   folder: string | null;
+  /** Чем совпал отправитель; по домену — письмо нужно проверить, вложения в сделку не грузятся. */
+  matchedBy: 'address' | 'domain' | null;
   /** Диагностика поиска (папки, критерии, совпадения по FROM) — без содержимого писем. */
   diag: MailSearchDiag | null;
 }
@@ -175,6 +177,9 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
   if (mail.source?.status === 'not_found') needs.push({ request_index: -1, reason: `письмо в ящике не найдено (искали от ${mail.source.searchedFrom}) — черновик по тому, что есть в карточке` });
   if (mail.source?.status === 'error') needs.push({ request_index: -1, reason: `почта: ${mail.source.error}` });
+  if (mail.source?.status === 'found' && mail.source.matchedBy === 'domain') {
+    needs.push({ request_index: -1, reason: `письмо найдено по домену ${mail.source.diag?.criteria.domain ?? ''}, не по адресу ${mail.source.searchedFrom} (папка ${mail.source.folder ?? '?'}, «${mail.source.subject}») — проверьте, что это та заявка; вложения в сделку не загружены` });
+  }
   const requirements = uniq([...files.parsed.flatMap((f) => f.requirements), ...extractRequirements([card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'))]);
   // Аналог — только предложение менеджеру с критерием подбора; строка КП остаётся без цены и без замены.
   if (d.analogs) {
@@ -246,7 +251,7 @@ const sameFile = (a: { name: string; size: number }, b: { name: string; size: nu
  */
 async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
   const from = (card.letter?.from || card.contact.email).toLowerCase();
-  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, diag: null };
+  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, matchedBy: null, diag: null };
   if (!from) return { source: { ...base, error: 'в карточке нет адреса отправителя' }, files: [] };
   let result: MailReadResult;
   try {
@@ -264,12 +269,14 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
     subject: found.subject,
   };
   const { take, skipped } = pickMailAttachments(found.attachments);
-  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, diag: result.diag };
+  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, matchedBy: found.matchedBy, diag: result.diag };
   const files: SourceFile[] = [];
   for (const a of take) {
     const name = a.filename ?? `attachment-${files.length + 1}`;
     const bytes = new Uint8Array(a.content);
     files.push({ name, size: bytes.byteLength, mime: a.contentType, load: async () => ({ bytes, mime: a.contentType }) });
+    // Совпадение только по домену: письмо может быть от другого человека — в файлы сделки ничего не грузим.
+    if (found.matchedBy === 'domain') continue;
     // Уже в карточке (то же имя и размер) — повторно не грузим.
     if (card.files.some((f) => sameFile(f, { name, size: bytes.byteLength }))) continue;
     try {

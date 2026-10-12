@@ -173,6 +173,7 @@ describe('черновик КП опта: источник — карточка 
       return { diag: noDiag, mail: {
         uid: 7,
         folder: 'INBOX',
+        matchedBy: 'address',
         messageId: '<m7@yandex.ru>',
         from: 'stoptpostavka@yandex.ru',
         subject: 'Запрос',
@@ -202,6 +203,28 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
     expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
+  });
+
+  it('совпадение только по корпоративному домену: текст и вложения в разбор, в сделку ничего не грузится, пометка «проверьте»', async () => {
+    const { gateway } = fakeGateway(JSON.stringify({ client: { org: '', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Дверь', name: 'дверь', width_mm: null, height_mm: null, qty: 1 }], required_blocks: [], questions: [] }));
+    const amo = fakeAmo({ mails: [{ ...letter, from: 'buyer@stroyopt.ru' }] });
+    const diag: MailSearchDiag = { ...noDiag, criteria: { ...noDiag.criteria, from: 'buyer@stroyopt.ru', domain: 'stroyopt.ru' } };
+    const analyzed: string[] = [];
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, {
+      amo,
+      analyze: async (f) => {
+        analyzed.push(f.filename);
+        return { id: 1, filename: f.filename, kind: 'spec', positions: [], questions: [], requirements: [] };
+      },
+      mail: async () => ({
+        diag,
+        mail: { uid: 9, folder: 'INBOX', matchedBy: 'domain', messageId: '<m9@stroyopt.ru>', from: 'other@stroyopt.ru', subject: 'Спецификация', date: new Date('2026-10-12T10:00:00Z'), text: 'Текст от другого адреса', attachments: [{ filename: 'spec.pdf', contentType: 'application/pdf', size: 10, content: Buffer.alloc(10), inline: false }] },
+      }),
+    });
+    expect(amo.uploaded).toEqual([]);
+    expect(analyzed).toEqual(['spec.pdf']);
+    expect(r.payload.source.mail).toMatchObject({ status: 'found', matchedBy: 'domain', uploaded: [], taken: ['spec.pdf'] });
+    expect(r.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'письмо найдено по домену stroyopt.ru, не по адресу buyer@stroyopt.ru (папка INBOX, «Спецификация») — проверьте, что это та заявка; вложения в сделку не загружены' });
   });
 
   it('письмо в ящике не найдено — пометка, черновик по карточке; ошибка входа — пометка с временем повтора', async () => {

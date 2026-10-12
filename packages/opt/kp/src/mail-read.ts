@@ -41,7 +41,8 @@ export interface MailAttachment {
 
 /** Диагностика поиска (без содержимого писем) — в mail_fetch при «не найдено». */
 export interface MailSearchDiag {
-  criteria: { from: string; domain: string; since: string; before: string; subject: string | null };
+  /** domain — null, если домен публичный (поиск только по точному адресу). */
+  criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null };
   /** Папки в порядке просмотра: сколько писем от адреса/домена всего и сколько в окне дат. */
   folders: { path: string; specialUse: string | null; byFrom: number; inWindow: number }[];
   /** Папки, которые не смотрели (Отправленные, Черновики, Корзина, несёлектируемые). */
@@ -58,6 +59,8 @@ export interface MailReadResult {
 export interface FetchedMail {
   uid: number;
   folder: string;
+  /** Чем совпал отправитель: точный адрес или только корпоративный домен (тогда письмо нужно проверить). */
+  matchedBy: 'address' | 'domain';
   messageId: string | null;
   from: string;
   subject: string;
@@ -209,6 +212,7 @@ export async function parseMail(uid: number, source: Buffer, folder = 'INBOX'): 
   return {
     uid,
     folder,
+    matchedBy: 'address',
     messageId: m.messageId ?? null,
     from: (m.from?.value[0]?.address ?? '').toLowerCase(),
     subject: (m.subject ?? '').trim(),
@@ -259,6 +263,17 @@ const dayStart = (d: Date, shiftDays: number) => {
 };
 
 export const domainOf = (address: string) => address.split('@')[1]?.toLowerCase() ?? '';
+
+/**
+ * Публичные почтовые домены: поиск по домену здесь опасен — нашлось бы письмо другого клиента
+ * с @yandex.ru, и КП ушло бы по чужой заявке. Для них — только точный адрес.
+ */
+export const PUBLIC_MAIL_DOMAINS = new Set([
+  'yandex.ru', 'ya.ru', 'yandex.com', 'mail.ru', 'inbox.ru', 'list.ru', 'bk.ru', 'internet.ru',
+  'gmail.com', 'rambler.ru', 'lenta.ru', 'outlook.com', 'hotmail.com', 'icloud.com', 'me.com',
+  'yahoo.com', 'vk.com', 'proton.me',
+]);
+export const isPublicDomain = (domain: string) => PUBLIC_MAIL_DOMAINS.has(domain.toLowerCase());
 
 /** Папки для поиска: всё из LIST, кроме Отправленных, Черновиков, Корзины и несёлектируемых; INBOX первой. */
 export function searchableFolders(list: { path: string; specialUse?: string | null; flags?: Set<string> | string[] }[]): { use: { path: string; specialUse: string | null }[]; skipped: string[] } {
@@ -315,7 +330,9 @@ export class ImapMailReader {
     }
     authPause.delete(key);
     const from = search.from.toLowerCase();
-    const domain = domainOf(from);
+    // По домену ищем только для корпоративных доменов; публичные (yandex.ru, mail.ru, gmail.com…) — только точный адрес.
+    const domainRaw = domainOf(from);
+    const domain = domainRaw && !isPublicDomain(domainRaw) ? domainRaw : null;
     const since = dayStart(search.around, -DATE_WINDOW_DAYS);
     const before = dayStart(search.around, DATE_WINDOW_DAYS + 1);
     const diag: MailSearchDiag = {
@@ -357,7 +374,8 @@ export class ImapMailReader {
       await client.mailboxOpen(chosen.folder, { readOnly: true });
       const one = await client.fetchOne(String(chosen.uid), { uid: true, source: true }, { uid: true });
       if (!one || !one.source) return { mail: null, diag, readOnly };
-      return { mail: await parseMail(chosen.uid, one.source, chosen.folder), diag, readOnly };
+      const mail = await parseMail(chosen.uid, one.source, chosen.folder);
+      return { mail: { ...mail, matchedBy: chosen.exact ? 'address' : 'domain' }, diag, readOnly };
     } finally {
       await client.logout().catch(() => client.close());
     }

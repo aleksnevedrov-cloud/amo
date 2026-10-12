@@ -52,11 +52,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob): Promise<{ draft
         kind: ms.status === 'error' ? 'kp_error' : 'mail_fetch',
         summary:
           ms.status === 'found'
-            ? `Письмо из ящика найдено (от ${ms.searchedFrom}${ms.folder ? `, папка ${ms.folder}` : ''}${ms.date ? `, ${new Date(ms.date).toLocaleDateString('ru-RU')}` : ''}): вложений ${ms.attachments}, взято ${ms.taken.length}, загружено в сделку ${ms.uploaded.length}` + (ms.skipped.length ? `, пропущено ${ms.skipped.length}` : '')
+            ? `Письмо из ящика найдено (${ms.matchedBy === 'domain' ? `по домену ${ms.diag?.criteria.domain ?? ''}, не по адресу ` : 'от '}${ms.searchedFrom}${ms.folder ? `, папка ${ms.folder}` : ''}${ms.date ? `, ${new Date(ms.date).toLocaleDateString('ru-RU')}` : ''}): вложений ${ms.attachments}, взято ${ms.taken.length}, загружено в сделку ${ms.uploaded.length}` + (ms.skipped.length ? `, пропущено ${ms.skipped.length}` : '')
             : ms.status === 'not_found'
               ? `Письмо в ящике не найдено (искали от ${ms.searchedFrom}${ms.diag ? `, папок просмотрено ${ms.diag.folders.length}, совпадений по отправителю ${ms.diag.folders.reduce((n, f) => n + f.byFrom, 0)}` : ''}${ms.error ? `: ${ms.error}` : ''})`
               : `Ящик не прочитан: ${ms.error}`,
-        details: { userId: job.userId, status: ms.status, messageId: ms.messageId, folder: ms.folder, taken: ms.taken, uploaded: ms.uploaded, skipped: ms.skipped, retryAt: ms.retryAt, diag: ms.diag },
+        details: { userId: job.userId, status: ms.status, messageId: ms.messageId, folder: ms.folder, matchedBy: ms.matchedBy, taken: ms.taken, uploaded: ms.uploaded, skipped: ms.skipped, retryAt: ms.retryAt, diag: ms.diag },
       });
     }
     const draftId = await core.kp.createDraft(accountId, leadId, r.payload as unknown as Record<string, unknown>, job.userId);
