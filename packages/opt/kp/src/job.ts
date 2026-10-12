@@ -36,8 +36,29 @@ export async function runDraftJob(core: OptCore, job: DraftJob): Promise<{ draft
             const r = await core.docs.analyze({ accountId, leadId, source: 'widget', filename: file.filename, mime: file.mime, bytes: file.bytes, settings: widgetSettings, createdBy: job.userId, hint: 'request', route });
             return { id: r.id, filename: file.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements };
           };
+    // Ящик, подключённый к amoCRM, читается по IMAP только на чтение и только здесь — по кнопке (вариант А).
+    const m = settings.mail;
+    const mailPassword = m.username && m.imapHost ? await core.secrets.get(accountId, 'smtp') : null;
+    const mail: KpDraftDeps['mail'] = mailPassword
+      ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, search)
+      : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze });
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze, mail });
+    const ms = r.payload.source.mail;
+    if (ms) {
+      await core.journal.add({
+        accountId,
+        leadId,
+        kind: ms.status === 'error' ? 'kp_error' : 'mail_fetch',
+        summary:
+          ms.status === 'found'
+            ? `Письмо из ящика найдено (от ${ms.searchedFrom}${ms.date ? `, ${new Date(ms.date).toLocaleDateString('ru-RU')}` : ''}): вложений ${ms.attachments}, взято ${ms.taken.length}, загружено в сделку ${ms.uploaded.length}` + (ms.skipped.length ? `, пропущено ${ms.skipped.length}` : '')
+            : ms.status === 'not_found'
+              ? `Письмо в ящике не найдено (искали от ${ms.searchedFrom}${ms.error ? `: ${ms.error}` : ''})`
+              : `Ящик не прочитан: ${ms.error}`,
+        details: { userId: job.userId, status: ms.status, messageId: ms.messageId, taken: ms.taken, uploaded: ms.uploaded, skipped: ms.skipped, retryAt: ms.retryAt },
+      });
+    }
     const draftId = await core.kp.createDraft(accountId, leadId, r.payload as unknown as Record<string, unknown>, job.userId);
     await core.journal.add({
       accountId,

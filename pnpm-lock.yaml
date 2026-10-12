@@ -610,6 +610,12 @@ importers:
       docxtemplater:
         specifier: 3.50.0
         version: 3.50.0
+      imapflow:
+        specifier: ^2.0.6
+        version: 2.0.6
+      mailparser:
+        specifier: ^3.9.28
+        version: 3.9.28
       nodemailer:
         specifier: ^10.0.10
         version: 10.0.10
@@ -620,9 +626,15 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@types/mailparser':
+        specifier: ^3.4.6
+        version: 3.4.6
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
+      hoodiecrow-imap:
+        specifier: ^2.1.0
+        version: 2.1.0
       pg:
         specifier: ^8.23.0
         version: 8.23.0

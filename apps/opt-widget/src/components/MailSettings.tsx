@@ -5,6 +5,9 @@ import type { KpApi, OptSettings } from '../api.ts';
 type Mail = OptSettings['mail'];
 
 const FIELDS: { key: keyof Mail; label: string; hint?: string; kind: 'input' | 'number' | 'textarea' | 'bool' }[] = [
+  { key: 'imapHost', label: 'IMAP-сервер', hint: 'Чтение письма заявки по кнопке «Собрать КП» — только чтение, флаги и письма не меняются; логин и пароль те же, что для SMTP', kind: 'input' },
+  { key: 'imapPort', label: 'Порт IMAP', hint: 'Яндекс: 993, SSL', kind: 'number' },
+  { key: 'imapSecure', label: 'SSL/TLS (IMAP)', kind: 'bool' },
   { key: 'smtpHost', label: 'SMTP-сервер', hint: 'Ящик, подключённый к amoCRM: письмо попадёт в переписку сделки из «Отправленных»', kind: 'input' },
   { key: 'smtpPort', label: 'Порт', kind: 'number' },
   { key: 'smtpSecure', label: 'SSL/TLS', kind: 'bool' },
@@ -17,7 +20,7 @@ const FIELDS: { key: keyof Mail; label: string; hint?: string; kind: 'input' | '
   { key: 'signature', label: 'Подпись', kind: 'textarea' },
 ];
 
-/** Вкладка «Письмо»: SMTP и шаблоны письма с КП (ТЗ 6.6). Пароль хранится отдельно и обратно не показывается. */
+/** Вкладка «Письмо»: IMAP для чтения заявки (вариант А), SMTP и шаблоны письма с КП (ТЗ 6.6). Пароль один на оба, хранится отдельно и обратно не показывается. */
 export function MailSettings({ api }: { api: KpApi }) {
   const [all, setAll] = useState<OptSettings | null>(null);
   const [mail, setMail] = useState<Mail | null>(null);

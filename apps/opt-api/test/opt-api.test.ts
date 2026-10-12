@@ -54,7 +54,7 @@ describe('opt-api: от подключения интеграции до пис�
     expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/status' })).statusCode).toBe(401);
     const st = await ctx.app.inject({ method: 'GET', url: '/widget/v1/status', headers });
     expect(st.json()).toMatchObject({ accountId: ACCOUNT_ID, connected: true, llmConfigured: true, llm: { provider: 'openai', model: 'gpt-5.5' }, mailConfigured: false, templateLoaded: false });
-    const bad = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/settings', headers, payload: { mail: { imapHost: 'x' } } });
+    const bad = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/settings', headers, payload: { mail: { pop3Host: 'x' } } });
     expect(bad.statusCode).toBe(400);
     const ok = await ctx.app.inject({ method: 'PUT', url: '/widget/v1/settings', headers, payload: { mail: { smtpHost: 'smtp.yandex.ru', username: 'sales@rf-dveri.ru', cc: 'manager@rf-dveri.ru', signature: 'Иван' } } });
     expect(ok.json()).toMatchObject({ version: 1, settings: { mail: { smtpHost: 'smtp.yandex.ru' } } });
@@ -85,8 +85,11 @@ describe('opt-api: от подключения интеграции до пис�
     expect(got.job).toBeNull();
     expect(got.draft).toMatchObject({ leadId: LEAD_ID, status: 'draft', client: { org: 'ООО Ромашка', fio: 'Иванов Иван', email: 'ivanov@romashka.ru' } });
     expect(got.draft.items.map((l: { name: string; price: number | null }) => [l.name, l.price])).toEqual([['дверь белая', null], ['добор', null]]);
-    expect(got.draft.needsManager).toHaveLength(2);
-    expect(got.draft.source).toMatchObject({ from: 'amo_card', mails: 1, documents: [], skipped: [] });
+    // Ящик настроен (логин и пароль SMTP есть), письмо в нём не найдено: пометка менеджеру и событие mail_fetch, сборка по карточке.
+    expect(got.draft.needsManager).toHaveLength(3);
+    expect(got.draft.needsManager[2]).toEqual({ request_index: -1, reason: 'письмо в ящике не найдено (искали от ivanov@romashka.ru) — черновик по тому, что есть в карточке' });
+    expect(got.draft.source).toMatchObject({ from: 'amo_card', mails: 1, documents: [], skipped: [], mail: { status: 'not_found', searchedFrom: 'ivanov@romashka.ru' } });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=mail_fetch', headers })).json().items.map((i: { summary: string }) => i.summary)).toEqual(['Письмо в ящике не найдено (искали от ivanov@romashka.ru)']);
     expect(requests).toHaveLength(1);
     draftId = got.draft.id;
     const journal = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_draft', headers })).json().items;

@@ -33,6 +33,10 @@ export const optSettingsSchema = z
     /** Письмо с КП: SMTP того же ящика, что подключён к amoCRM (ТЗ 6.6). Пароль — в account_secrets, kind = smtp. */
     mail: z
       .object({
+        /** Чтение письма заявки по кнопке «Собрать КП» — только чтение, тот же логин и пароль (RFD-AI-AGENT-OPT-MAIL-READ). */
+        imapHost: z.string().max(200).default('imap.yandex.ru'),
+        imapPort: z.number().int().min(1).max(65535).default(993),
+        imapSecure: z.boolean().default(true),
         smtpHost: z.string().max(200).default(''),
         smtpPort: z.number().int().min(1).max(65535).default(465),
         smtpSecure: z.boolean().default(true),

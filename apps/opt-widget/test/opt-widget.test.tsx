@@ -155,7 +155,7 @@ describe('виджет «Агент опт»: настройки', () => {
   const settings = {
     model: { provider: 'openai', model: 'gpt-5.5', fallbackModel: 'gpt-5.1', fallbackProvider: null, effort: 'low', maxTokens: 4096 },
     vision: { provider: 'tesseract', photosToClaude: false, maxFilesPerDay: 100 },
-    mail: { smtpHost: '', smtpPort: 465, smtpSecure: true, username: '', fromName: 'РФ-Двери', fromAddress: '', cc: '', subject: 'Коммерческое предложение {kpNo}', text: 'Здравствуйте!', signature: '' },
+    mail: { imapHost: 'imap.yandex.ru', imapPort: 993, imapSecure: true, smtpHost: '', smtpPort: 465, smtpSecure: true, username: '', fromName: 'РФ-Двери', fromAddress: '', cc: '', subject: 'Коммерческое предложение {kpNo}', text: 'Здравствуйте!', signature: '' },
     billing: { usdRubRate: 90, pricing: {} },
   };
 
@@ -191,13 +191,16 @@ describe('виджет «Агент опт»: настройки', () => {
     expect(document.body.textContent).toContain('GPT-5.5 · $1.25/$10 за 1M');
     await click('Письмо');
     await flush();
+    // IMAP для чтения заявки по кнопке: значения Яндекса по умолчанию.
+    expect(document.body.textContent).toContain('IMAP-сервер');
+    expect([...document.querySelectorAll('input')].some((i) => i.value === 'imap.yandex.ru')).toBe(true);
     const inputs = [...document.querySelectorAll('input')];
     await setInput(inputs.find((i) => i.value === '')!, 'smtp.yandex.ru');
     await setInput(document.querySelector('input[type=password]'), 'secret');
     await click('Сохранить');
     await flush();
     expect(saved).toHaveLength(2);
-    expect(JSON.parse(saved[0]!).mail).toMatchObject({ smtpHost: 'smtp.yandex.ru', smtpPort: 465 });
+    expect(JSON.parse(saved[0]!).mail).toMatchObject({ smtpHost: 'smtp.yandex.ru', smtpPort: 465, imapHost: 'imap.yandex.ru', imapPort: 993, imapSecure: true });
     expect(JSON.parse(saved[1]!)).toEqual({ password: 'secret' });
     expect(document.body.textContent).toContain('Сохранено (версия 2)');
     await click('Журнал сборок');

@@ -8,9 +8,10 @@ const KINDS = [
   ['kp_build', 'Сборки'],
   ['kp_sent', 'Отправки'],
   ['kp_error', 'Ошибки'],
+  ['mail_fetch', 'Почта'],
 ] as const;
 
-const KIND_LABEL: Record<string, string> = { kp_draft: 'черновик', kp_build: 'сборка', kp_sent: 'отправлено', kp_error: 'ошибка', note: 'заметка', document: 'документ', error: 'ошибка' };
+const KIND_LABEL: Record<string, string> = { kp_draft: 'черновик', kp_build: 'сборка', kp_sent: 'отправлено', kp_error: 'ошибка', mail_fetch: 'почта', note: 'заметка', document: 'документ', error: 'ошибка' };
 
 const dateTime = (iso: string) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 

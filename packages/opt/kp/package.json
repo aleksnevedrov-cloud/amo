@@ -20,12 +20,16 @@
     "@core/llm": "workspace:*",
     "@core/shared": "workspace:*",
     "docxtemplater": "3.50.0",
+    "imapflow": "^2.0.6",
+    "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",
     "pizzip": "3.1.7",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.4.6",
     "@types/pg": "^8.23.1",
+    "hoodiecrow-imap": "^2.1.0",
     "pg": "^8.23.0"
   }
 }

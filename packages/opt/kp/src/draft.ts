@@ -2,6 +2,7 @@ import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
+import { MailAuthError, pickMailAttachments, type FetchedMail, type MailSearch } from './mail-read.ts';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -42,7 +43,7 @@ export interface KpPayload {
   questions: string[];
   needs_manager: { request_index: number; reason: string }[];
   source: {
-    from: 'amo_card' | 'none';
+    from: 'amo_card' | 'mailbox' | 'none';
     mails: number;
     letterAt: string | null;
     attachments: string[];
@@ -50,10 +51,29 @@ export interface KpPayload {
     documents: number[];
     /** Файлы, которые не разбирались, и почему. */
     skipped: { name: string; reason: string }[];
+    /** Чтение письма из ящика по IMAP (вариант А); нет поля — ящик не настроен. */
+    mail?: MailSource;
   };
   generatedAt: string;
   /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
   requirements: string[];
+}
+
+/** Итог чтения ящика для черновика и журнала (mail_fetch). */
+export interface MailSource {
+  status: 'found' | 'not_found' | 'error';
+  messageId: string | null;
+  date: string | null;
+  subject: string;
+  searchedFrom: string;
+  /** Вложений в письме всего, сколько взято, сколько загружено в сделку (новые), что пропущено. */
+  attachments: number;
+  taken: string[];
+  uploaded: string[];
+  skipped: { name: string; reason: string }[];
+  error: string | null;
+  /** Пауза после ошибки входа: раньше этого времени ящик не читаем. */
+  retryAt: string | null;
 }
 
 export interface ParsedFile {
@@ -66,7 +86,12 @@ export interface ParsedFile {
 }
 
 export interface KpDraftDeps {
-  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'listLeadFiles' | 'downloadFile'>;
+  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'listLeadFiles' | 'downloadFile' | 'uploadFileToLead'>;
+  /**
+   * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
+   * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
+   */
+  mail?: ((search: MailSearch) => Promise<FetchedMail | null>) | null;
   /** Разбор файла спецификации (@core/docs); null — разбор недоступен. */
   analyze: ((file: { filename: string; mime: string; bytes: Uint8Array }) => Promise<ParsedFile>) | null;
   /**
@@ -125,7 +150,13 @@ const NO_PRICE = 'цена не задана';
 
 export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
   const card = await readCard(d.amo, input.leadId);
-  const files = await parseFiles(d, card.files, { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES });
+  // Письмо из ящика: полный текст вместо первой строки из amo и вложения, которых в файлах сделки нет.
+  const mail = d.mail ? await fetchMail(d.mail, d.amo, input.leadId, card) : { source: null, files: [] as SourceFile[] };
+  const sources: SourceFile[] = [
+    ...mail.files,
+    ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, load: () => d.amo.downloadFile(f) })),
+  ];
+  const files = await parseFiles(d, sources, { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES });
   const letter = card.letter ? await parseLetter(llm, input, card.letter.text) : null;
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
@@ -138,6 +169,8 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   }
   const client = letter?.parsed.client ?? { org: '', fio: '', email: '', phone: '' };
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
+  if (mail.source?.status === 'not_found') needs.push({ request_index: -1, reason: `письмо в ящике не найдено (искали от ${mail.source.searchedFrom}) — черновик по тому, что есть в карточке` });
+  if (mail.source?.status === 'error') needs.push({ request_index: -1, reason: `почта: ${mail.source.error}` });
   const requirements = uniq([...files.parsed.flatMap((f) => f.requirements), ...extractRequirements([card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'))]);
   // Аналог — только предложение менеджеру с критерием подбора; строка КП остаётся без цены и без замены.
   if (d.analogs) {
@@ -167,12 +200,13 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
       questions: uniq([...(letter?.parsed.questions ?? []), ...files.parsed.flatMap((f) => f.questions)]).slice(0, 20),
       needs_manager: needs,
       source: {
-        from: card.letter || card.files.length ? 'amo_card' : 'none',
+        from: mail.source?.status === 'found' ? 'mailbox' : card.letter || card.files.length ? 'amo_card' : 'none',
         mails: card.mails,
         letterAt: card.letter?.createdAt.toISOString() ?? null,
-        attachments: card.files.map((f) => f.name),
+        attachments: sources.map((f) => f.name),
         documents: files.parsed.map((f) => f.id),
         skipped: files.skipped,
+        ...(mail.source ? { mail: mail.source } : {}),
       },
       generatedAt: new Date().toISOString(),
       requirements,
@@ -185,9 +219,62 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
 
 interface Card {
   contact: { fio: string; email: string; phone: string };
-  letter: { text: string; createdAt: Date } | null;
+  letter: { text: string; createdAt: Date; from: string; subject: string } | null;
   mails: number;
   files: Awaited<ReturnType<AmoApiClient['listLeadFiles']>>;
+}
+
+/** Файл для разбора: из карточки (скачать) или из письма (байты уже есть). */
+interface SourceFile {
+  name: string;
+  size: number;
+  mime: string | null;
+  load(): Promise<{ bytes: Uint8Array; mime: string | null }>;
+}
+
+const sameFile = (a: { name: string; size: number }, b: { name: string; size: number }) => a.name === b.name && a.size === b.size;
+
+/**
+ * Письмо из ящика (вариант А). Ищем по адресу отправителя последнего входящего письма сделки
+ * (иначе email контакта), дате ±1 день и теме. Найдено — текст письма заменяет первую строку из amo,
+ * вложения грузятся в файлы сделки (дубли по имени и размеру не заливаются) и разбираются из памяти.
+ * Не найдено или ошибка — черновик собирается по карточке, с пометкой.
+ */
+async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
+  const from = (card.letter?.from || card.contact.email).toLowerCase();
+  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null };
+  if (!from) return { source: { ...base, error: 'в карточке нет адреса отправителя' }, files: [] };
+  let found: FetchedMail | null;
+  try {
+    found = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject ?? null });
+  } catch (err) {
+    const retryAt = err instanceof MailAuthError ? err.retryAt.toISOString() : null;
+    return { source: { ...base, status: 'error', error: (err as Error).message, retryAt }, files: [] };
+  }
+  if (!found) return { source: base, files: [] };
+  card.letter = {
+    text: [found.subject ? `Тема: ${found.subject}` : '', found.text].filter(Boolean).join('\n'),
+    createdAt: found.date ?? card.letter?.createdAt ?? new Date(),
+    from,
+    subject: found.subject,
+  };
+  const { take, skipped } = pickMailAttachments(found.attachments);
+  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped };
+  const files: SourceFile[] = [];
+  for (const a of take) {
+    const name = a.filename ?? `attachment-${files.length + 1}`;
+    const bytes = new Uint8Array(a.content);
+    files.push({ name, size: bytes.byteLength, mime: a.contentType, load: async () => ({ bytes, mime: a.contentType }) });
+    // Уже в карточке (то же имя и размер) — повторно не грузим.
+    if (card.files.some((f) => sameFile(f, { name, size: bytes.byteLength }))) continue;
+    try {
+      await amo.uploadFileToLead(leadId, { filename: name, mime: a.contentType, bytes });
+      source.uploaded.push(name);
+    } catch (err) {
+      source.skipped.push({ name, reason: `не загружен в сделку: ${(err as Error).message}` });
+    }
+  }
+  return { source, files };
 }
 
 /** Карточка сделки: главный контакт, последнее входящее письмо из примечаний amo, список файлов. */
@@ -205,14 +292,14 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
       email: contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '',
       phone: contact ? (fieldValues(contact.custom_fields_values, 'PHONE')[0] ?? '') : '',
     },
-    letter: last ? { text: [last.subject ? `Тема: ${last.subject}` : '', last.text].filter(Boolean).join('\n'), createdAt: last.createdAt } : null,
+    letter: last ? { text: [last.subject ? `Тема: ${last.subject}` : '', last.text].filter(Boolean).join('\n'), createdAt: last.createdAt, from: last.from, subject: last.subject } : null,
     mails: mails.length,
     files,
   };
 }
 
-/** Файлы сделки → разобранные документы. Что не разобралось — в список skipped с причиной, не молча. */
-async function parseFiles(d: KpDraftDeps, files: Card['files'], limits: { maxFiles: number; maxBytes: number }): Promise<{ parsed: ParsedFile[]; skipped: KpPayload['source']['skipped'] }> {
+/** Файлы сделки и вложения письма → разобранные документы. Что не разобралось — в список skipped с причиной, не молча. */
+async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFiles: number; maxBytes: number }): Promise<{ parsed: ParsedFile[]; skipped: KpPayload['source']['skipped'] }> {
   const parsed: ParsedFile[] = [];
   const skipped: KpPayload['source']['skipped'] = [];
   for (const [i, f] of files.entries()) {
@@ -229,7 +316,7 @@ async function parseFiles(d: KpDraftDeps, files: Card['files'], limits: { maxFil
       continue;
     }
     try {
-      const file = await d.amo.downloadFile(f);
+      const file = await f.load();
       parsed.push(await d.analyze({ filename: f.name, mime: file.mime ?? f.mime ?? 'application/octet-stream', bytes: file.bytes }));
     } catch (err) {
       skipped.push({ name: f.name, reason: (err as Error).message });

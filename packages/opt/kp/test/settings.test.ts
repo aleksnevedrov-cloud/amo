@@ -13,7 +13,9 @@ describe('настройки опта', () => {
   });
 
   it('лишние ключи отклоняются (schema strict), переходник для @core/docs несёт модель и разбор файлов', () => {
-    expect(optSettingsSchema.safeParse({ mail: { imapHost: 'x' } }).success).toBe(false);
+    expect(optSettingsSchema.safeParse({ mail: { pop3Host: 'x' } }).success).toBe(false);
+    // IMAP для чтения заявки по кнопке: значения Яндекса по умолчанию (вариант А).
+    expect(optSettingsSchema.parse({}).mail).toMatchObject({ imapHost: 'imap.yandex.ru', imapPort: 993, imapSecure: true });
     const w = toWidgetSettings(optSettingsSchema.parse({ vision: { provider: 'yandex' }, billing: { usdRubRate: 95 } }));
     expect(w.model).toMatchObject({ provider: 'openai', model: 'gpt-5.5' });
     expect(w.vision).toMatchObject({ provider: 'yandex', autoParse: false, noteInLead: false });

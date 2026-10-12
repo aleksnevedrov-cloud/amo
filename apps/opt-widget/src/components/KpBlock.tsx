@@ -171,9 +171,20 @@ function SourceInfo({ draft }: { draft: KpDraftInfo }) {
     src.letterAt ? `письмо от ${date(src.letterAt)}` : 'письма в карточке нет',
     src.documents.length ? `разобрано файлов: ${src.documents.length}` : src.attachments.length ? 'файлы не разобраны' : 'файлов нет',
   ];
+  const m = src.mail;
   return (
     <div className="opt-col">
       <div className="opt-muted">Источник: {parts.join(', ')}</div>
+      {m?.status === 'found' && (
+        <div className="opt-muted">
+          Письмо прочитано из ящика{m.date ? ` (${date(m.date)})` : ''}: вложений {m.attachments}, в сделку загружено {m.uploaded.length}
+        </div>
+      )}
+      {m?.status === 'not_found' && <div className="opt-error">Письмо в ящике не найдено (искали от {m.searchedFrom}) — черновик по карточке</div>}
+      {m?.status === 'error' && <div className="opt-error">Ящик не прочитан: {m.error}</div>}
+      {m?.skipped.map((f) => (
+        <div key={`m-${f.name}`} className="opt-error">Вложение «{f.name}» пропущено: {f.reason}</div>
+      ))}
       {src.skipped.map((f) => (
         <div key={f.name} className="opt-error">Файл «{f.name}» пропущен: {f.reason}</div>
       ))}

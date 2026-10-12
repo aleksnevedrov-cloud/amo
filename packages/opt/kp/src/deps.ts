@@ -4,6 +4,7 @@ import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, 
 import type { LLMProvider, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import { createOptAi, type OptAiProvider } from './llm.ts';
+import { readLatestMail, type FetchedMail, type MailReadConfig, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
 import { OptSettingsRepo } from './settings.ts';
 
@@ -30,6 +31,8 @@ export interface OptCore {
   /** База знаний опта: пять справочников (ТЗ раздел 9). */
   /** Корень файлов опта: шаблон КП и собранные документы (/data в контейнере, том opt_data). */
   filesRoot: string;
+  /** Чтение письма заявки из ящика по IMAP, только чтение (вариант А); в тестах подменяется. */
+  mailRead(cfg: MailReadConfig, search: MailSearch): Promise<FetchedMail | null>;
   alerter: Alerter;
   fetch: typeof fetch;
   /** Клиент amoCRM аккаунта по токенам опта; аккаунт не подключён — ошибка. */
@@ -45,6 +48,7 @@ export interface OptCoreOverrides {
   make?(provider: ProviderId, key: string): LLMProvider;
   ocr?: DocumentServiceDeps['ocr'];
   filesRoot?: string;
+  mailRead?: OptCore['mailRead'];
 }
 
 /**
@@ -96,6 +100,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     ai,
     kp: new KpRepo(db),
     filesRoot: overrides.filesRoot ?? process.env.KP_FILES_ROOT ?? '/data',
+    mailRead: overrides.mailRead ?? readLatestMail,
     alerter,
     fetch: fetchImpl,
     async amoFor(accountId) {

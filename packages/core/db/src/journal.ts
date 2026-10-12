@@ -20,6 +20,8 @@ export type JournalKind =
   | 'kp_build'
   | 'kp_sent'
   | 'kp_error'
+  // Опт: чтение письма заявки из ящика по кнопке (RFD-AI-AGENT-OPT-MAIL-READ).
+  | 'mail_fetch'
   | 'summary'
   | 'task'
   | 'document';

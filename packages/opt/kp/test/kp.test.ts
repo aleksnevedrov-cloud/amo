@@ -3,6 +3,7 @@ import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
 import { buildKpDraft, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
+import { MailAuthError } from '../src/mail-read.ts';
 
 describe('сборка КП: значения для шаблона', () => {
   it('сумма прописью и формы слов', () => {
@@ -80,10 +81,16 @@ const route = { primary: { provider: 'openai' as const, model: 'gpt-5.5' }, fall
 const file = (uuid: string, name: string, size = 1000): LeadFile => ({ uuid, name, size, mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', createdAt: null, downloadUrl: `https://drive/${uuid}` });
 const position = (name: string, w: number | null, h: number | null, qty: number | null): ParsedFile['positions'][number] => ({ name, marking: null, width_mm: w, height_mm: h, qty, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null });
 
-function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftDeps['amo']['leadMailNotes']>> } = {}): KpDraftDeps['amo'] & { downloaded: string[] } {
+function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftDeps['amo']['leadMailNotes']>> } = {}): KpDraftDeps['amo'] & { downloaded: string[]; uploaded: { filename: string; size: number }[] } {
   const downloaded: string[] = [];
+  const uploaded: { filename: string; size: number }[] = [];
   return {
     downloaded,
+    uploaded,
+    uploadFileToLead: async (_leadId, file) => {
+      uploaded.push({ filename: file.filename, size: file.bytes.byteLength });
+      return `uuid-${uploaded.length}`;
+    },
     getLead: async () => ({ id: 89835, name: 'Двери для офиса', price: null, status_id: 1, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } }),
     getContact: async () => ({ id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }, { field_id: 2, field_code: 'PHONE', values: [{ value: '+7 900 000-00-00' }] }] }),
     leadMailNotes: async () => opts.mails ?? [],
@@ -152,6 +159,69 @@ describe('черновик КП опта: источник — карточка 
     // Без источника кандидатов черновик собирается без предложений.
     const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null });
     expect(r2.payload.needs_manager.some((n) => n.reason.includes('по аналогу'))).toBe(false);
+  });
+
+  it('письмо из ящика: полный текст вместо первой строки amo, вложения — в сделку и в разбор, дубли не заливаются', async () => {
+    const { gateway, requests } = fakeGateway(JSON.stringify({ client: { org: 'ООО Стройоптпоставка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'дверь двухпольная, массив лиственницы 1,4×2,7 м, L429 Indigo, 2 шт', name: 'дверь двухпольная', width_mm: 1400, height_mm: 2700, qty: 2 }], required_blocks: [], questions: [] }));
+    const spec = Buffer.from('spec bytes');
+    const amo = fakeAmo({ mails: [{ ...letter, from: 'stoptpostavka@yandex.ru', subject: 'Запрос', text: 'Добрый день!' }], files: [file('u1', 'already.pdf', spec.byteLength)] });
+    const searches: unknown[] = [];
+    const mail: KpDraftDeps['mail'] = async (search) => {
+      searches.push(search);
+      return {
+        uid: 7,
+        messageId: '<m7@yandex.ru>',
+        from: 'stoptpostavka@yandex.ru',
+        subject: 'Запрос',
+        date: new Date('2026-10-12T13:55:00Z'),
+        text: 'Добрый день!\nНужна дверь двухпольная, массив лиственницы 1,4×2,7 м, окраска L429 Indigo, 2 шт. Аналог допустим.',
+        attachments: [
+          { filename: 'tz.pdf', contentType: 'application/pdf', size: 621_000, content: Buffer.alloc(621_000, 1), inline: false },
+          { filename: 'already.pdf', contentType: 'application/pdf', size: spec.byteLength, content: spec, inline: false },
+          { filename: 'logo.png', contentType: 'image/png', size: 3_000, content: Buffer.alloc(3_000), inline: true },
+        ],
+      };
+    };
+    const analyzed: string[] = [];
+    const analyze: KpDraftDeps['analyze'] = async (f) => {
+      analyzed.push(`${f.filename}:${f.bytes.byteLength}`);
+      return { id: 900 + analyzed.length, filename: f.filename, kind: 'spec', positions: [], questions: [], requirements: [] };
+    };
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 30013995, route }, { amo, analyze, mail });
+    expect(searches).toEqual([{ from: 'stoptpostavka@yandex.ru', around: letter.createdAt, subject: 'Запрос' }]);
+    // Полный текст письма ушёл модели вместо первой строки из amo.
+    expect(requests[0]?.messages[0]?.content).toContain('окраска L429 Indigo, 2 шт. Аналог допустим');
+    // Вложения: новое загружено в сделку, дубль по имени и размеру — нет, мелкая встроенная картинка пропущена; разбор из памяти, без скачивания из amo.
+    expect(amo.uploaded).toEqual([{ filename: 'tz.pdf', size: 621_000 }]);
+    expect(amo.downloaded).toEqual([]);
+    expect(analyzed).toEqual(['tz.pdf:621000', `already.pdf:${spec.byteLength}`]);
+    expect(r.payload.source).toMatchObject({ from: 'mailbox', attachments: ['tz.pdf', 'already.pdf'], documents: [901, 902] });
+    expect(r.payload.source.mail).toMatchObject({ status: 'found', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
+    expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
+    expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
+  });
+
+  it('письмо в ящике не найдено — пометка, черновик по карточке; ошибка входа — пометка с временем повтора', async () => {
+    const { gateway } = fakeGateway(JSON.stringify({ client: { org: '', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 1 }], required_blocks: [], questions: [] }));
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter] }), analyze: null, mail: async () => null });
+    expect(r.payload.source.mail).toMatchObject({ status: 'not_found', searchedFrom: 'ivanov@romashka.ru' });
+    expect(r.payload.source.from).toBe('amo_card');
+    expect(r.payload.items.map((l) => l.name)).toEqual(['добор']);
+    expect(r.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'письмо в ящике не найдено (искали от ivanov@romashka.ru) — черновик по тому, что есть в карточке' });
+    // Писем в карточке нет — ищем по email контакта.
+    const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo(), analyze: null, mail: async () => null });
+    expect(r2.payload.source.mail?.searchedFrom).toBe('ivanov@romashka.ru');
+    const retryAt = new Date(Date.now() + 30 * 60_000);
+    const r3 = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, {
+      amo: fakeAmo({ mails: [letter] }),
+      analyze: null,
+      mail: async () => {
+        throw new MailAuthError('вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК', retryAt);
+      },
+    });
+    expect(r3.payload.source.mail).toMatchObject({ status: 'error', error: 'вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК', retryAt: retryAt.toISOString() });
+    expect(r3.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'почта: вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК' });
+    expect(r3.payload.items.map((l) => l.name)).toEqual(['добор']);
   });
 
   it('файлов нет — позиции из письма; разбор недоступен — файлы в skipped', async () => {

@@ -50,7 +50,16 @@ export interface KpDraftInfo {
   requiredBlocks: string[];
   questions: string[];
   needsManager: { request_index: number; reason: string }[];
-  source: { from: string; mails: number; letterAt: string | null; attachments: string[]; documents: number[]; skipped: { name: string; reason: string }[] } | null;
+  source: {
+    from: string;
+    mails: number;
+    letterAt: string | null;
+    attachments: string[];
+    documents: number[];
+    skipped: { name: string; reason: string }[];
+    /** Чтение письма из ящика (вариант А); нет — ящик не настроен. */
+    mail?: { status: 'found' | 'not_found' | 'error'; searchedFrom: string; date: string | null; attachments: number; taken: string[]; uploaded: string[]; skipped: { name: string; reason: string }[]; error: string | null; retryAt: string | null };
+  } | null;
 }
 
 /** Состояние задания воркера «собрать черновик». */
