@@ -1,9 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { Dictionaries, WidgetApi, WidgetSettings } from '../api.ts';
-import { Field, linesToList, NumberInput } from './fields.tsx';
+import { errorMessage, Field, linesToList, NumberInput, s, useLoad } from '@ai-door/widget-core';
 import { dateTime } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
 
 type Email = WidgetSettings['email'];
 

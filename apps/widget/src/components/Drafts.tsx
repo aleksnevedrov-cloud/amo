@@ -1,8 +1,7 @@
 import { useCallback } from 'react';
 import type { WidgetApi } from '../api.ts';
 import { SuggestionCard } from './Suggestions.tsx';
-import { s } from './styles.ts';
-import { useLoad } from './useLoad.ts';
+import { s, useLoad } from '@ai-door/widget-core';
 
 /** Очередь черновиков режима «Полуавто» по всему аккаунту. */
 export function Drafts({ api }: { api: WidgetApi }) {

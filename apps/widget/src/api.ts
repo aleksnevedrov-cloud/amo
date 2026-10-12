@@ -4,7 +4,7 @@ import type { CalcResult, PricingRules } from '@ai-door/pricing';
 
 export type { CalcResult, PricingRules, ModelInfo, ModelRef, ProviderId };
 export type Suggestion = Omit<DbSuggestion, 'createdAt' | 'decidedAt'> & { createdAt: string; decidedAt: string | null };
-import type { AmoWidgetSelf } from './amo.ts';
+import { ApiClient } from '@ai-door/widget-core';
 
 export type { WidgetSettings };
 export type Mode = WidgetSettings['mode'];
@@ -397,12 +397,7 @@ export interface WazzupDumpInfo {
   createdAt: string; finishedAt: string | null;
 }
 
-export class WidgetApi {
-  constructor(
-    private readonly self: AmoWidgetSelf,
-    private readonly baseUrl: string,
-  ) {}
-
+export class WidgetApi extends ApiClient {
   status = () => this.call<Status>('GET', '/widget/v1/status');
   settings = () => this.call<{ settings: WidgetSettings; version: number }>('GET', '/widget/v1/settings');
   saveSettings = (settings: WidgetSettings) =>
@@ -532,15 +527,4 @@ export class WidgetApi {
     });
 
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
-
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.self.$authorizedAjax({
-      url: new URL(path, this.baseUrl).toString(),
-      method,
-      type: method,
-      dataType: 'json',
-      ...(body === undefined ? {} : { data: JSON.stringify(body), contentType: 'application/json' }),
-    });
-    return res as T;
-  }
 }

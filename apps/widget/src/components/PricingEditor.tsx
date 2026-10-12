@@ -2,9 +2,7 @@ import { useCallback, useState } from 'react';
 import type { CalcResult, PricingRules, WidgetApi } from '../api.ts';
 import { downloadBase64, fileToBase64 } from '../chat.ts';
 import { Calculation } from './Calculation.tsx';
-import { Field, NumberInput } from './fields.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
+import { errorMessage, Field, NumberInput, s, useLoad } from '@ai-door/widget-core';
 
 type Comp = PricingRules['components'][number];
 type Svc = PricingRules['services'][number];

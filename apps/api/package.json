@@ -18,6 +18,7 @@
     "@ai-door/docs": "workspace:*",
     "@ai-door/evals": "workspace:*",
     "@ai-door/knowledge": "workspace:*",
+    "@ai-door/kp": "workspace:*",
     "@ai-door/llm": "workspace:*",
     "@ai-door/mail": "workspace:*",
     "@ai-door/media": "workspace:*",

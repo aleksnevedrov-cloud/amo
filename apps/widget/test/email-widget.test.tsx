@@ -2,7 +2,7 @@
 import { widgetSettingsSchema } from '@ai-door/db';
 import { act } from 'react';
 import { describe, expect, it } from 'vitest';
-import type { AmoWidgetSelf } from '../src/amo.ts';
+import type { AmoWidgetSelf } from '@ai-door/widget-core';
 import { createCallbacks } from '../src/index.tsx';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

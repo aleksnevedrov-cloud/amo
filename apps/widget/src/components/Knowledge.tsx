@@ -1,8 +1,7 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
 import type { WidgetApi } from '../api.ts';
 import { dateTime } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
+import { errorMessage, s, useLoad } from '@ai-door/widget-core';
 
 const KIND_LABEL = { faq: 'Вопрос-ответ', text: 'Текст', url: 'Статья', file: 'Файл' } as const;
 const FILE_ACCEPT = '.pdf,.docx,.xlsx,.xlsm,.txt,.csv,.md';

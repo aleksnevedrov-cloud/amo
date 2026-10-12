@@ -2,8 +2,7 @@ import { useCallback, useState } from 'react';
 import type { DocumentResult, WidgetApi } from '../api.ts';
 import { fileToBase64 } from '../chat.ts';
 import { dateTime } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
+import { errorMessage, s, useLoad } from '@ai-door/widget-core';
 
 export const DOC_KIND: Record<string, string> = {
   measurement: 'Замерный лист',

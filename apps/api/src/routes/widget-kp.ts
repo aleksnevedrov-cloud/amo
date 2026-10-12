@@ -4,7 +4,8 @@ import { basename } from 'node:path';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@ai-door/agent';
+import { resolveRoute } from '@ai-door/agent';
+import { buildKp, buildKpDraft, findCertificates, templateData, type KpLine, type KpPayload } from '@ai-door/kp';
 import { buildKpMail, ourAddress, replySubject, serverConfig, type Mailbox } from '@ai-door/mail';
 import { KpRepo, MailAttachmentsRepo, type KpDraft } from '@ai-door/db';
 import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
@@ -163,8 +164,7 @@ export function widgetKpRoutes(
     try {
       const r = await buildKpDraft(
         ai.llm,
-        settings,
-        { accountId: p.accountId, leadId },
+        { accountId: p.accountId, leadId, route: resolveRoute(settings), pricing: settings.billing.pricing },
         {
           catalog: deps.catalog,
           dialog: deps.dialog,

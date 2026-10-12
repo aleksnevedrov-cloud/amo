@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { PROVIDER_LABELS, tariffModels } from '@ai-door/llm/pricing';
 import type { Dictionaries, LlmKeys, ModelInfo, ModelRef, ProviderId, WidgetApi, WidgetSettings } from '../api.ts';
-import { Field, NumberInput } from './fields.tsx';
+import { errorMessage, Field, NumberInput, s } from '@ai-door/widget-core';
 import { PROVIDER_NAME, providerShort, usd } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage } from './useLoad.ts';
 
 export const PROVIDERS: ProviderId[] = ['anthropic', 'openai'];
 const CONSOLE: Record<ProviderId, string> = { anthropic: 'console.anthropic.com', openai: 'platform.openai.com' };

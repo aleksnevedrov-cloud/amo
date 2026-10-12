@@ -1,8 +1,4 @@
-import type { LlmGateway } from '@ai-door/llm';
-import type { WidgetSettings } from '@ai-door/db';
-import { asGateway, type LlmClient } from './llm.ts';
-import { costOfResponse, type Cost } from './pricing.ts';
-import { resolveRoute } from './route.ts';
+import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@ai-door/llm';
 
 /**
  * Черновик КП (тема RFD-AI-AGENT-KP, этап 3 ТЗ).
@@ -60,6 +56,15 @@ export interface KpDraftDeps {
   };
 }
 
+export interface KpDraftInput {
+  accountId: number;
+  leadId: number;
+  /** Модель для разбора письма: маршрут по настройкам аккаунта считает вызывающий. */
+  route: ChatRoute;
+  /** Переопределения тарифов аккаунта (`billing.pricing`) для учёта стоимости. */
+  pricing?: PricingOverrides;
+}
+
 export interface KpRequestItem {
   raw: string;
   name: string;
@@ -112,7 +117,7 @@ export interface KpPayload {
 
 export interface KpDraftResult {
   payload: KpPayload;
-  cost: Cost;
+  cost: CostResult;
   provider: string;
   model: string;
 }
@@ -143,12 +148,37 @@ const MAX_ATTACH = 20_000;
 /** Комплектующие тянутся с сайта по одной карточке — больше позиций за ход не разбираем. */
 const MAX_COMPONENT_LOOKUPS = 5;
 
-export async function buildKpDraft(
-  llm: LlmClient | LlmGateway,
-  settings: WidgetSettings,
-  input: { accountId: number; leadId: number },
-  d: KpDraftDeps,
-): Promise<KpDraftResult> {
+export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
+  const request = await readRequest(input, d);
+  const res = await llm.chat(
+    { system: PROMPT, messages: [{ role: 'user', content: request.text }], maxTokens: 4000, effort: 'low' },
+    input.route,
+  );
+  const parsed = parseDraft(res.text ?? '');
+  const matched = await matchCatalog(input.accountId, parsed.request_items, d);
+  if (!parsed.request_items.length) matched.needs.push({ request_index: -1, reason: 'в письме не найдено позиций' });
+
+  return {
+    payload: {
+      client: parsed.client,
+      request_items: parsed.request_items,
+      candidates: matched.candidates,
+      items: matched.items,
+      components: matched.components,
+      required_blocks: parsed.required_blocks,
+      questions: parsed.questions,
+      needs_manager: matched.needs,
+      source: request.source,
+      generatedAt: new Date().toISOString(),
+    },
+    cost: costOfUsage({ provider: res.provider, model: res.model }, res.usage, input.pricing),
+    provider: res.provider,
+    model: res.model,
+  };
+}
+
+/** Текст запроса для модели: последнее входящее письмо из карточки amo (запасной источник — переписка) и вложения. */
+async function readRequest(input: KpDraftInput, d: KpDraftDeps): Promise<{ text: string; source: KpPayload['source'] }> {
   // Письма берём из карточки сделки: их туда положила сама amoCRM.
   const mails = (await d.mail?.leadMailNotes(input.leadId, 20).catch(() => [])) ?? [];
   const incoming = mails.filter((m) => m.income).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
@@ -159,7 +189,6 @@ export async function buildKpDraft(
   const last = lastMail
     ? { text: [lastMail.subject ? `Тема: ${lastMail.subject}` : '', lastMail.text].filter(Boolean).join('\n'), createdAt: lastMail.createdAt }
     : (history.filter((m) => m.role === 'client').at(-1) ?? null);
-  const source = lastMail ? 'amo_mail' : history.length ? 'dialog' : 'none';
   const files = (await d.attachments?.listByLead(input.accountId, input.leadId, 20).catch(() => [])) ?? [];
   const extracts = files.filter((f) => f.extractedText);
 
@@ -172,37 +201,39 @@ export async function buildKpDraft(
       )}`,
     );
   }
+  return {
+    text: parts.join('\n\n'),
+    source: {
+      from: lastMail ? 'amo_mail' : history.length ? 'dialog' : 'none',
+      mails: mails.length,
+      letterAt: last?.createdAt ? new Date(last.createdAt).toISOString() : null,
+      attachments: [...files.map((f) => f.filename), ...(lastMail?.attachments ?? [])],
+    },
+  };
+}
 
-  const res = await asGateway(llm).chat(
-    { system: PROMPT, messages: [{ role: 'user', content: parts.join('\n\n') }], maxTokens: 4000, effort: 'low' },
-    resolveRoute(settings),
-  );
-  const parsed = parseDraft(res.text ?? '');
+interface Matched {
+  candidates: KpCandidate[];
+  items: KpLine[];
+  components: KpComponents[];
+  needs: { request_index: number; reason: string }[];
+}
 
-  const candidates: KpCandidate[] = [];
-  const items: KpLine[] = [];
-  const components: KpComponents[] = [];
-  const needs: { request_index: number; reason: string }[] = [];
-
-  for (const [i, it] of parsed.request_items.entries()) {
-    const found = await d.catalog
-      .search(input.accountId, { query: searchQuery(it), limit: 3 })
-      .catch(() => [] as KpProduct[]);
-    if (!found.length) {
-      needs.push({ request_index: i, reason: 'позиции нет в каталоге' });
-      items.push(emptyLine(i, it));
-      continue;
-    }
-    for (const p of found) candidates.push(toCandidate(i, p));
+/** Позиции запроса → товары каталога: цены, наличие, сроки и комплектующие подставляет код, не модель. */
+async function matchCatalog(accountId: number, requested: KpRequestItem[], d: KpDraftDeps): Promise<Matched> {
+  const out: Matched = { candidates: [], items: [], components: [], needs: [] };
+  for (const [i, it] of requested.entries()) {
+    const found = await d.catalog.search(accountId, { query: searchQuery(it), limit: 3 }).catch(() => [] as KpProduct[]);
     const best = found[0];
     if (!best) {
-      needs.push({ request_index: i, reason: 'позиции нет в каталоге' });
-      items.push(emptyLine(i, it));
+      out.needs.push({ request_index: i, reason: 'позиции нет в каталоге' });
+      out.items.push(emptyLine(i, it));
       continue;
     }
-    if (best.price === null) needs.push({ request_index: i, reason: 'в каталоге нет цены' });
-    if (best.available === false) needs.push({ request_index: i, reason: 'нет в наличии' });
-    items.push({
+    for (const p of found) out.candidates.push(toCandidate(i, p));
+    if (best.price === null) out.needs.push({ request_index: i, reason: 'в каталоге нет цены' });
+    if (best.available === false) out.needs.push({ request_index: i, reason: 'нет в наличии' });
+    out.items.push({
       request_index: i,
       page_id: best.id,
       name: best.name,
@@ -212,40 +243,16 @@ export async function buildKpDraft(
       lead_time: paramOf(best, ['срок', 'поставка']),
       discount: 0,
     });
-    if (d.components && best.url && components.length < MAX_COMPONENT_LOOKUPS) {
-      const got = await d.components.forProduct(input.accountId, best.id, best.url).catch(() => []);
+    if (d.components && best.url && out.components.length < MAX_COMPONENT_LOOKUPS) {
+      const got = await d.components.forProduct(accountId, best.id, best.url).catch(() => []);
       if (got.length) {
         const groups: Record<string, { name: string; price: number }[]> = {};
         for (const c of got) (groups[c.group] ??= []).push({ name: c.name, price: c.price });
-        components.push({ request_index: i, page_id: best.id, groups });
+        out.components.push({ request_index: i, page_id: best.id, groups });
       }
     }
   }
-
-  if (!parsed.request_items.length) needs.push({ request_index: -1, reason: 'в письме не найдено позиций' });
-
-  return {
-    payload: {
-      client: parsed.client,
-      request_items: parsed.request_items,
-      candidates,
-      items,
-      components,
-      required_blocks: parsed.required_blocks,
-      questions: parsed.questions,
-      needs_manager: needs,
-      source: {
-        from: source,
-        mails: mails.length,
-        letterAt: last?.createdAt ? new Date(last.createdAt).toISOString() : null,
-        attachments: [...files.map((f) => f.filename), ...(lastMail?.attachments ?? [])],
-      },
-      generatedAt: new Date().toISOString(),
-    },
-    cost: costOfResponse({ provider: res.provider, model: res.model }, res.usage, settings.billing.pricing),
-    provider: res.provider,
-    model: res.model,
-  };
+  return out;
 }
 
 interface ParsedDraft {

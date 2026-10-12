@@ -1,8 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { ModelStats, WidgetApi } from '../api.ts';
 import { modelLabel, rub } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { useLoad } from './useLoad.ts';
+import { s, useLoad } from '@ai-door/widget-core';
 
 const PERIODS = [
   [7, '7 дней'],

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { KpSettingsInfo, WidgetApi } from '../api.ts';
-import { Field } from './fields.tsx';
-import { s } from './styles.ts';
+import { Field, s } from '@ai-door/widget-core';
 
 type Constants = KpSettingsInfo['constants'];
 

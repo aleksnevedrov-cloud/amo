@@ -1,5 +1,5 @@
 import type { Mode, Status } from '../api.ts';
-import { s } from './styles.ts';
+import { s } from '@ai-door/widget-core';
 
 const MODE_LABEL: Record<Mode, string> = {
   auto: 'Автоматический',

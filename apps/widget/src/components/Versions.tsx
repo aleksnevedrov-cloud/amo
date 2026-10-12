@@ -1,8 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { WidgetApi } from '../api.ts';
 import { dateTime } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
+import { errorMessage, s, useLoad } from '@ai-door/widget-core';
 
 const SECTION: Record<string, string> = {
   enabled: 'Вкл/выкл',

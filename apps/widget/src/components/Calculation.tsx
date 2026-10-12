@@ -1,6 +1,6 @@
 import type { CalcResult } from '../api.ts';
 import { rub } from './StatusBadge.tsx';
-import { s } from './styles.ts';
+import { s } from '@ai-door/widget-core';
 
 /** Черновик детализации — те же колонки, что в «Детализации сделки». */
 export function Calculation({ c }: { c: CalcResult }) {

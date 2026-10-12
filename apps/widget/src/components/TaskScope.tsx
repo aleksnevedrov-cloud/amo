@@ -1,6 +1,5 @@
 import type { Dictionaries, WidgetSettings } from '../api.ts';
-import { Field } from './fields.tsx';
-import { s } from './styles.ts';
+import { Field, s } from '@ai-door/widget-core';
 
 type Sweep = WidgetSettings['taskSweep'];
 

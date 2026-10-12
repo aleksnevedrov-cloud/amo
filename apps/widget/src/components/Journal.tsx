@@ -1,8 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { JournalItem, WidgetApi } from '../api.ts';
 import { dateTime, kindLabel, modelLabel, rub } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage } from './useLoad.ts';
+import { errorMessage, s } from '@ai-door/widget-core';
 
 const KINDS = ['', 'reply', 'handoff', 'blocked', 'pause', 'resume', 'skipped', 'error', 'import', 'sandbox'];
 

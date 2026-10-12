@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { DEFAULT_PRICING } from '@ai-door/llm/pricing';
 import type { Dictionaries, LlmKeys, Mode, ModelRef, ProviderId, Status, WidgetApi, WidgetSettings } from '../api.ts';
 import { CatalogStatus } from './Catalog.tsx';
-import { Field, linesToList, NumberInput } from './fields.tsx';
+import { errorMessage, Field, linesToList, NumberInput, s, useLoad } from '@ai-door/widget-core';
 import { Drafts } from './Drafts.tsx';
 import { EmailSettings } from './EmailSettings.tsx';
 import { KpSettings } from './KpSettings.tsx';
@@ -16,8 +16,6 @@ import { Analytics } from './Analytics.tsx';
 import { Sandbox } from './Sandbox.tsx';
 import { Versions } from './Versions.tsx';
 import { ConnectionBadge, modeLabel, providerShort, providerVendor, rub } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
 
 const MODES: Mode[] = ['off', 'hints', 'semi', 'auto'];
 

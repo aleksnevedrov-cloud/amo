@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CompareResult, EvalRun, ModelRef, ProviderId, SandboxResult, WidgetApi, WidgetSettings } from '../api.ts';
 import { ModelPicker } from './ModelSettings.tsx';
 import { dateTime, modelLabel, providerShort, rub, usd } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage } from './useLoad.ts';
+import { errorMessage, s } from '@ai-door/widget-core';
 
 interface Turn {
   role: 'client' | 'ai';

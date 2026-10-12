@@ -7,7 +7,7 @@ import { KpBlock } from './KpBlock.tsx';
 import { ModelPicker } from './ModelSettings.tsx';
 import { dateTime, kindLabel, modeLabel, modelLabel, rub } from './StatusBadge.tsx';
 import { SuggestionCard } from './Suggestions.tsx';
-import { errorMessage } from './useLoad.ts';
+import { errorMessage } from '@ai-door/widget-core';
 
 /** Как часто панель перечитывает данные, пока карточка открыта (новые сообщения, действия AI). */
 const POLL_MS = 20_000;

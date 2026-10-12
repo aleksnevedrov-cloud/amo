@@ -1,27 +1,10 @@
-import { createRoot, type Root } from 'react-dom/client';
-import { currentLeadId, type AmoWidgetSelf } from './amo.ts';
+import { advancedSettingsUrl, createMounter, currentLeadId, safe, settingsHost, type AmoWidgetSelf } from '@ai-door/widget-core';
 import { WidgetApi } from './api.ts';
-import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { LeadPanel } from './components/LeadPanel.tsx';
 import { SettingsPage } from './components/SettingsPage.tsx';
 
 declare const __API_URL__: string;
 declare const __STYLES__: string;
-
-/**
- * Стилевой слой виджета (src/styles.css) вшит в бандл сборкой и вставляется в документ один раз.
- * В архив тот же CSS кладётся отдельным файлом style.css — на случай, если он понадобится снаружи.
- */
-function ensureStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById('ai-door-styles')) return;
-  // В тестах и в dev-сборке define отсутствует — тогда стили просто не вставляются.
-  const css = typeof __STYLES__ === 'string' ? __STYLES__ : '';
-  if (!css) return;
-  const tag = document.createElement('style');
-  tag.id = 'ai-door-styles';
-  tag.textContent = css;
-  document.head.appendChild(tag);
-}
 
 /**
  * Шаги Salesbot для обработчика виджета:
@@ -42,11 +25,6 @@ export function salesbotSteps(apiUrl: string, handler: string = 'ai_reply'): str
 
 type Callbacks = Record<string, (...args: unknown[]) => unknown>;
 
-/** Адрес страницы расширенных настроек виджета в amo (локация advanced_settings). */
-export function advancedSettingsUrl(widgetCode: string, origin: string = typeof location === 'undefined' ? '' : location.origin): string {
-  return `${origin}/settings/widgets/${encodeURIComponent(widgetCode)}/`;
-}
-
 /**
  * Точка входа виджета. Сборка оборачивает её в AMD-модуль, который amo грузит как script.js:
  * `define([], () => function () { this.callbacks = createCallbacks(this); })`.
@@ -54,36 +32,15 @@ export function advancedSettingsUrl(widgetCode: string, origin: string = typeof 
  */
 export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL__): Callbacks {
   const api = new WidgetApi(self, apiUrl);
-  const roots = new Map<string, Root>();
+  // В тестах и в dev-сборке define отсутствует — тогда стили просто не вставляются.
+  const { mount, unmountAll } = createMounter(typeof __STYLES__ === 'string' ? __STYLES__ : '');
   const code = () => self.get_settings().widget_code;
-
-  const mount = (key: string, el: Element | null, node: React.ReactNode) => {
-    if (!el) return;
-    ensureStyles();
-    roots.get(key)?.unmount();
-    const root = createRoot(el);
-    root.render(<ErrorBoundary>{node}</ErrorBoundary>);
-    roots.set(key, root);
-  };
-
-  const safe =
-    <A extends unknown[]>(fn: (...args: A) => unknown) =>
-    (...args: A) => {
-      try {
-        fn(...args);
-      } catch (err) {
-        // eslint-disable-next-line no-console -- единственный канал диагностики внутри amo
-        console.error('[ai-door] widget error', err);
-      }
-      return true;
-    };
 
   return {
     init: safe(() => undefined),
     bind_actions: safe(() => undefined),
 
     render: safe(() => {
-      ensureStyles();
       if (self.system().area !== 'lcard') return;
       const leadId = currentLeadId();
       if (!leadId) return;
@@ -104,13 +61,7 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
      * на всю страницу по адресу /settings/widgets/<код>/ — ссылка сверху формы.
      */
     settings: safe((...args: unknown[]) => {
-      // amo передаёт jQuery-объект модального окна настроек.
-      const modal = args[0] as { find?: (sel: string) => { get?: (i: number) => Element | undefined } } | undefined;
-      const host = document.createElement('div');
-      const block = modal?.find?.('.widget_settings_block')?.get?.(0);
-      if (!block) return;
-      block.appendChild(host);
-      mount('settings', host, <SettingsPage api={api} fullPageUrl={advancedSettingsUrl(code())} />);
+      mount('settings', settingsHost(args[0]), <SettingsPage api={api} fullPageUrl={advancedSettingsUrl(code())} />);
     }),
 
     advancedSettings: safe(() => {
@@ -126,9 +77,6 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
      */
     onSalesbotDesignerSave: (handlerCode?: unknown) => salesbotSteps(apiUrl, typeof handlerCode === 'string' ? handlerCode : 'ai_reply'),
 
-    destroy: safe(() => {
-      for (const root of roots.values()) root.unmount();
-      roots.clear();
-    }),
+    destroy: safe(unmountAll),
   };
 }

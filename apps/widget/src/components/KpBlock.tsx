@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { KpDraftInfo, KpDraftLine, WidgetApi } from '../api.ts';
-import { errorMessage } from './useLoad.ts';
+import { errorMessage } from '@ai-door/widget-core';
 
 /**
  * Блок «КП» в карточке сделки (тема RFD-AI-AGENT-KP, раздел 9 ТЗ).

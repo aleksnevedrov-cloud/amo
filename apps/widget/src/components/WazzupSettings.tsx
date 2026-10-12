@@ -1,8 +1,6 @@
 import { useCallback, useState } from 'react';
 import type { WidgetApi } from '../api.ts';
-import { Field } from './fields.tsx';
-import { s } from './styles.ts';
-import { errorMessage, useLoad } from './useLoad.ts';
+import { errorMessage, Field, s, useLoad } from '@ai-door/widget-core';
 
 const fmt = (v: string | null | undefined) => (v ? new Date(v).toLocaleString('ru-RU') : '—');
 

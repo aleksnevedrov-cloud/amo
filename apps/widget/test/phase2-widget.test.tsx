@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { AmoWidgetSelf } from '../src/amo.ts';
+import type { AmoWidgetSelf } from '@ai-door/widget-core';
 import { createCallbacks, salesbotSteps } from '../src/index.tsx';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

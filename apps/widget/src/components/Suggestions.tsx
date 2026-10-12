@@ -2,8 +2,7 @@ import { useState } from 'react';
 import type { Suggestion, WidgetApi } from '../api.ts';
 import { insertIntoChat } from '../chat.ts';
 import { dateTime } from './StatusBadge.tsx';
-import { s } from './styles.ts';
-import { errorMessage } from './useLoad.ts';
+import { errorMessage, s } from '@ai-door/widget-core';
 
 /** Черновик на одобрение или подсказка менеджеру. */
 export function SuggestionCard({ api, item, onDone, showLead }: { api: WidgetApi; item: Suggestion; onDone: () => void; showLead?: boolean }) {
