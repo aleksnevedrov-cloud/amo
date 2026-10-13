@@ -154,7 +154,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
       <section className="opt-kp-card">
         <div className="opt-kp-head">
           <h3 className="opt-kp-title">Позиции КП</h3>
-          <span className="opt-kp-badge">{plural(lines.length, 'позиция', 'позиции', 'позиций')}</span>
+          <span className="opt-kp-badge" title={plural(lines.length, 'позиция', 'позиции', 'позиций')}>{lines.length}</span>
         </div>
         {lines.length === 0 ? (
           <div className="opt-kp-note">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>
@@ -371,11 +371,14 @@ function KpLinesTiles({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; n
               </label>
               <label className="opt-kp-field opt-kp-field-price">
                 <span className="opt-kp-label">Цена</span>
-                <input type="number" min={0} value={l.price ?? ''} placeholder="нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
+                <input type="number" min={0} value={l.price ?? ''} placeholder="Нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
               </label>
-              <label className="opt-kp-field">
+              <label className="opt-kp-field opt-kp-field-discount">
                 <span className="opt-kp-label">Скидка</span>
-                <input type="number" min={0} max={100} value={l.discount} onChange={(e) => onEdit(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />
+                <span className="opt-kp-suffix">
+                  <input type="number" min={0} max={100} value={l.discount} onChange={(e) => onEdit(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />
+                  <span>%</span>
+                </span>
               </label>
             </div>
           </div>

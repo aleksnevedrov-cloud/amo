@@ -97,8 +97,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.querySelectorAll('.opt-root.opt-kp')).toHaveLength(1);
     expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Действия с КП']);
     expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(5);
-    expect([...document.querySelectorAll('.opt-kp-badge')].map((b) => b.textContent)).toEqual(['Черновик', '1 позиция']);
     const tile = document.querySelector('.opt-kp-tile')!;
+    const tileHas = (sel: string, text: string) => tile.querySelector(sel)?.textContent === text;
+    expect([...document.querySelectorAll('.opt-kp-badge')].map((b) => b.textContent)).toEqual(['Черновик', '1']);
+    expect(document.querySelectorAll('.opt-kp-badge')[1]?.getAttribute('title')).toBe('1 позиция');
+    expect(tileHas('.opt-kp-suffix > span', '%')).toBe(true);
     expect(tile.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверь ДПС 01');
     expect(tile.querySelector('.opt-kp-sub')?.textContent).toBe('2100 × 900 мм');
     expect([...tile.querySelectorAll('.opt-kp-label')].map((l) => l.textContent)).toEqual(['Количество', 'Цена', 'Скидка']);
@@ -213,7 +216,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    await setInput(document.querySelector('input[placeholder="нет цены"]'), '14900');
+    await setInput(document.querySelector('input[placeholder="Нет цены"]'), '14900');
     expect(button('Собрать документ')?.disabled).toBe(true);
     await click('Сохранить правки');
     await flush();
