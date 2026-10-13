@@ -48,6 +48,8 @@ interface Measured {
   titles: { text: string; lines: number }[];
   labels: { text: string; lines: number }[];
   inputs: { placeholder: string; width: number; top: number; textFits: boolean }[];
+  badges: { text: string; sameLineAsTitle: boolean }[];
+  sizes: { title: number; text: number; button: number; input: number; badge: number };
   tile: number;
 }
 
@@ -74,6 +76,17 @@ const out = {
     const inner = r.width - parseFloat(st.paddingLeft) - parseFloat(st.paddingRight);
     return { placeholder: i.placeholder, width: r.width, top: r.top, textFits: c.measureText(text).width <= inner };
   }),
+  badges: [...document.querySelectorAll('.opt-kp-badge')].map((b) => {
+    const t = b.parentElement.querySelector('.opt-kp-title');
+    return { text: b.textContent, sameLineAsTitle: Math.abs(b.getBoundingClientRect().top + b.getBoundingClientRect().height / 2 - (t.getBoundingClientRect().top + t.getBoundingClientRect().height / 2)) < 4 };
+  }),
+  sizes: {
+    title: parseFloat(getComputedStyle(document.querySelector('.opt-kp-title')).fontSize),
+    text: parseFloat(getComputedStyle(document.querySelector('.opt-kp-questions li')).fontSize),
+    button: Math.round(document.querySelector('.opt-actions .opt-btn').getBoundingClientRect().height),
+    input: Math.round(document.querySelector('.opt-kp-field input').getBoundingClientRect().height),
+    badge: Math.round(document.querySelector('.opt-kp-badge').getBoundingClientRect().height),
+  },
   tile: document.querySelector('.opt-kp-tile').getBoundingClientRect().width,
 };
 document.body.appendChild(Object.assign(document.createElement('pre'), { id: 'result', textContent: JSON.stringify(out) }));
@@ -96,36 +109,37 @@ describe('раскладка блока в колонке amoCRM', () => {
     expect(html).toContain('placeholder="Нет цены"');
   });
 
-  it.skipIf(!hasChrome)('320, 340 и 400 px: заголовки и подписи в одну строку, «Количество» и «Скидка» в ряд, «Цена» ниже во всю ширину, «Нет цены» целиком, без горизонтальной прокрутки', async () => {
+  it.skipIf(!hasChrome)('320, 340 и 400 px: заголовки и подписи в одну строку, бейдж в строке заголовка, «Количество» и «Скидка» в ряд, «Цена» ниже во всю ширину, «Нет цены» целиком, без прокрутки', async () => {
     const html = await renderBlock();
     for (const width of [320, 340, 400]) {
       const m = measure(html, width);
       expect(m.overflow, `${width}: прокрутка`).toBe(false);
       expect(m.titles.map((t) => t.text)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Действия с КП']);
       expect(m.titles.map((t) => t.lines), `${width}: заголовки`).toEqual([1, 1, 1, 1]);
+      expect(m.badges.every((b) => b.sameLineAsTitle), `${width}: бейдж в строке заголовка`).toBe(true);
       expect(m.labels.map((l) => [l.text, l.lines]), `${width}: подписи`).toEqual([['Количество', 1], ['Цена', 1], ['Скидка', 1]]);
       const [qty, price, discount] = m.inputs;
       expect(m.inputs.every((i) => i.width >= 72), `${width}: поля ≥ 72 px: ${m.inputs.map((i) => Math.round(i.width))}`).toBe(true);
       expect(Math.abs(qty!.top - discount!.top), `${width}: количество и скидка в одной строке`).toBeLessThan(1);
       expect(price!.top, `${width}: цена второй строкой`).toBeGreaterThan(qty!.top + 20);
-      expect(price!.width, `${width}: цена во всю ширину плитки`).toBeGreaterThan(m.tile - 40);
+      expect(price!.width, `${width}: цена во всю ширину плитки`).toBeGreaterThan(m.tile - 30);
       expect(price!.textFits, `${width}: «Нет цены» обрезано`).toBe(true);
+      // Масштаб как у розницы: заголовок 13 px, текст 12 px, кнопки 28 px, поля 24 px, бейдж 20 px.
+      expect(m.sizes, `${width}: размеры`).toEqual({ title: 13, text: 12, button: 28, input: 24, badge: 20 });
     }
   }, 120_000);
 
-  it.skipIf(!hasChrome)('500 px: плитка ещё уже 420 — две строки; 550 px (ширина макета): три поля в ряд, цена шире остальных', async () => {
+  it.skipIf(!hasChrome)('500 и 550 px: плитка ≥ 420 — три поля в ряд, цена шире остальных', async () => {
     const html = await renderBlock();
-    const narrow = measure(html, 500);
-    expect(narrow.overflow).toBe(false);
-    expect(narrow.tile).toBeLessThan(420);
-    expect(narrow.inputs[1]!.top).toBeGreaterThan(narrow.inputs[0]!.top + 20);
-    const wide = measure(html, 550);
-    expect(wide.overflow).toBe(false);
-    expect(wide.tile).toBeGreaterThanOrEqual(420);
-    const [qty, price, discount] = wide.inputs;
-    expect(Math.abs(qty!.top - price!.top)).toBeLessThan(1);
-    expect(Math.abs(qty!.top - discount!.top)).toBeLessThan(1);
-    expect(price!.width).toBeGreaterThan(qty!.width * 1.8);
-    expect(price!.textFits).toBe(true);
+    for (const width of [500, 550]) {
+      const m = measure(html, width);
+      expect(m.overflow, `${width}: прокрутка`).toBe(false);
+      expect(m.tile, `${width}: плитка`).toBeGreaterThanOrEqual(420);
+      const [qty, price, discount] = m.inputs;
+      expect(Math.abs(qty!.top - price!.top), `${width}: ряд`).toBeLessThan(1);
+      expect(Math.abs(qty!.top - discount!.top), `${width}: ряд`).toBeLessThan(1);
+      expect(price!.width, `${width}: цена шире`).toBeGreaterThan(qty!.width * 1.8);
+      expect(price!.textFits).toBe(true);
+    }
   }, 60_000);
 });
