@@ -76,6 +76,10 @@ export type Effort = 'low' | 'medium' | 'high';
 export interface WebSearchOptions {
   /** Регион поиска; по умолчанию Россия, Москва. */
   region?: { country: 'RU'; city?: string; region?: string };
+  /** Сколько текста источников модель получает в контекст (search_context_size); не передан — значение провайдера (medium). */
+  contextSize?: 'low' | 'medium' | 'high';
+  /** Не больше N вызовов поиска за ответ (max_tool_calls); не передан — без ограничения. */
+  maxCalls?: number;
 }
 
 /** Ссылка, подтверждённая веб-поиском провайдера. */

@@ -1,10 +1,10 @@
 import { LlmError, WebSearchUnavailableError, type ChatRoute, type LlmGateway, type RoutedRequest, type RoutedResponse, type WebSource } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { buildQuery, describeItem, dropOutliers, judgeOffer, median, researchMarketPrice, statsOf, urlConfirmed, type ItemCard, type MarketOffer, type MarketResearchInput } from '../src/market-research.ts';
+import { buildQuery, cleanName, describeItem, dropOutliers, judgeOffer, leavesOf, median, notRfShop, orientSize, parseSizeMm, researchMarketPrice, statsOf, urlConfirmed, type ItemCard, type MarketOffer, type MarketResearchInput } from '../src/market-research.ts';
 
 const route: ChatRoute = { primary: { provider: 'openai', model: 'gpt-5' }, fallback: null };
 
-const CARD = { kind: 'leaf', factory: 'Профиль Дорс', model: '2.47U', collection: 'U', finish: 'ПВХ', color: 'белый', glazing: 'сатинат', heightMm: 2000, widthMm: 800, equipment: null, fireRating: null, standards: [] };
+const CARD = { kind: 'leaf', factory: 'Профиль Дорс', model: '2.47U', collection: 'U', finish: 'ПВХ', color: 'белый', glazing: 'сатинат', heightMm: 2000, widthMm: 800, leaves: null, equipment: null, fireRating: null, standards: [] };
 
 /** Ответ модели: первый вызов — карточка, второй — предложения с источниками и счётчиком поиска. */
 function fakeLlm(card: unknown, offers: unknown, sources: WebSource[], calls = 2): LlmGateway & { requests: RoutedRequest[] } {
@@ -67,6 +67,7 @@ const offer = (over: Partial<MarketOffer>): MarketOffer => ({
   widthMm: 800,
   heightMm: 2000,
   kind: 'leaf',
+  leaves: null,
   foundAt: '2026-10-13T10:00:00.000Z',
   ...over,
 });
@@ -79,14 +80,14 @@ describe('карточка позиции и запрос', () => {
     // Карточка — без веб-поиска и по строгой схеме.
     expect(llm.requests[0]?.webSearch).toBeUndefined();
     expect(llm.requests[0]?.outputSchema?.name).toBe('item_card');
-    expect(buildQuery(c, input.item, input.line)).toBe('Профиль Дорс 2.47U U дверное полотно ПВХ белый 2000×800 купить цена Москва');
+    expect(buildQuery(c, input.item, input.line)).toBe('Профиль Дорс 2.47U U дверное полотно ПВХ белый 800×2000 купить цена Москва');
   });
 
   it('без фабрики или модели — lowConfidence, запрос по наименованию и характеристикам', async () => {
     const llm = fakeLlm({ ...CARD, factory: null, model: null, collection: null }, { offers: [] }, []);
     const { card: c } = await describeItem(llm, route, { ...input, item: { ...input.item, name: 'Дверь межкомнатная ПВХ белая' } });
     expect(c.lowConfidence).toBe(true);
-    expect(buildQuery(c, { ...input.item, name: 'Дверь межкомнатная ПВХ белая' }, input.line)).toBe('Дверь межкомнатная ПВХ белая ПВХ белый сатинат 2000×800 дверное полотно купить цена Москва');
+    expect(buildQuery(c, { ...input.item, name: 'Дверь межкомнатная ПВХ белая' }, input.line)).toBe('Дверь межкомнатная ПВХ белая дверное полотно белый сатинат 800×2000 купить цена Москва');
   });
 });
 
@@ -99,9 +100,37 @@ describe('фильтр предложений', () => {
     expect(judgeOffer(offer({ currency: 'USD' }), card, SRC)).toMatchObject({ accepted: false, reason: 'не рубли' });
   });
 
-  it('тип товара: блок вместо полотна отклоняется, неизвестный тип (other) не мешает', () => {
-    expect(judgeOffer(offer({ kind: 'block' }), card, SRC)).toMatchObject({ accepted: false, reason: 'другой тип товара' });
-    expect(judgeOffer(offer({ kind: 'other' }), card, SRC)).toMatchObject({ accepted: true });
+  it('тип товара: дверь, полотно и блок совместимы (пометка, не отказ); фурнитура и комплект — другой товар; неизвестный тип (other) не мешает', () => {
+    expect(judgeOffer(offer({ kind: 'block' }), card, SRC)).toMatchObject({ accepted: true, notes: ['тип: дверной блок вместо «дверное полотно»'] });
+    expect(judgeOffer(offer({ kind: 'leaf' }), { ...card, kind: 'door' }, SRC)).toMatchObject({ accepted: true, notes: ['тип: дверное полотно вместо «дверь»'] });
+    expect(judgeOffer(offer({ kind: 'hardware' }), card, SRC)).toMatchObject({ accepted: false, reason: 'другой тип товара' });
+    expect(judgeOffer(offer({ kind: 'set' }), { ...card, kind: 'door' }, SRC)).toMatchObject({ accepted: false, reason: 'другой тип товара' });
+    expect(judgeOffer(offer({ kind: 'other' }), card, SRC)).toMatchObject({ accepted: true, notes: [] });
+  });
+
+  it('число створок: двухпольная позиция и однопольное предложение — отказ; неизвестное число створок не проверяется', () => {
+    expect(leavesOf('Дверь межкомнатная двухпольная из массива')).toBe(2);
+    expect(leavesOf('дверь двустворчатая')).toBe(2);
+    expect(leavesOf('Полотно однопольное')).toBe(1);
+    expect(leavesOf('Дверь Турин')).toBeNull();
+    expect(judgeOffer(offer({ leaves: 1 }), { ...card, leaves: 2 }, SRC)).toMatchObject({ accepted: false, reason: 'другое число створок' });
+    expect(judgeOffer(offer({ leaves: 2 }), { ...card, leaves: 2 }, SRC)).toMatchObject({ accepted: true });
+    expect(judgeOffer(offer({ leaves: null }), { ...card, leaves: 2 }, SRC)).toMatchObject({ accepted: true });
+  });
+
+  it('только магазины РФ: reddit, зарубежный домен, PDF и госдокументы отбрасываются до разбора с причиной; .com с рублями проходит', () => {
+    expect(notRfShop('https://www.reddit.com/r/doors/x')).toBe('не магазин (reddit.com)');
+    expect(notRfShop('https://www.tueren.de/produkt')).toBe('домен .de');
+    expect(notRfShop('https://fabrika.ru/catalog/price.pdf?v=2')).toBe('PDF-документ');
+    expect(notRfShop('https://docs.cntd.ru/document/1200')).toBe('не магазин (docs.cntd.ru)');
+    expect(notRfShop('https://zakupki.gov.ru/epz/order')).toBe('госдокумент');
+    expect(notRfShop('https://dveri-shop.ru/p/247u')).toBeNull();
+    expect(notRfShop('https://xn--80aaaf.xn--p1ai/p')).toBeNull();
+    expect(notRfShop('https://doors.com/p')).toBeNull();
+    const src = [{ url: 'https://www.reddit.com/r/doors/x' }, { url: 'https://doors.com/p' }];
+    expect(judgeOffer(offer({ url: 'https://www.reddit.com/r/doors/x' }), card, src)).toMatchObject({ accepted: false, reason: 'не магазин РФ', notes: ['не магазин (reddit.com)'] });
+    expect(judgeOffer(offer({ url: 'https://doors.com/p', currency: 'USD' }), card, src)).toMatchObject({ accepted: false, reason: 'не рубли' });
+    expect(judgeOffer(offer({ url: 'https://doors.com/p' }), card, src)).toMatchObject({ accepted: true });
   });
 
   it('единицы: комплект делится на количество, м² умножается на площадь полотна, без данных — «единица не приводится»', () => {
@@ -111,8 +140,34 @@ describe('фильтр предложений', () => {
     expect(judgeOffer(offer({ unit: 'set', quantityInUnit: null }), card, SRC)).toMatchObject({ accepted: false, reason: 'единица не приводится' });
     const m2 = judgeOffer(offer({ url: 'https://m2.ru/z', unit: 'm2', price: 5_000, widthMm: null, heightMm: null }), card, SRC);
     expect(m2).toMatchObject({ accepted: true, unitPrice: 8_000 });
-    expect(m2.formula?.replace(/\u00a0/g, ' ')).toBe('5 000 ₽/м² × 1.600 м² = 8 000 ₽');
-    expect(judgeOffer(offer({ unit: 'm2' }), { ...card, heightMm: null, widthMm: null }, SRC)).toMatchObject({ accepted: false, reason: 'единица не приводится' });
+    expect(m2.formula?.replace(/\u00a0/g, ' ')).toBe('5 000 ₽/м² × (800 × 2000 мм = 1.600 м²) = 8 000 ₽');
+    expect(judgeOffer(offer({ unit: 'm2' }), { ...card, heightMm: null, widthMm: null }, SRC)).toMatchObject({ accepted: false, reason: 'цена за м² без размера позиции' });
+  });
+
+  it('размер: меньшее значение — ширина; «1400x2700», «1,4х2,7м» и «2000×800» разбираются одинаково; у предложения размер тоже ориентируется', async () => {
+    expect(orientSize(2700, 1400)).toEqual({ widthMm: 1400, heightMm: 2700 });
+    expect(orientSize(800, 2000)).toEqual({ widthMm: 800, heightMm: 2000 });
+    expect(orientSize(null, 2000)).toEqual({ widthMm: null, heightMm: 2000 });
+    expect(parseSizeMm('Дверь двухпольная из массива лиственницы 1400x2700 мм, окраска L429')).toEqual({ widthMm: 1400, heightMm: 2700 });
+    expect(parseSizeMm('дверь 1,4х2,7м, 2 шт')).toEqual({ widthMm: 1400, heightMm: 2700 });
+    expect(parseSizeMm('Турин 2000×800')).toEqual({ widthMm: 800, heightMm: 2000 });
+    expect(parseSizeMm('полотно 2000*800 мм')).toEqual({ widthMm: 800, heightMm: 2000 });
+    expect(parseSizeMm('Дверь без размера')).toBeNull();
+    // Модель перепутала стороны (heightMm 1400, widthMm 2700) — карточка исправляет по правилу.
+    const text = 'Дверь межкомнатная двухпольная из массива лиственницы 1400x2700 мм, окраска L429 Indigo, 2 шт';
+    const llm = fakeLlm({ ...CARD, kind: 'block', factory: null, model: null, heightMm: 1400, widthMm: 2700, leaves: null, finish: 'окраска', color: 'L429 Indigo', glazing: null }, { offers: [] }, []);
+    const { card: c } = await describeItem(llm, route, { line: { name: text, size: '', qty: 2, price: null }, item: { raw: text, name: text, width_mm: null, height_mm: null }, requirements: [] });
+    expect(c).toMatchObject({ widthMm: 1400, heightMm: 2700, leaves: 2 });
+    // Предложение с размером «2700×1400» — тот же размер.
+    expect(judgeOffer(offer({ widthMm: 2700, heightMm: 1400 }), { ...c, kind: 'leaf', lowConfidence: true }, SRC)).toMatchObject({ accepted: true });
+  });
+
+  it('запрос: без количества и без дублей признаков, размер один раз', () => {
+    const text = 'Дверь межкомнатная двухпольная из массива лиственницы 1400x2700 мм, окраска L429 Indigo, 2 шт';
+    expect(cleanName(text)).toBe('Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo');
+    expect(cleanName('Полотно Турин 2000×800 — 3 штуки')).toBe('Полотно Турин');
+    const c: ItemCard = { kind: 'door', factory: null, model: null, collection: null, finish: 'окраска', color: 'L429 Indigo', glazing: null, heightMm: 2700, widthMm: 1400, leaves: 2, equipment: null, fireRating: null, standards: [], lowConfidence: true };
+    expect(buildQuery(c, { raw: text, name: text, width_mm: null, height_mm: null }, { name: text, size: '', qty: 2, price: null })).toBe('Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo 1400×2700 купить цена Москва');
   });
 
   it('размер: отклонение больше допуска отклоняется, в допуске принимается, неизвестный размер не проверяется', () => {

@@ -1,6 +1,6 @@
 /* eslint-disable no-console -- консольная утилита: вывод для заказчика */
 import { loadEnv } from '@core/shared';
-import { createOptCore, priceToleranceOf, researchMarketPrice, resolveOptRoute, type KpLine, type KpRequestItem, type MarketResearchInput } from '@opt/kp';
+import { createOptCore, parseSizeMm, priceToleranceOf, researchMarketPrice, resolveOptRoute, type KpLine, type KpRequestItem, type MarketResearchInput } from '@opt/kp';
 
 /**
  * Консольный прогон поиска рыночной цены по одной позиции (RFD-AI-AGENT-OPT-PRICE, этап 2):
@@ -9,6 +9,9 @@ import { createOptCore, priceToleranceOf, researchMarketPrice, resolveOptRoute, 
  *
  *   node apps/opt-worker/dist/research-one.js --account 28528549 --lead 123 [--index 0]
  *   node apps/opt-worker/dist/research-one.js --account 28528549 --text "Дверь Профиль Дорс 2.47U белый 2000×800" [--price 12000]
+ * Удешевление (RFD-AI-AGENT-OPT-PRICE-2-FIX, п. 6): --context low|medium|high — объём текста источников в контексте
+ * модели (search_context_size), --max-calls N — не больше N вызовов веб-поиска; --positions N — позиций в заявке
+ * для оценки стоимости (по черновику — его число строк).
  */
 const args = parseArgs(process.argv.slice(2));
 const accountId = Number(args.account);
@@ -17,6 +20,8 @@ if (!args.lead && !args.text) fail('укажите --lead <id сделки> (п�
 
 const env = loadEnv();
 const core = createOptCore(env);
+/** Число строк черновика — для оценки стоимости заявки; по --text неизвестно. */
+let positionsInDraft: number | null = null;
 try {
   const ai = await core.ai(accountId);
   if (!ai) fail('LLM не настроена: задайте ключ провайдера в настройках «Модель»');
@@ -29,11 +34,16 @@ try {
   console.log(`Позиция: ${input.item.name}${input.line.size ? `, ${input.line.size}` : ''}, ${input.line.qty} шт${input.managerPrice ? `, цена менеджера ${input.managerPrice} ₽` : ''}`);
   if (input.requirements.length) console.log(`Требования: ${input.requirements.join('; ')}`);
 
+  const searchContext = args.context === 'low' || args.context === 'medium' || args.context === 'high' ? args.context : undefined;
+  const maxSearchCalls = args['max-calls'] ? Number(args['max-calls']) : undefined;
+  if (searchContext || maxSearchCalls) console.log(`Параметры поиска: контекст источников ${searchContext ?? 'по умолчанию'}, вызовов не больше ${maxSearchCalls ?? 'без лимита'}`);
   const started = Date.now();
   const r = await researchMarketPrice(ai.llm, route, input, {
     analogPriceTolerance: priceToleranceOf({ priceTolerance: kpSettings.constants.analogPriceTolerancePct === undefined ? undefined : kpSettings.constants.analogPriceTolerancePct / 100 }),
     manufacturerDomains: kpSettings.constants.manufacturerDomains,
     pricing: settings.billing.pricing,
+    ...(searchContext ? { searchContext } : {}),
+    ...(maxSearchCalls && maxSearchCalls > 0 ? { maxSearchCalls } : {}),
   });
 
   console.log('\n— Карточка позиции —');
@@ -41,6 +51,12 @@ try {
   console.log(`\n— Поисковый запрос —\n${r.query}`);
   console.log(`\n— Итог: ${r.status}${r.error ? ` — ${r.error}` : ''} —`);
   console.log(`Вызовов веб-поиска: ${r.webSearchCalls}; источников: ${r.sources.length}; предложений: ${r.offers.length}; ${Math.round((Date.now() - started) / 1000)} с; ${r.cost.inputTokens}/${r.cost.outputTokens} токенов, $${r.cost.usd.toFixed(4)}`);
+  // Стоимость заявки: цена позиции × число позиций; курс — из настроек «Биллинг».
+  const positions = Math.max(1, Number(args.positions ?? positionsInDraft ?? 10));
+  const rate = settings.billing.usdRubRate;
+  const perRequest = r.cost.usd * positions;
+  console.log(`Стоимость: позиция $${r.cost.usd.toFixed(3)} (${(r.cost.usd * rate).toFixed(0)} ₽), заявка из ${positions} позиций ≈ $${perRequest.toFixed(2)} (${(perRequest * rate).toFixed(0)} ₽); из них веб-поиск $${(r.webSearchCalls * 0.01).toFixed(2)}, токены $${(r.cost.usd - r.webSearchCalls * 0.01).toFixed(3)}`);
+  if (!searchContext && !maxSearchCalls) console.log('Дешевле: повторить с --context low --max-calls 3 (меньше текста источников в контексте и не больше трёх вызовов поиска) и сравнить статистику');
   if (r.offers.length) {
     console.log('\n— Предложения (принятые первыми, сайты производителей выше) —');
     console.table(
@@ -53,7 +69,8 @@ try {
         производитель: j.manufacturer ? 'да' : '',
         продавец: j.offer.seller,
         модель: [j.offer.factory, j.offer.model].filter(Boolean).join(' '),
-        размер: j.offer.heightMm && j.offer.widthMm ? `${j.offer.heightMm}×${j.offer.widthMm}` : '',
+        размер: j.offer.heightMm && j.offer.widthMm ? `${j.offer.widthMm}×${j.offer.heightMm}` : '',
+        пометки: j.notes.join('; '),
         формула: j.formula ?? '',
         url: j.offer.url,
         найдено: j.offer.foundAt,
@@ -77,18 +94,17 @@ async function inputFromDraft(acc: number, leadId: number, index: number): Promi
   const line = payload.items?.[index];
   if (!line) fail(`в черновике ${draft.id} нет строки с индексом ${index} (строк: ${payload.items?.length ?? 0})`);
   const item = payload.request_items?.[line.request_index] ?? { raw: line.name, name: line.name, width_mm: null, height_mm: null, qty: line.qty };
-  console.log(`Черновик ${draft.id} от ${draft.createdAt.toISOString()}, строка ${index}`);
+  positionsInDraft = payload.items?.length ?? null;
+  console.log(`Черновик ${draft.id} от ${draft.createdAt.toISOString()}, строка ${index} из ${positionsInDraft ?? '?'}`);
   return { line, item, requirements: payload.requirements ?? [], managerPrice: line.price };
 }
 
-/** Позиция из строки аргумента: размер вида 2000×800 / 2000*800 / 2000x800 вынимается кодом. */
+/** Позиция из строки аргумента: размер («1400x2700», «1,4х2,7 м», «2000×800») вынимается кодом, меньшее — ширина. */
 function inputFromText(text: string, managerPrice: number | null): MarketResearchInput {
-  const m = /(\d{3,4})\s*[×x*хХ]\s*(\d{3,4})/.exec(text);
-  const height_mm = m ? Number(m[1]) : null;
-  const width_mm = m ? Number(m[2]) : null;
+  const size = parseSizeMm(text);
   return {
-    line: { name: text, size: m ? `${m[1]}×${m[2]} мм` : '', qty: 1, price: managerPrice },
-    item: { raw: text, name: text, width_mm, height_mm },
+    line: { name: text, size: size ? `${size.widthMm}×${size.heightMm} мм` : '', qty: 1, price: managerPrice },
+    item: { raw: text, name: text, width_mm: size?.widthMm ?? null, height_mm: size?.heightMm ?? null },
     requirements: [],
     managerPrice,
   };

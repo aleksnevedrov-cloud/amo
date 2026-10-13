@@ -276,6 +276,12 @@ describe('веб-поиск в слое модели (RFD-AI-AGENT-OPT-PRICE, э
     expect(both.include).toEqual(['web_search_call.action.sources']);
     expect((both.tools?.[0] as { user_location: { city: string; region: string } }).user_location).toMatchObject({ city: 'Saint Petersburg', region: 'Moscow' });
     expect(both).not.toHaveProperty('tool_choice');
+    expect(both).not.toHaveProperty('max_tool_calls');
+    // Удешевление поиска (RFD-AI-AGENT-OPT-PRICE-2-FIX): контекст источников и лимит вызовов — только если заданы.
+    const cheap = toOpenAiRequest({ ...req, model: 'gpt-5', webSearch: { contextSize: 'low', maxCalls: 3 } });
+    expect(cheap.tools).toEqual([{ type: 'web_search', user_location: { type: 'approximate', country: 'RU', city: 'Moscow', region: 'Moscow' }, search_context_size: 'low' }]);
+    // В типах SDK поля max_tool_calls нет, в API Responses оно есть.
+    expect((cheap as unknown as { max_tool_calls?: number }).max_tool_calls).toBe(3);
   });
 
   it('ответ с web_search_call: источники из вызова поиска и url_citation без дублей, число вызовов в usage и в стоимости', () => {

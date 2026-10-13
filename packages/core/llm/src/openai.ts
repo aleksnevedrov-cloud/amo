@@ -143,7 +143,13 @@ export function toOpenAiRequest(req: ChatRequest): OpenAIRequest {
     : undefined;
   // Веб-поиск (RFD-AI-AGENT-OPT-PRICE): встроенный инструмент web_search с регионом; без req.webSearch тело прежнее.
   const webTool: Tool[] = req.webSearch
-    ? [{ type: 'web_search', user_location: { type: 'approximate', country: req.webSearch.region?.country ?? 'RU', city: req.webSearch.region?.city ?? 'Moscow', region: req.webSearch.region?.region ?? 'Moscow' } }]
+    ? [
+        {
+          type: 'web_search',
+          user_location: { type: 'approximate', country: req.webSearch.region?.country ?? 'RU', city: req.webSearch.region?.city ?? 'Moscow', region: req.webSearch.region?.region ?? 'Moscow' },
+          ...(req.webSearch.contextSize ? { search_context_size: req.webSearch.contextSize } : {}),
+        },
+      ]
     : [];
   const include: OpenAIRequest['include'] = [...(traits.reasoning ? (['reasoning.encrypted_content'] as const) : []), ...(req.webSearch ? (['web_search_call.action.sources'] as const) : [])];
   return {
@@ -154,6 +160,8 @@ export function toOpenAiRequest(req: ChatRequest): OpenAIRequest {
     store: false,
     ...(tools ? { tools: [...webTool, ...tools], parallel_tool_calls: true } : webTool.length ? { tools: webTool } : {}),
     ...(req.toolChoice === 'required' && (tools || webTool.length) ? { tool_choice: 'required' as const } : {}),
+    // max_tool_calls есть в API Responses, но не в типах SDK 7.23 — уходит через spread.
+    ...(req.webSearch?.maxCalls && req.webSearch.maxCalls > 0 ? { max_tool_calls: Math.floor(req.webSearch.maxCalls) } : {}),
     ...(traits.reasoning ? { reasoning: { effort: req.effort ?? 'low' } } : {}),
     ...(include.length ? { include } : {}),
     ...(req.temperature !== null && req.temperature !== undefined && traits.temperature ? { temperature: Math.min(2, Math.max(0, req.temperature)) } : {}),
