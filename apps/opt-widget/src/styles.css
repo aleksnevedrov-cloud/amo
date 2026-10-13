@@ -222,8 +222,9 @@
   gap: 12px;
   min-width: 0;
 }
-.opt-kp .opt-kp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.opt-kp .opt-kp-title { margin: 0; font-size: 19px; font-weight: 600; color: var(--kp-text); line-height: 1.3; }
+/* Заголовок карточки не переносится; в узкой колонке amoCRM (~340 px) бейдж уходит под него, а не сжимает его (DESIGN-FIX, п. 1). */
+.opt-kp .opt-kp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.opt-kp .opt-kp-title { margin: 0; font-size: 19px; font-weight: 600; color: var(--kp-text); line-height: 1.3; white-space: nowrap; }
 .opt-kp .opt-kp-badge {
   display: inline-flex; align-items: center; flex: none;
   height: 32px; padding: 0 14px; border-radius: 16px;
@@ -242,13 +243,24 @@
 .opt-kp .opt-details-body { font-size: 14px; border-left-color: var(--kp-line); }
 /* Позиции: плитка #F5F7F9 радиус 13, название переносится по словам, поля под ним в ряд (цена шире). */
 .opt-kp .opt-kp-tiles { display: flex; flex-direction: column; gap: 12px; }
-.opt-kp .opt-kp-tile { background: var(--kp-soft); border-radius: var(--kp-radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.opt-kp .opt-kp-tile { background: var(--kp-soft); border-radius: var(--kp-radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; container-type: inline-size; }
 .opt-kp .opt-kp-tile-name { font-size: 15px; font-weight: 600; color: var(--kp-text); overflow-wrap: break-word; word-break: normal; }
-.opt-kp .opt-kp-fields { display: flex; gap: 10px; margin-top: 6px; }
-.opt-kp .opt-kp-field { display: flex; flex-direction: column; gap: 6px; flex: 1 1 0; min-width: 0; }
-/* Пропорции полей по макету: количество 1 : цена 2.2 : скидка 1.3. */
+/* Поля позиции: при плитке ≥ 420 px три в ряд (количество 1 : цена 2.2 : скидка 1.3), уже — «Количество» и «Скидка» по 50 %, «Цена» второй строкой во всю ширину (DESIGN-FIX, п. 3). */
+.opt-kp .opt-kp-fields { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+.opt-kp .opt-kp-field { display: flex; flex-direction: column; gap: 6px; flex: 1 1 0; min-width: 72px; }
 .opt-kp .opt-kp-field-price { flex: 2.2 1 0; }
 .opt-kp .opt-kp-field-discount { flex: 1.3 1 0; }
+/* Подписи полей строчными, 12 px, в одну строку (DESIGN-FIX, п. 2); капсом — только метка «ПОКУПАТЕЛЬ». */
+.opt-kp .opt-kp-field .opt-kp-label { text-transform: none; letter-spacing: 0; font-size: 12px; white-space: nowrap; }
+@container (max-width: 419px) {
+  .opt-kp .opt-kp-field { flex: 1 1 calc(50% - 5px); }
+  .opt-kp .opt-kp-field-price { flex: 1 1 100%; order: 3; }
+}
+/* Браузер без container queries: всегда две строки — читаемость важнее ряда. */
+@supports not (container-type: inline-size) {
+  .opt-kp .opt-kp-field { flex: 1 1 calc(50% - 5px); }
+  .opt-kp .opt-kp-field-price { flex: 1 1 100%; order: 3; }
+}
 /* Скидка со знаком «%» внутри поля, как в макете («0 %»). */
 .opt-kp .opt-kp-suffix { position: relative; display: block; }
 .opt-kp .opt-kp-suffix input { padding-right: 28px; }

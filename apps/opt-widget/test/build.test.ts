@@ -63,8 +63,9 @@ describe('архив виджета «Агент опт»', () => {
     for (const marker of ['Песочница', 'Правила цен', 'salesbot']) expect(text('script.js')).not.toContain(marker);
   });
 
-  it('размер архива около 120 КБ: React 19 ≈ 215 КБ в script.js, свой код ≈ 25 КБ, логотипы 40 КБ', () => {
-    expect(zipBytes).toBeLessThan(135 * 1024);
+  it('размер архива около 135 КБ: React 19 ≈ 215 КБ в script.js, свой код и стили ≈ 40 КБ, логотипы 40 КБ', () => {
+    // После стилей по макету (DESIGN, DESIGN-FIX) архив 134 КБ; запас до 150.
+    expect(zipBytes).toBeLessThan(150 * 1024);
     expect(files['script.js']!.length).toBeLessThan(320 * 1024);
   });
 });

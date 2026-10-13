@@ -354,7 +354,8 @@ function SearchDiag({ m }: { m: MailSourceInfo }) {
 
 /** Позиции плитками по макету: название на всю ширину, размер серым, под ними поля «Количество», «Цена», «Скидка»; пометки «нужен менеджер» — под размером. */
 function KpLinesTiles({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; onEdit: (i: number, patch: Partial<KpDraftLine>) => void }) {
-  const reasons = (i: number) => needsManager.filter((n) => n.request_index === i).map((n) => n.reason);
+  // «Цена не задана» под размером не показываем: это состояние и так видно в поле «Цена» (DESIGN-FIX, п. 4).
+  const reasons = (i: number) => needsManager.filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
   return (
     <div className="opt-kp-tiles">
       {lines.map((l, i) => {
