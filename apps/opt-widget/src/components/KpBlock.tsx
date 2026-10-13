@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { errorMessage } from '@core/widget-core';
-import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine } from '../api.ts';
+import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo } from '../api.ts';
 import { SendPreview } from './SendPreview.tsx';
 
 /**
@@ -14,6 +14,12 @@ const POLL_MS = 3000;
 
 const rub = (n: number | null) => (n === null ? '—' : `${n.toLocaleString('ru-RU')} ₽`);
 const date = (iso: string) => new Date(iso).toLocaleDateString('ru-RU');
+/** Дата и время по Москве: «13.10.2026 11:06». */
+const dateTimeMsk = (iso: string) => {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' })} ${d.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' })}`;
+};
+const kb = (bytes: number) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`);
 
 /** Черновик, задание воркера и действия над ними; ответ сервера всегда заменяет локальное состояние. */
 function useKpDraft(api: KpApi, leadId: number) {
@@ -116,8 +122,8 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
       <div className="opt-row opt-row-tight">
         <span className="opt-muted">{draft.kpNo ?? 'номер будет при сборке документа'} · {STATUS[draft.status] ?? draft.status}</span>
       </div>
-      {(draft.client.org || draft.client.fio) && <div className="opt-muted">Покупатель: {[draft.client.org, draft.client.fio].filter(Boolean).join(', ')}{draft.client.email ? ` · ${draft.client.email}` : ''}</div>}
-      <SourceInfo draft={draft} />
+      <Buyer client={draft.client} />
+      <MailSection draft={draft} />
       {pending && <div className="opt-muted">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
       {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
       {error && <div className="opt-error">{error}</div>}
@@ -163,30 +169,126 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   );
 }
 
-/** Откуда взят черновик: письмо, разобранные файлы, что пропущено и почему. */
-function SourceInfo({ draft }: { draft: KpDraftInfo }) {
+/** Покупатель одной строкой; e-mail не повторяется, если он уже стоит в названии или имени (из amo так бывает). */
+function Buyer({ client }: { client: KpDraftInfo['client'] }) {
+  const email = client.email.trim().toLowerCase();
+  const parts = [client.org, client.fio].map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== email);
+  const hasEmail = email && parts.some((x) => x.toLowerCase().includes(email));
+  if (!parts.length && !email) return null;
+  return <div className="opt-muted">Покупатель: {[...parts, hasEmail || !email ? '' : client.email.trim()].filter(Boolean).join(' · ')}</div>;
+}
+
+/**
+ * Раздел «Письмо» (RFD-AI-AGENT-OPT-MAIL-UI, вариант А): одна строка-статус, по клику — отправитель, тема,
+ * папка, вложения со статусом, что пропущено и ошибки разбора. Данные — из payload черновика (те же, что в
+ * событии mail_fetch журнала), новых запросов к почте виджет не делает. В черновике красных строк о письме нет.
+ */
+function MailSection({ draft }: { draft: KpDraftInfo }) {
+  const [open, setOpen] = useState(false);
   const src = draft.source;
   if (!src) return null;
-  const parts = [
-    src.letterAt ? `письмо от ${date(src.letterAt)}` : 'письма в карточке нет',
-    src.documents.length ? `разобрано файлов: ${src.documents.length}` : src.attachments.length ? 'файлы не разобраны' : 'файлов нет',
-  ];
   const m = src.mail;
+  const attachmentNames = new Set([...(m?.files?.map((f) => f.name) ?? []), ...(m?.taken ?? []), ...(m?.skipped.map((f) => f.name) ?? [])]);
+  // Ошибки разбора: по вложениям письма — в раздел письма, по файлам карточки — отдельным списком там же.
+  const parseErrors = src.skipped.filter((f) => attachmentNames.has(f.name));
+  const cardErrors = src.skipped.filter((f) => !attachmentNames.has(f.name));
+  const summary =
+    m?.status === 'found'
+      ? `Письмо: ${m.date ? dateTimeMsk(m.date) : 'дата неизвестна'} · ${m.attachments ? `вложений ${m.attachments}` : 'без вложений'}`
+      : m?.status === 'not_found'
+        ? 'Письмо: не найдено'
+        : m?.status === 'error'
+          ? 'Письмо: ящик не прочитан'
+          : src.letterAt
+            ? `Письмо: ${date(src.letterAt)} (из карточки, ящик не настроен)`
+            : 'Письмо: в карточке нет';
+  const warn = m?.status !== 'found' || (m.files ?? []).some((f) => f.status === 'not_uploaded' && f.reason) || parseErrors.length > 0 || cardErrors.length > 0;
   return (
-    <div className="opt-col">
-      <div className="opt-muted">Источник: {parts.join(', ')}</div>
-      {m?.status === 'found' && (
-        <div className="opt-muted">
-          Письмо прочитано из ящика{m.date ? ` (${date(m.date)})` : ''}: вложений {m.attachments}, в сделку загружено {m.uploaded.length}
+    <div className="opt-col opt-details">
+      <button type="button" className={`opt-details-summary${warn ? ' opt-details-warn' : ''}`} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {summary} {open ? '▾' : '▸'}
+      </button>
+      {open && (
+        <div className="opt-details-body opt-col">
+          {m?.status === 'found' && (
+            <>
+              <div>Отправитель: {[m.fromName, m.from ?? m.searchedFrom].filter(Boolean).join(' ')}{m.matchedBy === 'domain' ? ' (совпал только домен — проверьте письмо)' : ''}</div>
+              {m.subject && <div>Тема: {m.subject}</div>}
+              {m.folder && <div>Папка: {m.folder}</div>}
+              <MailFiles m={m} parseErrors={parseErrors} />
+            </>
+          )}
+          {m?.status === 'not_found' && <SearchDiag m={m} />}
+          {m?.status === 'error' && (
+            <div className="opt-error">
+              Ящик не прочитан: {m.error}
+              {m.retryAt ? ` — следующая попытка после ${dateTimeMsk(m.retryAt)}` : ''}
+            </div>
+          )}
+          {!m && <div className="opt-muted">Ящик во вкладке «Письмо» не настроен — черновик по письму и файлам из карточки сделки.</div>}
+          <div className="opt-muted">
+            {src.documents.length ? `Разобрано файлов: ${src.documents.length}` : src.attachments.length ? 'Файлы не разобраны' : 'Файлов для разбора нет'}
+            {src.mails ? ` · писем в карточке: ${src.mails}` : ''}
+          </div>
+          {cardErrors.length > 0 && (
+            <div className="opt-col">
+              <span className="opt-muted">Файлы карточки, которые не разобрались:</span>
+              {cardErrors.map((f) => (
+                <div key={f.name} className="opt-error">«{f.name}»: {f.reason}</div>
+              ))}
+            </div>
+          )}
         </div>
       )}
-      {m?.status === 'not_found' && <div className="opt-error">Письмо в ящике не найдено (искали от {m.searchedFrom}) — черновик по карточке</div>}
-      {m?.status === 'error' && <div className="opt-error">Ящик не прочитан: {m.error}</div>}
-      {m?.skipped.map((f) => (
-        <div key={`m-${f.name}`} className="opt-error">Вложение «{f.name}» пропущено: {f.reason}</div>
-      ))}
-      {src.skipped.map((f) => (
-        <div key={f.name} className="opt-error">Файл «{f.name}» пропущен: {f.reason}</div>
+    </div>
+  );
+}
+
+/** Вложения письма: имя, размер, статус; у старых черновиков без files — по спискам taken/uploaded/skipped. */
+function MailFiles({ m, parseErrors }: { m: MailSourceInfo; parseErrors: { name: string; reason: string }[] }) {
+  const files =
+    m.files ??
+    [
+      ...m.taken.map((name) => ({ name, size: 0, inline: false, status: m.uploaded.includes(name) ? ('uploaded' as const) : ('not_uploaded' as const), reason: m.skipped.find((x) => x.name === name)?.reason ?? null })),
+      ...m.skipped.filter((x) => !m.taken.includes(x.name)).map((x) => ({ name: x.name, size: 0, inline: false, status: 'skipped' as const, reason: x.reason })),
+    ];
+  if (!files.length) return <div className="opt-muted">Вложений нет.</div>;
+  const errorOf = (name: string) => parseErrors.find((e) => e.name === name)?.reason;
+  return (
+    <div className="opt-col">
+      <span className="opt-muted">Вложения:</span>
+      {files.map((f) => {
+        const parseError = errorOf(f.name);
+        const status = f.status === 'uploaded' ? 'загружено в сделку' : f.status === 'skipped' ? `пропущено: ${f.reason ?? 'без причины'}` : `не загружено: ${f.reason ?? 'причина не указана'}`;
+        return (
+          <div key={f.name} className={f.status === 'uploaded' ? '' : f.status === 'skipped' ? 'opt-muted' : 'opt-error'}>
+            {f.name}
+            {f.size ? ` (${kb(f.size)})` : ''} — {status}
+            {parseError && <div className="opt-error">не разобрано: {parseError}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Письмо не найдено: критерии поиска и просмотренные папки из diag. */
+function SearchDiag({ m }: { m: MailSourceInfo }) {
+  const d = m.diag;
+  return (
+    <div className="opt-col">
+      <div>Искали от {m.searchedFrom}{d?.criteria.domain ? ` (и весь домен @${d.criteria.domain})` : ''}{d ? `, даты ${d.criteria.since} – ${d.criteria.before}` : ''}{d?.criteria.subject ? `, тема «${d.criteria.subject}»` : ''}. Черновик собран по карточке.</div>
+      {d && d.folders.length > 0 && (
+        <div className="opt-col">
+          <span className="opt-muted">Папки ({d.folders.length}):</span>
+          {d.folders.map((f) => (
+            <div key={f.path} className="opt-muted">{f.path}: в окне дат {f.inWindow}, от отправителя {f.bySender + (f.bySenderWithoutDate ?? 0)}</div>
+          ))}
+        </div>
+      )}
+      {d && d.skippedFolders.length > 0 && <div className="opt-muted">Не смотрели: {d.skippedFolders.join(', ')}</div>}
+      {d?.errors.map((e) => (
+        <div key={e} className="opt-error">{e}</div>
       ))}
     </div>
   );

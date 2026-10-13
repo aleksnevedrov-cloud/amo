@@ -176,6 +176,7 @@ describe('черновик КП опта: источник — карточка 
         matchedBy: 'address',
         messageId: '<m7@yandex.ru>',
         from: 'stoptpostavka@yandex.ru',
+        fromName: 'Стройоптпоставка',
         subject: 'Запрос',
         date: new Date('2026-10-12T13:55:00Z'),
         text: 'Добрый день!\nНужна дверь двухпольная, массив лиственницы 1,4×2,7 м, окраска L429 Indigo, 2 шт. Аналог допустим.',
@@ -200,7 +201,13 @@ describe('черновик КП опта: источник — карточка 
     expect(amo.downloaded).toEqual([]);
     expect(analyzed).toEqual(['tz.pdf:621000', `already.pdf:${spec.byteLength}`]);
     expect(r.payload.source).toMatchObject({ from: 'mailbox', attachments: ['tz.pdf', 'already.pdf'], documents: [901, 902] });
-    expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
+    expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', from: 'stoptpostavka@yandex.ru', fromName: 'Стройоптпоставка', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
+    // Список вложений со статусами для раздела «Письмо» в карточке (RFD-AI-AGENT-OPT-MAIL-UI).
+    expect(r.payload.source.mail?.files).toEqual([
+      { name: 'logo.png', size: 3_000, inline: true, status: 'skipped', reason: 'встроенная картинка меньше 20 КБ' },
+      { name: 'tz.pdf', size: 621_000, inline: false, status: 'uploaded', reason: null },
+      { name: 'already.pdf', size: spec.byteLength, inline: false, status: 'not_uploaded', reason: 'уже есть в файлах сделки' },
+    ]);
     expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
     // Привязка файла в amo упала (405) — вложение всё равно разбирается из памяти, причина — в skipped (RFD-AI-AGENT-OPT-MAIL-READ-7).
@@ -215,6 +222,7 @@ describe('черновик КП опта: источник — карточка 
     expect(r2.payload.source.mail).toMatchObject({ status: 'found', uploaded: [], taken: ['tz.pdf', 'already.pdf'] });
     expect(r2.payload.source.mail?.skipped.map((x) => x.name)).toEqual(['logo.png', 'tz.pdf', 'already.pdf']);
     expect(r2.payload.source.mail?.skipped[1]?.reason).toContain('не загружен в сделку: привязка файла f-1 к сделке: PUT');
+    expect(r2.payload.source.mail?.files?.map((f) => [f.name, f.status, f.reason?.slice(0, 20) ?? null])).toEqual([['logo.png', 'skipped', 'встроенная картинка '], ['tz.pdf', 'not_uploaded', 'привязка файла f-1 к'], ['already.pdf', 'not_uploaded', 'привязка файла f-1 к']]);
   });
 
   it('адрес отправителя из mail-note amo: только e-mail, без имени и кириллицы; тема — из письма, не название сделки', async () => {
@@ -249,12 +257,12 @@ describe('черновик КП опта: источник — карточка 
       },
       mail: async () => ({
         diag,
-        mail: { uid: 9, folder: 'INBOX', matchedBy: 'domain', messageId: '<m9@stroyopt.ru>', from: 'other@stroyopt.ru', subject: 'Спецификация', date: new Date('2026-10-12T10:00:00Z'), text: 'Текст от другого адреса', attachments: [{ filename: 'spec.pdf', contentType: 'application/pdf', size: 10, content: Buffer.alloc(10), inline: false }] },
+        mail: { uid: 9, folder: 'INBOX', matchedBy: 'domain', messageId: '<m9@stroyopt.ru>', from: 'other@stroyopt.ru', fromName: null, subject: 'Спецификация', date: new Date('2026-10-12T10:00:00Z'), text: 'Текст от другого адреса', attachments: [{ filename: 'spec.pdf', contentType: 'application/pdf', size: 10, content: Buffer.alloc(10), inline: false }] },
       }),
     });
     expect(amo.uploaded).toEqual([]);
     expect(analyzed).toEqual(['spec.pdf']);
-    expect(r.payload.source.mail).toMatchObject({ status: 'found', matchedBy: 'domain', uploaded: [], taken: ['spec.pdf'] });
+    expect(r.payload.source.mail).toMatchObject({ status: 'found', matchedBy: 'domain', uploaded: [], taken: ['spec.pdf'], files: [{ name: 'spec.pdf', status: 'not_uploaded', reason: 'отправитель совпал только по домену — в сделку не грузим' }] });
     expect(r.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'письмо найдено по домену stroyopt.ru, не по адресу buyer@stroyopt.ru (папка INBOX, «Спецификация») — проверьте, что это та заявка; вложения в сделку не загружены' });
   });
 

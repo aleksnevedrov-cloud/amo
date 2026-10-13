@@ -58,7 +58,35 @@ export interface KpDraftInfo {
     documents: number[];
     skipped: { name: string; reason: string }[];
     /** Чтение письма из ящика (вариант А); нет — ящик не настроен. */
-    mail?: { status: 'found' | 'not_found' | 'error'; searchedFrom: string; date: string | null; attachments: number; taken: string[]; uploaded: string[]; skipped: { name: string; reason: string }[]; error: string | null; retryAt: string | null };
+    mail?: MailSourceInfo;
+  } | null;
+}
+
+/** Чтение письма из ящика — как сохранено в payload черновика (те же данные, что в событии mail_fetch журнала). */
+export interface MailSourceInfo {
+  status: 'found' | 'not_found' | 'error';
+  searchedFrom: string;
+  from?: string | null;
+  fromName?: string | null;
+  subject?: string;
+  date: string | null;
+  folder?: string | null;
+  matchedBy?: 'address' | 'domain' | null;
+  attachments: number;
+  taken: string[];
+  uploaded: string[];
+  skipped: { name: string; reason: string }[];
+  /** Все вложения со статусом; нет у черновиков до MAIL-UI. */
+  files?: { name: string; size: number; inline: boolean; status: 'uploaded' | 'not_uploaded' | 'skipped'; reason: string | null }[];
+  error: string | null;
+  retryAt: string | null;
+  diag?: {
+    criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null };
+    folders: { path: string; inWindow: number; bySender: number; scannedWithoutDate?: number; bySenderWithoutDate?: number }[];
+    skippedFolders: string[];
+    fallbackWithoutDate: boolean;
+    stoppedAfterInbox?: boolean;
+    errors: string[];
   } | null;
 }
 

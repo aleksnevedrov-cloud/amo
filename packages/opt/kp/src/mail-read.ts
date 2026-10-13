@@ -104,6 +104,8 @@ export interface FetchedMail {
   matchedBy: 'address' | 'domain';
   messageId: string | null;
   from: string;
+  /** Имя отправителя из заголовка From (для блока в карточке). */
+  fromName: string | null;
   subject: string;
   date: Date | null;
   /** Полный текст без цитат прошлой переписки и подписи-разделителя. */
@@ -259,6 +261,7 @@ export async function parseMail(uid: number, source: Buffer, folder = 'INBOX'): 
     matchedBy: 'address',
     messageId: m.messageId ?? null,
     from: (m.from?.value[0]?.address ?? '').toLowerCase(),
+    fromName: m.from?.value[0]?.name?.trim() || null,
     subject: (m.subject ?? '').trim(),
     date: m.date ?? null,
     text: stripQuoted(raw).slice(0, MAX_TEXT),

@@ -2,7 +2,7 @@ import { fieldValues, type AmoApiClient } from '@core/amo';
 import type { Position } from '@core/docs';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
-import { MailAuthError, pickMailAttachments, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
+import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -60,12 +60,27 @@ export interface KpPayload {
 }
 
 /** Итог чтения ящика для черновика и журнала (mail_fetch). */
+/** Вложение письма в блоке карточки: что с ним стало и почему (RFD-AI-AGENT-OPT-MAIL-UI). */
+export interface MailSourceFile {
+  name: string;
+  size: number;
+  inline: boolean;
+  /** uploaded — загружено в сделку; not_uploaded — взято в разбор, но в сделку не попало (причина); skipped — не взято (причина). */
+  status: 'uploaded' | 'not_uploaded' | 'skipped';
+  reason: string | null;
+}
+
 export interface MailSource {
   status: 'found' | 'not_found' | 'error';
   messageId: string | null;
   date: string | null;
   subject: string;
   searchedFrom: string;
+  /** Адрес и имя отправителя найденного письма. */
+  from: string | null;
+  fromName: string | null;
+  /** Все вложения письма со статусом — для раздела «Письмо» в карточке; нет поля — черновик до MAIL-UI. */
+  files?: MailSourceFile[];
   /** Вложений в письме всего, сколько взято, сколько загружено в сделку (новые), что пропущено. */
   attachments: number;
   taken: string[];
@@ -261,7 +276,7 @@ export function extractEmail(s: string | null | undefined): string {
 async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
   // Адрес: из последнего входящего письма сделки, иначе email главного контакта; только e-mail, без имени.
   const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email);
-  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, matchedBy: null, diag: null };
+  const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, from: null, fromName: null, files: [], attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, matchedBy: null, diag: null };
   if (!from) return { source: { ...base, error: 'в карточке нет e-mail отправителя' }, files: [] };
   let result: MailReadResult;
   try {
@@ -280,23 +295,39 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
     subject: found.subject,
   };
   const { take, skipped } = pickMailAttachments(found.attachments);
-  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, matchedBy: found.matchedBy, diag: result.diag };
+  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, from: found.from || null, fromName: found.fromName ?? null, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, matchedBy: found.matchedBy, diag: result.diag };
+  const sizeOf = (a: MailAttachment) => a.size || a.content.byteLength;
+  const list: MailSourceFile[] = skipped.map((x) => {
+    const a = found.attachments.find((f) => (f.filename ?? f.contentType) === x.name);
+    return { name: x.name, size: a ? sizeOf(a) : 0, inline: a?.inline ?? false, status: 'skipped', reason: x.reason };
+  });
   const files: SourceFile[] = [];
   for (const a of take) {
     const name = a.filename ?? `attachment-${files.length + 1}`;
     const bytes = new Uint8Array(a.content);
     files.push({ name, size: bytes.byteLength, mime: a.contentType, load: async () => ({ bytes, mime: a.contentType }) });
+    const row: MailSourceFile = { name, size: bytes.byteLength, inline: a.inline, status: 'not_uploaded', reason: null };
+    list.push(row);
     // Совпадение только по домену: письмо может быть от другого человека — в файлы сделки ничего не грузим.
-    if (found.matchedBy === 'domain') continue;
+    if (found.matchedBy === 'domain') {
+      row.reason = 'отправитель совпал только по домену — в сделку не грузим';
+      continue;
+    }
     // Уже в карточке (то же имя и размер) — повторно не грузим.
-    if (card.files.some((f) => sameFile(f, { name, size: bytes.byteLength }))) continue;
+    if (card.files.some((f) => sameFile(f, { name, size: bytes.byteLength }))) {
+      row.reason = 'уже есть в файлах сделки';
+      continue;
+    }
     try {
       await amo.uploadFileToLead(leadId, { filename: name, mime: a.contentType, bytes });
       source.uploaded.push(name);
+      row.status = 'uploaded';
     } catch (err) {
+      row.reason = (err as Error).message;
       source.skipped.push({ name, reason: `не загружен в сделку: ${(err as Error).message}` });
     }
   }
+  source.files = list;
   return { source, files };
 }
 

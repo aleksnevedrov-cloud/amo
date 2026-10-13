@@ -173,3 +173,16 @@
 .opt-skel { height: 11px; border-radius: 4px; background: #eef0f2; margin: 7px 0; }
 
 @keyframes opt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* Раздел «Письмо» (RFD-AI-AGENT-OPT-MAIL-UI): строка-статус как ссылка, по клику — служебные сведения. */
+.opt-root .opt-details { gap: 4px; }
+.opt-root .opt-details-summary {
+  background: none; border: 0; padding: 0; margin: 0; text-align: left; cursor: pointer;
+  font: inherit; color: var(--ad-link); line-height: 1.45;
+}
+.opt-root .opt-details-summary.opt-details-warn { color: #b02a2a; }
+.opt-root .opt-details-body {
+  padding: 6px 0 6px 8px;
+  border-left: 2px solid var(--ad-line);
+  font-size: 12px;
+}

@@ -78,9 +78,14 @@ describe('виджет «Агент опт»: карточка сделки', ()
     stage = 'done';
     await act(async () => cbs.render!());
     await flush();
-    expect(document.body.textContent).toContain('Покупатель: ООО Ромашка, Иванов Иван · ivanov@romashka.ru');
-    expect(document.body.textContent).toContain('Источник: письмо от 09.10.2026, разобрано файлов: 1');
-    expect(document.body.textContent).toContain('Файл «big.pdf» пропущен: файл больше 20 МБ');
+    expect(document.body.textContent).toContain('Покупатель: ООО Ромашка · Иванов Иван · ivanov@romashka.ru');
+    // Ящик не настроен: строка-статус по письму из карточки; ошибки файлов — только в раскрытии, в черновике красных строк нет.
+    expect(document.body.textContent).toContain('Письмо: 09.10.2026 (из карточки, ящик не настроен) ▸');
+    expect(document.body.textContent).not.toContain('big.pdf');
+    expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
+    await click('Письмо: 09.10.2026 (из карточки, ящик не настроен) ▸');
+    expect(document.body.textContent).toContain('Разобрано файлов: 1 · писем в карточке: 1');
+    expect(document.body.textContent).toContain('«big.pdf»: файл больше 20 МБ');
     expect(document.body.textContent).toContain('Дверь ДПС 01');
     expect(document.body.textContent).toContain('Сторона открывания?');
     expect(button('Собрать документ')?.disabled).toBe(true);
@@ -90,6 +95,77 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect([...document.querySelectorAll('.opt-root .opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
     expect(document.querySelector('.opt-root .opt-table')).not.toBeNull();
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+  });
+
+  it('раздел «Письмо»: строка-статус с датой по МСК и числом вложений, по клику — отправитель, тема, папка, вложения со статусом; e-mail покупателя не дублируется', async () => {
+    const mailDraft = {
+      ...draft,
+      client: { org: '', fio: 'stoptpostavka@yandex.ru', email: 'StOptPostavka@yandex.ru', phone: '' },
+      source: {
+        from: 'mailbox', mails: 1, letterAt: '2026-10-13T08:06:00Z', attachments: ['Карточка (1).doc', 'photo.jpg'], documents: [501], skipped: [{ name: 'Карточка (1).doc', reason: 'LibreOffice: .doc → .docx не удалось: пусто' }],
+        mail: {
+          status: 'found', searchedFrom: 'stoptpostavka@yandex.ru', from: 'stoptpostavka@yandex.ru', fromName: 'Стройоптпоставка', subject: 'Запрос ООО Стройоптпоставка', date: '2026-10-13T08:06:00Z', folder: 'INBOX', matchedBy: 'address',
+          attachments: 3, taken: ['Карточка (1).doc', 'photo.jpg'], uploaded: ['photo.jpg'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }],
+          files: [
+            { name: 'logo.png', size: 3_000, inline: true, status: 'skipped', reason: 'встроенная картинка меньше 20 КБ' },
+            { name: 'Карточка (1).doc', size: 48_000, inline: false, status: 'not_uploaded', reason: 'привязка файла f-1 к сделке: PUT … → HTTP 405: {}' },
+            { name: 'photo.jpg', size: 1_300_000, inline: false, status: 'uploaded', reason: null },
+          ],
+          error: null, retryAt: null, diag: null,
+        },
+      },
+    };
+    const { self, calls } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: mailDraft, job: null } });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    const text = () => document.body.textContent ?? '';
+    // Дубль e-mail убран: имя контакта в amo — тот же адрес.
+    expect(text()).toContain('Покупатель: StOptPostavka@yandex.ru');
+    expect(text().match(/stoptpostavka@yandex\.ru/gi)).toHaveLength(1);
+    // Свёрнуто: только строка-статус, 08:06 UTC = 11:06 МСК; служебных сведений и красных строк в черновике нет.
+    expect(text()).toContain('Письмо: 13.10.2026 11:06 · вложений 3 ▸');
+    expect(text()).not.toContain('Отправитель');
+    expect(text()).not.toContain('HTTP 405');
+    expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
+    await click('Письмо: 13.10.2026 11:06 · вложений 3 ▸');
+    expect(text()).toContain('Письмо: 13.10.2026 11:06 · вложений 3 ▾');
+    expect(text()).toContain('Отправитель: Стройоптпоставка stoptpostavka@yandex.ru');
+    expect(text()).toContain('Тема: Запрос ООО Стройоптпоставка');
+    expect(text()).toContain('Папка: INBOX');
+    expect(text()).toContain('photo.jpg (1.2 МБ) — загружено в сделку');
+    expect(text()).toContain('Карточка (1).doc (47 КБ) — не загружено: привязка файла f-1 к сделке: PUT … → HTTP 405: {}');
+    expect(text()).toContain('не разобрано: LibreOffice: .doc → .docx не удалось: пусто');
+    expect(text()).toContain('logo.png (3 КБ) — пропущено: встроенная картинка меньше 20 КБ');
+    expect(text()).toContain('Разобрано файлов: 1');
+    await click('Письмо: 13.10.2026 11:06 · вложений 3 ▾');
+    expect(text()).not.toContain('Папка: INBOX');
+    // Новых запросов к почте виджет не делает — только черновик.
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual(['GET /widget/v1/kp/draft']);
+  });
+
+  it('письмо не найдено: строка «Письмо: не найдено», в раскрытии — критерии поиска и папки из diag', async () => {
+    const nf = {
+      ...draft,
+      source: {
+        ...draft.source,
+        mail: {
+          status: 'not_found', searchedFrom: 'ivanov@romashka.ru', from: null, fromName: null, subject: '', date: null, folder: null, matchedBy: null, attachments: 0, taken: [], uploaded: [], skipped: [], files: [], error: null, retryAt: null,
+          diag: { criteria: { from: 'ivanov@romashka.ru', domain: 'romashka.ru', since: '2026-10-07', before: '2026-10-12', subject: 'Запрос КП' }, folders: [{ path: 'INBOX', inWindow: 12, bySender: 0, scannedWithoutDate: 200, bySenderWithoutDate: 0 }, { path: 'Spam', inWindow: 1, bySender: 0 }], skippedFolders: ['Sent', 'Drafts'], fallbackWithoutDate: false, errors: ['Spam: SEARCH по дате прерван по таймауту (30 с), переподключение'] },
+        },
+      },
+    };
+    const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: nf, job: null } });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect(document.body.textContent).toContain('Письмо: не найдено ▸');
+    expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
+    await click('Письмо: не найдено ▸');
+    expect(document.body.textContent).toContain('Искали от ivanov@romashka.ru (и весь домен @romashka.ru), даты 2026-10-07 – 2026-10-12, тема «Запрос КП». Черновик собран по карточке.');
+    expect(document.body.textContent).toContain('Папки (2):INBOX: в окне дат 12, от отправителя 0Spam: в окне дат 1, от отправителя 0');
+    expect(document.body.textContent).toContain('Не смотрели: Sent, Drafts');
+    expect(document.body.textContent).toContain('Spam: SEARCH по дате прерван по таймауту');
   });
 
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
