@@ -5,6 +5,7 @@ export * from './draft.ts';
 export * from './job.ts';
 export * from './llm.ts';
 export * from './mail-read.ts';
+export * from './market-research.ts';
 export * from './migrations.ts';
 export * from './repo.ts';
 export * from './research-notes.ts';
