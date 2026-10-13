@@ -89,6 +89,8 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
       { raw: await raw({ from: 'other@mail.ru', subject: 'Запрос', text: 'Чужое письмо', date: d('2026-10-12T12:00:00Z') }), uid: 2 },
       { raw: await raw({ from: 'someone@yandex.ru', subject: 'Запрос ООО Стройоптпоставка', text: 'Тот же публичный домен, другой адрес — чужой клиент', date: d('2026-10-12T17:00:00Z') }), uid: 3 },
       { raw: await raw({ from: 'manager@stroyopt.ru', subject: 'Спецификация', text: 'Корпоративный домен, другой сотрудник', date: d('2026-10-12T14:00:00Z') }), uid: 4 },
+      // Как у Яндекса в сделке 30013995: адрес отправителя в смешанном регистре, SEARCH FROM его не находит.
+      { raw: await raw({ from: 'StOptPostavka@yandex.ru', subject: 'Карточка организации', text: 'Высылаю карточку', date: d('2026-10-11T09:00:00Z'), attachments: [{ filename: 'Карточка Строй(1).doc', content: Buffer.alloc(3_000, 1), contentType: 'application/msword' }] }), uid: 5 },
     ];
     // Письмо заявки лежит не в INBOX, а в пользовательской папке — так бывает при правилах сортировки в ящике.
     const requests = [
@@ -133,6 +135,8 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(r.diag.folders.map((f) => f.path)).toEqual(['INBOX', 'Requests', 'Spam']);
     expect(r.diag.skippedFolders).toEqual(expect.arrayContaining(['Sent', 'Drafts']));
     expect(r.diag.fallbackWithoutDate).toBe(false);
+    // Во «Входящих» в окне все 5 писем (hoodiecrow считает SINCE/BEFORE по дате записи на сервер — сегодня), от отправителя два (uid 1 и 5); запасной проход не понадобился.
+    expect(r.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 5, bySender: 2, scannedWithoutDate: 0, bySenderWithoutDate: 0 });
     // Флаги прочитанных писем не менялись ни в одной папке.
     const check = new ImapFlow({ host: cfg.host, port: cfg.port, secure: false, auth: { user: 'shop', pass: 'pass' }, logger: false });
     check.on('error', () => undefined);
@@ -158,7 +162,8 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     const pub = await new ImapMailReader(cfg).findLatest({ from: 'nobody@yandex.ru', around: d('2026-10-12T16:55:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
     expect(pub.mail).toBeNull();
     expect(pub.diag.criteria.domain).toBeNull();
-    expect(pub.diag.folders.map((f) => [f.path, f.byFrom])).toEqual([['INBOX', 0], ['Requests', 0], ['Spam', 0]]);
+    // Письма в окне есть, но от этого адреса — ни одного; запасной проход по последним письмам тоже пуст.
+    expect(pub.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 1, 0], ['Spam', 1, 0, 1, 0]]);
     const corp = await new ImapMailReader(cfg).findLatest({ from: 'buyer@stroyopt.ru', around: d('2026-10-12T16:55:00Z') });
     expect(corp.mail).toMatchObject({ folder: 'INBOX', from: 'manager@stroyopt.ru', matchedBy: 'domain', subject: 'Спецификация' });
     expect(corp.diag.criteria.domain).toBe('stroyopt.ru');
@@ -167,12 +172,24 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
   it('окно дат пустое — запасной поиск без даты по последним письмам', async () => {
     const far = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-11-20T10:00:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
     expect(far.diag.fallbackWithoutDate).toBe(true);
-    expect(far.diag.folders.find((f) => f.path === 'Requests')).toEqual({ path: 'Requests', specialUse: null, byFrom: 1, inWindow: 0 });
+    expect(far.diag.folders.find((f) => f.path === 'Requests')).toEqual({ path: 'Requests', specialUse: null, inWindow: 0, bySender: 0, scannedWithoutDate: 1, bySenderWithoutDate: 1 });
     expect(far.mail).toMatchObject({ folder: 'Requests', subject: 'Запрос ООО Стройоптпоставка' });
     // Совсем чужой домен — ничего, диагностика по папкам с нулями.
     const none = await new ImapMailReader(cfg).findLatest({ from: 'x@nowhere.test', around: d('2026-10-12T16:55:00Z') });
     expect(none.mail).toBeNull();
-    expect(none.diag.folders.map((f) => [f.path, f.byFrom, f.inWindow])).toEqual([['INBOX', 0, 0], ['Requests', 0, 0], ['Spam', 0, 0]]);
+    expect(none.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 1, 0], ['Spam', 1, 0, 1, 0]]);
+  });
+
+  it('From в смешанном регистре (StOptPostavka@yandex.ru) находится по stoptpostavka@yandex.ru: SEARCH FROM не используется, отправитель сверяется по ENVELOPE', async () => {
+    const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-10-11T16:55:00Z'), subject: 'Карточка организации' });
+    expect(r.mail).toMatchObject({ uid: 5, folder: 'INBOX', from: SENDER, subject: 'Карточка организации', matchedBy: 'address' });
+    expect(r.mail?.attachments.map((a) => a.filename)).toEqual(['Карточка Строй(1).doc']);
+    expect(r.diag.folders[0]).toMatchObject({ path: 'INBOX', inWindow: 5, bySender: 2 });
+    expect(r.diag.errors).toEqual([]);
+    // Регистр искомого адреса тоже не важен.
+    const mixed = await new ImapMailReader(cfg).findLatest({ from: 'StOptPostavka@Yandex.ru', around: d('2026-10-11T16:55:00Z'), subject: 'Карточка организации' });
+    expect(mixed.mail?.uid).toBe(5);
+    expect(mixed.diag.criteria.from).toBe(SENDER);
   });
 
   it('кириллица в адресе не уходит в SEARCH — понятная ошибка до подключения; кириллическая тема сравнивается на клиенте', async () => {

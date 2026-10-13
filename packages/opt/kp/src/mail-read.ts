@@ -9,8 +9,12 @@ import { simpleParser } from 'mailparser';
  * папка открывается через EXAMINE (readOnly), тело берётся BODY.PEEK, флаги \Seen не ставятся,
  * письма не перемещаются и не удаляются. Фонового опроса нет: ящик читается только по кнопке.
  * Логин и пароль — те же, что для SMTP во вкладке «Письмо» (пароль приложения Яндекса).
- * Поиск (RFD-AI-AGENT-OPT-MAIL-READ-2): все папки кроме Отправленных/Черновиков/Корзины, FROM по адресу
- * или домену, окно ±2 дня и запасной поиск без даты; при «не найдено» — диагностика без содержимого писем.
+ * Поиск (RFD-AI-AGENT-OPT-MAIL-READ-2): все папки кроме Отправленных/Черновиков/Корзины, окно ±2 дня и
+ * запасной поиск без даты; при «не найдено» — диагностика без содержимого писем.
+ * Отправитель (RFD-AI-AGENT-OPT-MAIL-READ-4): IMAP SEARCH FROM у Яндекса не находит письмо по полному адресу
+ * (сделка 30013995: письмо во «Входящих», byFrom=0 во всех 26 папках), поэтому SEARCH идёт только по дате,
+ * а отправитель сверяется на клиенте по ENVELOPE: адрес в нижнем регистре равен искомому, для корпоративного
+ * домена — оканчивается на @domain.
  */
 
 export interface MailReadConfig {
@@ -43,13 +47,17 @@ export interface MailAttachment {
 export interface MailSearchDiag {
   /** domain — null, если домен публичный (поиск только по точному адресу). */
   criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null };
-  /** Папки в порядке просмотра: сколько писем от адреса/домена всего и сколько в окне дат. */
-  folders: { path: string; specialUse: string | null; byFrom: number; inWindow: number }[];
+  /**
+   * Папки в порядке просмотра: inWindow — писем в окне дат (SEARCH SINCE/BEFORE), bySender — из них прошло
+   * фильтр отправителя по ENVELOPE; scannedWithoutDate / bySenderWithoutDate — то же для запасного прохода
+   * по последним письмам папки без даты (0, если он не понадобился).
+   */
+  folders: { path: string; specialUse: string | null; inWindow: number; bySender: number; scannedWithoutDate: number; bySenderWithoutDate: number }[];
   /** Папки, которые не смотрели (Отправленные, Черновики, Корзина, несёлектируемые). */
   skippedFolders: string[];
-  /** Сработал ли запасной поиск без даты. */
+  /** Запасной проход без даты нашёл письмо отправителя хотя бы в одной папке. */
   fallbackWithoutDate: boolean;
-  /** Сбои SEARCH по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
+  /** Сбои SEARCH по дате по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
   errors: string[];
 }
 
@@ -81,7 +89,7 @@ export const MAIL_MIN_INLINE_BYTES = 20 * 1024;
 /** Пауза после ошибки входа: Яндекс блокирует IP при частых неверных входах (как в рознице). */
 export const MAIL_AUTH_PAUSE_MS = 30 * 60_000;
 const MAX_TEXT = 12_000;
-/** Кандидатов из папки: при поиске по дате и при запасном поиске без даты (последние N писем). */
+/** Писем из папки на проверку отправителя: последние N в окне дат и последние N папки при запасном проходе без даты. */
 const MAX_CANDIDATES = 200;
 /** Окно даты: ±2 дня (SINCE/BEFORE в IMAP — по дате сервера, без времени и пояса). */
 const DATE_WINDOW_DAYS = 2;
@@ -300,7 +308,8 @@ export class ImapMailReader {
 
   /**
    * Самое свежее письмо отправителя: все папки ящика кроме Отправленных/Черновиков/Корзины, каждая через
-   * EXAMINE; FROM по адресу или домену; окно ±2 дня, если по дате пусто — последние 200 писем папки без даты.
+   * EXAMINE; SEARCH только по дате (окно ±2 дня), отправитель сверяется на клиенте по ENVELOPE; если в окне
+   * от него ничего нет — последние 200 писем папки без даты через тот же фильтр.
    * readOnly — как открывались папки (всегда EXAMINE), diag — что просмотрено, без содержимого писем.
    */
   async findLatest(search: MailSearch): Promise<MailReadResult & { readOnly: boolean }> {
@@ -332,10 +341,10 @@ export class ImapMailReader {
     }
     authPause.delete(key);
     const from = search.from.trim().toLowerCase();
-    // В IMAP SEARCH уходят только ASCII-критерии (FROM, SINCE, BEFORE): кириллица в FROM ломает весь запрос,
-    // сервер отвечает BAD и все папки выглядят пустыми. Тема сравнивается на клиенте по envelope, в SEARCH не идёт.
+    // Отправитель и тема в IMAP SEARCH не уходят: сравниваются на клиенте по ENVELOPE. Адрес всё равно должен
+    // быть одним e-mail без имени — иначе сравнивать не с чем (строка amo «Имя addr» сюда попадать не должна).
     if (!/^[\x21-\x7e]+@[\x21-\x7e]+$/.test(from)) throw new Error(`адрес отправителя для поиска должен быть e-mail в ASCII, получено «${search.from}»`);
-    // По домену ищем только для корпоративных доменов; публичные (yandex.ru, mail.ru, gmail.com…) — только точный адрес.
+    // По домену сверяем только корпоративные домены; публичные (yandex.ru, mail.ru, gmail.com…) — только точный адрес.
     const domainRaw = domainOf(from);
     const domain = domainRaw && !isPublicDomain(domainRaw) ? domainRaw : null;
     const since = dayStart(search.around, -DATE_WINDOW_DAYS);
@@ -352,8 +361,22 @@ export class ImapMailReader {
       const listed = await client.list();
       const { use, skipped } = searchableFolders(listed);
       diag.skippedFolders = skipped;
-      const fromQuery = domain ? { or: [{ from }, { from: `@${domain}` }] } : { from };
       const candidates: Candidate[] = [];
+      // Фильтр отправителя на клиенте: точный адрес или (для корпоративного домена) любой адрес @domain.
+      const matchSender = (sender: string): 'address' | 'domain' | null => (sender === from ? 'address' : domain && sender.endsWith(`@${domain}`) ? 'domain' : null);
+      const scan = async (folder: string, range: string | number[], byUid: boolean): Promise<{ scanned: number; found: Candidate[] }> => {
+        const found: Candidate[] = [];
+        let scanned = 0;
+        for await (const m of client.fetch(range, { uid: true, envelope: true }, byUid ? { uid: true } : {})) {
+          scanned += 1;
+          const sender = (m.envelope?.from?.[0]?.address ?? '').trim().toLowerCase();
+          const matched = matchSender(sender);
+          if (!matched) continue;
+          const d = m.envelope?.date;
+          found.push({ uid: m.uid, folder, subject: m.envelope?.subject ?? '', date: d instanceof Date ? d : d ? new Date(d) : null, exact: matched === 'address' });
+        }
+        return { scanned, found };
+      };
       for (const folder of use) {
         let box;
         try {
@@ -363,21 +386,25 @@ export class ImapMailReader {
           continue;
         }
         readOnly = readOnly && Boolean(box.readOnly);
-        // imapflow возвращает false, если сервер отверг SEARCH — фиксируем, а не считаем папку пустой.
-        const byFromRaw = await client.search(fromQuery, { uid: true });
-        const inWindowRaw = await client.search({ ...fromQuery, since, before }, { uid: true });
-        if (byFromRaw === false || inWindowRaw === false) diag.errors.push(`${folder.path}: сервер отверг SEARCH`);
-        const byFrom = (byFromRaw || []) as number[];
+        // SEARCH только по дате. imapflow возвращает false, если сервер отверг SEARCH — фиксируем, а не считаем папку пустой.
+        const inWindowRaw = await client.search({ since, before }, { uid: true });
+        if (inWindowRaw === false) diag.errors.push(`${folder.path}: сервер отверг SEARCH по дате`);
         const inWindow = (inWindowRaw || []) as number[];
-        diag.folders.push({ path: folder.path, specialUse: folder.specialUse, byFrom: byFrom.length, inWindow: inWindow.length });
-        const uids = inWindow.length ? inWindow.slice(-MAX_CANDIDATES) : byFrom.slice(-MAX_CANDIDATES);
-        if (!inWindow.length && byFrom.length) diag.fallbackWithoutDate = true;
-        if (!uids.length) continue;
-        for await (const m of client.fetch(uids, { uid: true, envelope: true }, { uid: true })) {
-          const d = m.envelope?.date;
-          const sender = (m.envelope?.from?.[0]?.address ?? '').toLowerCase();
-          candidates.push({ uid: m.uid, folder: folder.path, subject: m.envelope?.subject ?? '', date: d instanceof Date ? d : d ? new Date(d) : null, exact: sender === from });
+        const stat = { path: folder.path, specialUse: folder.specialUse, inWindow: inWindow.length, bySender: 0, scannedWithoutDate: 0, bySenderWithoutDate: 0 };
+        if (inWindow.length) {
+          const r = await scan(folder.path, inWindow.slice(-MAX_CANDIDATES), true);
+          stat.bySender = r.found.length;
+          candidates.push(...r.found);
         }
+        // В окне дат от отправителя ничего — последние письма папки без даты (по номерам сообщений, новые в конце).
+        if (!stat.bySender && box.exists > 0) {
+          const r = await scan(folder.path, `${Math.max(1, box.exists - MAX_CANDIDATES + 1)}:*`, false);
+          stat.scannedWithoutDate = r.scanned;
+          stat.bySenderWithoutDate = r.found.length;
+          if (r.found.length) diag.fallbackWithoutDate = true;
+          candidates.push(...r.found);
+        }
+        diag.folders.push(stat);
       }
       const chosen = chooseLatest(candidates, search.subject);
       if (!chosen) return { mail: null, diag, readOnly };

@@ -300,6 +300,17 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
   return { source, files };
 }
 
+/**
+ * Критерии поиска письма в ящике по карточке сделки — те же, что при сборке черновика (fetchMail):
+ * адрес из последнего входящего письма сделки, иначе e-mail контакта; дата и тема письма из amo.
+ * Для консольной проверки без сборки КП (RFD-AI-AGENT-OPT-MAIL-READ-4); from пустой — искать нечего.
+ */
+export async function leadMailSearch(amo: KpDraftDeps['amo'], leadId: number): Promise<{ search: MailSearch; letterFrom: string | null; contactEmail: string; mails: number }> {
+  const card = await readCard(amo, leadId);
+  const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email);
+  return { search: { from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject || null }, letterFrom: card.letter?.from ?? null, contactEmail: card.contact.email, mails: card.mails };
+}
+
 /** Карточка сделки: главный контакт, последнее входящее письмо из примечаний amo, список файлов. */
 async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> {
   const lead = await amo.getLead(leadId);
