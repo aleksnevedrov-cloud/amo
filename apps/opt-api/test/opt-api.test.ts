@@ -110,7 +110,7 @@ describe('opt-api: от подключения интеграции до пис�
     const xml = new PizZip(readFileSync(d!.docxPath!)).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
     expect(xml).toContain('КП КП-2026-1 для ООО Ромашка');
     expect(xml).toContain('1. дверь белая — 29 800 ₽; 2. добор — 4 320 ₽; итого 34 120 ₽. Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.');
-    expect(ctx.amo.calls.filter((c) => c.url.endsWith(`/leads/${LEAD_ID}/files`) && c.method === 'POST')).toHaveLength(1);
+    expect(ctx.amo.calls.filter((c) => c.url.endsWith(`/leads/${LEAD_ID}/files`) && c.method === 'PUT')).toHaveLength(1);
   });
 
   it('предпросмотр и отправка: получатель из карточки, тема и текст из шаблонов, статус sent, примечание в сделке', async () => {

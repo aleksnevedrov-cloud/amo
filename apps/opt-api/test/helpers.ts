@@ -38,7 +38,7 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`)) return mock.mail ? json(200, { _embedded: { notes: [mock.mail] } }) : new Response(null, { status: 204 });
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/notes`) && method === 'POST') return json(200, { _embedded: { notes: [{ id: 1 }] } });
     if (url.includes(`/api/v4/leads/${LEAD_ID}/files`) && method === 'GET') return mock.files.length ? json(200, { _embedded: { files: mock.files } }) : new Response(null, { status: 204 });
-    if (url.endsWith(`/api/v4/leads/${LEAD_ID}/files`) && method === 'POST') return json(200, {});
+    if (url.endsWith(`/api/v4/leads/${LEAD_ID}/files`) && method === 'PUT') return json(200, {});
     if (url.includes(`/api/v4/leads/${LEAD_ID}`)) return json(200, { id: LEAD_ID, name: 'Двери для офиса', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
     if (url.endsWith('/api/v4/contacts/77')) return json(200, { id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }] });
     if (url === 'https://drive-b.amocrm.ru/v1.0/sessions' && method === 'POST') return json(200, { upload_url: 'https://upload.amocrm.ru/part/1', max_part_size: 10_000_000 });

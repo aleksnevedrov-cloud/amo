@@ -203,6 +203,18 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.source.mail).toMatchObject({ status: 'found', folder: 'INBOX', messageId: '<m7@yandex.ru>', attachments: 3, taken: ['tz.pdf', 'already.pdf'], uploaded: ['tz.pdf'], skipped: [{ name: 'logo.png', reason: 'встроенная картинка меньше 20 КБ' }] });
     expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
+    // Привязка файла в amo упала (405) — вложение всё равно разбирается из памяти, причина — в skipped (RFD-AI-AGENT-OPT-MAIL-READ-7).
+    const broken = fakeAmo({ mails: [{ ...letter, from: 'stoptpostavka@yandex.ru', subject: 'Запрос', text: 'Добрый день!' }] });
+    broken.uploadFileToLead = async () => {
+      throw new Error('привязка файла f-1 к сделке: PUT https://acc.amocrm.ru/api/v4/leads/30013995/files → HTTP 405: {}');
+    };
+    analyzed.length = 0;
+    const r2 = await buildKpDraft(gateway, { accountId: 1, leadId: 30013995, route }, { amo: broken, analyze, mail });
+    expect(analyzed).toEqual(['tz.pdf:621000', `already.pdf:${spec.byteLength}`]);
+    expect(r2.payload.source.documents).toHaveLength(2);
+    expect(r2.payload.source.mail).toMatchObject({ status: 'found', uploaded: [], taken: ['tz.pdf', 'already.pdf'] });
+    expect(r2.payload.source.mail?.skipped.map((x) => x.name)).toEqual(['logo.png', 'tz.pdf', 'already.pdf']);
+    expect(r2.payload.source.mail?.skipped[1]?.reason).toContain('не загружен в сделку: привязка файла f-1 к сделке: PUT');
   });
 
   it('адрес отправителя из mail-note amo: только e-mail, без имени и кириллицы; тема — из письма, не название сделки', async () => {

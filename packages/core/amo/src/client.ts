@@ -411,7 +411,13 @@ export class AmoApiClient {
     }
     if (!uuid) return null;
 
-    await this.request('POST', `/api/v4/leads/${leadId}/files`, [{ file_uuid: uuid }]);
+    // Привязка файла к сущности в amo v4 — PUT (POST отвечает 405; RFD-AI-AGENT-OPT-MAIL-READ-7).
+    try {
+      await this.request('PUT', `/api/v4/leads/${leadId}/files`, [{ file_uuid: uuid }]);
+    } catch (err) {
+      if (err instanceof AmoError) throw new AmoError(`привязка файла ${uuid} к сделке: PUT https://${this.accountDomain}/api/v4/leads/${leadId}/files → HTTP ${err.status}: ${String(err.body ?? '').slice(0, 300) || 'без тела'}`, err.status, err.body);
+      throw err;
+    }
     return uuid;
   }
 

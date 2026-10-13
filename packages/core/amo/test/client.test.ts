@@ -148,7 +148,7 @@ describe('AmoApiClient: файлы сделки (для «Агента опт»)
       ['POST', 'https://drive-b.amocrm.ru/v1.0/sessions'],
       ['POST', 'https://drive-b.amocrm.ru/upload/1'],
       ['POST', 'https://drive-b.amocrm.ru/upload/2'],
-      ['POST', 'https://acc.amocrm.ru/api/v4/leads/7/files'],
+      ['PUT', 'https://acc.amocrm.ru/api/v4/leads/7/files'],
     ]);
     expect(s.calls[1]?.body).toEqual({ file_name: 'Карточка.doc', file_size: 6, content_type: 'application/msword', with_preview: false });
     expect(s.calls[1]?.auth).toBe('Bearer TOKEN');
@@ -170,5 +170,16 @@ describe('AmoApiClient: файлы сделки (для «Агента опт»)
       'сессия загрузки файла в amo: POST https://acc.amocrm.ru/api/v4/files/sessions → HTTP 404: {} (drive_url в /api/v4/account не получен)',
     );
     expect(old.calls[1]?.url).toBe('https://acc.amocrm.ru/api/v4/files/sessions');
+    // Привязка: файл уже на drive, PUT отвечает 405 — ошибка с адресом, кодом и телом.
+    const link = scripted([
+      { status: 200, body: { id: 1, drive_url: 'https://drive-b.amocrm.ru' } },
+      { status: 200, body: { upload_url: 'https://drive-b.amocrm.ru/upload/1', max_part_size: 100 } },
+      { status: 200, body: { uuid: 'f-9' } },
+      { status: 405, body: { title: 'Method Not Allowed' } },
+    ]);
+    await expect(client(link.fn).uploadFileToLead(7, { filename: 'a.doc', mime: '', bytes: new Uint8Array([1]) })).rejects.toThrow(
+      'привязка файла f-9 к сделке: PUT https://acc.amocrm.ru/api/v4/leads/7/files → HTTP 405: {"title":"Method Not Allowed"}',
+    );
+    expect(link.calls[3]).toMatchObject({ method: 'PUT', url: 'https://acc.amocrm.ru/api/v4/leads/7/files', body: [{ file_uuid: 'f-9' }] });
   });
 });
