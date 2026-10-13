@@ -18,7 +18,7 @@ const worker = new Worker<DraftJob>(
   KP_QUEUE,
   async (job) => {
     if (job.name !== DRAFT_JOB) throw new Error(`Неизвестная задача ${job.name}`);
-    const r = await runDraftJob(core, job.data);
+    const r = await runDraftJob(core, job.data, { onProgress: (line) => log.debug({ ...job.data }, `kp: ящик — ${line}`) });
     log.info({ ...job.data, draftId: r.draftId }, 'kp: черновик собран');
     return r;
   },

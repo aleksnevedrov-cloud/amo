@@ -20,7 +20,12 @@ export const draftJobId = (accountId: number, leadId: number) => `draft-${accoun
  * разбираются @core/docs, позиции кладутся в kp_drafts без цен. Любая ошибка — в журнал (kp_error)
  * и наверх: задание помечается упавшим, виджет показывает текст.
  */
-export async function runDraftJob(core: OptCore, job: DraftJob): Promise<{ draftId: number }> {
+/** Хуки задания: onProgress — строки хода чтения ящика (в debug-лог воркера). */
+export interface DraftJobHooks {
+  onProgress?: (line: string) => void;
+}
+
+export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobHooks = {}): Promise<{ draftId: number }> {
   const { accountId, leadId } = job;
   try {
     const ai = await core.ai(accountId);
@@ -40,7 +45,7 @@ export async function runDraftJob(core: OptCore, job: DraftJob): Promise<{ draft
     const m = settings.mail;
     const mailPassword = m.username && m.imapHost ? await core.secrets.get(accountId, 'smtp') : null;
     const mail: KpDraftDeps['mail'] = mailPassword
-      ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, search)
+      ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, search, { onProgress: hooks.onProgress })
       : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
     const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze, mail });

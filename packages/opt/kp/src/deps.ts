@@ -4,7 +4,7 @@ import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, 
 import type { LLMProvider, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import { createOptAi, type OptAiProvider } from './llm.ts';
-import { readLatestMail, type MailReadConfig, type MailReadResult, type MailSearch } from './mail-read.ts';
+import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailReadResult, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
 import { OptSettingsRepo } from './settings.ts';
 
@@ -32,7 +32,7 @@ export interface OptCore {
   /** Корень файлов опта: шаблон КП и собранные документы (/data в контейнере, том opt_data). */
   filesRoot: string;
   /** Чтение письма заявки из ящика по IMAP, только чтение (вариант А); в тестах подменяется. */
-  mailRead(cfg: MailReadConfig, search: MailSearch): Promise<MailReadResult>;
+  mailRead(cfg: MailReadConfig, search: MailSearch, opts?: MailReadOptions): Promise<MailReadResult>;
   alerter: Alerter;
   fetch: typeof fetch;
   /** Клиент amoCRM аккаунта по токенам опта; аккаунт не подключён — ошибка. */

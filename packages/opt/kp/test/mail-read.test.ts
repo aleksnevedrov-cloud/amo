@@ -1,11 +1,11 @@
 // Чтение письма заявки из ящика: выбор письма, лимиты вложений, только чтение (настоящий IMAP — hoodiecrow), пауза после ошибки входа.
-import type { AddressInfo } from 'node:net';
+import { createServer, connect as netConnect, type AddressInfo, type Server, type Socket } from 'node:net';
 // @ts-expect-error — у hoodiecrow нет типов
 import hoodiecrow from 'hoodiecrow-imap';
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chooseLatest, domainOf, htmlToPlain, ImapMailReader, isPublicDomain, MailAuthError, normalizeSubject, parseMail, pickMailAttachments, resetMailAuthPauses, searchableFolders, stripQuoted, type MailAttachment, type MailReadConfig } from '../src/mail-read.ts';
+import { chooseLatest, compressUids, domainOf, htmlToPlain, ImapMailReader, isPublicDomain, MailAuthError, MailTimeoutError, normalizeSubject, parseMail, pickMailAttachments, resetMailAuthPauses, searchableFolders, stripQuoted, type MailAttachment, type MailReadConfig } from '../src/mail-read.ts';
 
 async function raw(mail: { from: string; subject: string; text?: string; html?: string; date: Date; attachments?: { filename: string; content: Buffer; contentType?: string; cid?: string }[] }): Promise<string> {
   const t = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'windows' });
@@ -47,6 +47,10 @@ describe('выбор письма и разбор', () => {
     ]);
     expect(r.use.map((f) => f.path)).toEqual(['INBOX', 'Requests', 'Spam']);
     expect(r.skipped).toEqual(['Sent', 'Drafts', 'Trash', 'Archive']);
+    // UID одной командой FETCH диапазонами.
+    expect(compressUids([10, 9, 1, 2, 3, 7, 3])).toBe('1:3,7,9:10');
+    expect(compressUids([5])).toBe('5');
+    expect(compressUids([])).toBe('');
   });
 
   it('лимиты вложений как у розницы: встроенные < 20 КБ, 25 МБ на файл, 10 файлов, 60 МБ суммарно', () => {
@@ -136,7 +140,9 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(r.diag.skippedFolders).toEqual(expect.arrayContaining(['Sent', 'Drafts']));
     expect(r.diag.fallbackWithoutDate).toBe(false);
     // Во «Входящих» в окне все 5 писем (hoodiecrow считает SINCE/BEFORE по дате записи на сервер — сегодня), от отправителя два (uid 1 и 5); запасной проход не понадобился.
-    expect(r.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 5, bySender: 2, scannedWithoutDate: 0, bySenderWithoutDate: 0 });
+    expect(r.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 5, bySender: 2, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 5, ms: expect.any(Number) });
+    // Во Входящих есть письма отправителя, но не с этой темой — остальные папки просмотрены.
+    expect(r.diag.stoppedAfterInbox).toBe(false);
     // Флаги прочитанных писем не менялись ни в одной папке.
     const check = new ImapFlow({ host: cfg.host, port: cfg.port, secure: false, auth: { user: 'shop', pass: 'pass' }, logger: false });
     check.on('error', () => undefined);
@@ -151,11 +157,17 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     }
   });
 
-  it('без темы — самое свежее от точного адреса в окне, включая Спам; письма из Отправленных не считаются', async () => {
-    const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-10-12T16:55:00Z') });
-    expect(r.mail).toMatchObject({ folder: 'Spam', subject: 'Счёт' });
-    // Тот же домен, другой адрес (uid 3 в INBOX, 17:00) — ниже точного адреса, хотя свежее.
-    expect(r.mail?.from).toBe(SENDER);
+  it('без темы — письмо отправителя есть во Входящих: берётся самое свежее оттуда, остальные папки не обходятся; прогресс по папкам', async () => {
+    const lines: string[] = [];
+    const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-10-12T16:55:00Z') }, { onProgress: (l) => lines.push(l) });
+    expect(r.mail).toMatchObject({ folder: 'INBOX', uid: 5, from: SENDER, subject: 'Карточка организации' });
+    expect(r.diag.stoppedAfterInbox).toBe(true);
+    expect(r.diag.folders.map((f) => f.path)).toEqual(['INBOX']);
+    expect(lines[0]).toMatch(/^INBOX: в окне дат 5, ENVELOPE загружено 5, от отправителя 2, \d+\.\d с$/);
+    expect(lines[1]).toBe('письмо отправителя найдено во Входящих — остальные папки не смотрим');
+    // Тема известна и во Входящих её нет — обход продолжается, самое свежее с точного адреса по всем папкам: Спам.
+    const spam = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-10-12T16:55:00Z'), subject: 'Счёт' });
+    expect(spam.mail).toMatchObject({ folder: 'Spam', subject: 'Счёт', from: SENDER });
   });
 
   it('публичный домен без письма с точного адреса — null (чужие письма @yandex.ru не берутся); корпоративный домен — найдено по домену с пометкой', async () => {
@@ -163,21 +175,23 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(pub.mail).toBeNull();
     expect(pub.diag.criteria.domain).toBeNull();
     // Письма в окне есть, но от этого адреса — ни одного; запасной проход по последним письмам тоже пуст.
-    expect(pub.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 1, 0], ['Spam', 1, 0, 1, 0]]);
+    // Запасной проход без даты — только Входящие и Спам, пользовательская папка Requests без него.
+    expect(pub.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 0, 0], ['Spam', 1, 0, 1, 0]]);
     const corp = await new ImapMailReader(cfg).findLatest({ from: 'buyer@stroyopt.ru', around: d('2026-10-12T16:55:00Z') });
     expect(corp.mail).toMatchObject({ folder: 'INBOX', from: 'manager@stroyopt.ru', matchedBy: 'domain', subject: 'Спецификация' });
     expect(corp.diag.criteria.domain).toBe('stroyopt.ru');
   });
 
-  it('окно дат пустое — запасной поиск без даты по последним письмам', async () => {
-    const far = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-11-20T10:00:00Z'), subject: 'Запрос ООО Стройоптпоставка' });
+  it('окно дат пустое — запасной поиск без даты по последним письмам Входящих и Спама', async () => {
+    const far = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: d('2026-11-20T10:00:00Z'), subject: 'Карточка организации' });
     expect(far.diag.fallbackWithoutDate).toBe(true);
-    expect(far.diag.folders.find((f) => f.path === 'Requests')).toEqual({ path: 'Requests', specialUse: null, inWindow: 0, bySender: 0, scannedWithoutDate: 1, bySenderWithoutDate: 1 });
-    expect(far.mail).toMatchObject({ folder: 'Requests', subject: 'Запрос ООО Стройоптпоставка' });
+    expect(far.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 0, bySender: 0, scannedWithoutDate: 5, bySenderWithoutDate: 2, envelopes: 5, ms: expect.any(Number) });
+    expect(far.mail).toMatchObject({ folder: 'INBOX', uid: 5, subject: 'Карточка организации' });
+    expect(far.diag.stoppedAfterInbox).toBe(true);
     // Совсем чужой домен — ничего, диагностика по папкам с нулями.
     const none = await new ImapMailReader(cfg).findLatest({ from: 'x@nowhere.test', around: d('2026-10-12T16:55:00Z') });
     expect(none.mail).toBeNull();
-    expect(none.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 1, 0], ['Spam', 1, 0, 1, 0]]);
+    expect(none.diag.folders.map((f) => [f.path, f.inWindow, f.bySender, f.scannedWithoutDate, f.bySenderWithoutDate])).toEqual([['INBOX', 5, 0, 5, 0], ['Requests', 1, 0, 0, 0], ['Spam', 1, 0, 1, 0]]);
   });
 
   it('From в смешанном регистре (StOptPostavka@yandex.ru) находится по stoptpostavka@yandex.ru: SEARCH FROM не используется, отправитель сверяется по ENVELOPE', async () => {
@@ -212,6 +226,65 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     // Пауза — на связку логин@сервер: с верным паролем тот же ящик тоже ждёт, пока пауза не сброшена.
     await expect(new ImapMailReader(cfg).findLatest(search)).rejects.toBeInstanceOf(MailAuthError);
     resetMailAuthPauses();
-    expect((await new ImapMailReader(cfg).findLatest(search)).mail?.folder).toBe('Spam');
+    expect((await new ImapMailReader(cfg).findLatest(search)).mail?.folder).toBe('INBOX');
   });
+
+  it('зависший сервер: без приветствия и с приветствием без ответа на вход — таймаут с понятной ошибкой, а не вечное ожидание', async () => {
+    resetMailAuthPauses();
+    const silent = createServer(() => undefined);
+    await new Promise<void>((r) => silent.listen(0, r));
+    const greetOnly = createServer((sock) => sock.write('* OK IMAP4rev1 ready\r\n'));
+    await new Promise<void>((r) => greetOnly.listen(0, r));
+    try {
+      const search = { from: SENDER, around: d('2026-10-12T16:55:00Z') };
+      const t0 = Date.now();
+      const e1 = await new ImapMailReader({ ...cfg, port: (silent.address() as AddressInfo).port }).findLatest(search, { connectMs: 400 }).catch((e: Error) => e);
+      expect(e1).toBeInstanceOf(MailTimeoutError);
+      expect((e1 as Error).message).toBe('чтение ящика прервано по таймауту на подключение и вход');
+      const e2 = await new ImapMailReader({ ...cfg, port: (greetOnly.address() as AddressInfo).port }).findLatest(search, { connectMs: 400 }).catch((e: Error) => e);
+      expect(e2).toBeInstanceOf(MailTimeoutError);
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      // Таймаут — не ошибка входа: паузы на 30 минут нет, следующая попытка идёт к серверу.
+      expect((await new ImapMailReader(cfg).findLatest(search)).mail?.uid).toBe(5);
+    } finally {
+      silent.close();
+      greetOnly.close();
+    }
+  });
+
+  it('зависший SEARCH: таймаут команды, переподключение и проход по последним письмам Входящих по номерам сообщений', async () => {
+    resetMailAuthPauses();
+    // Прокси к hoodiecrow: после команды SEARCH ответы сервера клиенту не передаются — как будто сервер завис.
+    const sockets = new Set<Socket>();
+    const proxy: Server = createServer((client) => {
+      const upstream = netConnect(cfg.port, cfg.host);
+      sockets.add(client).add(upstream);
+      let mute = false;
+      client.on('data', (b) => {
+        if (/ UID SEARCH | SEARCH /i.test(b.toString())) mute = true;
+        upstream.write(b);
+      });
+      upstream.on('data', (b) => {
+        if (!mute) client.write(b);
+      });
+      const end = () => {
+        client.destroy();
+        upstream.destroy();
+      };
+      client.on('close', end).on('error', end);
+      upstream.on('close', end).on('error', end);
+    });
+    await new Promise<void>((r) => proxy.listen(0, r));
+    try {
+      const lines: string[] = [];
+      const r = await new ImapMailReader({ ...cfg, port: (proxy.address() as AddressInfo).port }).findLatest({ from: SENDER, around: d('2026-10-12T16:55:00Z') }, { commandMs: 700, onProgress: (l) => lines.push(l) });
+      expect(r.diag.errors).toEqual(['INBOX: SEARCH по дате прерван по таймауту (1 с), переподключение']);
+      expect(r.diag.folders[0]).toMatchObject({ path: 'INBOX', inWindow: 0, scannedWithoutDate: 5, bySenderWithoutDate: 2 });
+      expect(r.mail).toMatchObject({ folder: 'INBOX', uid: 5 });
+      expect(lines[0]).toContain('SEARCH по таймауту');
+    } finally {
+      for (const s of sockets) s.destroy();
+      proxy.close();
+    }
+  }, 20_000);
 });

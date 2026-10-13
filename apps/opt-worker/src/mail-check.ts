@@ -41,10 +41,14 @@ try {
   console.log(`Ящик: ${m.username} @ ${m.imapHost}:${m.imapPort} (${m.imapSecure ? 'TLS' : 'без TLS'}); ищем от ${search.from}, около ${search.around.toISOString().slice(0, 10)}${search.subject ? `, тема «${search.subject}»` : ''}`);
 
   const started = Date.now();
-  const r = await new ImapMailReader({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password }).findLatest(search);
+  console.log('Таймауты: подключение 20 с, команда 30 с, весь поиск 90 с');
+  const r = await new ImapMailReader({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password }).findLatest(search, {
+    onProgress: (line) => console.log(`  ${((Date.now() - started) / 1000).toFixed(1)} с  ${line}`),
+  });
   console.log(`Папки открыты только на чтение: ${r.readOnly ? 'да' : 'НЕТ'}; ${Math.round((Date.now() - started) / 1000)} с`);
   console.log(`Критерии: ${JSON.stringify(r.diag.criteria)}`);
-  console.table(r.diag.folders.map((f) => ({ папка: f.path, 'спец.': f.specialUse ?? '', 'в окне дат': f.inWindow, 'от отправителя': f.bySender, 'без даты просмотрено': f.scannedWithoutDate, 'без даты от отправителя': f.bySenderWithoutDate })));
+  console.table(r.diag.folders.map((f) => ({ папка: f.path, 'спец.': f.specialUse ?? '', 'в окне дат': f.inWindow, 'от отправителя': f.bySender, 'без даты просмотрено': f.scannedWithoutDate, 'без даты от отправителя': f.bySenderWithoutDate, 'ENVELOPE': f.envelopes, 'мс': f.ms })));
+  if (r.diag.stoppedAfterInbox) console.log('Письмо найдено во Входящих — остальные папки не смотрели');
   if (r.diag.skippedFolders.length) console.log(`Пропущены: ${r.diag.skippedFolders.join(', ')}`);
   if (r.diag.fallbackWithoutDate) console.log('Сработал запасной проход без даты');
   if (r.diag.errors.length) console.log(`Ошибки SEARCH: ${r.diag.errors.join('; ')}`);
