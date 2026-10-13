@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage } from '@core/widget-core';
 import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo } from '../api.ts';
 import { SendPreview } from './SendPreview.tsx';
@@ -9,7 +9,15 @@ import { SendPreview } from './SendPreview.tsx';
  * документ и отправляет письмо из окна предпросмотра. Автосборки и автоотправки нет.
  */
 
-const STATUS: Record<string, string> = { draft: 'черновик', built: 'документ собран', sent: 'отправлено', cancelled: 'отменено' };
+const STATUS: Record<string, string> = { draft: 'Черновик', built: 'Документ собран', sent: 'Отправлено', cancelled: 'Отменено' };
+/** Склонение: 1 вложение, 2 вложения, 5 вложений; 1 позиция, 2 позиции, 5 позиций. */
+const plural = (n: number, one: string, few: string, many: string) => {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  return `${n} ${m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? few : many}`;
+};
+/** Размер по макету: «1400 × 2700 мм». */
+const sizeLabel = (size: string) => size.replace(/\s*[×x]\s*/i, ' × ');
 const POLL_MS = 3000;
 
 const rub = (n: number | null) => (n === null ? '—' : `${n.toLocaleString('ru-RU')} ₽`);
@@ -96,63 +104,108 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const total = lines.reduce((sum, l) => sum + (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100)), 0);
   const ready = lines.length > 0 && lines.every((l) => l.price !== null);
 
-  // Корень .opt-root: переменные макета, ширина колонки виджетов (~280 px), перенос длинных строк.
+  const kpStatus = STATUS[draft?.status ?? 'draft'] ?? draft?.status ?? '';
+
+  // Макет Figma «10 Агент опт — КП» (RFD-AI-AGENT-OPT-WIDGET-DESIGN): карточки с рамкой и радиусом 13 px на сером фоне,
+  // блок в карточке сделки ~500 px. Шапку с логотипом рисует amoCRM (.opt-caption).
   if (!draft) {
     return (
-      <div className="opt-root">
-      <div className="opt-col">
-        {pending ? (
-          <div className="opt-muted">{job?.state === 'queued' ? 'В очереди…' : 'Собираю черновик: читаю карточку, письма и файлы…'}</div>
-        ) : (
-          <div className="opt-empty">КП по этой сделке ещё не собирали</div>
-        )}
-        {job?.state === 'failed' && <div className="opt-error">Черновик не собран: {job.error}</div>}
-        {error && <div className="opt-error">{error}</div>}
-        <button type="button" className="opt-btn opt-btn-wide opt-btn-green" disabled={busy || pending} onClick={start}>
-          Собрать КП
-        </button>
-      </div>
+      <div className="opt-root opt-kp">
+        <section className="opt-kp-card opt-col">
+          <div className="opt-kp-head">
+            <h3 className="opt-kp-title">Черновик КП</h3>
+          </div>
+          {pending ? (
+            <div className="opt-kp-note">{job?.state === 'queued' ? 'В очереди…' : 'Собираю черновик: читаю карточку, письма и файлы…'}</div>
+          ) : (
+            <div className="opt-kp-note">КП по этой сделке ещё не собирали</div>
+          )}
+          {job?.state === 'failed' && <div className="opt-error">Черновик не собран: {job.error}</div>}
+          {error && <div className="opt-error">{error}</div>}
+          <div className="opt-actions">
+            <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending} onClick={start}>
+              Собрать КП
+            </button>
+          </div>
+        </section>
       </div>
     );
   }
 
   return (
-    <div className="opt-root">
-    <div className="opt-col">
-      <div className="opt-row opt-row-tight">
-        <span className="opt-muted">{draft.kpNo ?? 'номер будет при сборке документа'} · {STATUS[draft.status] ?? draft.status}</span>
-      </div>
-      <Buyer client={draft.client} />
-      <MailSection draft={draft} />
-      {pending && <div className="opt-muted">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
-      {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
-      {error && <div className="opt-error">{error}</div>}
-
-      {lines.length === 0 ? (
-        <div className="opt-empty">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>
-      ) : (
-        <KpLinesTable lines={lines} needsManager={draft.needsManager} onEdit={edit} />
-      )}
-      {lines.length > 0 && <div className="opt-muted">Итого: {rub(Math.round(total))}</div>}
-      {draft.questions.length > 0 && (
-        <div className="opt-col">
-          <span className="opt-muted">Уточнить у клиента:</span>
-          {draft.questions.map((q) => (
-            <div key={q}>— {q}</div>
-          ))}
+    <div className="opt-root opt-kp">
+      {/* 2. Черновик КП: статус, номер, покупатель, письмо */}
+      <section className="opt-kp-card">
+        <div className="opt-kp-head">
+          <h3 className="opt-kp-title">Черновик КП</h3>
+          <span className={`opt-kp-badge${draft.status === 'draft' || draft.status === 'built' || draft.status === 'sent' ? ' opt-kp-badge-green' : ''}`}>{kpStatus}</span>
         </div>
+        <div className="opt-kp-sub">{draft.kpNo ?? 'Номер появится после сборки документа'}</div>
+        <div className="opt-kp-sep" />
+        <Buyer client={draft.client} />
+        <div className="opt-kp-sep" />
+        <MailSection draft={draft} />
+        {pending && <div className="opt-kp-sub">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
+        {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
+        {error && <div className="opt-error">{error}</div>}
+      </section>
+
+      {/* 3. Позиции КП */}
+      <section className="opt-kp-card">
+        <div className="opt-kp-head">
+          <h3 className="opt-kp-title">Позиции КП</h3>
+          <span className="opt-kp-badge">{plural(lines.length, 'позиция', 'позиции', 'позиций')}</span>
+        </div>
+        {lines.length === 0 ? (
+          <div className="opt-kp-note">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>
+        ) : (
+          <>
+            <KpLinesTiles lines={lines} needsManager={draft.needsManager} onEdit={edit} />
+            <div className="opt-kp-sep" />
+            <div className="opt-kp-total">
+              <span>Итого</span>
+              <b>{rub(Math.round(total))}</b>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* 4. Уточнить у клиента */}
+      {draft.questions.length > 0 && (
+        <section className="opt-kp-card">
+          <div className="opt-kp-head">
+            <h3 className="opt-kp-title">Уточнить у клиента</h3>
+          </div>
+          <ul className="opt-kp-questions">
+            {draft.questions.map((q) => (
+              <li key={q}>{q}</li>
+            ))}
+          </ul>
+        </section>
       )}
 
-      <KpActions
-        draft={draft}
-        busy={busy || pending}
-        dirty={dirty}
-        ready={ready}
-        onDraft={start}
-        onSave={() => void act(() => api.saveDraftItems(draft.id, lines))}
-        onBuild={() => void act(() => api.buildDoc(draft.id))}
-        onSend={() => setPreview(true)}
-      />
+      {/* 5. Действия с КП */}
+      <section className="opt-kp-card">
+        <div className="opt-kp-head">
+          <h3 className="opt-kp-title">Действия с КП</h3>
+        </div>
+        <KpActions
+          draft={draft}
+          busy={busy || pending}
+          dirty={dirty}
+          ready={ready}
+          onDraft={start}
+          onSave={() => void act(() => api.saveDraftItems(draft.id, lines))}
+          onBuild={() => void act(() => api.buildDoc(draft.id))}
+          onSend={() => setPreview(true)}
+        />
+      </section>
+
+      {/* 6. Примечание */}
+      <section className="opt-kp-card opt-kp-note">
+        <KpNote draft={draft} ready={ready} />
+      </section>
+
       {preview && (
         <SendPreview
           api={api}
@@ -165,17 +218,22 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         />
       )}
     </div>
-    </div>
   );
 }
 
-/** Покупатель одной строкой; e-mail не повторяется, если он уже стоит в названии или имени (из amo так бывает). */
+/** Покупатель по макету: метка капсом, название компании (и имя), e-mail; адрес не повторяется, если он уже стоит в названии или имени. */
 function Buyer({ client }: { client: KpDraftInfo['client'] }) {
   const email = client.email.trim().toLowerCase();
   const parts = [client.org, client.fio].map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== email);
   const hasEmail = email && parts.some((x) => x.toLowerCase().includes(email));
   if (!parts.length && !email) return null;
-  return <div className="opt-muted">Покупатель: {[...parts, hasEmail || !email ? '' : client.email.trim()].filter(Boolean).join(' · ')}</div>;
+  return (
+    <div className="opt-kp-buyer">
+      <div className="opt-kp-label">Покупатель</div>
+      {parts.length > 0 ? <div className="opt-kp-name">{parts.join(' · ')}</div> : <div className="opt-kp-name">{client.email.trim()}</div>}
+      {parts.length > 0 && email && !hasEmail && <div className="opt-kp-sub">{client.email.trim()}</div>}
+    </div>
+  );
 }
 
 /**
@@ -194,7 +252,7 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
   const cardErrors = src.skipped.filter((f) => !attachmentNames.has(f.name));
   const summary =
     m?.status === 'found'
-      ? `Письмо: ${m.date ? dateTimeMsk(m.date) : 'дата неизвестна'} · ${m.attachments ? `вложений ${m.attachments}` : 'без вложений'}`
+      ? `Письмо: ${m.date ? dateTimeMsk(m.date) : 'дата неизвестна'} · ${m.attachments ? plural(m.attachments, 'вложение', 'вложения', 'вложений') : 'без вложений'}`
       : m?.status === 'not_found'
         ? 'Письмо: не найдено'
         : m?.status === 'error'
@@ -206,7 +264,7 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
   return (
     <div className="opt-col opt-details">
       <button type="button" className={`opt-details-summary${warn ? ' opt-details-warn' : ''}`} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        {summary} {open ? '▾' : '▸'}
+        {summary} {open ? '⌄' : '›'}
       </button>
       {open && (
         <div className="opt-details-body opt-col">
@@ -294,72 +352,64 @@ function SearchDiag({ m }: { m: MailSourceInfo }) {
   );
 }
 
-/** Таблица позиций: менеджер правит количество, цену и скидку; пометки «нужен менеджер» — под позицией. */
-function KpLinesTable({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; onEdit: (i: number, patch: Partial<KpDraftLine>) => void }) {
+/** Позиции плитками по макету: название на всю ширину, размер серым, под ними поля «Количество», «Цена», «Скидка»; пометки «нужен менеджер» — под размером. */
+function KpLinesTiles({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; onEdit: (i: number, patch: Partial<KpDraftLine>) => void }) {
   const reasons = (i: number) => needsManager.filter((n) => n.request_index === i).map((n) => n.reason);
   return (
-    <table className="opt-table">
-      <thead>
-        <tr>
-          <th style={th}>Позиция</th>
-          <th style={{ ...th, width: 48 }}>Кол-во</th>
-          <th style={{ ...th, width: 92 }}>Цена</th>
-          <th style={{ ...th, width: 56 }}>Скидка</th>
-        </tr>
-      </thead>
-      <tbody>
-        {lines.map((l, i) => {
-          const why = reasons(l.request_index);
-          return (
-            <tr key={`${l.request_index}-${i}`}>
-              <td style={td}>
-                <div>{l.name || '—'}</div>
-                {l.size && <div className="opt-muted">{l.size}</div>}
-                {why.length > 0 && <div className="opt-muted">{why.join('; ')}</div>}
-              </td>
-              <td style={td}>
-                <input type="number" min={1} value={l.qty} style={input} onChange={(e) => onEdit(i, { qty: Math.max(1, Number(e.target.value) || 1) })} />
-              </td>
-              <td style={td}>
-                <input type="number" min={0} value={l.price ?? ''} placeholder="нет цены" style={input} onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
-              </td>
-              <td style={td}>
-                <input type="number" min={0} max={100} value={l.discount} style={input} onChange={(e) => onEdit(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <div className="opt-kp-tiles">
+      {lines.map((l, i) => {
+        const why = reasons(l.request_index);
+        return (
+          <div key={`${l.request_index}-${i}`} className="opt-kp-tile">
+            <div className="opt-kp-tile-name">{l.name || '—'}</div>
+            {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
+            {why.length > 0 && <div className="opt-kp-sub">{why.join('; ')}</div>}
+            <div className="opt-kp-fields">
+              <label className="opt-kp-field">
+                <span className="opt-kp-label">Количество</span>
+                <input type="number" min={1} value={l.qty} onChange={(e) => onEdit(i, { qty: Math.max(1, Number(e.target.value) || 1) })} />
+              </label>
+              <label className="opt-kp-field opt-kp-field-price">
+                <span className="opt-kp-label">Цена</span>
+                <input type="number" min={0} value={l.price ?? ''} placeholder="нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
+              </label>
+              <label className="opt-kp-field">
+                <span className="opt-kp-label">Скидка</span>
+                <input type="number" min={0} max={100} value={l.discount} onChange={(e) => onEdit(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />
+              </label>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-/** Кнопки шагов: собрать заново → сохранить правки → собрать документ → отправить (окно предпросмотра). */
+/** Кнопки шагов во всю ширину одна под другой: собрать заново → сохранить правки → собрать документ → отправить (окно предпросмотра). */
 function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend }: { draft: KpDraftInfo; busy: boolean; dirty: boolean; ready: boolean; onDraft: () => void; onSave: () => void; onBuild: () => void; onSend: () => void }) {
   const canSend = (draft.status === 'built' || draft.status === 'sent') && !dirty;
   return (
-    <>
-      <div className="opt-actions">
-        <button type="button" className="opt-btn" disabled={busy} onClick={onDraft} title="Прочитать карточку заново; правки в позициях будут потеряны">
-          Собрать заново
-        </button>
-        <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={onSave}>
-          Сохранить правки
-        </button>
-        <button type="button" className="opt-btn opt-btn-green" disabled={busy || dirty || !ready} title={dirty ? 'Сначала сохраните правки' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
-          Собрать документ
-        </button>
-        <button type="button" className="opt-btn" disabled={busy || !canSend} title={canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
-          Отправить клиенту
-        </button>
-      </div>
-      {draft.status === 'sent' && <div className="opt-muted">Отправлено{draft.sentAt ? ` ${date(draft.sentAt)}` : ''}.</div>}
-      {draft.status === 'built' && <div className="opt-muted">Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки.</div>}
-      {!ready && draft.items.length > 0 && <div className="opt-muted">Сборка документа включится, когда у каждой позиции будет цена.</div>}
-    </>
+    <div className="opt-actions">
+      <button type="button" className="opt-btn" disabled={busy} onClick={onDraft} title="Прочитать карточку заново; правки в позициях будут потеряны">
+        Собрать заново
+      </button>
+      <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={onSave}>
+        Сохранить правки
+      </button>
+      <button type="button" className="opt-btn opt-btn-green" disabled={busy || dirty || !ready} title={dirty ? 'Сначала сохраните правки' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
+        Собрать документ
+      </button>
+      <button type="button" className="opt-btn" disabled={busy || !canSend} title={canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
+        Отправить клиенту
+      </button>
+    </div>
   );
 }
 
-const th: CSSProperties = { textAlign: 'left', padding: '4px 4px', borderBottom: '1px solid #e6eaed', fontWeight: 600 };
-const td: CSSProperties = { padding: '4px 4px', borderBottom: '1px solid #f0f3f5', verticalAlign: 'top' };
-const input: CSSProperties = { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '2px 4px' };
+/** Примечание под действиями: что дальше по состоянию черновика. */
+function KpNote({ draft, ready }: { draft: KpDraftInfo; ready: boolean }) {
+  if (draft.status === 'sent') return <>Отправлено{draft.sentAt ? ` ${date(draft.sentAt)}` : ''}. Повторная отправка — через «Отправить клиенту» с подтверждением.</>;
+  if (draft.status === 'built') return <>Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки. Проверьте документ и отправьте клиенту.</>;
+  if (!ready && draft.items.length > 0) return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя. Сборка документа включится, когда у каждой позиции будет цена.</>;
+  return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.</>;
+}

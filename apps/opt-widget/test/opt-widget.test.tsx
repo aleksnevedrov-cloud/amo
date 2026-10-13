@@ -78,22 +78,35 @@ describe('виджет «Агент опт»: карточка сделки', ()
     stage = 'done';
     await act(async () => cbs.render!());
     await flush();
-    expect(document.body.textContent).toContain('Покупатель: ООО Ромашка · Иванов Иван · ivanov@romashka.ru');
+    // Карточка «Черновик КП» по макету: бейдж статуса, подпись про номер, покупатель меткой капсом (CSS), название, e-mail.
+    expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Черновик');
+    expect(document.body.textContent).toContain('Номер появится после сборки документа');
+    expect(document.querySelector('.opt-kp-buyer')?.textContent).toBe('ПокупательООО Ромашка · Иванов Иванivanov@romashka.ru');
     // Ящик не настроен: строка-статус по письму из карточки; ошибки файлов — только в раскрытии, в черновике красных строк нет.
-    expect(document.body.textContent).toContain('Письмо: 09.10.2026 (из карточки, ящик не настроен) ▸');
+    expect(document.body.textContent).toContain('Письмо: 09.10.2026 (из карточки, ящик не настроен) ›');
     expect(document.body.textContent).not.toContain('big.pdf');
     expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
-    await click('Письмо: 09.10.2026 (из карточки, ящик не настроен) ▸');
+    await click('Письмо: 09.10.2026 (из карточки, ящик не настроен) ›');
     expect(document.body.textContent).toContain('Разобрано файлов: 1 · писем в карточке: 1');
     expect(document.body.textContent).toContain('«big.pdf»: файл больше 20 МБ');
     expect(document.body.textContent).toContain('Дверь ДПС 01');
     expect(document.body.textContent).toContain('Сторона открывания?');
     expect(button('Собрать документ')?.disabled).toBe(true);
     expect(button('Отправить клиенту')?.disabled).toBe(true);
-    // Раскладка под колонку ~280 px: корень .opt-root, кнопки шагов в .opt-actions столбиком, таблица .opt-table.
-    expect(document.querySelectorAll('.opt-root')).toHaveLength(1);
+    // Макет Figma: 5 карточек (черновик, позиции, вопросы, действия, примечание), позиция — плитка с полями под названием, кнопки столбиком.
+    expect(document.querySelectorAll('.opt-root.opt-kp')).toHaveLength(1);
+    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Действия с КП']);
+    expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(5);
+    expect([...document.querySelectorAll('.opt-kp-badge')].map((b) => b.textContent)).toEqual(['Черновик', '1 позиция']);
+    const tile = document.querySelector('.opt-kp-tile')!;
+    expect(tile.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверь ДПС 01');
+    expect(tile.querySelector('.opt-kp-sub')?.textContent).toBe('2100 × 900 мм');
+    expect([...tile.querySelectorAll('.opt-kp-label')].map((l) => l.textContent)).toEqual(['Количество', 'Цена', 'Скидка']);
+    expect([...document.querySelectorAll('.opt-kp-questions li')].map((l) => l.textContent)).toEqual(['Сторона открывания?']);
     expect([...document.querySelectorAll('.opt-root .opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
-    expect(document.querySelector('.opt-root .opt-table')).not.toBeNull();
+    expect(button('Сохранить правки')?.disabled).toBe(true);
+    expect(document.body.textContent).toContain('Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.');
+    expect(document.querySelector('.opt-table')).toBeNull();
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
   });
 
@@ -121,15 +134,15 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await flush();
     const text = () => document.body.textContent ?? '';
     // Дубль e-mail убран: имя контакта в amo — тот же адрес.
-    expect(text()).toContain('Покупатель: StOptPostavka@yandex.ru');
+    expect(document.querySelector('.opt-kp-buyer')?.textContent).toBe('ПокупательStOptPostavka@yandex.ru');
     expect(text().match(/stoptpostavka@yandex\.ru/gi)).toHaveLength(1);
     // Свёрнуто: только строка-статус, 08:06 UTC = 11:06 МСК; служебных сведений и красных строк в черновике нет.
-    expect(text()).toContain('Письмо: 13.10.2026 11:06 · вложений 3 ▸');
+    expect(text()).toContain('Письмо: 13.10.2026 11:06 · 3 вложения ›');
     expect(text()).not.toContain('Отправитель');
     expect(text()).not.toContain('HTTP 405');
     expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
-    await click('Письмо: 13.10.2026 11:06 · вложений 3 ▸');
-    expect(text()).toContain('Письмо: 13.10.2026 11:06 · вложений 3 ▾');
+    await click('Письмо: 13.10.2026 11:06 · 3 вложения ›');
+    expect(text()).toContain('Письмо: 13.10.2026 11:06 · 3 вложения ⌄');
     expect(text()).toContain('Отправитель: Стройоптпоставка stoptpostavka@yandex.ru');
     expect(text()).toContain('Тема: Запрос ООО Стройоптпоставка');
     expect(text()).toContain('Папка: INBOX');
@@ -138,7 +151,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(text()).toContain('не разобрано: LibreOffice: .doc → .docx не удалось: пусто');
     expect(text()).toContain('logo.png (3 КБ) — пропущено: встроенная картинка меньше 20 КБ');
     expect(text()).toContain('Разобрано файлов: 1');
-    await click('Письмо: 13.10.2026 11:06 · вложений 3 ▾');
+    await click('Письмо: 13.10.2026 11:06 · 3 вложения ⌄');
     expect(text()).not.toContain('Папка: INBOX');
     // Новых запросов к почте виджет не делает — только черновик.
     expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual(['GET /widget/v1/kp/draft']);
@@ -159,9 +172,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    expect(document.body.textContent).toContain('Письмо: не найдено ▸');
+    expect(document.body.textContent).toContain('Письмо: не найдено ›');
     expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
-    await click('Письмо: не найдено ▸');
+    await click('Письмо: не найдено ›');
     expect(document.body.textContent).toContain('Искали от ivanov@romashka.ru (и весь домен @romashka.ru), даты 2026-10-07 – 2026-10-12, тема «Запрос КП». Черновик собран по карточке.');
     expect(document.body.textContent).toContain('Папки (2):INBOX: в окне дат 12, от отправителя 0Spam: в окне дат 1, от отправителя 0');
     expect(document.body.textContent).toContain('Не смотрели: Sent, Drafts');
@@ -204,11 +217,12 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(button('Собрать документ')?.disabled).toBe(true);
     await click('Сохранить правки');
     await flush();
-    expect(document.body.textContent?.replace(/\u00a0/g, ' ')).toContain('Итого: 163 900 ₽');
+    expect(document.querySelector('.opt-kp-total')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Итого163 900 ₽');
     await click('Собрать документ');
     await flush();
-    expect(document.body.textContent).toContain('КП-2026-1 · документ собран');
-    expect(document.body.textContent).toContain('Документ собран (DOCX и PDF)');
+    expect(document.querySelector('.opt-kp-sub')?.textContent).toBe('КП-2026-1');
+    expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Документ собран');
+    expect(document.body.textContent).toContain('Документ собран (DOCX и PDF) — файлы в карточке сделки');
     await click('Отправить клиенту');
     await flush();
     expect(document.body.textContent).toContain('Вложение: KP-КП-2026-1.pdf (117 КБ)');
@@ -222,7 +236,8 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await flush();
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0]!)).toMatchObject({ draftId: 7, to: 'buyer@romashka.ru', subject: 'Коммерческое предложение КП-2026-1', text: 'Здравствуйте!', resendConfirmed: false });
-    expect(document.body.textContent).toContain('отправлено');
+    expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Отправлено');
+    expect(document.body.textContent).toContain('Отправлено 12.10.2026.');
     expect(document.getElementById('ai-door-opt-styles')).toBeNull(); // в тестах define __STYLES__ нет — тег не вставляется
   });
 });
