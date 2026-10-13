@@ -32,9 +32,9 @@ RUN pnpm --filter @opt/api --filter @opt/worker run build \
 
 FROM node:22-alpine
 WORKDIR /app
-# LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП.
+# LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП, Writer и Calc — старые .doc/.rtf/.xls из писем → DOCX/XLSX.
 RUN apk add --no-cache libredwg || true
-RUN apk add --no-cache libreoffice-writer ttf-dejavu font-noto || true
+RUN apk add --no-cache libreoffice-writer libreoffice-calc ttf-dejavu font-noto || true
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data
 COPY --from=build /out/opt-api apps/opt-api
 COPY --from=build /out/opt-worker apps/opt-worker

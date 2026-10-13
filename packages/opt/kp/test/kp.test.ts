@@ -55,7 +55,7 @@ describe('черновик: разбор ответа модели и позиц
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
     const r = positionToRequest({ name: 'Дверь противопожарная', marking: 'ДПС 01 EI30', width_mm: 900, height_mm: 2100, qty: 3, unit: 'компл.', price_rub: 25_000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: null });
-    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 2100×900 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3 });
+    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3 });
     expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1 });
   });
 });
@@ -123,7 +123,7 @@ describe('черновик КП опта: источник — карточка 
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 89835, route, pricing: {} }, { amo, analyze });
     expect(amo.downloaded).toEqual(['Двери (3).docx', 'кривой.xlsx']);
     expect(r.payload.items).toEqual([
-      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '2100×900 мм', qty: 11, price: null, lead_time: '', discount: 0 },
+      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0 },
       { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0 },
     ]);
     expect(r.payload.needs_manager).toEqual([{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }]);
@@ -272,7 +272,7 @@ describe('черновик КП опта: источник — карточка 
   it('файлов нет — позиции из письма; разбор недоступен — файлы в skipped', async () => {
     const { gateway } = fakeGateway(modelAnswer);
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [letter], files: [file('u1', 'spec.docx')] }), analyze: null });
-    expect(r.payload.items.map((l) => [l.name, l.size, l.qty, l.price])).toEqual([['дверь', '2000×800 мм', 2, null]]);
+    expect(r.payload.items.map((l) => [l.name, l.size, l.qty, l.price])).toEqual([['дверь', '800×2000 мм', 2, null]]);
     expect(r.payload.source.skipped).toEqual([{ name: 'spec.docx', reason: 'разбор файлов недоступен' }]);
   });
 

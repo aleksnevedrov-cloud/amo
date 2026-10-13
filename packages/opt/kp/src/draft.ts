@@ -408,7 +408,7 @@ export function parseDraft(text: string): ParsedDraft {
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */
 export function positionToRequest(p: Position): KpRequestItem {
-  const size = p.width_mm && p.height_mm ? `${p.height_mm}×${p.width_mm}` : '';
+  const size = p.width_mm && p.height_mm ? `${p.width_mm}×${p.height_mm}` : '';
   const qty = p.qty && p.qty > 0 ? Math.round(p.qty) : 1;
   return {
     raw: [p.marking, p.name, size, `${qty} ${p.unit ?? 'шт'}`].filter(Boolean).join(' ').slice(0, 500),
@@ -423,9 +423,10 @@ function toLine(it: KpRequestItem, i: number): KpLine {
   return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0 };
 }
 
-function sizeText(it: KpRequestItem): string {
+/** Размер в строке позиции — ширина × высота (RFD-AI-AGENT-OPT-MAIL-READ-6, п. 3). */
+export function sizeText(it: Pick<KpRequestItem, 'width_mm' | 'height_mm'>): string {
   if (!it.width_mm && !it.height_mm) return '';
-  return `${it.height_mm ?? '—'}×${it.width_mm ?? '—'} мм`;
+  return `${it.width_mm ?? '—'}×${it.height_mm ?? '—'} мм`;
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');

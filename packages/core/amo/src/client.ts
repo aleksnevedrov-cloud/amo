@@ -347,27 +347,46 @@ export class AmoApiClient {
     return res?._embedded?.tasks ?? [];
   }
 
+  private driveUrl: string | null | undefined;
+
   /**
-   * Загрузка файла в карточку сделки через Files API amoCRM: сессия загрузки,
-   * заливка частями, привязка к сделке. Возвращает uuid файла или null,
-   * если amo не принял файл (вызывающий сам решает про запасной путь).
+   * Адрес файлового сервиса amo («Файлы» живут не на домене аккаунта, а на drive-url из
+   * GET /api/v4/account?with=drive_url, например https://drive-b.amocrm.ru). Кэшируется на клиент;
+   * нет в ответе — null, тогда сессия создаётся по старому пути на домене аккаунта.
+   */
+  async getDriveUrl(): Promise<string | null> {
+    if (this.driveUrl !== undefined) return this.driveUrl;
+    const acc = await this.request<{ drive_url?: string }>('GET', '/api/v4/account?with=drive_url').catch(() => null);
+    this.driveUrl = acc?.drive_url ? acc.drive_url.replace(/\/+$/, '') : null;
+    return this.driveUrl;
+  }
+
+  /**
+   * Загрузка файла в карточку сделки через Files API amoCRM: сессия загрузки на drive-url
+   * (RFD-AI-AGENT-OPT-MAIL-READ-6: POST /api/v4/files/sessions на домене аккаунта отвечал 404),
+   * заливка частями, привязка к сделке. Возвращает uuid файла или null, если amo не принял файл
+   * (вызывающий сам решает про запасной путь). Ошибки — с URL, кодом и телом ответа amo.
    */
   async uploadFileToLead(
     leadId: number,
     file: { filename: string; mime: string; bytes: Uint8Array },
   ): Promise<string | null> {
-    const session = await this.request<{ upload_url?: string; max_part_size?: number }>(
-      'POST',
-      '/api/v4/files/sessions',
-      {
+    const drive = await this.getDriveUrl();
+    const sessionPath = drive ? `${drive}/v1.0/sessions` : '/api/v4/files/sessions';
+    let session: { upload_url?: string; max_part_size?: number } | null;
+    try {
+      session = await this.request<{ upload_url?: string; max_part_size?: number }>('POST', sessionPath, {
         file_name: file.filename,
         file_size: file.bytes.byteLength,
         content_type: file.mime || 'application/octet-stream',
         with_preview: false,
-      },
-    );
+      });
+    } catch (err) {
+      if (err instanceof AmoError) throw new AmoError(`сессия загрузки файла в amo: POST ${drive ? sessionPath : `https://${this.accountDomain}${sessionPath}`} → HTTP ${err.status}: ${String(err.body ?? '').slice(0, 300) || 'без тела'}${drive ? '' : ' (drive_url в /api/v4/account не получен)'}`, err.status, err.body);
+      throw err;
+    }
     const first = session?.upload_url;
-    if (!first) return null;
+    if (!first) throw new AmoError(`сессия загрузки файла в amo: POST ${sessionPath} — в ответе нет upload_url: ${JSON.stringify(session).slice(0, 300)}`, 200, session);
 
     const partSize = Math.max(1, Number(session?.max_part_size ?? file.bytes.byteLength));
     let url = first;
@@ -381,7 +400,7 @@ export class AmoApiClient {
         body: chunk.slice().buffer as ArrayBuffer,
       });
       if (!res.ok) {
-        throw new Error(`amo upload ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        throw new AmoError(`загрузка части файла в amo: POST ${url} → HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300) || 'без тела'}`, res.status);
       }
       const body = (await res.json().catch(() => null)) as
         | { uuid?: string; next_url?: string }
@@ -429,6 +448,7 @@ export class AmoApiClient {
     return { bytes: new Uint8Array(await res.arrayBuffer()), mime: res.headers.get('content-type')?.split(';')[0]?.trim() || file.mime };
   }
 
+  /** path — путь на домене аккаунта или полный https-адрес (файловый сервис drive-url). */
   private async request<T>(
     method: string,
     path: string,
@@ -437,7 +457,7 @@ export class AmoApiClient {
   ): Promise<T | null> {
     for (let attempt = 0; ; attempt++) {
       const token = await this.getAccessToken();
-      const res = await this.fetchImpl(`https://${this.accountDomain}${path}`, {
+      const res = await this.fetchImpl(path.startsWith('https://') ? path : `https://${this.accountDomain}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${token}`,

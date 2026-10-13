@@ -9,7 +9,7 @@ function scripted(responses: { status: number; body?: unknown }[]) {
     calls.push({
       url: String(input),
       method: init?.method ?? 'GET',
-      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      body: init?.body ? (typeof init.body === 'string' ? JSON.parse(init.body) : 'bytes') : undefined,
       auth: new Headers(init?.headers).get('authorization'),
     });
     const r = responses.shift() ?? { status: 200, body: {} };
@@ -127,5 +127,48 @@ describe('AmoApiClient: файлы сделки (для «Агента опт»)
   it('204 на пустой список файлов → []', async () => {
     const s = scripted([{ status: 204 }]);
     expect(await client(s.fn).listLeadFiles(5)).toEqual([]);
+  });
+
+  it('загрузка файла: сессия на drive_url из /api/v4/account, части по upload_url, привязка к сделке; drive_url кэшируется', async () => {
+    const s = scripted([
+      { status: 200, body: { id: 1, drive_url: 'https://drive-b.amocrm.ru/' } },
+      { status: 200, body: { upload_url: 'https://drive-b.amocrm.ru/upload/1', max_part_size: 4 } },
+      { status: 200, body: { next_url: 'https://drive-b.amocrm.ru/upload/2' } },
+      { status: 200, body: { uuid: 'f-1' } },
+      { status: 200, body: {} },
+      // Второй файл: аккаунт не запрашивается заново.
+      { status: 200, body: { upload_url: 'https://drive-b.amocrm.ru/upload/9', max_part_size: 100 } },
+      { status: 200, body: { uuid: 'f-2' } },
+      { status: 200, body: {} },
+    ]);
+    const c = client(s.fn);
+    expect(await c.uploadFileToLead(7, { filename: 'Карточка.doc', mime: 'application/msword', bytes: new Uint8Array([1, 2, 3, 4, 5, 6]) })).toBe('f-1');
+    expect(s.calls.map((x) => [x.method, x.url])).toEqual([
+      ['GET', 'https://acc.amocrm.ru/api/v4/account?with=drive_url'],
+      ['POST', 'https://drive-b.amocrm.ru/v1.0/sessions'],
+      ['POST', 'https://drive-b.amocrm.ru/upload/1'],
+      ['POST', 'https://drive-b.amocrm.ru/upload/2'],
+      ['POST', 'https://acc.amocrm.ru/api/v4/leads/7/files'],
+    ]);
+    expect(s.calls[1]?.body).toEqual({ file_name: 'Карточка.doc', file_size: 6, content_type: 'application/msword', with_preview: false });
+    expect(s.calls[1]?.auth).toBe('Bearer TOKEN');
+    expect(s.calls[4]?.body).toEqual([{ file_uuid: 'f-1' }]);
+    expect(await c.uploadFileToLead(7, { filename: 'b.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) })).toBe('f-2');
+    expect(s.calls[5]?.url).toBe('https://drive-b.amocrm.ru/v1.0/sessions');
+  });
+
+  it('загрузка файла: ошибка amo — в тексте URL, код и тело ответа; без drive_url — старый путь на домене аккаунта с пометкой', async () => {
+    const s = scripted([
+      { status: 200, body: { id: 1, drive_url: 'https://drive-b.amocrm.ru' } },
+      { status: 403, body: { title: 'Forbidden', detail: 'Scope files is required' } },
+    ]);
+    await expect(client(s.fn).uploadFileToLead(7, { filename: 'a.doc', mime: '', bytes: new Uint8Array([1]) })).rejects.toThrow(
+      'сессия загрузки файла в amo: POST https://drive-b.amocrm.ru/v1.0/sessions → HTTP 403: {"title":"Forbidden","detail":"Scope files is required"}',
+    );
+    const old = scripted([{ status: 200, body: { id: 1 } }, { status: 404, body: {} }]);
+    await expect(client(old.fn).uploadFileToLead(7, { filename: 'a.doc', mime: '', bytes: new Uint8Array([1]) })).rejects.toThrow(
+      'сессия загрузки файла в amo: POST https://acc.amocrm.ru/api/v4/files/sessions → HTTP 404: {} (drive_url в /api/v4/account не получен)',
+    );
+    expect(old.calls[1]?.url).toBe('https://acc.amocrm.ru/api/v4/files/sessions');
   });
 });

@@ -1,3 +1,4 @@
+import { convertLegacyOffice } from './convert.ts';
 import type { OptCore } from './deps.ts';
 import { buildKpDraft, type KpDraftDeps } from './draft.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
@@ -37,9 +38,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const analyze: KpDraftDeps['analyze'] =
       settings.vision.provider === 'off'
         ? null
-        : async (file) => {
+        : async (orig) => {
+            // Старый Word/Excel (.doc, .xls, .rtf…) → DOCX/XLSX через LibreOffice, затем обычный разбор.
+            const file = await convertLegacyOffice(orig);
             const r = await core.docs.analyze({ accountId, leadId, source: 'widget', filename: file.filename, mime: file.mime, bytes: file.bytes, settings: widgetSettings, createdBy: job.userId, hint: 'request', route });
-            return { id: r.id, filename: file.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements };
+            return { id: r.id, filename: orig.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements };
           };
     // Ящик, подключённый к amoCRM, читается по IMAP только на чтение и только здесь — по кнопке (вариант А).
     const m = settings.mail;
