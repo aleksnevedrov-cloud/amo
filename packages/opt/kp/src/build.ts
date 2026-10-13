@@ -4,6 +4,7 @@ import { join, extname, basename } from 'node:path';
 import { promisify } from 'node:util';
 import Docxtemplater from 'docxtemplater';
 import PizZip from 'pizzip';
+import { formatKopecks, lineSumKopecks, splitVat, toRub } from './offer-price.ts';
 
 /**
  * Сборка КП по файлу-шаблону (тема RFD-AI-AGENT-KP, этап 4 ТЗ).
@@ -58,8 +59,8 @@ const run = promisify(execFile);
 
 const money = (v: number) => `${Math.round(v).toLocaleString('ru-RU')} ₽`;
 
-/** Цена строки с учётом скидки менеджера. */
-export const lineSum = (l: KpBuildLine) => (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100));
+/** Цена строки с учётом скидки менеджера, рубли; считается в целых копейках (offer-price.ts), округление один раз. */
+export const lineSum = (l: KpBuildLine) => toRub(lineSumKopecks(l));
 
 const ONES = ['', 'один', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять'];
 const ONES_F = ['', 'одна', 'две', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять'];
@@ -121,8 +122,10 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     price: l.price === null ? '—' : money(l.price),
     sum: money(lineSum(l)),
   }));
-  const total = input.lines.reduce((s, l) => s + lineSum(l), 0);
-  const vat = input.vatRate > 0 ? total - total / (1 + input.vatRate / 100) : 0;
+  // Итог и НДС — в целых копейках: цены в КП конечные, НДС выделяется из них (этап 4 ТЗ RFD-AI-AGENT-OPT-PRICE), а не начисляется сверху.
+  const totalKopecks = input.lines.reduce((s, l) => s + lineSumKopecks(l), 0);
+  const total = toRub(totalKopecks);
+  const vat = splitVat(totalKopecks, input.vatRate);
   const qty = input.lines.reduce((s, l) => s + l.qty, 0);
   return {
     kp_number: input.kpNo,
@@ -133,7 +136,7 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     items,
     total_in_words: rublesInWords(total),
     vat_phrase: input.vatRate > 0
-      ? `в том числе НДС ${input.vatRate}% — ${vat.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+      ? `в том числе НДС ${input.vatRate}% — ${formatKopecks(vat.vatKopecks)}`
       : 'НДС не облагается',
     grand_total: money(total),
     total_qty: `${qty} ${plural(qty, 'позиция', 'позиции', 'позиций')}`,
