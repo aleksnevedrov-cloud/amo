@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { AnthropicProvider } from '../src/anthropic.ts';
 import { chatWithFallback, gatewayFromResolver, LlmUnavailableError, singleProviderGateway } from '../src/fallback.ts';
-import { OpenAIProvider } from '../src/openai.ts';
+import { fromOpenAiResponse, OpenAIProvider, toOpenAiRequest, type OpenAIResponseT } from '../src/openai.ts';
+import { costOfUsage } from '../src/pricing.ts';
 import { createProvider, verifyKey } from '../src/providers/index.ts';
-import { LlmError, type ChatRequest, type LLMProvider } from '../src/types.ts';
+import { LlmError, WebSearchUnavailableError, type ChatRequest, type LLMProvider } from '../src/types.ts';
 
 type Handler = (url: string, init: RequestInit) => Promise<Response> | Response;
 
@@ -234,5 +235,102 @@ describe('провайдеры напрямую', () => {
     expect(await a.listModels()).toEqual([]);
     const o = new OpenAIProvider({ create: async () => openaiOk as never });
     expect((await o.chat(req)).text).toBe('Добрый день!');
+  });
+});
+
+describe('веб-поиск в слое модели (RFD-AI-AGENT-OPT-PRICE, этап 1)', () => {
+  const mk = (h: Handler) => createProvider('openai', 'sk-test', { fetch: fetchWith(h), maxRetries: 0, timeoutMs: 200 });
+  const webSearchCall = {
+    type: 'web_search_call',
+    id: 'ws_1',
+    status: 'completed',
+    action: { type: 'search', query: 'дверь Турин цена', sources: [{ type: 'url', url: 'https://shop.ru/turin' }, { type: 'url', url: 'https://fabrika.ru/turin' }] },
+  };
+  const citedMessage = {
+    type: 'message',
+    id: 'm1',
+    role: 'assistant',
+    status: 'completed',
+    content: [{ type: 'output_text', text: '{"offers":[]}', annotations: [{ type: 'url_citation', url: 'https://shop.ru/turin', title: 'Турин', start_index: 0, end_index: 1 }, { type: 'url_citation', url: 'https://market.ru/x', title: 'Маркет', start_index: 0, end_index: 1 }] }],
+  };
+  const withSearch = { ...openaiOk, output: [webSearchCall, citedMessage] } as unknown as OpenAIResponseT;
+
+  it('без webSearch тело запроса прежнее: тот же набор ключей, без tools, tool_choice и include', () => {
+    const body = toOpenAiRequest({ model: 'gpt-4.1', system: 'S', messages: [{ role: 'user', content: 'Привет' }], maxTokens: 100 });
+    expect(Object.keys(body).sort()).toEqual(['input', 'instructions', 'max_output_tokens', 'model', 'store']);
+    const reasoning = toOpenAiRequest({ model: 'gpt-5', system: 'S', messages: [{ role: 'user', content: 'Привет' }], maxTokens: 100 });
+    expect(Object.keys(reasoning).sort()).toEqual(['include', 'input', 'instructions', 'max_output_tokens', 'model', 'reasoning', 'store']);
+    expect(reasoning.include).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('с webSearch и toolChoice required: инструмент web_search с регионом, tool_choice, include с источниками и рассуждениями', () => {
+    const body = toOpenAiRequest({ model: 'gpt-5', system: 'S', messages: [{ role: 'user', content: 'Цены' }], maxTokens: 100, webSearch: {}, toolChoice: 'required' });
+    expect(body.tools).toEqual([{ type: 'web_search', user_location: { type: 'approximate', country: 'RU', city: 'Moscow', region: 'Moscow' } }]);
+    expect(body.tool_choice).toBe('required');
+    expect(body.include).toEqual(['reasoning.encrypted_content', 'web_search_call.action.sources']);
+    expect(body).not.toHaveProperty('parallel_tool_calls');
+    // Вместе с function-tools: веб-поиск первым, parallel_tool_calls как раньше; регион из запроса.
+    const both = toOpenAiRequest({ ...req, model: 'gpt-4.1', tools: [{ name: 'f', description: 'd', inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false } }], webSearch: { region: { country: 'RU', city: 'Saint Petersburg' } } });
+    expect(both.tools?.map((t) => t.type)).toEqual(['web_search', 'function']);
+    expect(both.parallel_tool_calls).toBe(true);
+    expect(both.include).toEqual(['web_search_call.action.sources']);
+    expect((both.tools?.[0] as { user_location: { city: string; region: string } }).user_location).toMatchObject({ city: 'Saint Petersburg', region: 'Moscow' });
+    expect(both).not.toHaveProperty('tool_choice');
+  });
+
+  it('ответ с web_search_call: источники из вызова поиска и url_citation без дублей, число вызовов в usage и в стоимости', () => {
+    const r = fromOpenAiResponse(withSearch);
+    expect(r.sources).toEqual([{ url: 'https://shop.ru/turin' }, { url: 'https://fabrika.ru/turin' }, { url: 'https://market.ru/x', title: 'Маркет' }]);
+    expect(r.usage.webSearchCalls).toBe(1);
+    expect(r.text).toBe('{"offers":[]}');
+    // Ответ без поиска — как раньше: ни sources, ни webSearchCalls.
+    const plain = fromOpenAiResponse(openaiOk as unknown as OpenAIResponseT);
+    expect(plain).not.toHaveProperty('sources');
+    expect(plain.usage).not.toHaveProperty('webSearchCalls');
+    // Тариф: вызов веб-поиска прибавляется к токенам ($0.01 по умолчанию, переопределяется в тарифе модели).
+    const base = costOfUsage({ provider: 'openai', model: 'gpt-5' }, { inputTokens: 1000, outputTokens: 0 }).usd;
+    expect(costOfUsage({ provider: 'openai', model: 'gpt-5' }, { inputTokens: 1000, outputTokens: 0, webSearchCalls: 2 }).usd).toBeCloseTo(base + 0.02, 6);
+    expect(costOfUsage({ provider: 'openai', model: 'gpt-5' }, { inputTokens: 0, outputTokens: 0, webSearchCalls: 1 }, { 'openai:gpt-5': { input: 1, output: 1, webSearchPerCall: 0.03 } }).usd).toBeCloseTo(0.03, 6);
+  });
+
+  it('модель не вызвала поиск ни разу или провайдер отверг web_search → WebSearchUnavailableError с текстом провайдера', async () => {
+    const silent = mk(() => json(200, openaiOk));
+    await expect(silent.chat({ ...req, model: 'gpt-5', webSearch: {}, toolChoice: 'required' })).rejects.toBeInstanceOf(WebSearchUnavailableError);
+    await expect(silent.chat({ ...req, model: 'gpt-5', webSearch: {}, toolChoice: 'required' })).rejects.toThrow(/ни разу не вызвала веб-поиск/);
+    const rejected = mk(() => json(400, { error: { message: 'Hosted tool web_search is not supported with this model', type: 'invalid_request_error', code: null } }));
+    await expect(rejected.chat({ ...req, model: 'gpt-5', webSearch: {} })).rejects.toThrow(/OpenAI отверг запрос с веб-поиском: .*web_search is not supported/);
+    // Успешный поиск проходит насквозь.
+    const ok = mk(() => json(200, withSearch));
+    const r = await ok.chat({ ...req, model: 'gpt-5', webSearch: {}, toolChoice: 'required' });
+    expect(r.sources?.length).toBe(3);
+    // Без webSearch тот же ответ без поиска — не ошибка.
+    await expect(silent.chat({ ...req, model: 'gpt-5' })).resolves.toMatchObject({ text: 'Добрый день!' });
+  });
+
+  it('Anthropic с webSearch → WebSearchUnavailableError без обращения к API', async () => {
+    let called = false;
+    const p = createProvider('anthropic', 'sk-ant', { fetch: fetchWith(() => ((called = true), json(200, anthropicOk))), maxRetries: 0 });
+    await expect(p.chat({ ...req, model: 'claude-opus-5', webSearch: {} })).rejects.toThrow(/только у OpenAI/);
+    expect(called).toBe(false);
+  });
+
+  it('резервная модель при WebSearchUnavailableError: только если она тоже OpenAI', async () => {
+    const calls: string[] = [];
+    const openai: LLMProvider = {
+      id: 'openai',
+      chat: async (r) => {
+        calls.push(r.model);
+        if (r.model === 'gpt-5.5') throw new WebSearchUnavailableError('openai', 'web_search недоступен для gpt-5.5');
+        return fromOpenAiResponse(withSearch);
+      },
+      listModels: async () => [],
+      validateKey: async () => ({ ok: true, models: [] }),
+    };
+    const anthropic: LLMProvider = { id: 'anthropic', chat: async () => { throw new Error('не должен вызываться'); }, listModels: async () => [], validateKey: async () => ({ ok: true, models: [] }) };
+    const resolve = (id: 'openai' | 'anthropic') => (id === 'openai' ? openai : anthropic);
+    const r = await chatWithFallback(resolve, { ...req, webSearch: {}, toolChoice: 'required' }, { primary: { provider: 'openai', model: 'gpt-5.5' }, fallback: { provider: 'openai', model: 'gpt-5.1' } });
+    expect(r.fallbackUsed).toBe(true);
+    expect(calls).toEqual(['gpt-5.5', 'gpt-5.1']);
+    await expect(chatWithFallback(resolve, { ...req, webSearch: {} }, { primary: { provider: 'openai', model: 'gpt-5.5' }, fallback: { provider: 'anthropic', model: 'claude-opus-5' } })).rejects.toBeInstanceOf(WebSearchUnavailableError);
   });
 });

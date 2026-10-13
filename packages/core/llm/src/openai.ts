@@ -16,6 +16,8 @@ import {
   type UnifiedImage,
   type UnifiedMessage,
   type UnifiedPart,
+  type WebSource,
+  WebSearchUnavailableError,
 } from './types.ts';
 
 export type OpenAIRequest = ResponseCreateParamsNonStreaming;
@@ -139,14 +141,21 @@ export function toOpenAiRequest(req: ChatRequest): OpenAIRequest {
   const tools: Tool[] | undefined = req.tools?.length
     ? req.tools.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.inputSchema, strict: strictCompatible(t.inputSchema) }))
     : undefined;
+  // Веб-поиск (RFD-AI-AGENT-OPT-PRICE): встроенный инструмент web_search с регионом; без req.webSearch тело прежнее.
+  const webTool: Tool[] = req.webSearch
+    ? [{ type: 'web_search', user_location: { type: 'approximate', country: req.webSearch.region?.country ?? 'RU', city: req.webSearch.region?.city ?? 'Moscow', region: req.webSearch.region?.region ?? 'Moscow' } }]
+    : [];
+  const include: OpenAIRequest['include'] = [...(traits.reasoning ? (['reasoning.encrypted_content'] as const) : []), ...(req.webSearch ? (['web_search_call.action.sources'] as const) : [])];
   return {
     model: req.model,
     instructions: systemText(req.system),
     input: toOpenAiInput(req.messages, req.images),
     max_output_tokens: req.maxTokens,
     store: false,
-    ...(tools ? { tools, parallel_tool_calls: true } : {}),
-    ...(traits.reasoning ? { reasoning: { effort: req.effort ?? 'low' }, include: ['reasoning.encrypted_content'] } : {}),
+    ...(tools ? { tools: [...webTool, ...tools], parallel_tool_calls: true } : webTool.length ? { tools: webTool } : {}),
+    ...(req.toolChoice === 'required' && (tools || webTool.length) ? { tool_choice: 'required' as const } : {}),
+    ...(traits.reasoning ? { reasoning: { effort: req.effort ?? 'low' } } : {}),
+    ...(include.length ? { include } : {}),
     ...(req.temperature !== null && req.temperature !== undefined && traits.temperature ? { temperature: Math.min(2, Math.max(0, req.temperature)) } : {}),
     ...(req.outputSchema ? { text: { format: { type: 'json_schema', name: req.outputSchema.name, schema: req.outputSchema.schema, strict: false } } } : {}),
     ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
@@ -170,11 +179,24 @@ export function fromOpenAiResponse(res: OpenAIResponseT, latencyMs = 0): ChatRes
   const parts: UnifiedPart[] = [];
   const toolCalls: ToolCall[] = [];
   let refusal = false;
+  // Ссылки веб-поиска: из источников вызова поиска и из аннотаций url_citation текста; дубли по url убираются.
+  const sources = new Map<string, WebSource>();
+  let webSearchCalls = 0;
   for (const item of res.output) {
     if (item.type === 'message') {
       for (const c of item.content) {
-        if (c.type === 'output_text') parts.push({ type: 'text', text: c.text });
-        else if (c.type === 'refusal') refusal = true;
+        if (c.type === 'output_text') {
+          parts.push({ type: 'text', text: c.text });
+          for (const a of c.annotations ?? []) {
+            if (a.type === 'url_citation' && a.url && !sources.has(a.url)) sources.set(a.url, { url: a.url, ...(a.title ? { title: a.title } : {}) });
+          }
+        } else if (c.type === 'refusal') refusal = true;
+      }
+    } else if (item.type === 'web_search_call') {
+      webSearchCalls += 1;
+      const action = item.action as { type?: string; sources?: { url?: string }[] } | undefined;
+      for (const s of action?.sources ?? []) {
+        if (s.url && !sources.has(s.url)) sources.set(s.url, { url: s.url });
       }
     } else if (item.type === 'function_call') {
       const args = parseArgs(item.arguments);
@@ -197,12 +219,13 @@ export function fromOpenAiResponse(res: OpenAIResponseT, latencyMs = 0): ChatRes
     text: text || null,
     toolCalls,
     stopReason,
-    usage: { inputTokens: Math.max(0, (u?.input_tokens ?? 0) - cached), outputTokens: u?.output_tokens ?? 0, cachedInputTokens: cached, cacheWriteTokens: 0 },
+    usage: { inputTokens: Math.max(0, (u?.input_tokens ?? 0) - cached), outputTokens: u?.output_tokens ?? 0, cachedInputTokens: cached, cacheWriteTokens: 0, ...(webSearchCalls ? { webSearchCalls } : {}) },
     provider: 'openai',
     model: res.model,
     // Items ответа (в т. ч. reasoning) уходят обратно как есть — так требует Responses API при store: false.
     assistantMessage: { role: 'assistant', content: parts, raw: { provider: 'openai', items: res.output.map(stripStatus) } },
     latencyMs,
+    ...(webSearchCalls ? { sources: [...sources.values()] } : {}),
   };
 }
 
@@ -229,12 +252,18 @@ export class OpenAIProvider implements LLMProvider {
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const started = Date.now();
+    let res: OpenAIResponseT;
     try {
-      const res = await this.client.create(toOpenAiRequest(req));
-      return fromOpenAiResponse(res, Date.now() - started);
+      res = await this.client.create(toOpenAiRequest(req));
     } catch (err) {
-      throw toOpenAiError(err);
+      const e = toOpenAiError(err);
+      // Провайдер отверг запрос с веб-поиском (инструмент недоступен модели или аккаунту) — текст провайдера наверх, без тихого продолжения.
+      if (req.webSearch && (e.code === 'bad_request' || e.code === 'not_found')) throw new WebSearchUnavailableError('openai', `OpenAI отверг запрос с веб-поиском: ${e.message}`, { status: e.status, cause: err });
+      throw e;
     }
+    const out = fromOpenAiResponse(res, Date.now() - started);
+    if (req.webSearch && !out.usage.webSearchCalls) throw new WebSearchUnavailableError('openai', `модель ${out.model} ни разу не вызвала веб-поиск — цены без ссылок не принимаются`);
+    return out;
   }
 
   /** Только чат-модели с инструментами: эмбеддинги, аудио, картинки, поиск — скрыты (раздел 4 ТЗ). */

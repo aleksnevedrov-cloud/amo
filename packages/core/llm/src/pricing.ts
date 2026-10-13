@@ -11,7 +11,12 @@ export interface ModelPrice {
   output: number;
   /** $ за 1M токенов, прочитанных из кэша; по умолчанию — 10 % от входа. */
   cachedInput?: number;
+  /** $ за один вызов веб-поиска (OpenAI тарифицирует отдельно от токенов); по умолчанию WEB_SEARCH_PER_CALL_USD. */
+  webSearchPerCall?: number;
 }
+
+/** Вызов инструмента web_search у OpenAI: $10 за 1000 вызовов (openai.com/api/pricing, сверять при смене прайса). */
+export const WEB_SEARCH_PER_CALL_USD = 0.01;
 
 export interface ModelTariff extends ModelPrice {
   name: string;
@@ -85,6 +90,7 @@ export interface UsageLike {
   outputTokens: number;
   cachedInputTokens?: number;
   cacheWriteTokens?: number;
+  webSearchCalls?: number;
 }
 
 export interface CostResult {
@@ -100,7 +106,8 @@ export function costOfUsage(ref: ModelRef, u: UsageLike, overrides: PricingOverr
   const write = u.cacheWriteTokens ?? 0;
   const cachedPrice = p.cachedInput ?? p.input * 0.1;
   const writePrice = ref.provider === 'anthropic' ? p.input * 1.25 : p.input;
-  const usd = (u.inputTokens * p.input + cached * cachedPrice + write * writePrice + u.outputTokens * p.output) / 1_000_000;
+  const webCalls = u.webSearchCalls ?? 0;
+  const usd = (u.inputTokens * p.input + cached * cachedPrice + write * writePrice + u.outputTokens * p.output) / 1_000_000 + webCalls * (p.webSearchPerCall ?? WEB_SEARCH_PER_CALL_USD);
   return { inputTokens: u.inputTokens + cached + write, outputTokens: u.outputTokens, usd };
 }
 

@@ -1,4 +1,4 @@
-import { LlmError, sameModel, type ChatRequest, type ChatResponse, type ChatRoute, type LLMProvider, type ModelRef, type ProviderId } from './types.ts';
+import { LlmError, sameModel, WebSearchUnavailableError, type ChatRequest, type ChatResponse, type ChatRoute, type LLMProvider, type ModelRef, type ProviderId } from './types.ts';
 
 /** Провайдер по идентификатору для конкретного аккаунта; null — ключа нет. */
 export type ProviderResolver = (id: ProviderId) => LLMProvider | null | Promise<LLMProvider | null>;
@@ -56,6 +56,11 @@ export async function chatWithFallback(resolve: ProviderResolver, req: RoutedReq
     } catch (err) {
       const e = err instanceof LlmError ? err : new LlmError('unknown', ref.provider, (err as Error).message, { cause: err });
       attempts.push({ ref, error: e.message, code: e.code });
+      // Веб-поиск недоступен у основной модели: резервная берётся только если она тоже OpenAI — иначе ошибка наверх.
+      if (e instanceof WebSearchUnavailableError) {
+        if (ref === route.primary && fallback?.provider === 'openai') return null;
+        throw e;
+      }
       if (!e.retryable) throw e;
       return null;
     }

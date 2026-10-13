@@ -69,6 +69,29 @@ export interface SystemBlock {
 
 export type Effort = 'low' | 'medium' | 'high';
 
+/**
+ * Веб-поиск провайдера (OpenAI Responses, инструмент `web_search`) — только для поиска рыночных цен
+ * в КП «Агента опт» (RFD-AI-AGENT-OPT-PRICE). Агент розницы это поле не передаёт и поиск не делает.
+ */
+export interface WebSearchOptions {
+  /** Регион поиска; по умолчанию Россия, Москва. */
+  region?: { country: 'RU'; city?: string; region?: string };
+}
+
+/** Ссылка, подтверждённая веб-поиском провайдера. */
+export interface WebSource {
+  url: string;
+  title?: string;
+}
+
+/** Веб-поиск недоступен: провайдер его не поддерживает, отверг запрос или модель ни разу не вызвала поиск. Молча продолжать нельзя. */
+export class WebSearchUnavailableError extends LlmError {
+  override name = 'WebSearchUnavailableError';
+  constructor(provider: ProviderId, message: string, opts: { status?: number; cause?: unknown } = {}) {
+    super('bad_request', provider, message, opts);
+  }
+}
+
 export interface ChatRequest {
   model: string;
   system: string | SystemBlock[];
@@ -85,6 +108,10 @@ export interface ChatRequest {
   outputSchema?: { name: string; schema: Record<string, unknown> };
   /** Стабильный ключ для кэша промпта (OpenAI prompt_cache_key). */
   cacheKey?: string;
+  /** Веб-поиск провайдера; не передан — запрос уходит байт в байт как раньше. */
+  webSearch?: WebSearchOptions;
+  /** 'required' — модель обязана вызвать инструмент (веб-поиск); не передан — поведение провайдера по умолчанию. */
+  toolChoice?: 'auto' | 'required';
 }
 
 export type StopReason = 'end' | 'tool_call' | 'max_tokens' | 'refusal' | 'error' | 'pause';
@@ -97,6 +124,8 @@ export interface ChatUsage {
   cachedInputTokens: number;
   /** Записано в кэш (Anthropic). */
   cacheWriteTokens: number;
+  /** Вызовов веб-поиска в ответе (OpenAI тарифицирует их отдельно от токенов); есть только при веб-поиске. */
+  webSearchCalls?: number;
 }
 
 export interface ToolCall {
@@ -116,6 +145,8 @@ export interface ChatResponse {
   /** Ход ассистента для добавления в историю (с `raw` для точного повтора). */
   assistantMessage: UnifiedMessage;
   latencyMs: number;
+  /** Ссылки из веб-поиска (web_search_call.action.sources и url_citation), без дублей; есть только при веб-поиске. */
+  sources?: WebSource[];
 }
 
 export interface ModelInfo {

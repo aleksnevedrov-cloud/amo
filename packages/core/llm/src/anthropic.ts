@@ -14,6 +14,7 @@ import {
   type UnifiedImage,
   type UnifiedMessage,
   type UnifiedPart,
+  WebSearchUnavailableError,
 } from './types.ts';
 
 export type AnthropicRequest = Anthropic.Beta.MessageCreateParamsNonStreaming;
@@ -195,6 +196,8 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
+    // Веб-поиск для КП подключён только у OpenAI (RFD-AI-AGENT-OPT-PRICE): без тихого ответа «по памяти модели».
+    if (req.webSearch) throw new WebSearchUnavailableError('anthropic', 'веб-поиск для КП подключён только у OpenAI');
     const started = Date.now();
     try {
       const res = await this.client.create(toAnthropicRequest(req));
