@@ -81,25 +81,25 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect(r.json()).toEqual({ queued: [0, 1] });
     expect(g.searches()).toBe(2);
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
-    // Медиана 86 000 (80 000 без НДС в медиану не вошла) × коэффициент производителя 0,9 = 77 400,00.
-    expect(d.items[0]).toMatchObject({ price: 77_400, priceSource: 'research', coefficient: 0.9, market: { median: 86_000, min: 84_000, max: 90_000, count: 3, unit: 'piece' } });
+    // Медиана четырёх (80 000 без указания НДС принято как конечная цена, 5.1) = 85 000 × коэффициент производителя 0,9 = 76 500,00.
+    expect(d.items[0]).toMatchObject({ price: 76_500, priceSource: 'research', coefficient: 0.9, market: { median: 85_000, min: 80_000, max: 90_000, count: 4, unit: 'piece' } });
     expect(d.items[0].market.researchId).toBeGreaterThan(0);
-    expect(d.needsManager.filter((n: { request_index: number }) => n.request_index === 0)).toEqual([]);
     // Вторая позиция («добор») получила те же предложения, но карточка позиции другая — для теста важно, что цена поставлена и пометок о «цена не задана» нет.
     expect(d.items[1].price).not.toBeNull();
     const st = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/research?draftId=${draftId}`, headers })).json();
     expect(st.pending).toBe(false);
-    expect(st.positions[0].research).toMatchObject({ status: 'ok', stats: { median: 86_000, count: 3 }, webSearchCalls: 2 });
-    expect(st.positions[0].research.offers.map((o: { url: string; accepted: boolean; reason: string | null }) => [o.url, o.accepted, o.reason])).toEqual([
-      ['https://fabrika-l.ru/p3', true, null],
-      ['https://dveri-a.ru/p1', true, null],
-      ['https://dveri-b.ru/p2', true, null],
-      ['https://dveri-c.ru/p4', false, 'НДС не определён'],
+    expect(st.positions[0].research).toMatchObject({ status: 'ok', stats: { median: 85_000, count: 4 }, webSearchCalls: 2 });
+    expect(st.positions[0].research.offers.map((o: { url: string; accepted: boolean; reason: string | null; vatAssumed: boolean }) => [o.url, o.accepted, o.reason, o.vatAssumed])).toEqual([
+      ['https://fabrika-l.ru/p3', true, null, false],
+      ['https://dveri-c.ru/p4', true, null, true],
+      ['https://dveri-a.ru/p1', true, null, false],
+      ['https://dveri-b.ru/p2', true, null, false],
     ]);
+    expect(d.needsManager.filter((n: { request_index: number }) => n.request_index === 0).map((n: { reason: string }) => n.reason)).toEqual(['НДС по умолчанию (не указан на сайте)']);
     const journal = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items;
     expect(journal).toHaveLength(2);
-    expect(journal.map((j: { summary: string }) => j.summary.replace(/\u00a0/g, ' '))).toContainEqual(expect.stringContaining('77 400 ₽, источников 3, медиана 86 000 ₽'));
-    expect(journal[0]).toMatchObject({ details: { sources: 3, webSearchCalls: 2 }, costUsd: expect.any(Number) });
+    expect(journal.map((j: { summary: string }) => j.summary.replace(/\u00a0/g, ' '))).toContainEqual(expect.stringContaining('76 500 ₽, источников 4, медиана 85 000 ₽'));
+    expect(journal[0]).toMatchObject({ details: { sources: 4, webSearchCalls: 2 }, costUsd: expect.any(Number) });
     expect(Number(journal[0].costUsd)).toBeGreaterThan(0.02);
   });
 
@@ -117,14 +117,14 @@ describe('поиск цен из черновика: кнопка «Найти �
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     const items = d.items.map((l: KpPayload['items'][number], i: number) => (i === 0 ? { ...l, price: 70_000 } : l));
     const saved = (await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${draftId}`, headers, payload: { items } })).json().draft;
-    expect(saved.items[0]).toMatchObject({ price: 70_000, priceSource: 'manager', market: { median: 86_000 } });
+    expect(saved.items[0]).toMatchObject({ price: 70_000, priceSource: 'manager', market: { median: 85_000 } });
     expect(saved.items[1].priceSource).toBe('research');
     // «По всем» — позицию с ценой не трогает вовсе.
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toEqual({ queued: [], reason: 'у всех позиций уже есть цена' });
     // Явный список — это «Заменить»: цена поиска возвращается.
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } });
     const after = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
-    expect(after.items[0]).toMatchObject({ price: 77_400, priceSource: 'research' });
+    expect(after.items[0]).toMatchObject({ price: 76_500, priceSource: 'research' });
   });
 
   it('собранное КП: 409 «КП уже собрано»; чужой черновик — 404', async () => {

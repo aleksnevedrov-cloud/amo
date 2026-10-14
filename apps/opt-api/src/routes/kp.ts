@@ -231,7 +231,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
               webSearchCalls: r.webSearchCalls,
               costUsd: r.costUsd,
               analog: r.analog ? { url: r.analog.url, unitPrice: r.analog.unitPrice, reason: r.analog.suggestion.reason } : null,
-              offers: r.offers.map((o) => ({ url: o.offer.url, seller: o.offer.seller, title: o.offer.title, price: o.offer.price, currency: o.offer.currency, unit: o.offer.unit, vatStated: o.offer.vatStated, unitPrice: o.unitPrice, accepted: o.accepted, reason: o.reason, manufacturer: o.manufacturer, formula: o.formula, notes: o.notes, foundAt: o.offer.foundAt })),
+              offers: r.offers.map((o) => ({ url: o.offer.url, seller: o.offer.seller, title: o.offer.title, price: o.offer.price, currency: o.offer.currency, unit: o.offer.unit, vatStated: o.offer.vatStated, unitPrice: o.unitPrice, accepted: o.accepted, reason: o.reason, manufacturer: o.manufacturer, formula: o.formula, notes: o.notes, vatAssumed: o.vatAssumed ?? false, areaScaled: o.areaScaled ?? false, sourceSize: o.sourceSize ?? null, foundAt: o.offer.foundAt })),
             }
           : null,
       };

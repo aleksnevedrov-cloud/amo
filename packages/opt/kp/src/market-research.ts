@@ -10,7 +10,9 @@ import type { KpLine, KpRequestItem } from './draft.ts';
  * (веб-поиск OpenAI, toolChoice 'required', регион Москва и МО, строгая схема). Дальше — код:
  * ссылка должна быть подтверждена поиском, предложение проходит фильтр соответствия, цена
  * приводится к единице позиции с формулой строкой, считается статистика, при отсутствии точной
- * модели — аналоги через analog.ts. Цен «по памяти модели» нет: предложение без подтверждённой
+ * модели — аналоги через analog.ts. Правки 5.1 (решение заказчика, вариант В): НДС не указан —
+ * цена считается конечной с НДС (vatAssumed), а при нестандартном размере без точных совпадений
+ * берутся до трёх ближайших по площади предложений того же типа с пересчётом цены по площади. Цен «по памяти модели» нет: предложение без подтверждённой
  * ссылки отбрасывается, а если поиск не вызывался — WebSearchUnavailableError из слоя модели.
  * Запрещено брать цену из документа клиента и из каталога розницы (ТЗ, раздел 11).
  */
@@ -92,6 +94,11 @@ export interface OfferJudgement {
   manufacturer: boolean;
   /** Пометки без отказа: совместимый, но другой тип (дверь ↔ полотно ↔ блок) и т. п. */
   notes: string[];
+  /** НДС на сайте не указан — цена принята как конечная с НДС (5.1). */
+  vatAssumed?: boolean;
+  /** Цена пересчитана по площади с другого размера (5.1); sourceSize — размер источника «Ш×В». */
+  areaScaled?: boolean;
+  sourceSize?: string | null;
 }
 
 export interface ResearchStats {
@@ -126,6 +133,8 @@ export interface MarketResearchResult {
   webSearchCalls: number;
   cost: CostResult;
   sources: WebSource[];
+  /** Статистика посчитана по пересчёту по площади с других размеров (аналог по площади, 5.1). */
+  areaScaled?: boolean;
 }
 
 export interface MarketResearchInput {
@@ -488,30 +497,75 @@ export function judgeOffer(offer: MarketOffer, card: ItemCard, sources: WebSourc
     price = price * area;
     steps.push(`${fmt(offer.price)}/м² × (${card.widthMm} × ${card.heightMm} мм = ${area.toFixed(3)} м²) = ${fmt(price)}`);
   }
-  // Размер — только если известен и у позиции, и у предложения; у предложения тоже меньшее — ширина.
-  const tol = opts.sizeToleranceMm ?? 0;
-  const os = orientSize(offer.widthMm, offer.heightMm);
-  const sizeKnown = (card.heightMm !== null && os.heightMm !== null) || (card.widthMm !== null && os.widthMm !== null);
-  if (sizeKnown && offer.unit !== 'm2') {
-    const dh = card.heightMm !== null && os.heightMm !== null ? Math.abs(card.heightMm - os.heightMm) : 0;
-    const dw = card.widthMm !== null && os.widthMm !== null ? Math.abs(card.widthMm - os.widthMm) : 0;
-    if (dh > tol || dw > tol) return reject('другой размер', price, steps.join('; ') || null);
-  }
   // Модель: фабрика или модель позиции заданы и у предложения заданы, но не совпали — кандидат в аналоги.
   if (!card.lowConfidence) {
     const factoryMismatch = offer.factory && norm(offer.factory) !== norm(card.factory) && !norm(offer.factory).includes(norm(card.factory)) && !norm(card.factory).includes(norm(offer.factory));
     const modelMismatch = offer.model && norm(offer.model) !== norm(card.model) && !norm(offer.model).includes(norm(card.model)) && !norm(card.model).includes(norm(offer.model));
     if (factoryMismatch || modelMismatch) return reject('другая модель', price, steps.join('; ') || null);
   }
-  // НДС источника: pre_net со ставкой — доначисляем; pre_net без ставки или unknown — отдельно, не в медиану.
+  // НДС источника: pre_net со ставкой — доначисляем; pre_net без ставки — не определён; не указан — конечная цена с НДС
+  // (розница РФ показывает конечные цены; решение заказчика 5.1), с пометкой.
+  let vatAssumed = false;
   if (offer.vatStated === 'pre_net') {
     if (!offer.vatRateStated || offer.vatRateStated <= 0) return reject('НДС не определён', price, steps.join('; ') || null);
     price = price * (1 + offer.vatRateStated / 100);
     steps.push(`+ НДС ${offer.vatRateStated} % = ${fmt(price)}`);
   } else if (offer.vatStated === 'unknown') {
-    return reject('НДС не определён', price, steps.join('; ') || null);
+    vatAssumed = true;
+    notes.push(VAT_ASSUMED_NOTE);
   }
-  return { offer, accepted: true, reason: null, unitPrice: round2(price), formula: steps.join('; ') || null, manufacturer, notes };
+  // Размер — только если известен и у позиции, и у предложения; у предложения тоже меньшее — ширина.
+  // Отказ «другой размер» идёт последним: такие предложения — кандидаты в пересчёт по площади (5.1).
+  const tol = opts.sizeToleranceMm ?? 0;
+  const os = orientSize(offer.widthMm, offer.heightMm);
+  const sizeKnown = (card.heightMm !== null && os.heightMm !== null) || (card.widthMm !== null && os.widthMm !== null);
+  if (sizeKnown && offer.unit !== 'm2') {
+    const dh = card.heightMm !== null && os.heightMm !== null ? Math.abs(card.heightMm - os.heightMm) : 0;
+    const dw = card.widthMm !== null && os.widthMm !== null ? Math.abs(card.widthMm - os.widthMm) : 0;
+    if (dh > tol || dw > tol) return { ...reject('другой размер', round2(price), steps.join('; ') || null), vatAssumed };
+  }
+  return { offer, accepted: true, reason: null, unitPrice: round2(price), formula: steps.join('; ') || null, manufacturer, notes, vatAssumed };
+}
+
+export const VAT_ASSUMED_NOTE = 'НДС по умолчанию (не указан на сайте)';
+export const AREA_ANALOG_MAX = 3;
+
+/**
+ * Аналог по площади (5.1): точных совпадений по размеру нет, но есть предложения того же типа (тип, число створок
+ * и модель уже проверены) с известным размером — до трёх ближайших по площади, цена × (S позиции / S предложения).
+ * Без размера у позиции или у предложения — не берутся.
+ */
+export function scaleByArea(judged: OfferJudgement[], card: ItemCard, max = AREA_ANALOG_MAX): { judged: OfferJudgement[]; scaled: boolean } {
+  if (judged.some((j) => j.accepted)) return { judged, scaled: false };
+  const area = areaM2(card);
+  if (!area) return { judged, scaled: false };
+  const candidates = judged
+    .filter((j) => j.reason === 'другой размер' && j.unitPrice !== null)
+    .map((j) => {
+      const os = orientSize(j.offer.widthMm, j.offer.heightMm);
+      const s = os.widthMm && os.heightMm ? (os.widthMm * os.heightMm) / 1_000_000 : null;
+      return { j, s, os };
+    })
+    .filter((x): x is { j: OfferJudgement; s: number; os: { widthMm: number; heightMm: number } } => x.s !== null && x.s > 0)
+    .sort((a, b) => Math.abs(a.s - area) - Math.abs(b.s - area))
+    .slice(0, max);
+  if (!candidates.length) return { judged, scaled: false };
+  const chosen = new Map<OfferJudgement, OfferJudgement>();
+  for (const { j, s, os } of candidates) {
+    const unitPrice = round2((j.unitPrice as number) * (area / s));
+    const sourceSize = `${os.widthMm}×${os.heightMm}`;
+    chosen.set(j, {
+      ...j,
+      accepted: true,
+      reason: null,
+      unitPrice,
+      formula: `${j.formula ? `${j.formula}; ` : ''}пересчёт по площади: ${fmt(j.unitPrice as number)} × (${area.toFixed(3)} / ${s.toFixed(3)} м²) = ${fmt(unitPrice)}`,
+      notes: [...j.notes, `аналог, пересчёт по площади с ${sourceSize}`],
+      areaScaled: true,
+      sourceSize,
+    });
+  }
+  return { judged: judged.map((j) => chosen.get(j) ?? j), scaled: true };
 }
 
 /** Медиана: на чётном числе — среднее двух средних. */
@@ -586,7 +640,9 @@ export async function researchMarketPrice(llm: LlmGateway, route: ChatRoute, inp
     cost = addCost(cost, costOfUsage({ provider: found.res.provider, model: found.res.model }, found.res.usage, opts.pricing));
     provider = found.res.provider;
     model = found.res.model;
-    const judged = dropOutliers(found.offers.map((o) => judgeOffer(o, card as ItemCard, found.sources, opts)));
+    const exact = found.offers.map((o) => judgeOffer(o, card as ItemCard, found.sources, opts));
+    const area = scaleByArea(exact, card as ItemCard);
+    const judged = dropOutliers(area.judged);
     const stats = statsOf(judged);
     const analog = stats ? null : pickAnalog(judged, input, stats, opts);
     return {
@@ -602,6 +658,7 @@ export async function researchMarketPrice(llm: LlmGateway, route: ChatRoute, inp
       webSearchCalls: found.res.usage.webSearchCalls ?? 0,
       cost,
       sources: found.sources,
+      areaScaled: area.scaled && stats !== null,
     };
   } catch (err) {
     if (err instanceof WebSearchUnavailableError || err instanceof LlmError) {

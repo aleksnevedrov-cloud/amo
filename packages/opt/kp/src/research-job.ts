@@ -1,7 +1,7 @@
 import type { JournalKind } from '@core/db';
 import type { OptCore } from './deps.ts';
 import { NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
-import type { MarketResearchInput } from './market-research.ts';
+import { VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { manufacturerCoefficient, offerPrice, type OfferPrice } from './offer-price.ts';
 import { DEFAULT_CACHE_DAYS, researchWithCache, type CachedResearch } from './research-repo.ts';
 import { resolveOptRoute } from './settings.ts';
@@ -139,7 +139,8 @@ export async function applyResearchToDraft(core: OptCore, accountId: number, dra
     }
     items[i] = next;
     const notes = price.notes;
-    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && (n.reason === NO_PRICE || n.reason.startsWith('ограничение расчёта') || n.reason.startsWith('предварительно, по аналогу') || n.reason === 'цены не найдены' || n.reason.startsWith('поиск цены:'))));
+    const ours = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:');
+    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ours(n.reason)));
     // Без цены пометка «цена не задана» остаётся: менеджеру всё равно её вводить.
     if (next.price === null) needs.push({ request_index: requestIndex, reason: NO_PRICE });
     for (const n of notes) needs.push({ request_index: requestIndex, reason: price.status === 'failed' ? `поиск цены: ${n}` : n });

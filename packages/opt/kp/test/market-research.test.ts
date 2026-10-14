@@ -1,6 +1,6 @@
 import { LlmError, WebSearchUnavailableError, type ChatRoute, type LlmGateway, type RoutedRequest, type RoutedResponse, type WebSource } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { buildQuery, cleanName, describeItem, dropOutliers, judgeOffer, leavesOf, median, notRfShop, orientSize, parseSizeMm, researchMarketPrice, statsOf, urlConfirmed, type ItemCard, type MarketOffer, type MarketResearchInput } from '../src/market-research.ts';
+import { buildQuery, cleanName, describeItem, dropOutliers, judgeOffer, leavesOf, median, notRfShop, orientSize, parseSizeMm, researchMarketPrice, scaleByArea, statsOf, urlConfirmed, type ItemCard, type MarketOffer, type MarketResearchInput } from '../src/market-research.ts';
 
 const route: ChatRoute = { primary: { provider: 'openai', model: 'gpt-5' }, fallback: null };
 
@@ -184,8 +184,9 @@ describe('фильтр предложений', () => {
     expect(j.formula?.replace(/\u00a0/g, ' ')).toBe('11 500 ₽ − доставка 1 500 ₽ = 10 000 ₽');
   });
 
-  it('НДС источника: unknown и pre_net без ставки — отдельно, не в медиане; pre_net со ставкой доначисляется; no_vat — конечная цена', () => {
-    expect(judgeOffer(offer({ vatStated: 'unknown' }), card, SRC)).toMatchObject({ accepted: false, reason: 'НДС не определён', unitPrice: 10_000 });
+  it('НДС источника: не указан — конечная цена с НДС и пометка (5.1); pre_net без ставки — не определён; pre_net со ставкой доначисляется; no_vat — конечная цена', () => {
+    expect(judgeOffer(offer({ vatStated: 'unknown' }), card, SRC)).toMatchObject({ accepted: true, unitPrice: 10_000, vatAssumed: true, notes: ['НДС по умолчанию (не указан на сайте)'] });
+    expect(judgeOffer(offer({ vatStated: 'included' }), card, SRC).vatAssumed).toBe(false);
     expect(judgeOffer(offer({ vatStated: 'pre_net', vatRateStated: null }), card, SRC)).toMatchObject({ accepted: false, reason: 'НДС не определён' });
     const j = judgeOffer(offer({ vatStated: 'pre_net', vatRateStated: 22 }), card, SRC);
     expect(j).toMatchObject({ accepted: true, unitPrice: 12_200 });
@@ -201,6 +202,59 @@ describe('фильтр предложений', () => {
     expect(judgeOffer(offer({}), card, SRC).manufacturer).toBe(false);
     expect(judgeOffer(offer({}), card, SRC, { manufacturerDomains: ['dveri-shop.ru'] }).manufacturer).toBe(true);
     expect(judgeOffer(offer({ sourceKind: 'manufacturer' }), card, SRC).manufacturer).toBe(true);
+  });
+});
+
+describe('аналог по площади (5.1)', () => {
+  // Пример заказчика: сделка 30013995, позиция 1400×2700, пять предложений — все отброшены до 5.1.
+  const door: ItemCard = { kind: 'door', factory: null, model: null, collection: null, finish: 'окраска', color: 'L429 Indigo', glazing: null, heightMm: 2700, widthMm: 1400, leaves: 2, equipment: null, fireRating: null, standards: [], lowConfidence: true };
+  const src = [{ url: 'https://woodwindows.ru/1' }, { url: 'https://woodwindows.ru/2' }, { url: 'https://woodwindows.ru/3' }, { url: 'https://dverka.moscow/4' }, { url: 'https://otis-group.ru/5' }];
+  const wood = (url: string, price: number, widthMm: number | null, heightMm: number | null, leaves: number | null = 2) => offer({ url, seller: 'Альянс', title: 'Дверь двупольная из лиственницы', price, vatStated: 'unknown', factory: null, model: null, widthMm, heightMm, kind: 'door', leaves });
+
+  it('три предложения Альянса пересчитываются по площади (1000×2700 и 2000×2700 → 1400×2700), НДС по умолчанию; другое число створок и без размера — не берутся', () => {
+    const judged = [
+      wood('https://woodwindows.ru/1', 77_000, 1000, 2700),
+      wood('https://woodwindows.ru/2', 148_000, 2000, 2700),
+      wood('https://woodwindows.ru/3', 162_000, 2000, 2700),
+      wood('https://dverka.moscow/4', 30_045, null, null, 1),
+      wood('https://otis-group.ru/5', 12_441, 550, 1900, 1),
+    ].map((o) => judgeOffer(o, door, src));
+    expect(judged.map((j) => j.reason)).toEqual(['другой размер', 'другой размер', 'другой размер', 'другое число створок', 'другое число створок']);
+    const { judged: scaled, scaled: flag } = scaleByArea(judged, door);
+    expect(flag).toBe(true);
+    // 77 000 × (3,78 / 2,70) = 107 800; 148 000 × (3,78 / 5,40) = 103 600; 162 000 × 0,7 = 113 400.
+    expect(scaled.filter((j) => j.accepted).map((j) => [j.sourceSize, j.unitPrice, j.vatAssumed])).toEqual([['1000×2700', 107_800, true], ['2000×2700', 103_600, true], ['2000×2700', 113_400, true]]);
+    expect(scaled[0]?.notes).toEqual(['НДС по умолчанию (не указан на сайте)', 'аналог, пересчёт по площади с 1000×2700']);
+    expect(scaled[0]?.formula?.replace(/\u00a0/g, ' ')).toBe('пересчёт по площади: 77 000 ₽ × (3.780 / 2.700 м²) = 107 800 ₽');
+    expect(scaled.filter((j) => !j.accepted).map((j) => j.reason)).toEqual(['другое число створок', 'другое число створок']);
+    expect(statsOf(dropOutliers(scaled))).toEqual({ min: 103_600, max: 113_400, median: 107_800, count: 3, unit: 'piece' });
+  });
+
+  it('ближайшие по площади — не больше трёх; точное совпадение есть — пересчёта нет; без размера позиции — нет', () => {
+    // Ширины 1100…1600 без точного 1400: ближайшие по площади — 1300 и 1500 (по 100 мм), затем 1200.
+    const widths = [1100, 1200, 1300, 1500, 1600];
+    const manySrc = widths.map((w) => ({ url: `https://woodwindows.ru/w${w}` }));
+    const many = widths.map((w) => judgeOffer(wood(`https://woodwindows.ru/w${w}`, 100_000, w, 2700), door, manySrc));
+    const r = scaleByArea(many, door);
+    // Выбраны три ближайших (1300 и 1500 по 100 мм, затем 1200); порядок в списке — исходный.
+    expect(r.judged.filter((j) => j.accepted).map((j) => j.sourceSize)).toEqual(['1200×2700', '1300×2700', '1500×2700']);
+    const exact = [judgeOffer(wood('https://woodwindows.ru/1', 90_000, 1400, 2700), door, src), judgeOffer(wood('https://woodwindows.ru/2', 148_000, 2000, 2700), door, src)];
+    expect(scaleByArea(exact, door)).toMatchObject({ scaled: false });
+    expect(scaleByArea(exact, door).judged[1]?.accepted).toBe(false);
+    expect(scaleByArea(judged1(), { ...door, heightMm: null, widthMm: null }).scaled).toBe(false);
+    function judged1() {
+      return [judgeOffer(wood('https://woodwindows.ru/1', 77_000, 1000, 2700), door, src)];
+    }
+  });
+
+  it('полный прогон по примеру: status ok, медиана 107 800 по трём пересчитанным, areaScaled', async () => {
+    const llm = fakeLlm({ ...CARD, kind: 'door', factory: null, model: null, leaves: 2, heightMm: 2700, widthMm: 1400 }, { offers: [
+      wood('https://woodwindows.ru/1', 77_000, 1000, 2700), wood('https://woodwindows.ru/2', 148_000, 2000, 2700), wood('https://woodwindows.ru/3', 162_000, 2000, 2700), wood('https://dverka.moscow/4', 30_045, null, null, 1), wood('https://otis-group.ru/5', 12_441, 550, 1900, 1),
+    ] }, src);
+    const text = 'Дверь межкомнатная двухпольная из массива лиственницы 1400x2700 мм, окраска L429 Indigo, 2 шт';
+    const r = await researchMarketPrice(llm, route, { line: { name: text, size: '1400×2700 мм', qty: 2, price: null }, item: { raw: text, name: text, width_mm: 1400, height_mm: 2700 }, requirements: [] });
+    expect(r).toMatchObject({ status: 'ok', areaScaled: true, stats: { min: 103_600, max: 113_400, median: 107_800, count: 3 } });
+    expect(r.offers.filter((j) => j.accepted)).toHaveLength(3);
   });
 });
 
@@ -230,13 +284,15 @@ describe('полный прогон', () => {
     const llm = fakeLlm(CARD, { offers }, SRC);
     const r = await researchMarketPrice(llm, route, input, { pricing: { 'openai:gpt-5': { input: 1, output: 2, cachedInput: 0.5 } } });
     expect(r.status).toBe('ok');
-    expect(r.stats).toEqual({ min: 9_500, max: 10_500, median: 10_000, count: 2, unit: 'piece' });
-    expect(r.offers.map((j) => [j.offer.url, j.accepted, j.reason])).toEqual([
-      ['https://profildoors.ru/2-47u', true, null],
-      ['https://market.ru/x', true, null],
-      ['https://dveri-shop.ru/p/247u', false, 'НДС не определён'],
-      ['https://nowhere.ru/p', false, 'ссылка не подтверждена поиском'],
+    // НДС не указан у dveri-shop — цена принята как конечная (5.1): три источника в медиане.
+    expect(r.stats).toEqual({ min: 9_500, max: 10_500, median: 10_000, count: 3, unit: 'piece' });
+    expect(r.offers.map((j) => [j.offer.url, j.accepted, j.reason, j.vatAssumed])).toEqual([
+      ['https://profildoors.ru/2-47u', true, null, false],
+      ['https://market.ru/x', true, null, false],
+      ['https://dveri-shop.ru/p/247u', true, null, true],
+      ['https://nowhere.ru/p', false, 'ссылка не подтверждена поиском', undefined],
     ]);
+    expect(r.areaScaled).toBe(false);
     expect(r.offers.every((j) => j.offer.foundAt && !Number.isNaN(Date.parse(j.offer.foundAt)))).toBe(true);
     expect(r.webSearchCalls).toBe(2);
     expect(r.sources).toEqual(SRC);

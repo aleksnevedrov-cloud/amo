@@ -1,4 +1,4 @@
-import type { MarketResearchResult, OfferJudgement } from './market-research.ts';
+import { VAT_ASSUMED_NOTE, type MarketResearchResult } from './market-research.ts';
 import { limitationNotes, priceStatus, type PriceStatus } from './research-notes.ts';
 
 /**
@@ -9,7 +9,7 @@ import { limitationNotes, priceStatus, type PriceStatus } from './research-notes
  * автоматической скидки нет; наценка на закупку не применяется: розничная цена — не наша закупка).
  * Коэффициент: позиция в черновике → производитель (справочник в настройках КП) → общий.
  * Доставка и монтаж в КП не считаются. НДС источников учтён на этапе 2 (judgeOffer): pre_net со
- * ставкой доначислен, «НДС не определён» — не в медиане, показывается отдельно.
+ * ставкой доначислен; НДС не указан — цена принята как конечная с НДС (5.1) с пометкой.
  * Цена предложения — уже конечная цена с нашим НДС (vatRate, по умолчанию 22): без НДС = конечная / 1,22,
  * НДС = конечная − без НДС; повторно увеличивать конечную цену на 22 % запрещено.
  */
@@ -66,10 +66,8 @@ export interface OfferPrice {
   /** Сколько подтверждённых предложений вошло в медиану. */
   sources: number;
   coefficient: { value: number; source: 'line' | 'manufacturer' | 'general' | 'default' };
-  /** Пометки для needs_manager и материалов расчёта (ограничение расчёта, аналог, причина отсутствия цены). */
+  /** Пометки для needs_manager и материалов расчёта (ограничение расчёта, аналог по площади, НДС по умолчанию, причина отсутствия цены). */
   notes: string[];
-  /** Предложения, у которых НДС не определён: в медиану не вошли, показываются отдельно. */
-  vatUnknown: OfferJudgement[];
   /** Формула расчёта строкой. */
   formula: string | null;
 }
@@ -77,24 +75,28 @@ export interface OfferPrice {
 /** Цена предложения по результату исследования. */
 export function offerPrice(research: MarketResearchResult, coefficient: CoefficientSources = {}): OfferPrice {
   const coef = pickCoefficient(coefficient);
-  const vatUnknown = research.offers.filter((o) => o.reason === 'НДС не определён');
   const sources = research.stats?.count ?? 0;
   const byAnalog = research.stats === null && research.analog !== null;
   const status = priceStatus({ sources: byAnalog ? 1 : sources, byAnalog, failed: research.status === 'failed' });
-  const base: Omit<OfferPrice, 'priceKopecks' | 'price' | 'basis' | 'medianKopecks' | 'formula' | 'notes'> = { status, sources, coefficient: coef, vatUnknown };
+  const base: Omit<OfferPrice, 'priceKopecks' | 'price' | 'basis' | 'medianKopecks' | 'formula' | 'notes'> = { status, sources, coefficient: coef };
 
   if (research.status === 'failed') return { ...base, priceKopecks: null, price: null, basis: null, medianKopecks: null, formula: null, notes: [research.error ? research.error : 'ошибка поиска'] };
   if (research.stats) {
     const medianKopecks = toKopecks(research.stats.median);
     const priceKopecks = Math.round(medianKopecks * coef.value);
+    const accepted = research.offers.filter((o) => o.accepted);
+    const notes = limitationNotes({ sources });
+    // Аналог по площади (5.1): пометка с размерами источников; НДС по умолчанию — если хоть у одного принятого НДС не был указан.
+    if (research.areaScaled) notes.push(`аналог, пересчёт по площади с ${[...new Set(accepted.filter((o) => o.areaScaled).map((o) => o.sourceSize ?? '?'))].join(', ')}`);
+    if (accepted.some((o) => o.vatAssumed)) notes.push(VAT_ASSUMED_NOTE);
     return {
       ...base,
       priceKopecks,
       price: toRub(priceKopecks),
-      basis: 'median',
+      basis: research.areaScaled ? 'analog' : 'median',
       medianKopecks,
-      formula: `медиана ${formatKopecks(medianKopecks)} (${sources} ${plural(sources, 'источник', 'источника', 'источников')})${coef.value === 1 ? '' : ` × ${coef.value}`} = ${formatKopecks(priceKopecks)}`,
-      notes: limitationNotes({ sources }),
+      formula: `медиана ${formatKopecks(medianKopecks)} (${sources} ${plural(sources, 'источник', 'источника', 'источников')}${research.areaScaled ? ', пересчёт по площади' : ''})${coef.value === 1 ? '' : ` × ${coef.value}`} = ${formatKopecks(priceKopecks)}`,
+      notes,
     };
   }
   if (research.analog && research.analog.unitPrice !== null) {

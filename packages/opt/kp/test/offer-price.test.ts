@@ -37,13 +37,18 @@ describe('коэффициент', () => {
 });
 
 describe('цена предложения', () => {
-  it('3 и больше источников: медиана × 1,00, копейки без потерь, пометок нет; НДС не определён — отдельно, не в медиане', () => {
-    const offers = [judged(10_000), judged(10_333.33), judged(12_000), judged(9_000, 'НДС не определён')];
+  it('3 и больше источников: медиана × 1,00, копейки без потерь, пометок нет; НДС не указан у принятого — пометка «НДС по умолчанию» (5.1)', () => {
+    const offers = [judged(10_000), judged(10_333.33), judged(12_000)];
     const r = research({ offers, stats: stats([10_000, 10_333.33, 12_000]) });
     const p = offerPrice(r);
     expect(p).toMatchObject({ status: 'ok', basis: 'median', sources: 3, priceKopecks: 1_033_333, price: 10_333.33, medianKopecks: 1_033_333, coefficient: { value: 1, source: 'default' }, notes: [] });
-    expect(p.vatUnknown.map((o) => o.offer.price)).toEqual([9_000]);
     expect(plain(p.formula!)).toBe('медиана 10 333,33 ₽ (3 источника) = 10 333,33 ₽');
+    const assumed = offerPrice(research({ offers: [{ ...judged(10_000), vatAssumed: true }, judged(10_333.33), judged(12_000)], stats: stats([10_000, 10_333.33, 12_000]) }));
+    expect(assumed.notes).toEqual(['НДС по умолчанию (не указан на сайте)']);
+    // Аналог по площади: пометка с размерами источников, basis analog.
+    const area = offerPrice(research({ areaScaled: true, offers: [{ ...judged(107_800), areaScaled: true, sourceSize: '1000×2700', vatAssumed: true }, { ...judged(103_600), areaScaled: true, sourceSize: '2000×2700', vatAssumed: true }], stats: stats([107_800, 103_600]) }));
+    expect(area).toMatchObject({ basis: 'analog', price: 105_700, notes: ['ограничение расчёта: 2 источника', 'аналог, пересчёт по площади с 1000×2700, 2000×2700', 'НДС по умолчанию (не указан на сайте)'] });
+    expect(plain(area.formula!)).toBe('медиана 105 700,00 ₽ (2 источника, пересчёт по площади) = 105 700,00 ₽');
   });
 
   it('медиана на чётном числе — среднее двух средних; коэффициент применяется к копейкам с одним округлением', () => {
