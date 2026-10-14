@@ -57,6 +57,30 @@ export interface MailAttachment {
 }
 
 /** Диагностика поиска (без содержимого писем) — в mail_fetch при «не найдено». */
+/** Одна команда FETCH ENVELOPE: диапазон UID (или номеров сообщений), сколько конвертов загружено, сколько заняла. */
+export interface MailFetchBatchDiag {
+  range: string;
+  envelopes: number;
+  ms: number;
+}
+
+export interface MailFolderDiag {
+  path: string;
+  specialUse: string | null;
+  inWindow: number;
+  bySender: number;
+  scannedWithoutDate: number;
+  bySenderWithoutDate: number;
+  envelopes: number;
+  ms: number;
+  /** Диапазоны просмотренных порций (для сводки «просмотрено»). */
+  ranges?: string[];
+  /** Порции FETCH ENVELOPE по порядку с временем каждой (MAIL-READ-6-FIX). */
+  batches?: MailFetchBatchDiag[];
+  /** Письмо отправителя найдено в одной из порций — остальные порции папки не читались. */
+  stoppedEarly?: boolean;
+}
+
 export interface MailSearchDiag {
   /** domain — null, если домен публичный (поиск только по точному адресу); windowSource — откуда взято окно дат. */
   criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null; windowSource?: MailWindowSource };
@@ -65,7 +89,7 @@ export interface MailSearchDiag {
    * фильтр отправителя по ENVELOPE; scannedWithoutDate / bySenderWithoutDate — то же для запасного прохода
    * по последним письмам папки без даты (0, если он не понадобился).
    */
-  folders: { path: string; specialUse: string | null; inWindow: number; bySender: number; scannedWithoutDate: number; bySenderWithoutDate: number; envelopes: number; ms: number; ranges?: string[] }[];
+  folders: MailFolderDiag[];
   /** Папки, которые не смотрели (Отправленные, Черновики, Корзина, несёлектируемые). */
   skippedFolders: string[];
   /** Запасной проход без даты нашёл письмо отправителя хотя бы в одной папке. */
@@ -87,19 +111,25 @@ export interface MailReadResult {
 export interface MailReadOptions {
   /** Подключение, приветствие и вход, мс (20 с). */
   connectMs?: number;
-  /** Одна команда IMAP: LIST, EXAMINE, SEARCH, FETCH, мс (30 с). */
+  /** Одна команда IMAP: LIST, EXAMINE, SEARCH, FETCH BODY, мс (30 с). */
   commandMs?: number;
+  /** Одна порция FETCH ENVELOPE, мс (20 с): Яндекс отдаёт ≈3,5 конверта/с, порция в 20 UID укладывается с запасом. */
+  fetchBatchMs?: number;
   /** Весь поиск по ящику, мс (90 с). */
   totalMs?: number;
   /** Строка прогресса на каждую папку — в консоль mail-check и в debug-лог задания. */
   onProgress?: (line: string) => void;
-  /** UID в одной команде FETCH (500); в тестах меньше. */
+  /** UID в одной команде FETCH ENVELOPE (20); в тестах меньше. */
   fetchBatch?: number;
 }
 
 export const MAIL_CONNECT_MS = 20_000;
 export const MAIL_COMMAND_MS = 30_000;
 export const MAIL_TOTAL_MS = 90_000;
+export const MAIL_FETCH_BATCH_MS = 20_000;
+
+/** imapflow отверг команду, потому что соединение уже закрыто (простой сокета, BYE сервера). */
+const isConnectionLost = (err: unknown): boolean => (err as { code?: string } | null)?.code === 'NoConnection';
 
 /** Ящик не ответил вовремя; where — папка/команда, на которой остановились. */
 export class MailTimeoutError extends Error {
@@ -136,8 +166,12 @@ export const MAIL_AUTH_PAUSE_MS = 30 * 60_000;
 const MAX_TEXT = 12_000;
 /** Писем из папки на проверку отправителя при запасном проходе без даты (последние N папки). */
 const MAX_CANDIDATES = 200;
-/** FETCH ENVELOPE по окну дат — порциями по 500 UID (MAIL-READ-6), общий лимит — totalMs (90 с). */
-export const FETCH_BATCH = 500;
+/**
+ * FETCH ENVELOPE — порциями по 20 UID от новых к старым (MAIL-READ-6-FIX): Яндекс отдаёт ≈3,5 конверта/с, и 93 конверта
+ * одной командой упирались в лимит команды 30 с. Порция — fetchBatchMs (20 с), весь поиск — totalMs (90 с); как только
+ * в порции нашлось письмо отправителя, остальные порции не читаются — оно и есть последнее.
+ */
+export const FETCH_BATCH = 20;
 /** Окно даты: ±2 дня (SINCE/BEFORE в IMAP — по дате сервера, без времени и пояса). */
 const DATE_WINDOW_DAYS = 2;
 /** Папки, где письма заявок не ищем, по special-use. */
@@ -383,6 +417,7 @@ export class ImapMailReader {
 
     const connectMs = opts.connectMs ?? MAIL_CONNECT_MS;
     const commandMs = opts.commandMs ?? MAIL_COMMAND_MS;
+    const fetchBatchMs = opts.fetchBatchMs ?? MAIL_FETCH_BATCH_MS;
     const deadline = Date.now() + (opts.totalMs ?? MAIL_TOTAL_MS);
     const progress = opts.onProgress ?? (() => undefined);
     let client: ImapFlow | null = null;
@@ -473,10 +508,10 @@ export class ImapMailReader {
       const candidates: Candidate[] = [];
 
       /** ENVELOPE пачкой одной командой FETCH по диапазону; фильтр отправителя на клиенте. */
-      const scan = async (folder: string, range: string, byUid: boolean, where: string): Promise<{ scanned: number; found: Candidate[] }> => {
+      const scan = async (folder: string, range: string, byUid: boolean, where: string, limitMs: number): Promise<{ scanned: number; found: Candidate[] }> => {
         const found: Candidate[] = [];
         let scanned = 0;
-        await run(where, commandMs, async () => {
+        await run(where, limitMs, async () => {
           for await (const m of c.fetch(range, { uid: true, envelope: true }, byUid ? { uid: true } : {})) {
             scanned += 1;
             const sender = (m.envelope?.from?.[0]?.address ?? '').trim().toLowerCase();
@@ -489,25 +524,43 @@ export class ImapMailReader {
         return { scanned, found };
       };
 
-      /** Порционный FETCH по UID: по FETCH_BATCH за команду; таймаут — не ошибка, а partial с просмотренными диапазонами. */
-      const scanBatches = async (folder: string, uids: number[], ranges: string[]): Promise<{ scanned: number; found: Candidate[]; timedOut: boolean }> => {
+      /**
+       * Порционный FETCH ENVELOPE: по FETCH_BATCH идентификаторов за команду, свежие первыми; ids — UID (byUid) или номера
+       * сообщений. Нашли письмо отправителя — дальше не читаем. Таймаут — не ошибка, а partial с просмотренными порциями.
+       */
+      const scanBatches = async (folder: string, ids: number[], byUid: boolean, stat: MailFolderDiag): Promise<{ scanned: number; found: Candidate[]; timedOut: boolean }> => {
         let scanned = 0;
         const found: Candidate[] = [];
-        // Свежие письма первыми: UID растут со временем.
-        const sorted = [...uids].sort((a, b) => b - a);
+        // Свежие письма первыми: и UID, и номера сообщений растут со временем.
+        const sorted = [...ids].sort((a, b) => b - a);
         const batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
+        const ranges = (stat.ranges ??= []);
+        const batches = (stat.batches ??= []);
+        const total = Math.ceil(sorted.length / batch);
         for (let i = 0; i < sorted.length; i += batch) {
           const part = sorted.slice(i, i + batch);
           const range = compressUids(part);
+          const label = range.length > 60 ? `${Math.min(...part)}…${Math.max(...part)}` : range;
+          const t0 = Date.now();
           try {
-            const r = await scan(folder, range, true, `FETCH ENVELOPE ${folder} (${range.length > 40 ? `${part.length} UID` : range})`);
+            const r = await scan(folder, range, byUid, `FETCH ENVELOPE ${folder} (${range.length > 40 ? `${part.length} ${byUid ? 'UID' : 'сообщений'}` : range})`, fetchBatchMs);
             scanned += r.scanned;
             found.push(...r.found);
-            ranges.push(range.length > 60 ? `${Math.min(...part)}…${Math.max(...part)}` : range);
+            ranges.push(label);
+            batches.push({ range: label, envelopes: r.scanned, ms: Date.now() - t0 });
+            progress(`${folder}: порция ${batches.length} из ${total} (${label}) — конвертов ${r.scanned}, от отправителя ${r.found.length}, ${((Date.now() - t0) / 1000).toFixed(1)} с`);
           } catch (err) {
-            if (!(err instanceof MailTimeoutError)) throw err;
-            diag.partial = { where: err.where, ranges: diag.folders.flatMap((f) => (f.ranges ?? []).map((r) => `${f.path}: ${r}`)).concat(ranges.map((r) => `${folder}: ${r}`)) };
+            // Обрыв соединения посреди порции (сокет закрыт по простою) — тоже «просмотрено не полностью», а не сбой.
+            if (!(err instanceof MailTimeoutError) && !isConnectionLost(err)) throw err;
+            const where = err instanceof MailTimeoutError ? err.where : `FETCH ENVELOPE ${folder} (${label}) — соединение оборвано`;
+            batches.push({ range: label, envelopes: 0, ms: Date.now() - t0 });
+            diag.partial = { where, ranges: diag.folders.flatMap((f) => (f.ranges ?? []).map((r) => `${f.path}: ${r}`)).concat(ranges.map((r) => `${folder}: ${r}`)) };
             return { scanned, found, timedOut: true };
+          }
+          if (foundHere(found) && i + batch < sorted.length) {
+            stat.stoppedEarly = true;
+            progress(`${folder}: письмо отправителя найдено в порции ${batches.length} — остальные ${total - batches.length} не читаем`);
+            break;
           }
         }
         return { scanned, found, timedOut: false };
@@ -526,7 +579,7 @@ export class ImapMailReader {
           continue;
         }
         readOnly = readOnly && Boolean(box.readOnly);
-        const stat: MailSearchDiag['folders'][number] = { path: folder.path, specialUse: folder.specialUse, inWindow: 0, bySender: 0, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 0, ms: 0, ranges: [] };
+        const stat: MailFolderDiag = { path: folder.path, specialUse: folder.specialUse, inWindow: 0, bySender: 0, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 0, ms: 0, ranges: [], batches: [] };
         // SEARCH только по дате. false — сервер отверг; таймаут — переподключение и проход по номерам сообщений (Входящие и Спам).
         let searchTimedOut = false;
         let inWindow: number[] = [];
@@ -543,7 +596,7 @@ export class ImapMailReader {
         }
         stat.inWindow = inWindow.length;
         if (inWindow.length) {
-          const r = await scanBatches(folder.path, inWindow, stat.ranges as string[]);
+          const r = await scanBatches(folder.path, inWindow, true, stat);
           stat.envelopes += r.scanned;
           stat.bySender = r.found.length;
           candidates.push(...r.found);
@@ -552,18 +605,25 @@ export class ImapMailReader {
             diag.errors.push(`${folder.path}: FETCH ENVELOPE прерван по общему лимиту времени — просмотрено ${stat.envelopes} из ${inWindow.length}`);
           }
         }
-        // В окне дат от отправителя ничего (или SEARCH завис) — последние письма Входящих/Спама по номерам сообщений.
+        // В окне дат от отправителя ничего (или SEARCH завис) — последние письма Входящих/Спама по номерам сообщений,
+        // теми же порциями: 200 конвертов одной командой у Яндекса тоже не укладываются в лимит.
         if (!stopped && !stat.bySender && box.exists > 0 && (fallbackFolder(folder) || searchTimedOut)) {
-          const r = await scan(folder.path, `${Math.max(1, box.exists - MAX_CANDIDATES + 1)}:*`, false, `FETCH ENVELOPE ${folder.path} (без даты)`);
+          const first = Math.max(1, box.exists - MAX_CANDIDATES + 1);
+          const seqs = Array.from({ length: box.exists - first + 1 }, (_, i) => first + i);
+          const r = await scanBatches(folder.path, seqs, false, stat);
           stat.envelopes += r.scanned;
           stat.scannedWithoutDate = r.scanned;
           stat.bySenderWithoutDate = r.found.length;
           if (r.found.length) diag.fallbackWithoutDate = true;
           candidates.push(...r.found);
+          if (r.timedOut) {
+            stopped = true;
+            diag.errors.push(`${folder.path}: FETCH ENVELOPE без даты прерван по лимиту времени — просмотрено ${r.scanned} из ${seqs.length}`);
+          }
         }
         stat.ms = Date.now() - t0;
         diag.folders.push(stat);
-        progress(`${folder.path}: в окне дат ${stat.inWindow}, ENVELOPE загружено ${stat.envelopes}, от отправителя ${stat.bySender + stat.bySenderWithoutDate}${searchTimedOut ? ', SEARCH по таймауту' : ''}${stopped ? ', просмотр прерван по лимиту времени' : ''}, ${(stat.ms / 1000).toFixed(1)} с`);
+        progress(`${folder.path}: в окне дат ${stat.inWindow}, ENVELOPE загружено ${stat.envelopes} за ${stat.batches?.length ?? 0} порций, от отправителя ${stat.bySender + stat.bySenderWithoutDate}${searchTimedOut ? ', SEARCH по таймауту' : ''}${stopped ? ', просмотр прерван по лимиту времени' : ''}, ${(stat.ms / 1000).toFixed(1)} с`);
         if (isInbox(folder.path) && foundHere(candidates)) {
           diag.stoppedAfterInbox = true;
           progress('письмо отправителя найдено во Входящих — остальные папки не смотрим');

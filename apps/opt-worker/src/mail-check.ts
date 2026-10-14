@@ -42,7 +42,7 @@ try {
   console.log(`Ящик: ${m.username} @ ${m.imapHost}:${m.imapPort} (${m.imapSecure ? 'TLS' : 'без TLS'}); ищем от ${search.from}, около ${search.around.toISOString().slice(0, 10)}${search.subject ? `, тема «${search.subject}»` : ''}`);
 
   const started = Date.now();
-  console.log('Таймауты: подключение 20 с, команда 30 с, весь поиск 90 с');
+  console.log('Таймауты: подключение 20 с, команда 30 с, порция FETCH ENVELOPE 20 UID / 20 с, весь поиск 90 с');
   const r = await new ImapMailReader({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password }).findLatest(search, {
     onProgress: (line) => console.log(`  ${((Date.now() - started) / 1000).toFixed(1)} с  ${line}`),
   });
@@ -52,7 +52,10 @@ try {
   if (r.diag.stoppedAfterInbox) console.log('Письмо найдено во Входящих — остальные папки не смотрели');
   if (r.diag.skippedFolders.length) console.log(`Пропущены: ${r.diag.skippedFolders.join(', ')}`);
   if (r.diag.fallbackWithoutDate) console.log('Сработал запасной проход без даты');
-  if (r.diag.partial) console.log(`Ящик просмотрен не полностью: лимит времени вышел на ${r.diag.partial.where}; просмотрено: ${r.diag.partial.ranges.join('; ') || '—'}`);
+  for (const f of r.diag.folders) {
+    if (f.batches?.length) console.log(`${f.path}: порций ${f.batches.length}${f.stoppedEarly ? ' (остановились на найденном письме)' : ''}: ${f.batches.map((b) => `${b.range} — ${b.envelopes} конв., ${(b.ms / 1000).toFixed(1)} с`).join('; ')}`);
+  }
+  if (r.diag.partial) console.log(`Ящик просмотрен не полностью: лимит времени вышел на ${r.diag.partial.where}; просмотрено порций ${r.diag.partial.ranges.length}: ${r.diag.partial.ranges.join('; ') || '—'}`);
   if (r.diag.errors.length) console.log(`Ошибки SEARCH: ${r.diag.errors.join('; ')}`);
   if (r.mail) {
     console.log('\n— Найдено —');

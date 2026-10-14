@@ -339,7 +339,7 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
   const found = result.mail;
   if (!found && result.diag.partial) {
     const p = result.diag.partial;
-    return { source: { ...base, status: 'partial', diag: result.diag, error: `ящик просмотрен не полностью: лимит времени вышел на ${p.where}; просмотрено диапазонов ${p.ranges.length}` }, files: [] };
+    return { source: { ...base, status: 'partial', diag: result.diag, error: `ящик просмотрен не полностью: лимит времени вышел на ${p.where}; просмотрено порций ${p.ranges.length}` }, files: [] };
   }
   if (!found) return { source: { ...base, diag: result.diag }, files: [] };
   card.letter = {

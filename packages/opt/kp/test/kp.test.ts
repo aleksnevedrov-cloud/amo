@@ -332,7 +332,7 @@ describe('критерии поиска письма без даты в карт
     const amo = fakeAmo({ notes: [{ id: 1, note_type: 'common', created_at: 0, created_by: 0, params: { text: 'Запрос КП. От: Туркина Татьяна <t_turkina@sviaznoyalliance.ru>' } }] });
     amo.getLead = async () => ({ id: 30008823, name: '89813', price: null, status_id: 1, pipeline_id: 1, responsible_user_id: 3, created_at: Math.floor(new Date('2026-10-12T06:00:00Z').getTime() / 1000), custom_fields_values: null, _embedded: { contacts: [] } });
     const searches: unknown[] = [];
-    const partialDiag: MailSearchDiag = { ...noDiag, criteria: { ...noDiag.criteria, windowSource: 'lead' }, partial: { where: 'FETCH ENVELOPE INBOX (500 UID)', ranges: ['INBOX: 9001…9500'] } };
+    const partialDiag: MailSearchDiag = { ...noDiag, criteria: { ...noDiag.criteria, windowSource: 'lead' }, partial: { where: 'FETCH ENVELOPE INBOX (9461:9480)', ranges: ['INBOX: 9481:9500'] } };
     const mail: KpDraftDeps['mail'] = async (search) => {
       searches.push(search);
       return { mail: null, diag: partialDiag };
@@ -340,7 +340,7 @@ describe('критерии поиска письма без даты в карт
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 30008823, route }, { amo, analyze: null, mail });
     expect(searches).toHaveLength(1);
     expect(searches[0]).toMatchObject({ from: 't_turkina@sviaznoyalliance.ru', subject: null, window: { since: new Date('2026-09-28T06:00:00Z'), source: 'lead' } });
-    expect(r.payload.source.mail).toMatchObject({ status: 'partial', searchedFrom: 't_turkina@sviaznoyalliance.ru', error: 'ящик просмотрен не полностью: лимит времени вышел на FETCH ENVELOPE INBOX (500 UID); просмотрено диапазонов 1' });
+    expect(r.payload.source.mail).toMatchObject({ status: 'partial', searchedFrom: 't_turkina@sviaznoyalliance.ru', error: 'ящик просмотрен не полностью: лимит времени вышел на FETCH ENVELOPE INBOX (9461:9480); просмотрено порций 1' });
     expect(r.payload.needs_manager.map((n) => n.reason)).toContainEqual(expect.stringContaining('письмо в ящике не найдено среди просмотренного'));
     expect(r.payload.needs_manager.map((n) => n.reason)).not.toContainEqual(expect.stringMatching(/^почта:/));
   });
