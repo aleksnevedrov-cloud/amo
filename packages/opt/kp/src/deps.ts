@@ -6,6 +6,7 @@ import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } fr
 import { createOptAi, type OptAiProvider } from './llm.ts';
 import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailReadResult, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
+import { KpPriceResearchRepo } from './research-repo.ts';
 import { OptSettingsRepo } from './settings.ts';
 
 /**
@@ -28,6 +29,8 @@ export interface OptCore {
   docs: DocumentService;
   ai: OptAiProvider;
   kp: KpRepo;
+  /** Результаты поиска рыночных цен и кэш (этап 3). */
+  research: KpPriceResearchRepo;
   /** База знаний опта: пять справочников (ТЗ раздел 9). */
   /** Корень файлов опта: шаблон КП и собранные документы (/data в контейнере, том opt_data). */
   filesRoot: string;
@@ -99,6 +102,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     docs,
     ai,
     kp: new KpRepo(db),
+    research: new KpPriceResearchRepo(db),
     filesRoot: overrides.filesRoot ?? process.env.KP_FILES_ROOT ?? '/data',
     mailRead: overrides.mailRead ?? readLatestMail,
     alerter,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { loadEnv } from '@core/shared';
-import { runDraftJob, type KpMail, type KpMailSender, type OptAiProvider, type SmtpConfig } from '@opt/kp';
+import { runDraftJob, runResearchJob, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SmtpConfig } from '@opt/kp';
 import { SignJWT } from 'jose';
 import { freshOptDb } from '../../../packages/opt/kp/test/setup.ts';
 import { buildApp } from '../src/app.ts';
@@ -93,6 +93,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
   };
   // Очередь в тестах выполняет задание сразу, в том же процессе: состояние — как после работы воркера.
   const jobs: { state: DraftJobState }[] = [];
+  const researchStates = new Map<string, DraftJobState>();
   let core: Deps | null = null;
   const deps: Deps = createDeps(env, {
     db,
@@ -115,6 +116,23 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
       },
       async state() {
         return jobs.at(-1)?.state ?? null;
+      },
+      close: async () => undefined,
+    },
+    // Поиск цен тоже выполняется сразу; состояние по позициям — как после воркера (failed с текстом, иначе завершено).
+    researchQueue: {
+      async enqueue(list: ResearchJob[]) {
+        for (const j of list) {
+          try {
+            await runResearchJob(core!, j);
+            researchStates.set(`${j.draftId}:${j.requestIndex}`, null);
+          } catch (err) {
+            researchStates.set(`${j.draftId}:${j.requestIndex}`, { state: 'failed', error: (err as Error).message });
+          }
+        }
+      },
+      async states(_accountId, draftId, idx) {
+        return Object.fromEntries(idx.map((i) => [i, researchStates.get(`${draftId}:${i}`) ?? null]));
       },
       close: async () => undefined,
     },

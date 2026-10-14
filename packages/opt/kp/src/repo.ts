@@ -17,6 +17,19 @@ export interface KpConstants {
   analogPriceTolerancePct?: number;
   /** Домены производителей: источник с таким доменом всегда считается сайтом производителя; пусто по умолчанию. */
   manufacturerDomains?: string[];
+  /** Поиск рыночных цен (RFD-AI-AGENT-OPT-PRICE, этап 5). Общий коэффициент к медиане; не задан — 1,00. */
+  priceCoefficient?: number;
+  /** Справочник «производитель → коэффициент»; имеет приоритет над общим. */
+  manufacturerCoefficients?: Record<string, number>;
+  /** Искать цены автоматически при сборке черновика; по умолчанию выключено — поиск по кнопке «Найти цены». */
+  autoResearch?: boolean;
+  /** Срок кэша результатов поиска, дней; не задан — 7. */
+  researchCacheDays?: number;
+  /** Не больше позиций за одно нажатие «по всем»; не задан — 30. */
+  maxPositionsPerRun?: number;
+  /** Объём текста источников в контексте модели (search_context_size) и лимит вызовов поиска — удешевление. */
+  searchContext?: 'low' | 'medium' | 'high';
+  maxSearchCalls?: number;
 }
 
 export interface KpNumbering {
@@ -50,6 +63,8 @@ export interface KpDraft {
   createdAt: Date;
   builtAt: Date | null;
   sentAt: Date | null;
+  /** Растёт при каждой записи payload — защита от гонки автозаполнения цен (миграция 003). */
+  version: number;
 }
 
 const DEFAULT_NUMBERING: KpNumbering = { prefix: 'КП', year: null, counter: 0 };
@@ -184,10 +199,20 @@ export class KpRepo {
   }
 
   async setPayload(id: number, payload: Record<string, unknown>): Promise<void> {
-    await this.db.query('UPDATE kp_drafts SET payload = $2::jsonb WHERE id = $1', [
+    await this.db.query('UPDATE kp_drafts SET payload = $2::jsonb, version = version + 1 WHERE id = $1', [
       id,
       JSON.stringify(payload),
     ]);
+  }
+
+  /** Запись payload только если черновик не менялся с прочитанной версии; false — гонка, перечитать и повторить. */
+  async setPayloadIfVersion(id: number, expectedVersion: number, payload: Record<string, unknown>): Promise<boolean> {
+    const { rowCount } = await this.db.query('UPDATE kp_drafts SET payload = $2::jsonb, version = version + 1 WHERE id = $1 AND version = $3', [
+      id,
+      JSON.stringify(payload),
+      expectedVersion,
+    ]);
+    return (rowCount ?? 0) > 0;
   }
 
   async setBuilt(
@@ -226,5 +251,6 @@ function mapDraft(r: Record<string, unknown>): KpDraft {
     createdAt: r.created_at as Date,
     builtAt: (r.built_at ?? null) as Date | null,
     sentAt: (r.sent_at ?? null) as Date | null,
+    version: Number(r.version ?? 0),
   };
 }

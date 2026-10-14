@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
-import { buildKp, composeKpMail, DEFAULT_PRICE_NOTE, findCertificates, renderMailTemplate, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { buildKp, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_PRICE_NOTE, findCertificates, renderMailTemplate, researchablePositions, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -26,6 +26,14 @@ const constantsSchema = z.object({
   analogPriceTolerancePct: z.number().min(0).max(10).optional(),
   /** Домены производителей, без схемы и пути; пусто по умолчанию. */
   manufacturerDomains: z.array(z.string().trim().min(1).max(100)).max(200).optional(),
+  // Поиск рыночных цен (RFD-AI-AGENT-OPT-PRICE, этап 5): коэффициенты, режим запуска, кэш, лимиты.
+  priceCoefficient: z.number().min(0.1).max(10).optional(),
+  manufacturerCoefficients: z.record(z.string().trim().min(1).max(100), z.number().min(0.1).max(10)).optional(),
+  autoResearch: z.boolean().optional(),
+  researchCacheDays: z.number().int().min(0).max(365).optional(),
+  maxPositionsPerRun: z.number().int().min(1).max(200).optional(),
+  searchContext: z.enum(['low', 'medium', 'high']).optional(),
+  maxSearchCalls: z.number().int().min(1).max(20).optional(),
 });
 
 const settingsSchema = z.object({
@@ -51,9 +59,20 @@ const linesSchema = z.object({
         price: z.number().min(0).max(100_000_000).nullable(),
         lead_time: z.string().max(100),
         discount: z.number().min(0).max(100),
+        // Поля автозаполнения цен идут сквозь правки менеджера без изменений (сервер решает, что цена стала ручной).
+        priceSource: z.enum(['research', 'analog', 'manager']).optional(),
+        market: z.object({ median: z.number(), min: z.number(), max: z.number(), count: z.number().int(), unit: z.literal('piece'), researchId: z.number().int(), researchedAt: z.string() }).nullable().optional(),
+        coefficient: z.number().optional(),
       }),
     )
     .max(200),
+});
+
+/** Кнопка «Найти цены»: все позиции без цены или явный список; force — «искать заново» мимо кэша. */
+const researchBody = z.object({
+  draftId: z.coerce.number().int().positive(),
+  requestIndexes: z.union([z.literal('all'), z.array(z.number().int().min(0)).max(200)]).default('all'),
+  force: z.boolean().optional(),
 });
 
 /** Окно предпросмотра (ТЗ 6.6): менеджер правит получателя, копию, тему и текст; вложение — нет. */
@@ -78,7 +97,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const s = await repo.getSettings(principal(req).accountId);
     return {
       // Фраза о ценах есть в каждом КП: пока заказчик её не менял, показываем текст по умолчанию.
-      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, manufacturerDomains: [], ...s.constants },
+      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, manufacturerDomains: [], priceCoefficient: 1, manufacturerCoefficients: {}, autoResearch: false, researchCacheDays: DEFAULT_CACHE_DAYS, maxPositionsPerRun: DEFAULT_MAX_POSITIONS_PER_RUN, ...s.constants },
       certsDir: s.certsDir,
       numbering: s.numbering,
       template: { exists: Boolean(s.templatePath), name: s.templateName, md5: s.templateMd5, updatedAt: s.templateUpdatedAt },
@@ -154,9 +173,71 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const d = await repo.byId(p.accountId, id);
     if (!d) return reply.code(404).send({ error: 'not_found' });
     if (d.status !== 'draft' && d.status !== 'built') return reply.code(409).send({ error: 'locked' });
-    await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items: b.data.items as KpLine[] } as unknown as Record<string, unknown>);
+    // Цена, которую менеджер поменял руками, становится ручной: автозаполнение её не затирает (этап 5, 9.3).
+    const before = (d.payload as unknown as Partial<KpPayload>).items ?? [];
+    const items = (b.data.items as KpLine[]).map((l) => {
+      const prev = before.find((x) => x.request_index === l.request_index);
+      const changed = l.price !== (prev?.price ?? null);
+      return { ...prev, ...l, priceSource: changed && l.price !== null ? 'manager' : (l.priceSource ?? prev?.priceSource) } as KpLine;
+    });
+    await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
     const fresh = await repo.byId(p.accountId, id);
     return { draft: fresh ? view(fresh) : null };
+  });
+
+  /**
+   * Поиск рыночных цен (RFD-AI-AGENT-OPT-PRICE, этап 5). Задания уходят в очередь kp-research по одной позиции,
+   * ответ сразу 202 со списком позиций; виджет опрашивает GET /kp/research, пока есть queued / running.
+   * «all» — только позиции без цены; явный список — заменяет и ручную цену (кнопка «Заменить»).
+   */
+  api.post('/kp/research', async (req, reply) => {
+    const p = principal(req);
+    const b = researchBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const draft = await repo.byId(p.accountId, b.data.draftId);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    if (draft.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
+    if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
+    const { constants } = await repo.getSettings(p.accountId);
+    const positions = researchablePositions(draft.payload as unknown as Partial<KpPayload>, b.data.requestIndexes, constants.maxPositionsPerRun ?? DEFAULT_MAX_POSITIONS_PER_RUN);
+    if (!positions.length) return reply.code(202).send({ queued: [], reason: b.data.requestIndexes === 'all' ? 'у всех позиций уже есть цена' : 'позиции не найдены' });
+    await deps.researchQueue.enqueue(positions.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: b.data.force, replace: b.data.requestIndexes !== 'all' })));
+    return reply.code(202).send({ queued: positions });
+  });
+
+  /** Состояние поиска по позициям черновика: задание (queued / running / failed) и последняя запись kp_price_research. */
+  api.get('/kp/research', async (req, reply) => {
+    const p = principal(req);
+    const q = draftBody.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const draft = await repo.byId(p.accountId, q.data.draftId);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    const items = (draft.payload as unknown as Partial<KpPayload>).items ?? [];
+    const idx = items.map((l) => l.request_index);
+    const [states, rows] = await Promise.all([deps.researchQueue.states(p.accountId, draft.id, idx), deps.research.listByDraft(p.accountId, draft.id)]);
+    const positions = idx.map((requestIndex) => {
+      const r = rows.find((x) => x.requestIndex === requestIndex) ?? null;
+      return {
+        requestIndex,
+        job: states[requestIndex] ?? null,
+        research: r
+          ? {
+              id: r.id,
+              status: r.status,
+              query: r.query,
+              stats: r.stats,
+              error: r.error,
+              createdAt: r.createdAt,
+              webSearchCalls: r.webSearchCalls,
+              costUsd: r.costUsd,
+              analog: r.analog ? { url: r.analog.url, unitPrice: r.analog.unitPrice, reason: r.analog.suggestion.reason } : null,
+              offers: r.offers.map((o) => ({ url: o.offer.url, seller: o.offer.seller, title: o.offer.title, price: o.offer.price, currency: o.offer.currency, unit: o.offer.unit, vatStated: o.offer.vatStated, unitPrice: o.unitPrice, accepted: o.accepted, reason: o.reason, manufacturer: o.manufacturer, formula: o.formula, notes: o.notes, foundAt: o.offer.foundAt })),
+            }
+          : null,
+      };
+    });
+    const pending = positions.some((x) => x.job && (x.job.state === 'queued' || x.job.state === 'running'));
+    return { draftId: draft.id, pending, positions };
   });
 
   /** Документ строится из строк, которые менеджер подтвердил: цены и количества берутся из черновика. Автосборки нет. */

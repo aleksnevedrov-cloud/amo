@@ -20,6 +20,17 @@ export interface KpRequestItem {
   qty: number;
 }
 
+/** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
+export interface KpLineMarket {
+  median: number;
+  min: number;
+  max: number;
+  count: number;
+  unit: 'piece';
+  researchId: number;
+  researchedAt: string;
+}
+
 /** Строка будущего документа: её правит менеджер перед сборкой. */
 export interface KpLine {
   request_index: number;
@@ -30,6 +41,11 @@ export interface KpLine {
   price: number | null;
   lead_time: string;
   discount: number;
+  /** Откуда цена: поиск по точной модели, аналог или менеджер руками; нет поля — цены ещё не было. */
+  priceSource?: 'research' | 'analog' | 'manager';
+  market?: KpLineMarket | null;
+  /** Коэффициент, применённый к медиане (общий или производителя). */
+  coefficient?: number;
 }
 
 export interface KpPayload {
@@ -167,7 +183,7 @@ const PROMPT = `Вы разбираете входящее письмо с за�
 const MAX_LETTER = 12_000;
 const DEFAULT_MAX_FILES = 10;
 const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024;
-const NO_PRICE = 'цена не задана';
+export const NO_PRICE = 'цена не задана';
 
 export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
   const card = await readCard(d.amo, input.leadId);

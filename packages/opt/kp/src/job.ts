@@ -1,4 +1,5 @@
 import { convertLegacyOffice } from './convert.ts';
+import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob } from './research-job.ts';
 import type { OptCore } from './deps.ts';
 import { buildKpDraft, type KpDraftDeps } from './draft.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
@@ -21,9 +22,13 @@ export const draftJobId = (accountId: number, leadId: number) => `draft-${accoun
  * разбираются @core/docs, позиции кладутся в kp_drafts без цен. Любая ошибка — в журнал (kp_error)
  * и наверх: задание помечается упавшим, виджет показывает текст.
  */
-/** Хуки задания: onProgress — строки хода чтения ящика (в debug-лог воркера). */
+/**
+ * Хуки задания: onProgress — строки хода чтения ящика (в debug-лог воркера); enqueueResearch — постановка
+ * заданий поиска цен (очередь kp-research) при включённой настройке «искать автоматически при сборке».
+ */
 export interface DraftJobHooks {
   onProgress?: (line: string) => void;
+  enqueueResearch?: (jobs: ResearchJob[]) => Promise<void>;
 }
 
 export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobHooks = {}): Promise<{ draftId: number }> {
@@ -68,6 +73,12 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
       });
     }
     const draftId = await core.kp.createDraft(accountId, leadId, r.payload as unknown as Record<string, unknown>, job.userId);
+    // Поиск цен при сборке — только если включено в настройках КП (по умолчанию выключено: поиск по кнопке «Найти цены»).
+    const { constants } = await core.kp.getSettings(accountId);
+    if (constants.autoResearch && hooks.enqueueResearch) {
+      const idx = researchablePositions(r.payload, 'all', constants.maxPositionsPerRun ?? DEFAULT_MAX_POSITIONS_PER_RUN);
+      if (idx.length) await hooks.enqueueResearch(idx.map((requestIndex) => ({ accountId, draftId, requestIndex, userId: job.userId })));
+    }
     await core.journal.add({
       accountId,
       leadId,
