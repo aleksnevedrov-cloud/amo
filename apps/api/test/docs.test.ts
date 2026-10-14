@@ -70,9 +70,9 @@ describe('разбор файла из карточки сделки', () => {
     expect(dwg.json().message).toContain('LibreDWG');
   });
 
-  it('OCR выключен в настройках — 422 с подсказкой про настройку', async () => {
+  it('OCR выключен и фото модели не показываем — 422 с подсказкой про настройку (с «фото — модели» картинку разбирает модель, RFD-AI-AGENT-WA-PHOTO)', async () => {
     const { settings } = await ctx.deps.settings.get(31337);
-    await ctx.deps.settings.save(31337, 1, { ...settings, vision: { ...settings.vision, provider: 'off' } });
+    await ctx.deps.settings.save(31337, 1, { ...settings, vision: { ...settings.vision, provider: 'off', photosToClaude: false } });
     const res = await ctx.app.inject({ method: 'POST', url: '/widget/v1/leads/702/documents', headers: await headers(), payload: { name: 'IMG.jpg', mime: 'image/jpeg', file: Buffer.from([0xff, 0xd8]).toString('base64') } });
     expect(res.statusCode).toBe(422);
     expect(res.json().message).toContain('выключено');

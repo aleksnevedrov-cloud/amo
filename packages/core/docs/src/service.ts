@@ -1,8 +1,8 @@
-import type { LlmClient } from '@retail/agent';
+import { resolveRoute, type LlmClient } from '@retail/agent';
 import type { ChatRoute, LlmGateway } from '@core/llm';
 import type { CatalogRepo } from '@retail/catalog';
 import type { DocumentSource, DocumentsRepo, WidgetSettings } from '@core/db';
-import { analyzeDocument, AnalyzeError } from './analyze.ts';
+import { analyzeDocument, AnalyzeError, pickVisionRoute } from './analyze.ts';
 import type { DwgConverter } from './dwg.ts';
 import { extract, ExtractError, type Extracted } from './extract.ts';
 import { estimateKit, type KitEstimate } from './kit.ts';
@@ -60,8 +60,17 @@ export interface DocumentResult {
   memoryOpenings: { room?: string; width_mm?: number; height_mm?: number; wall_mm?: number; qty?: number }[];
 }
 
+/** Этап, на котором разбор остановился — в журнал (RFD-AI-AGENT-WA-PHOTO, п. 1). */
+export type DocumentStage = 'limit' | 'extract' | 'ocr' | 'llm';
+
 export class DocumentError extends Error {
   override name = 'DocumentError';
+  constructor(
+    message: string,
+    readonly stage: DocumentStage = 'llm',
+  ) {
+    super(message);
+  }
 }
 
 /** Фото без текста короче этого — считаем фотографией двери/проёма, не документом. */
@@ -79,36 +88,47 @@ export class DocumentService {
   async analyze(input: AnalyzeFileInput): Promise<DocumentResult> {
     const { settings } = input;
     const llm = (await this.d.llmFor?.(input.accountId)) ?? this.d.llm;
-    if (!llm) throw new DocumentError('LLM не настроена: задайте ключ провайдера в настройках («Модель») или на сервере');
+    if (!llm) throw new DocumentError('LLM не настроена: задайте ключ провайдера в настройках («Модель») или на сервере', 'limit');
     if ((await this.d.documents.countToday(input.accountId)) >= settings.vision.maxFilesPerDay) {
-      throw new DocumentError(`Достигнут дневной лимит разбора файлов (${settings.vision.maxFilesPerDay})`);
+      throw new DocumentError(`Достигнут дневной лимит разбора файлов (${settings.vision.maxFilesPerDay})`, 'limit');
     }
     let extracted: Extracted;
     try {
       extracted = await extract(input.bytes, input.mime, input.filename, this.d.dwg ? { dwg: this.d.dwg } : {});
     } catch (err) {
-      throw new DocumentError(err instanceof ExtractError ? err.message : `Файл не читается: ${(err as Error).message}`);
+      throw new DocumentError(err instanceof ExtractError ? err.message : `Файл не читается: ${(err as Error).message}`, 'extract');
     }
 
     let text = extracted.text;
     let ocrName: string | null = null;
     let image: { bytes: Uint8Array; mime: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' } | undefined;
+    const mimeLower = input.mime.toLowerCase().split(';')[0]?.trim() ?? '';
+    const route = input.route ?? resolveRoute(settings);
+    // Фото (jpeg/png) смотрит модель с vision как скан (RFD-AI-AGENT-WA-PHOTO, п. 3): смета, спецификация, замерный
+    // лист на фото читаются ею лучше OCR; OCR, если включён, даёт текст-подсказку, его сбой не фатален.
+    // Выключено «фото — модели» или модели без vision нет — как раньше: только OCR.
+    const visionForImage = extracted.format === 'image' && settings.vision.photosToClaude && IMAGE_MIMES.has(mimeLower) && hasVision(route);
     if (extracted.needsOcr) {
       const ocr = this.d.ocr(settings.vision.provider);
-      if (!ocr) throw new DocumentError(extracted.format === 'image' ? 'Распознавание фото выключено (настройка «Файлы и фото клиентов»)' : 'В PDF нет текста, а распознавание сканов выключено');
-      try {
-        const r = await ocr.recognize(input.bytes, mimeFor(extracted, input.mime));
-        ocrName = r.provider;
-        text = [text, r.text].filter((x) => x.trim()).join('\n');
-      } catch (err) {
-        throw new DocumentError(`Распознавание: ${(err as Error).message}`);
+      if (!ocr && !visionForImage) {
+        throw new DocumentError(extracted.format === 'image' ? 'Распознавание фото выключено (настройка «Файлы и фото клиентов»)' : 'В PDF нет текста, а распознавание сканов выключено', 'ocr');
+      }
+      if (ocr) {
+        try {
+          const r = await ocr.recognize(input.bytes, mimeFor(extracted, input.mime));
+          ocrName = r.provider;
+          text = [text, r.text].filter((x) => x.trim()).join('\n');
+        } catch (err) {
+          if (!visionForImage) throw new DocumentError(`Распознавание: ${(err as Error).message}`, 'ocr');
+          ocrName = null;
+        }
       }
     }
-    // Фото без текста (дверь, проём, интерьер): картинку смотрит Claude, если заказчик это разрешил.
-    const mimeLower = input.mime.toLowerCase().split(';')[0]?.trim() ?? '';
-    if (extracted.format === 'image' && text.trim().length < PHOTO_TEXT_THRESHOLD) {
-      if (!settings.vision.photosToClaude) throw new DocumentError('На фото нет текста, а анализ фотографий моделью выключен');
-      if (!IMAGE_MIMES.has(mimeLower)) throw new DocumentError(`Формат фото ${mimeLower || 'неизвестен'} не поддерживается`);
+    if (visionForImage) image = { bytes: input.bytes, mime: mimeLower as NonNullable<typeof image>['mime'] };
+    // Фото без текста (дверь, проём, интерьер) без модели с vision: картинку показать некому.
+    else if (extracted.format === 'image' && text.trim().length < PHOTO_TEXT_THRESHOLD) {
+      if (!settings.vision.photosToClaude) throw new DocumentError('На фото нет текста, а анализ фотографий моделью выключен', 'ocr');
+      if (!IMAGE_MIMES.has(mimeLower)) throw new DocumentError(`Формат фото ${mimeLower || 'неизвестен'} не поддерживается`, 'extract');
       image = { bytes: input.bytes, mime: mimeLower as NonNullable<typeof image>['mime'] };
     }
 
@@ -120,11 +140,11 @@ export class DocumentService {
       filename: input.filename,
       ...(image ? { image } : {}),
         ...(input.hint ? { hint: input.hint } : image ? { hint: 'photo' as const } : {}),
-        ...(input.route ? { route: input.route } : {}),
+        route,
       });
     } catch (err) {
       // Ответ не по схеме или модель не видит изображения — понятная ошибка менеджеру, а не 500.
-      if (err instanceof AnalyzeError) throw new DocumentError(err.message);
+      if (err instanceof AnalyzeError) throw new DocumentError(err.message, 'llm');
       throw err;
     }
     const data = analyzed.data;
@@ -177,6 +197,16 @@ export class DocumentService {
     result.text = documentToText(result, input.filename);
     result.note = documentToNote(result, input.filename);
     return result;
+  }
+}
+
+/** Есть ли в маршруте модель, которая видит изображения (основная или резервная). */
+function hasVision(route: ChatRoute): boolean {
+  try {
+    pickVisionRoute(route, true);
+    return true;
+  } catch {
+    return false;
   }
 }
 

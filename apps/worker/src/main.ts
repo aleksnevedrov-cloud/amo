@@ -214,6 +214,7 @@ const pipeline = new DialogPipeline({
     llm,
     ai,
     documents: docs,
+    log: (fields, msg) => log.warn(fields, msg),
     outcomes,
     email: {
       reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),

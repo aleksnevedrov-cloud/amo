@@ -85,12 +85,36 @@ describe('вложения из чата (фаза 3)', () => {
     expect(doc!.costRub).toBeGreaterThan(0);
   });
 
-  it('сбой разбора — агенту пометка, диалог продолжается', async () => {
+  it('сбой разбора — агенту пометка, диалог продолжается; в журнале и логе — этап, текст ошибки, размер файла (RFD-AI-AGENT-WA-PHOTO, п. 1)', async () => {
+    const logged: Record<string, unknown>[] = [];
     const t = await setup([text('Не удалось открыть файл. Напишите, пожалуйста, размеры проёмов текстом.')], {}, analyzer(true));
-    await t.dialog.enqueue(ACC, lead, '', 'https://test.amocrm.ru/c/2', { url: 'https://drive.amocrm.ru/files/scan.pdf', type: 'file' });
-    expect((await t.pipeline.processLead(ACC, lead)).status).toBe('replied');
+    const pipeline = new DialogPipeline({ ...t, log: (f) => logged.push(f) });
+    await t.dialog.enqueue(ACC, lead, '', 'https://test.amocrm.ru/c/2', { url: 'https://drive.amocrm.ru/files/scan.pdf?sig=secret', type: 'file' });
+    expect((await pipeline.processLead(ACC, lead)).status).toBe('replied');
     expect(JSON.stringify(t.llm.requests[0]!.messages)).toContain('разобрать не удалось');
-    expect((await t.journal.list(ACC, { leadId: lead })).some((e) => e.kind === 'error' && e.summary.includes('OCR недоступен'))).toBe(true);
+    const err = (await t.journal.list(ACC, { leadId: lead })).find((e) => e.kind === 'error');
+    expect(err?.summary).toBe('Разбор файла «scan.pdf» — разбор: OCR недоступен');
+    expect(err?.details).toMatchObject({ stage: 'analyze', stageTitle: 'разбор', error: 'OCR недоступен', errorName: 'Error', url: 'https://drive.amocrm.ru/files/scan.pdf', mime: 'image/jpeg', bytes: 3, ms: expect.any(Number) });
+    expect(logged[0]).toMatchObject({ accountId: ACC, leadId: lead, filename: 'scan.pdf', stage: 'analyze', error: 'OCR недоступен' });
+  });
+
+  it('файл не скачался (HTTP 404 из хранилища) — в журнале этап «скачивание», код ответа и признак повтора; ошибка без текста не теряется', async () => {
+    const t = await setup([text('Файл не открылся, напишите размеры текстом.'), text('Файл не открылся, напишите размеры текстом.')], {}, analyzer());
+    const notFound = Object.assign(new Error('Вложение недоступно: HTTP 404 (повтор через 2 с не помог, первая попытка: Вложение недоступно: HTTP 404)'), { name: 'AttachmentError', status: 404, retried: true });
+    const pipeline = new DialogPipeline({ ...t, download: async () => { throw notFound; } });
+    await t.dialog.enqueue(ACC, lead, '', 'https://test.amocrm.ru/c/4', { url: 'https://store.wazzup24.com/cd1574bb.jpeg', type: 'picture' });
+    expect((await pipeline.processLead(ACC, lead)).status).toBe('replied');
+    const err = (await t.journal.list(ACC, { leadId: lead })).find((e) => e.kind === 'error');
+    expect(err?.summary).toContain('Разбор файла «cd1574bb.jpeg» — скачивание: Вложение недоступно: HTTP 404');
+    expect(err?.details).toMatchObject({ stage: 'download', status: 404, retried: true, type: 'picture', url: 'https://store.wazzup24.com/cd1574bb.jpeg' });
+    // Исключение без сообщения (так выглядела запись 14.10 по сделке 89955) — в журнале «без текста» и имя класса.
+    const silent = new DialogPipeline({ ...t, download: async () => { throw new TypeError(''); } });
+    lead += 1;
+    await t.dialog.enqueue(ACC, lead, '', 'https://test.amocrm.ru/c/5', { url: 'https://store.wazzup24.com/x.jpeg', type: 'picture' });
+    await silent.processLead(ACC, lead);
+    const e2 = (await t.journal.list(ACC, { leadId: lead })).find((e) => e.kind === 'error');
+    expect(e2?.summary).toBe('Разбор файла «x.jpeg» — скачивание: TypeError без текста');
+    expect(e2?.details).toMatchObject({ stage: 'download', error: 'TypeError без текста', errorName: 'TypeError', status: null });
   });
 
   it('автоматический разбор выключен — файл не скачивается', async () => {

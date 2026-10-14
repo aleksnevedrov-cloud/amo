@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { downloadAttachment, isAudio, SttError, WhisperStt, YandexStt } from '../src/index.ts';
+import { AttachmentError, downloadAttachment, isAudio, SttError, WhisperStt, YandexStt } from '../src/index.ts';
 
 const audio = new Uint8Array([1, 2, 3]);
 
@@ -43,6 +43,42 @@ describe('downloadAttachment', () => {
     const r = await downloadAttachment('https://drive.amocrm.ru/v.ogg', { fetch: f, resolve: async () => ['93.158.134.3'] });
     expect(r).toEqual({ bytes: audio, mime: 'audio/ogg' });
     await expect(downloadAttachment('https://x/v.ogg', { fetch: f, resolve: async () => ['10.0.0.1'] })).rejects.toThrow(/внутреннюю/);
+  });
+
+  it('ответ 403/404 или обрыв сети — одна повторная попытка; в ошибке код ответа и признак повтора (RFD-AI-AGENT-WA-PHOTO)', async () => {
+    const resolve = async () => ['93.158.134.3'];
+    const calls: Record<string, unknown>[] = [];
+    let n = 0;
+    const flaky = (async (_u: unknown, init?: RequestInit) => {
+      calls.push({ headers: init?.headers });
+      n += 1;
+      return n === 1 ? new Response('', { status: 404, statusText: 'Not Found' }) : new Response(audio, { headers: { 'content-type': 'image/jpeg' } });
+    }) as typeof fetch;
+    const ok = await downloadAttachment('https://store.wazzup24.com/x.jpeg', { fetch: flaky, resolve, retryMs: 1 });
+    expect(ok.mime).toBe('image/jpeg');
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.headers).toMatchObject({ 'user-agent': expect.stringContaining('ai-door') });
+    const gone = (async () => new Response('', { status: 404 })) as typeof fetch;
+    const err = await downloadAttachment('https://store.wazzup24.com/x.jpeg', { fetch: gone, resolve, retryMs: 1 }).catch((e: AttachmentError) => e);
+    expect(err).toBeInstanceOf(AttachmentError);
+    expect(err).toMatchObject({ status: 404, retried: true });
+    expect((err as Error).message).toMatch(/HTTP 404.*повтор через 0 с не помог/);
+    // 401 не повторяется: ссылка требует права, второй запрос их не даст.
+    let tries = 0;
+    const denied = (async () => {
+      tries += 1;
+      return new Response('', { status: 401 });
+    }) as typeof fetch;
+    await expect(downloadAttachment('https://store.wazzup24.com/x.jpeg', { fetch: denied, resolve, retryMs: 1 })).rejects.toMatchObject({ status: 401, retried: false });
+    expect(tries).toBe(1);
+    // Обрыв сети — статус 0, повтор.
+    let net = 0;
+    const broken = (async () => {
+      net += 1;
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    await expect(downloadAttachment('https://store.wazzup24.com/x.jpeg', { fetch: broken, resolve, retryMs: 1 })).rejects.toMatchObject({ status: 0, retried: true, message: expect.stringContaining('fetch failed') });
+    expect(net).toBe(2);
   });
 
   it('isAudio', () => {

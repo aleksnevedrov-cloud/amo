@@ -69,18 +69,53 @@ export class WhisperStt implements SttProvider {
   }
 }
 
-/** Скачивает вложение по ссылке из amo с проверкой адреса и размера. */
+/** Вложение не скачалось: код ответа (0 — сеть/таймаут) и была ли повторная попытка — в журнал (RFD-AI-AGENT-WA-PHOTO, п. 1). */
+export class AttachmentError extends SttError {
+  override name = 'AttachmentError';
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retried = false,
+  ) {
+    super(message);
+  }
+}
+
+/** Коды, после которых скачивание повторяется один раз: ссылка хранилища могла ещё не раздаться или ответить временно. */
+const RETRY_STATUSES = new Set([403, 404, 408, 425, 429, 500, 502, 503, 504]);
+const DOWNLOAD_RETRY_MS = 2000;
+
+/**
+ * Скачивает вложение по ссылке из amo или Wazzup с проверкой адреса и размера. Ответ без 2xx или обрыв сети —
+ * одна повторная попытка через retryMs; в ошибке — код ответа, чтобы причина была видна в журнале.
+ */
 export async function downloadAttachment(
   url: string,
-  opts: { fetch?: typeof fetch; resolve?: (host: string) => Promise<string[]> } = {},
+  opts: { fetch?: typeof fetch; resolve?: (host: string) => Promise<string[]>; retryMs?: number } = {},
 ): Promise<{ bytes: Uint8Array; mime: string }> {
   const safe = await assertPublicUrl(url, opts.resolve);
-  const res = await (opts.fetch ?? fetch)(safe, { signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new SttError(`Вложение недоступно: HTTP ${res.status}`);
-  if (Number(res.headers.get('content-length') ?? 0) > MAX_AUDIO_BYTES) throw new SttError('Вложение больше 10 МБ');
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  if (bytes.byteLength > MAX_AUDIO_BYTES) throw new SttError('Вложение больше 10 МБ');
-  return { bytes, mime: res.headers.get('content-type') ?? 'application/octet-stream' };
+  const f = opts.fetch ?? fetch;
+  const attempt = async (): Promise<{ bytes: Uint8Array; mime: string } | AttachmentError> => {
+    let res: Response;
+    try {
+      // Хранилища (store.wazzup24.com) отдают файл по прямой ссылке без токена; User-Agent — чтобы CDN не отбрасывал запрос без него.
+      res = await f(safe, { signal: AbortSignal.timeout(30_000), headers: { 'user-agent': 'ai-door-agent/1.0', accept: '*/*' } });
+    } catch (err) {
+      return new AttachmentError(`Вложение не скачалось: ${(err as Error)?.message || String(err)}`, 0);
+    }
+    if (!res.ok) return new AttachmentError(`Вложение недоступно: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`, res.status);
+    if (Number(res.headers.get('content-length') ?? 0) > MAX_AUDIO_BYTES) throw new SttError('Вложение больше 10 МБ');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > MAX_AUDIO_BYTES) throw new SttError('Вложение больше 10 МБ');
+    return { bytes, mime: res.headers.get('content-type') ?? 'application/octet-stream' };
+  };
+  const first = await attempt();
+  if (!(first instanceof AttachmentError)) return first;
+  if (first.status !== 0 && !RETRY_STATUSES.has(first.status)) throw first;
+  await new Promise((r) => setTimeout(r, opts.retryMs ?? DOWNLOAD_RETRY_MS));
+  const second = await attempt();
+  if (second instanceof AttachmentError) throw new AttachmentError(`${second.message} (повтор через ${Math.round((opts.retryMs ?? DOWNLOAD_RETRY_MS) / 1000)} с не помог, первая попытка: ${first.message})`, second.status, true);
+  return second;
 }
 
 export const isAudio = (type: string | null | undefined, mime?: string) =>

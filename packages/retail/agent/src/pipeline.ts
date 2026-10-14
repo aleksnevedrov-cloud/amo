@@ -84,6 +84,8 @@ export interface PipelineDeps {
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(accountId: number, provider: WidgetSettings['stt']['provider']): Promise<SttProvider | null>;
   download?: typeof downloadAttachment;
+  /** Лог воркера (pino.warn): сбои разбора вложений с деталями, не только журнал. */
+  log?: (fields: Record<string, unknown>, msg: string) => void;
   /** Пауза перед повторным поиском вложения в Wazzup (мс); в тестах 0. */
   wazzupRetryMs?: number;
   /** Почта: ответы письмом и признак ответа менеджера. */
@@ -149,6 +151,34 @@ const isEmptyPlaceholder = (text: string): boolean => {
 };
 const WAZZUP_ATTACH_WINDOW_MS = 3 * 60_000;
 const WAZZUP_ATTACH_RETRY_MS = 5_000;
+/** Подписи этапов разбора вложения для журнала. */
+const STAGE_TITLE: Record<string, string> = { download: 'скачивание', limit: 'лимит', extract: 'чтение файла', ocr: 'распознавание', llm: 'модель', analyze: 'разбор' };
+
+/** Текст исключения для журнала: имя и сообщение, причина (cause), не-Error — как есть; пустое — «без текста». */
+export function describeError(err: unknown): { error: string; errorName: string | null; cause: string | null } {
+  if (err instanceof Error) {
+    const cause = err.cause instanceof Error ? `${err.cause.name}: ${err.cause.message}` : err.cause !== undefined ? String(err.cause) : null;
+    return { error: err.message || `${err.name} без текста`, errorName: err.name, cause };
+  }
+  if (err === null || err === undefined || err === '') return { error: 'ошибка без текста', errorName: null, cause: null };
+  if (typeof err === 'object') {
+    const o = err as { message?: unknown; status?: unknown; code?: unknown };
+    const msg = typeof o.message === 'string' && o.message ? o.message : JSON.stringify(err).slice(0, 300);
+    return { error: [msg, o.code !== undefined ? `code ${String(o.code)}` : '', o.status !== undefined ? `status ${String(o.status)}` : ''].filter(Boolean).join(', '), errorName: null, cause: null };
+  }
+  return { error: String(err), errorName: null, cause: null };
+}
+
+/** Адрес вложения без параметров запроса (в ссылках хранилищ бывают подписи). */
+const safeUrl = (url: string): string => {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url.slice(0, 200);
+  }
+};
+
 /** Тип вложения Wazzup → MIME для существующих веток разбора (vision/документы/STT). */
 const wazzupMime = (type: string | null): string =>
   type === 'image' ? 'image/jpeg' : type === 'audio' ? 'audio/ogg' : type === 'video' ? 'video/mp4' : 'application/octet-stream';
@@ -634,23 +664,40 @@ export class DialogPipeline {
     }));
   }
 
-  /** Файл или фото из чата: разбор (фаза 3) или пометка, если разбор недоступен. */
+  /**
+   * Файл или фото из чата: разбор (фаза 3) или пометка, если разбор недоступен. Сбой — в журнал и лог воркера с этапом
+   * (скачивание / чтение файла / распознавание / модель), кодом ответа хранилища, текстом исключения и размером
+   * файла (RFD-AI-AGENT-WA-PHOTO, п. 1): пустое «разобрать не удалось» причину не объясняло.
+   */
   private async attachmentText(t: Turn, m: PendingMessage): Promise<string> {
     const url = m.attachmentUrl as string;
     const filename = decodeURIComponent(new URL(url, 'https://x').pathname.split('/').pop() ?? '') || 'файл';
     if (!this.d.documents || !t.settings.vision.autoParse) {
       return [m.text, `(клиент отправил файл «${filename}» — разбор вложений выключен, попросите описать словами)`].filter(Boolean).join('\n');
     }
+    const started = Date.now();
+    const source = safeUrl(url);
+    const fail = async (stage: string, err: unknown, extra: Record<string, unknown> = {}) => {
+      const e = describeError(err);
+      const details = { stage, stageTitle: STAGE_TITLE[stage] ?? stage, url: source, type: m.attachmentType ?? null, ms: Date.now() - started, ...e, ...extra };
+      await this.journal(t, { kind: 'error', summary: `Разбор файла «${filename}» — ${STAGE_TITLE[stage] ?? stage}: ${e.error}`, details });
+      this.d.log?.({ accountId: t.accountId, leadId: t.leadId, filename, ...details }, 'вложение: разбор не удался');
+      return [m.text, `(клиент отправил файл «${filename}», разобрать не удалось — попросите описать словами или передайте менеджеру)`].filter(Boolean).join('\n');
+    };
+    let file: { bytes: Uint8Array; mime: string };
     try {
-      const file = await (this.d.download ?? downloadAttachment)(url);
+      file = await (this.d.download ?? downloadAttachment)(url);
+    } catch (err) {
+      return fail('download', err, { status: (err as { status?: number }).status ?? null, retried: (err as { retried?: boolean }).retried ?? false });
+    }
+    try {
       const r = await this.d.documents.analyze({ accountId: t.accountId, leadId: t.leadId, source: 'chat', filename, mime: file.mime, bytes: file.bytes, settings: t.settings });
       t.openings.push(...r.memoryOpenings);
-      await this.journal(t, { kind: 'document', summary: `Разобран файл «${filename}» (${r.kind})`, details: { documentId: r.id, model: r.model, text: r.text }, costUsd: r.costUsd, costRub: r.costUsd * t.settings.billing.usdRubRate });
+      await this.journal(t, { kind: 'document', summary: `Разобран файл «${filename}» (${r.kind})`, details: { documentId: r.id, model: r.model, text: r.text, mime: file.mime, bytes: file.bytes.byteLength, ms: Date.now() - started }, costUsd: r.costUsd, costRub: r.costUsd * t.settings.billing.usdRubRate });
       if (t.settings.vision.noteInLead) await t.access.api.addLeadNote(t.leadId, r.note).catch(() => undefined);
       return [m.text, r.text].filter(Boolean).join('\n');
     } catch (err) {
-      await this.journal(t, { kind: 'error', summary: `Разбор файла «${filename}»: ${(err as Error).message}` });
-      return [m.text, `(клиент отправил файл «${filename}», разобрать не удалось — попросите описать словами или передайте менеджеру)`].filter(Boolean).join('\n');
+      return fail((err as { stage?: string }).stage ?? 'analyze', err, { mime: file.mime, bytes: file.bytes.byteLength });
     }
   }
 

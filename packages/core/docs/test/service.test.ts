@@ -148,10 +148,42 @@ describe('DocumentService', () => {
     await expect(svc.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'door.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1]), settings: strict })).rejects.toThrow(/выключен/);
   });
 
+  it('фото документа (смета в WhatsApp): картинку видит модель с vision вместе с текстом OCR; OCR упал или выключен — всё равно разбирается (RFD-AI-AGENT-WA-PHOTO, п. 3)', async () => {
+    const { repo, saved } = fakeRepo();
+    const estimate: DocumentData = { ...baseDoc, kind: 'estimate', title: 'Смета', summary: 'Дверь и фурнитура.', positions: [{ name: 'Дверь межкомнатная массив дуба', marking: null, width_mm: 900, height_mm: 2000, qty: 1, unit: 'компл.', price_rub: 93_833.33, material: 'массив дуба', color: null, fireproof: null, note: 'коробка 78×38, наличник 80/2200, добор 250/2200' }], questions: ['фото нечёткое, уточнить: строка 5'] };
+    const seen: LlmRequest[] = [];
+    const llm = fakeLlm(estimate, (r) => seen.push(r));
+    const ocr: OcrProvider = { name: 'tesseract', async recognize() { return { provider: 'tesseract', pages: [], text: 'Дверь массив дуба 900х2000 93 833,33\nФурнитура 22 633,33' }; } };
+    const svc = new DocumentService({ llm, catalog, documents: repo, ocr: () => ocr });
+    const r = await svc.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'photo.jpeg', mime: 'image/jpeg', bytes: new Uint8Array([1, 2]), settings });
+    const blocks = seen[0]!.messages[0]!.content as { type: string; text?: string }[];
+    expect(blocks.some((b) => b.type === 'image')).toBe(true);
+    expect(blocks.find((b) => b.type === 'text')?.text).toContain('Дверь массив дуба 900х2000 93 833,33');
+    expect(blocks.find((b) => b.type === 'text')?.text).toContain('разберите его как скан');
+    expect(r.ocr).toBe('tesseract');
+    expect(r.kind).toBe('estimate');
+    expect(r.text).toContain('фото нечёткое, уточнить');
+    expect(saved[0]).toMatchObject({ format: 'image', ocr: 'tesseract', kind: 'estimate' });
+    // OCR упал — фото всё равно уходит модели, в записи ocr = null.
+    const broken: OcrProvider = { name: 'tesseract', async recognize() { throw new Error('Tesseract не запустился'); } };
+    const r2 = await new DocumentService({ llm, catalog, documents: repo, ocr: () => broken }).analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'photo.jpeg', mime: 'image/jpeg', bytes: new Uint8Array([1, 2]), settings });
+    expect(r2.ocr).toBeNull();
+    expect(r2.kind).toBe('estimate');
+    // OCR выключен — модель с vision разбирает фото сама.
+    const r3 = await new DocumentService({ llm, catalog, documents: repo, ocr: () => null }).analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'photo.jpeg', mime: 'image/jpeg', bytes: new Uint8Array([1, 2]), settings });
+    expect(r3.kind).toBe('estimate');
+    // «Фото — модели» выключено: только OCR, его сбой — ошибка с этапом ocr.
+    const strict = { ...settings, vision: { ...settings.vision, photosToClaude: false } };
+    const err = await new DocumentService({ llm, catalog, documents: repo, ocr: () => broken }).analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'photo.jpeg', mime: 'image/jpeg', bytes: new Uint8Array([1, 2]), settings: strict }).catch((e: DocumentError) => e);
+    expect(err).toBeInstanceOf(DocumentError);
+    expect(err).toMatchObject({ stage: 'ocr', message: 'Распознавание: Tesseract не запустился' });
+  });
+
   it('OCR выключен — понятная ошибка; без LLM — ошибка', async () => {
     const { repo } = fakeRepo();
+    const strict = { ...settings, vision: { ...settings.vision, photosToClaude: false } };
     const svc = new DocumentService({ llm: fakeLlm(baseDoc), catalog, documents: repo, ocr: () => null });
-    await expect(svc.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'a.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1]), settings })).rejects.toBeInstanceOf(DocumentError);
+    await expect(svc.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'a.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1]), settings: strict })).rejects.toMatchObject({ name: 'DocumentError', stage: 'ocr' });
     const none = new DocumentService({ llm: null, catalog, documents: repo, ocr: () => null });
     await expect(none.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'a.txt', mime: 'text/plain', bytes: new Uint8Array([65]), settings })).rejects.toThrow(/LLM/);
   });
