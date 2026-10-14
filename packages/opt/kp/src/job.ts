@@ -1,8 +1,11 @@
-import { convertLegacyOffice } from './convert.ts';
 import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob } from './research-job.ts';
 import type { OptCore } from './deps.ts';
-import { buildKpDraft, type KpDraftDeps } from './draft.ts';
+import { buildKpDraft, type KpDraftDeps, type ParsedFile } from './draft.ts';
+import { analyzeDraftFile } from './file-analyze.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
+
+/** Подпись способа разбора файла для журнала. */
+const METHOD_LABEL: Record<NonNullable<ParsedFile['method']>, string> = { docs: 'модель одним запросом', columns: 'по колонкам, без модели', 'columns+model': 'по колонкам + модель', 'model-chunks': 'модель порциями' };
 
 /** Очередь опта в Redis (база 1): задание «собрать черновик» по кнопке менеджера; плановых задач нет (ТЗ 6.5). */
 export const KP_QUEUE = 'kp';
@@ -40,15 +43,15 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const route = resolveOptRoute(settings);
     const amo = await core.amoFor(accountId);
     const widgetSettings = toWidgetSettings(settings);
+    // Таблицы xlsx — по колонкам и порциями (file-analyze.ts / table-parse.ts), остальное — @core/docs; старый Office — через LibreOffice.
     const analyze: KpDraftDeps['analyze'] =
       settings.vision.provider === 'off'
         ? null
-        : async (orig) => {
-            // Старый Word/Excel (.doc, .xls, .rtf…) → DOCX/XLSX через LibreOffice, затем обычный разбор.
-            const file = await convertLegacyOffice(orig);
-            const r = await core.docs.analyze({ accountId, leadId, source: 'widget', filename: file.filename, mime: file.mime, bytes: file.bytes, settings: widgetSettings, createdBy: job.userId, hint: 'request', route });
-            return { id: r.id, filename: orig.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements };
-          };
+        : (orig) =>
+            analyzeDraftFile(
+              { docs: core.docs, documents: core.documents, llm: ai.llm, settings: widgetSettings, route, pricing: settings.billing.pricing, accountId, leadId, userId: job.userId ?? null, ...(hooks.onProgress ? { onProgress: hooks.onProgress } : {}) },
+              orig,
+            );
     // Ящик, подключённый к amoCRM, читается по IMAP только на чтение и только здесь — по кнопке (вариант А).
     const m = settings.mail;
     const mailPassword = m.username && m.imapHost ? await core.secrets.get(accountId, 'smtp') : null;
@@ -83,8 +86,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
       accountId,
       leadId,
       kind: 'kp_draft',
-      summary: `Черновик КП: позиций ${r.payload.items.length}, документов ${r.payload.source.documents.length}` + (r.payload.source.skipped.length ? `, пропущено файлов ${r.payload.source.skipped.length}` : ''),
-      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped },
+      summary:
+        `Черновик КП: позиций ${r.payload.items.length}, документов ${r.payload.source.documents.length}` +
+        (r.payload.source.skipped.length ? `, пропущено файлов ${r.payload.source.skipped.length}` : '') +
+        (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : ''),
+      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files },
       inputTokens: r.cost.inputTokens,
       outputTokens: r.cost.outputTokens,
       costUsd: r.cost.usd,

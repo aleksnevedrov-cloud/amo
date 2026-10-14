@@ -121,6 +121,14 @@ export interface ParsedFile {
   positions: Position[];
   questions: string[];
   requirements: string[];
+  /** Время разбора, мс — в журнал (RFD-AI-AGENT-OPT-XLSX-TIMEOUT, п. 1). */
+  ms?: number;
+  /** docs — @core/docs одним запросом; columns / columns+model / model-chunks — таблица (table-parse.ts). */
+  method?: 'docs' | 'columns' | 'columns+model' | 'model-chunks';
+  chunks?: number;
+  model?: string | null;
+  warnings?: string[];
+  costUsd?: number;
 }
 
 export interface KpDraftDeps {
@@ -158,6 +166,8 @@ export interface KpDraftResult {
   cost: CostResult;
   provider: string | null;
   model: string | null;
+  /** Разобранные файлы: способ, порции, время — для журнала (без позиций). */
+  files: { name: string; positions: number; ms: number | null; method: ParsedFile['method'] | null; chunks: number | null; model: string | null; warnings: string[]; costUsd: number | null }[];
 }
 
 /** Блоки, которые клиент может попросить включить в КП. */
@@ -256,6 +266,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,
     model: letter?.model ?? null,
+    files: files.parsed.map((f) => ({ name: f.filename, positions: f.positions.length, ms: f.ms ?? null, method: f.method ?? null, chunks: f.chunks ?? null, model: f.model ?? null, warnings: f.warnings ?? [], costUsd: f.costUsd ?? null })),
   };
 }
 

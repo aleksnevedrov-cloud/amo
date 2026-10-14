@@ -610,6 +610,9 @@ importers:
       docxtemplater:
         specifier: 3.50.0
         version: 3.50.0
+      exceljs:
+        specifier: ^4.4.0
+        version: 4.4.0
       imapflow:
         specifier: ^2.0.6
         version: 2.0.6

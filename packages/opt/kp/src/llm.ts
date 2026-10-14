@@ -14,6 +14,14 @@ export interface OptAi {
 
 export type OptAiProvider = (accountId: number) => Promise<OptAi | null>;
 
+/**
+ * Таймаут одного запроса к модели (RFD-AI-AGENT-OPT-XLSX-TIMEOUT, п. 1): 180 с вместо 60 с по умолчанию SDK —
+ * разбор таблицы по схеме и поиск цен с веб-поиском отвечают дольше минуты.
+ */
+export const OPT_LLM_TIMEOUT_MS = 180_000;
+/** Повторов внутри SDK нет: повтор после таймаута — один, на уровне вызова (п. 4), резервная модель — в шлюзе. */
+export const OPT_LLM_SDK_RETRIES = 0;
+
 export interface OptAiOptions {
   accountKey(accountId: number, provider: ProviderId): Promise<string | null>;
   serverKeys?: Partial<Record<ProviderId, string | undefined>>;
@@ -29,7 +37,7 @@ export function createOptAi(opts: OptAiOptions): OptAiProvider {
     const k = `${provider}:${key}`;
     let p = adapters.get(k);
     if (!p) {
-      p = opts.make ? opts.make(provider, key) : createProvider(provider, key, opts.fetch ? { fetch: opts.fetch } : {});
+      p = opts.make ? opts.make(provider, key) : createProvider(provider, key, { timeoutMs: OPT_LLM_TIMEOUT_MS, maxRetries: OPT_LLM_SDK_RETRIES, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
       if (adapters.size > 1000) adapters.clear();
       adapters.set(k, p);
     }

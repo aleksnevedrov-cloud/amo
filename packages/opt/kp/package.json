@@ -20,6 +20,7 @@
     "@core/llm": "workspace:*",
     "@core/shared": "workspace:*",
     "docxtemplater": "3.50.0",
+    "exceljs": "^4.4.0",
     "imapflow": "^2.0.6",
     "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",
