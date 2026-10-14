@@ -7,7 +7,17 @@ import type { OptSettings } from '@opt/kp/settings';
 export type { ModelInfo, ModelRef, OptSettings, ProviderId };
 
 /** Константы КП опта: к общему набору добавлена фраза о ценах (плейсхолдер {{price_note}}). */
-export type KpConstants = CoreKpConstants & { priceNote?: string; analogPriceTolerancePct?: number; manufacturerDomains?: string[] };
+export type KpConstants = CoreKpConstants & {
+  priceNote?: string;
+  analogPriceTolerancePct?: number;
+  manufacturerDomains?: string[];
+  // Поиск рыночных цен (RFD-AI-AGENT-OPT-PRICE): коэффициенты, автозапуск, кэш, лимит.
+  priceCoefficient?: number;
+  manufacturerCoefficients?: Record<string, number>;
+  autoResearch?: boolean;
+  researchCacheDays?: number;
+  maxPositionsPerRun?: number;
+};
 
 export interface Status {
   accountId: number;
@@ -32,6 +42,54 @@ export interface KpDraftLine {
   price: number | null;
   lead_time: string;
   discount: number;
+  /** Откуда цена: поиск по точной модели, аналог или менеджер руками (этап 5). */
+  priceSource?: 'research' | 'analog' | 'manager';
+  market?: { median: number; min: number; max: number; count: number; unit: 'piece'; researchId: number; researchedAt: string } | null;
+  coefficient?: number;
+}
+
+/** Состояние поиска цен по позициям черновика (GET /kp/research). */
+export interface ResearchOffer {
+  url: string;
+  seller: string;
+  title: string;
+  price: number;
+  currency: string;
+  unit: 'piece' | 'set' | 'm2';
+  vatStated: 'included' | 'no_vat' | 'pre_net' | 'unknown';
+  unitPrice: number | null;
+  accepted: boolean;
+  reason: string | null;
+  manufacturer: boolean;
+  formula: string | null;
+  notes: string[];
+  vatAssumed: boolean;
+  areaScaled: boolean;
+  sourceSize: string | null;
+  foundAt: string;
+}
+
+export interface ResearchPosition {
+  requestIndex: number;
+  job: DraftJob;
+  research: {
+    id: number;
+    status: 'ok' | 'none' | 'failed';
+    query: string;
+    stats: { min: number; max: number; median: number; count: number; unit: 'piece' } | null;
+    error: string | null;
+    createdAt: string;
+    webSearchCalls: number;
+    costUsd: number;
+    analog: { url: string; unitPrice: number | null; reason: string } | null;
+    offers: ResearchOffer[];
+  } | null;
+}
+
+export interface ResearchState {
+  draftId: number;
+  pending: boolean;
+  positions: ResearchPosition[];
 }
 
 export interface KpDraftInfo {
@@ -164,6 +222,9 @@ export class KpApi extends ApiClient {
   saveDraftItems = (id: number, items: KpDraftLine[]) => this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   /** Кнопка «Собрать документ»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
   buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[] }>('POST', '/widget/v1/kp/build', { draftId });
+  /** Поиск цен: все позиции без цены ('all') или одна позиция; force — «искать заново» мимо кэша. */
+  research = (draftId: number, requestIndexes: number[] | 'all' = 'all', force = false) => this.call<{ queued: number[]; reason?: string }>('POST', '/widget/v1/kp/research', { draftId, requestIndexes, force });
+  researchState = (draftId: number) => this.call<ResearchState>('GET', `/widget/v1/kp/research?draftId=${draftId}`);
   sendPreview = (draftId: number) => this.call<SendPreviewInfo>('GET', `/widget/v1/kp/send/preview?draftId=${draftId}`);
   /** «Проверено, отправить»: письмо уходит только отсюда. */
   send = (body: { draftId: number; to: string; cc?: string; subject: string; text: string; resendConfirmed?: boolean }) =>

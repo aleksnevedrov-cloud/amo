@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage } from '@core/widget-core';
-import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo } from '../api.ts';
+import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo, ResearchPosition, ResearchState } from '../api.ts';
 import { SendPreview } from './SendPreview.tsx';
 
 /**
@@ -89,15 +89,59 @@ function useKpDraft(api: KpApi, leadId: number) {
   };
 
   const edit = (i: number, patch: Partial<KpDraftLine>) => {
-    setLines((xs) => xs.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+    // Цена, которую менеджер поменял руками, становится ручной (сервер делает то же при сохранении).
+    setLines((xs) => xs.map((l, k) => (k === i ? { ...l, ...patch, ...('price' in patch && patch.price !== l.price && patch.price !== null ? { priceSource: 'manager' as const } : {}) } : l)));
     setDirty(true);
   };
 
-  return { draft, job, lines, dirty, busy, error, pending, act, edit, take };
+  // Поиск цен (RFD-AI-AGENT-OPT-PRICE, этап 6): состояние по позициям, опрос раз в 3 с, пока есть queued / running.
+  const [research, setResearch] = useState<ResearchState | null>(null);
+  const wasPending = useRef(false);
+  const draftId = draft?.id ?? null;
+  const loadResearch = useCallback(async () => {
+    if (!draftId) return;
+    try {
+      const r = await api.researchState(draftId);
+      if (!alive.current) return;
+      setResearch(r);
+      // Поиск закончился — цены легли в черновик: перечитываем его, не трогая несохранённые правки менеджера.
+      if (!r.pending && wasPending.current && !dirty) await refresh();
+      wasPending.current = r.pending;
+    } catch (err) {
+      if (alive.current) setError(errorMessage(err));
+    }
+  }, [api, draftId, refresh, dirty]);
+  useEffect(() => {
+    setResearch(null);
+    void loadResearch();
+  }, [loadResearch]);
+  const researching = research?.pending ?? false;
+  useEffect(() => {
+    if (!researching) return;
+    const t = setInterval(() => void loadResearch(), POLL_MS);
+    return () => clearInterval(t);
+  }, [researching, loadResearch]);
+  const findPrices = async (which: number[] | 'all', force = false) => {
+    if (!draftId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.research(draftId, which, force);
+      if (!alive.current) return;
+      if (!r.queued.length && r.reason) setError(r.reason);
+      await loadResearch();
+    } catch (err) {
+      if (alive.current) setError(errorMessage(err));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  return { draft, job, lines, dirty, busy, error, pending, act, edit, take, research, researching, findPrices };
 }
 
 export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
-  const { draft, job, lines, dirty, busy, error, pending, act, edit, take } = useKpDraft(api, leadId);
+  const { draft, job, lines, dirty, busy, error, pending, act, edit, take, research, researching, findPrices } = useKpDraft(api, leadId);
   const [preview, setPreview] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
 
@@ -160,7 +204,14 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           <div className="opt-kp-note">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>
         ) : (
           <>
-            <KpLinesTiles lines={lines} needsManager={draft.needsManager} onEdit={edit} />
+            {draft.status === 'draft' && (
+              <div className="opt-actions">
+                <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending || researching || dirty} title={dirty ? 'Сначала сохраните правки' : 'Найти рыночные цены по позициям без цены; позиции с ценой не трогаются'} onClick={() => void findPrices('all')}>
+                  {researching ? 'Ищу цены…' : 'Найти цены'}
+                </button>
+              </div>
+            )}
+            <KpLinesTiles lines={lines} needsManager={draft.needsManager} research={research} locked={draft.status !== 'draft' || busy || pending || dirty} onEdit={edit} onFind={(i, force) => void findPrices([i], force)} />
             <div className="opt-kp-sep" />
             <div className="opt-kp-total">
               <span>Итого</span>
@@ -352,26 +403,28 @@ function SearchDiag({ m }: { m: MailSourceInfo }) {
   );
 }
 
-/** Позиции плитками по макету: название на всю ширину, размер серым, под ними поля «Количество», «Цена», «Скидка»; пометки «нужен менеджер» — под размером. */
-function KpLinesTiles({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; onEdit: (i: number, patch: Partial<KpDraftLine>) => void }) {
+/** Позиции плитками по макету: название, размер серым, состояние поиска цены с раскрытием «Источники», поля «Количество», «Цена», «Скидка». */
+function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; research: ResearchState | null; locked: boolean; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onFind: (requestIndex: number, force: boolean) => void }) {
   // «Цена не задана» под размером не показываем: это состояние и так видно в поле «Цена» (DESIGN-FIX, п. 4).
   const reasons = (i: number) => needsManager.filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
   return (
     <div className="opt-kp-tiles">
       {lines.map((l, i) => {
         const why = reasons(l.request_index);
+        const pos = research?.positions?.find((p) => p.requestIndex === l.request_index) ?? null;
         return (
           <div key={`${l.request_index}-${i}`} className="opt-kp-tile">
             <div className="opt-kp-tile-name">{l.name || '—'}</div>
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
             {why.length > 0 && <div className="opt-kp-sub">{why.join('; ')}</div>}
+            <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />
             <div className="opt-kp-fields">
               <label className="opt-kp-field">
                 <span className="opt-kp-label">Количество</span>
                 <input type="number" min={1} value={l.qty} onChange={(e) => onEdit(i, { qty: Math.max(1, Number(e.target.value) || 1) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-price">
-                <span className="opt-kp-label">Цена</span>
+                <span className="opt-kp-label">Цена{l.priceSource === 'manager' ? ' · изменено менеджером' : l.priceSource === 'analog' ? ' · по аналогу' : l.priceSource === 'research' ? ' · по рынку' : ''}</span>
                 <input type="number" min={0} value={l.price ?? ''} placeholder="Нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-discount">
@@ -388,6 +441,88 @@ function KpLinesTiles({ lines, needsManager, onEdit }: { lines: KpDraftLine[]; n
     </div>
   );
 }
+
+const VAT_TITLE: Record<string, string> = { included: 'с НДС', no_vat: 'без НДС', pre_net: 'до НДС', unknown: 'НДС не указан' };
+const UNIT_TITLE: Record<string, string> = { piece: 'шт', set: 'компл.', m2: 'м²' };
+
+/**
+ * Состояние поиска цены по позиции: идёт поиск / найдено N источников / цены не найдены / ошибка; кнопка
+ * «Найти цену» или «Искать заново» (мимо кэша); раскрытие «Источники» — все предложения, принятые первыми
+ * (продавец, цена на сайте, размер, пересчитанная цена, ссылка), отклонённые серым с причиной.
+ */
+function PriceState({ line, pos, locked, onFind }: { line: KpDraftLine; pos: ResearchPosition | null; locked: boolean; onFind: (force: boolean) => void }) {
+  const [open, setOpen] = useState(false);
+  const job = pos?.job ?? null;
+  const r = pos?.research ?? null;
+  const busy = job?.state === 'queued' || job?.state === 'running';
+  let status: string;
+  if (busy) status = job?.state === 'queued' ? 'поиск цены в очереди…' : 'идёт поиск цены…';
+  else if (job?.state === 'failed') status = `поиск не выполнен: ${job.error}`;
+  else if (!r) status = line.market ? `источников ${line.market.count}` : '';
+  else if (r.status === 'failed') status = `ошибка поиска: ${r.error ?? 'без текста'}`;
+  else if (r.status === 'none') status = 'цены не найдены';
+  else status = `найдено ${plural(r.stats?.count ?? 0, 'источник', 'источника', 'источников')} · ${dateTimeMsk(r.createdAt)}`;
+  const isError = job?.state === 'failed' || r?.status === 'failed';
+  const canOpen = Boolean(r && r.offers.length);
+  return (
+    <div className="opt-kp-price-state opt-col">
+      <div className="opt-row opt-kp-price-row">
+        {status && (
+          <button type="button" className={`opt-details-summary${isError ? ' opt-details-warn' : ''}`} disabled={!canOpen} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            {status}
+            {canOpen ? ` · Источники ${open ? '⌄' : '›'}` : ''}
+          </button>
+        )}
+        {!busy && !locked && (
+          <button type="button" className="opt-btn opt-btn-small" onClick={() => onFind(Boolean(r))} title={r ? 'Искать заново, не используя сохранённый результат' : 'Найти рыночную цену по этой позиции'}>
+            {r ? 'Искать заново' : 'Найти цену'}
+          </button>
+        )}
+      </div>
+      {open && r && (
+        <div className="opt-details-body opt-col">
+          {r.stats && (
+            <div>
+              Диапазон {rub(r.stats.min)} – {rub(r.stats.max)}, медиана <b>{rub(r.stats.median)}</b> за шт
+              {line.coefficient && line.coefficient !== 1 ? ` × ${line.coefficient}` : ''}
+            </div>
+          )}
+          {r.analog && <div>Аналог: {r.analog.reason}</div>}
+          {r.offers.map((o) => (
+            <div key={o.url} className={o.accepted ? 'opt-kp-offer' : 'opt-kp-offer opt-muted'}>
+              <div>
+                {o.manufacturer ? '★ ' : ''}
+                {o.seller || 'продавец не указан'} — {o.price.toLocaleString('ru-RU')} {o.currency}/{UNIT_TITLE[o.unit] ?? o.unit}
+                {o.sourceSize ? `, ${o.sourceSize}` : ''}
+                {o.accepted && o.unitPrice !== null && o.unitPrice !== o.price ? ` → ${rub(o.unitPrice)} за шт` : ''}
+                {!o.accepted ? ` — ${o.reason ?? 'отклонено'}` : ''}
+              </div>
+              <div className="opt-muted">
+                {VAT_TITLE[o.vatStated] ?? o.vatStated}
+                {o.notes.length ? `; ${o.notes.join('; ')}` : ''}
+                {o.formula ? `; ${o.formula}` : ''} ·{' '}
+                <a href={o.url} target="_blank" rel="noreferrer" className="opt-link">
+                  {safeHost(o.url)}
+                </a>
+              </div>
+            </div>
+          ))}
+          <div className="opt-muted">
+            Запрос: {r.query}; вызовов поиска {r.webSearchCalls}, ${r.costUsd.toFixed(3)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const safeHost = (url: string) => {
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
 
 /** Кнопки шагов во всю ширину одна под другой: собрать заново → сохранить правки → собрать документ → отправить (окно предпросмотра). */
 function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend }: { draft: KpDraftInfo; busy: boolean; dirty: boolean; ready: boolean; onDraft: () => void; onSave: () => void; onBuild: () => void; onSend: () => void }) {

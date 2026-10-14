@@ -35,7 +35,7 @@ async function renderBlock(): Promise<string> {
     system: () => ({ area: 'lcard' }),
     i18n: () => '',
     render_template: ({ render }) => document.body.insertAdjacentHTML('beforeend', render),
-    $authorizedAjax: async () => ({ draft, job: null }),
+    $authorizedAjax: async (opts) => (opts.url.includes('/kp/research') ? { draftId: 17, pending: false, positions: [{ requestIndex: 0, job: null, research: null }] } : { draft, job: null }),
   };
   const cbs = createCallbacks(self, 'https://opt.test.ru');
   await act(async () => cbs.render!());

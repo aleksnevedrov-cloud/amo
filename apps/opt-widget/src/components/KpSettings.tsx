@@ -3,7 +3,7 @@ import { Field, s } from '@core/widget-core';
 import type { KpApi, KpConstants, KpSettingsInfo } from '../api.ts';
 
 /** Поля постоянных частей КП: один источник правды — таблица kp_settings, в коде только подписи. */
-const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; kind: 'input' | 'textarea' | 'number' | 'lines' }[] = [
+const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; kind: 'input' | 'textarea' | 'number' | 'lines' | 'bool' | 'pairs' }[] = [
   { key: 'sellerName', label: 'Продавец', kind: 'input' },
   { key: 'sellerRequisites', label: 'Реквизиты продавца', hint: 'Попадают в шапку предложения', kind: 'textarea' },
   { key: 'vatRate', label: 'Ставка НДС, %', hint: 'Берётся отсюда, в коде не зашита', kind: 'number' },
@@ -15,6 +15,12 @@ const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; k
   { key: 'analogPriceTolerancePct', label: 'Допуск цены аналога, %', hint: 'Аналог по цене — не дальше этого от цены заявки; не больше 10', kind: 'number' },
   { key: 'manufacturerDomains', label: 'Домены производителей', hint: 'По одному в строке, без http и пути; источник с таким доменом всегда считается сайтом производителя. Пусто — вид источника определяет модель', kind: 'lines' },
   { key: 'priceNote', label: 'Фраза о ценах', hint: 'Печатается в каждом КП под итогом — плейсхолдер {{price_note}} в шаблоне; пусто — без фразы', kind: 'textarea' },
+  // Поиск рыночных цен (RFD-AI-AGENT-OPT-PRICE, этап 6).
+  { key: 'autoResearch', label: 'Искать цены автоматически при сборке черновика', hint: 'Выключено — поиск только по кнопке «Найти цены» в карточке сделки. Каждая позиция — отдельный вызов веб-поиска (≈ $0,1–0,2), результат хранится в кэше', kind: 'bool' },
+  { key: 'priceCoefficient', label: 'Общий коэффициент к медиане рынка', hint: '1,00 — цена предложения равна медиане найденных розничных цен; 0,95 — на 5 % ниже', kind: 'number' },
+  { key: 'manufacturerCoefficients', label: 'Коэффициенты по производителям', hint: 'По одному в строке: «Профиль Дорс = 0.9». Имеет приоритет над общим коэффициентом', kind: 'pairs' },
+  { key: 'researchCacheDays', label: 'Срок кэша результатов поиска, дней', hint: 'Повторный поиск той же позиции в этот срок не обращается к провайдеру; 0 — без кэша', kind: 'number' },
+  { key: 'maxPositionsPerRun', label: 'Позиций за одно нажатие «Найти цены»', hint: 'Не больше 200', kind: 'number' },
   { key: 'signature', label: 'Подпись', kind: 'input' },
 ];
 
@@ -119,22 +125,46 @@ function ConstantsForm({ value, onChange }: { value: KpConstants; onChange: (pat
     <>
       {CONSTANT_FIELDS.map(({ key, label, hint, kind }) => {
         const v = value[key];
-        const text = v === undefined ? '' : Array.isArray(v) ? v.join('\n') : String(v);
-        // Список (kind lines) — по одному значению в строке; пустой список не сохраняется.
+        const text = v === undefined ? '' : Array.isArray(v) ? v.join('\n') : kind === 'pairs' ? pairsToText(v as Record<string, number>) : String(v);
+        // Список (kind lines) — по одному значению в строке; пары (kind pairs) — «имя = число»; пустое не сохраняется.
         const set = (raw: string) =>
-          onChange({ [key]: kind === 'lines' ? raw.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) : raw === '' ? undefined : kind === 'number' ? Number(raw) : raw });
+          onChange({ [key]: kind === 'lines' ? raw.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) : kind === 'pairs' ? textToPairs(raw) : raw === '' ? undefined : kind === 'number' ? Number(raw) : raw });
+        if (kind === 'bool') {
+          return (
+            <Field key={key} label={label} hint={hint}>
+              <input type="checkbox" checked={Boolean(v)} onChange={(e) => onChange({ [key]: e.target.checked })} />
+            </Field>
+          );
+        }
         return (
           <Field key={key} label={label} hint={hint}>
-            {kind === 'textarea' || kind === 'lines' ? (
+            {kind === 'textarea' || kind === 'lines' || kind === 'pairs' ? (
               <textarea style={{ ...s.input, minHeight: key === 'sellerRequisites' || key === 'coverLetter' ? 80 : 60 }} value={text} onChange={(e) => set(e.target.value)} />
             ) : (
-              <input style={s.input} type={kind === 'number' ? 'number' : 'text'} value={text} onChange={(e) => set(e.target.value)} />
+              <input style={s.input} type={kind === 'number' ? 'number' : 'text'} step={kind === 'number' ? 'any' : undefined} value={text} onChange={(e) => set(e.target.value)} />
             )}
           </Field>
         );
       })}
     </>
   );
+}
+
+/** Справочник «производитель → коэффициент» ↔ строки «имя = число»; кривые строки пропускаются. */
+export function pairsToText(v: Record<string, number> | undefined): string {
+  return Object.entries(v ?? {})
+    .map(([k, n]) => `${k} = ${n}`)
+    .join('\n');
+}
+export function textToPairs(raw: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const m = /^\s*(.+?)\s*[=:]\s*([0-9]+(?:[.,][0-9]+)?)\s*$/.exec(line);
+    if (!m) continue;
+    const n = Number(m[2]?.replace(',', '.'));
+    if (m[1] && Number.isFinite(n) && n > 0) out[m[1]] = n;
+  }
+  return out;
 }
 
 /** Файл → base64 для JSON-тела: отдельная зависимость на multipart не нужна. */

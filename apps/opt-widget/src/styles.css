@@ -290,3 +290,12 @@
 .opt-kp .opt-actions .opt-btn-green:hover:not(:disabled) { background: #f6fff0; border-color: #258500; }
 .opt-kp .opt-kp-note { font-size: 12px; color: var(--kp-muted); }
 .opt-kp .opt-error { font-size: 12px; }
+
+/* Поиск цен в плитке позиции (RFD-AI-AGENT-OPT-PRICE, этап 6): строка состояния со ссылкой «Источники», малая кнопка, список предложений. */
+.opt-kp .opt-kp-price-state { gap: 4px; }
+.opt-kp .opt-kp-price-row { justify-content: space-between; align-items: center; gap: 6px 8px; }
+.opt-kp .opt-kp-price-row .opt-details-summary:disabled { color: var(--kp-muted); cursor: default; }
+.opt-kp .opt-btn-small { min-height: 22px; padding: 0 8px; font-size: 11px; font-weight: 600; border-radius: var(--kp-radius-sm); flex: none; }
+.opt-kp .opt-kp-offer { padding: 4px 0; border-top: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-offer:first-of-type { border-top: 0; }
+.opt-kp .opt-kp-offer .opt-link { font-size: 12px; }

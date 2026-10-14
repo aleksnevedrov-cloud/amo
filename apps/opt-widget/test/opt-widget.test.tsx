@@ -17,7 +17,9 @@ function fakeSelf(area: string, responses: Record<string, Responder>) {
     render_template: ({ render }) => document.body.insertAdjacentHTML('beforeend', render),
     $authorizedAjax: async (opts) => {
       calls.push(opts);
-      const r = responses[`${opts.method} ${new URL(opts.url).pathname}`];
+      const key = `${opts.method} ${new URL(opts.url).pathname}`;
+      // Состояние поиска цен запрашивается при каждом показе черновика; по умолчанию — поиска не было.
+      const r = key === 'GET /widget/v1/kp/research' && responses[key] === undefined ? { draftId: 7, pending: false, positions: [] } : responses[key];
       if (r === undefined) throw { status: 404, responseJSON: { message: `нет ответа для ${opts.method} ${opts.url}` } };
       return typeof r === 'function' ? (r as (d?: string) => unknown)(opts.data) : r;
     },
@@ -106,7 +108,10 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(tile.querySelector('.opt-kp-sub')?.textContent).toBe('2100 × 900 мм');
     expect([...tile.querySelectorAll('.opt-kp-label')].map((l) => l.textContent)).toEqual(['Количество', 'Цена', 'Скидка']);
     expect([...document.querySelectorAll('.opt-kp-questions li')].map((l) => l.textContent)).toEqual(['Сторона открывания?']);
-    expect([...document.querySelectorAll('.opt-root .opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
+    const actions = [...document.querySelectorAll('.opt-kp-card')].find((c) => c.querySelector('.opt-kp-title')?.textContent === 'Действия с КП')!;
+    expect([...actions.querySelectorAll('.opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
+    // Кнопка поиска цен — в карточке позиций (этап 6).
+    expect(button('Найти цены')?.disabled).toBe(false);
     expect(button('Сохранить правки')?.disabled).toBe(true);
     expect(document.body.textContent).toContain('Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.');
     expect(document.querySelector('.opt-table')).toBeNull();
@@ -156,8 +161,8 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(text()).toContain('Разобрано файлов: 1');
     await click('Письмо: 13.10.2026 11:06 · 3 вложения ⌄');
     expect(text()).not.toContain('Папка: INBOX');
-    // Новых запросов к почте виджет не делает — только черновик.
-    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual(['GET /widget/v1/kp/draft']);
+    // Новых запросов к почте виджет не делает — только черновик и состояние поиска цен.
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual(['GET /widget/v1/kp/draft', 'GET /widget/v1/kp/research']);
   });
 
   it('письмо не найдено: строка «Письмо: не найдено», в раскрытии — критерии поиска и папки из diag', async () => {
@@ -182,6 +187,68 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Папки (2):INBOX: в окне дат 12, от отправителя 0Spam: в окне дат 1, от отправителя 0');
     expect(document.body.textContent).toContain('Не смотрели: Sent, Drafts');
     expect(document.body.textContent).toContain('Spam: SEARCH по дате прерван по таймауту');
+  });
+
+  it('поиск цен (этап 6): «Найти цены» ставит задание, строка позиции показывает ход поиска, затем цену с пометкой и раскрытие «Источники»; «Искать заново» идёт мимо кэша', async () => {
+    let current = { ...draft, needsManager: [{ request_index: 0, reason: 'цена не задана' }] };
+    let stage: 'idle' | 'running' | 'done' = 'idle';
+    const posts: string[] = [];
+    const offers = [
+      { url: 'https://woodwindows.ru/1', seller: 'Альянс', title: 'Дверь', price: 77_000, currency: 'RUB', unit: 'piece', vatStated: 'unknown', unitPrice: 107_800, accepted: true, reason: null, manufacturer: false, formula: '77 000 ₽ × (3,780 м² / 2,700 м²) = 107 800 ₽', notes: ['НДС по умолчанию (не указан на сайте)', 'аналог, пересчёт по площади с 1000×2700'], vatAssumed: true, areaScaled: true, sourceSize: '1000×2700', foundAt: '2026-10-14T08:00:00Z' },
+      { url: 'https://fabrika-l.ru/p', seller: 'Фабрика Л', title: 'Дверь', price: 110_000, currency: 'RUB', unit: 'piece', vatStated: 'included', unitPrice: 110_000, accepted: true, reason: null, manufacturer: true, formula: null, notes: [], vatAssumed: false, areaScaled: false, sourceSize: null, foundAt: '2026-10-14T08:00:00Z' },
+      { url: 'https://vinchelli.ru/1', seller: 'Винчелли', title: 'Дверь', price: 63_540, currency: 'RUB', unit: 'piece', vatStated: 'unknown', unitPrice: 63_540, accepted: false, reason: 'размер не указан', manufacturer: false, formula: null, notes: [], vatAssumed: true, areaScaled: false, sourceSize: null, foundAt: '2026-10-14T08:00:00Z' },
+    ];
+    const done = { id: 9, status: 'ok', query: 'дверь двухпольная лиственница 1400×2700 купить цена Москва', stats: { min: 107_800, max: 110_000, median: 108_900, count: 2, unit: 'piece' }, error: null, createdAt: '2026-10-14T08:06:00Z', webSearchCalls: 2, costUsd: 0.15, analog: null, offers };
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'GET /widget/v1/kp/research': () => ({ draftId: 7, pending: stage === 'running', positions: [{ requestIndex: 0, job: stage === 'running' ? { state: 'running' } : null, research: stage === 'done' ? done : null }] }),
+      'POST /widget/v1/kp/research': (data?: string) => {
+        posts.push(data ?? '');
+        stage = 'running';
+        return { queued: [0] };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    const text = () => document.body.textContent ?? '';
+    expect(button('Найти цены')?.disabled).toBe(false);
+    expect(button('Найти цену')).toBeDefined();
+    await click('Найти цены');
+    await flush();
+    expect(JSON.parse(posts[0]!)).toEqual({ draftId: 7, requestIndexes: 'all', force: false });
+    expect(text()).toContain('идёт поиск цены…');
+    expect(button('Ищу цены…')?.disabled).toBe(true);
+    // Воркер закончил: цена легла в черновик, следующий опрос приносит результат и перечитывает черновик.
+    stage = 'done';
+    current = { ...current, items: [{ ...current.items[0]!, price: 108_900, priceSource: 'analog', coefficient: 1, market: { median: 108_900, min: 107_800, max: 110_000, count: 2, unit: 'piece', researchId: 9, researchedAt: '2026-10-14T08:06:00Z' } }], needsManager: [{ request_index: 0, reason: 'ограничение расчёта: 2 источника' }, { request_index: 0, reason: 'аналог, пересчёт по площади с 1000×2700' }] } as unknown as typeof current;
+    await act(async () => cbs.render!());
+    await flush();
+    await act(async () => new Promise((r) => setTimeout(r, 30)));
+    expect(text()).toContain('найдено 2 источника · 14.10.2026 11:06 · Источники ›');
+    expect(text()).toContain('ограничение расчёта: 2 источника; аналог, пересчёт по площади с 1000×2700');
+    expect((document.querySelector('input[placeholder="Нет цены"]') as HTMLInputElement).value).toBe('108900');
+    expect(text()).toContain('Цена · по аналогу');
+    expect(text()).not.toContain('Винчелли');
+    await click('найдено 2 источника · 14.10.2026 11:06 · Источники ›');
+    expect(text().replace(/\u00a0/g, ' ')).toContain('Диапазон 107 800 ₽ – 110 000 ₽, медиана 108 900 ₽ за шт');
+    const rows = [...document.querySelectorAll('.opt-kp-offer')].map((el) => [el.classList.contains('opt-muted'), el.textContent?.replace(/\u00a0/g, ' ')]);
+    expect(rows[0]![0]).toBe(false);
+    expect(rows[0]![1]).toContain('Альянс — 77 000 RUB/шт, 1000×2700 → 107 800 ₽ за шт');
+    expect(rows[0]![1]).toContain('НДС не указан; НДС по умолчанию (не указан на сайте); аналог, пересчёт по площади с 1000×2700; 77 000 ₽ × (3,780 м² / 2,700 м²) = 107 800 ₽ · woodwindows.ru');
+    expect(rows[1]![1]).toContain('★ Фабрика Л — 110 000 RUB/шт');
+    expect(rows[2]).toEqual([true, expect.stringContaining('Винчелли — 63 540 RUB/шт — размер не указан')]);
+    expect([...document.querySelectorAll('.opt-kp-offer a')].map((a) => a.getAttribute('href'))).toEqual(['https://woodwindows.ru/1', 'https://fabrika-l.ru/p', 'https://vinchelli.ru/1']);
+    expect(text()).toContain('вызовов поиска 2, $0.150');
+    // Все позиции с ценой — «Найти цены» ничего не ставит, а «Искать заново» у позиции идёт мимо кэша.
+    await click('Искать заново');
+    expect(JSON.parse(posts[1]!)).toEqual({ draftId: 7, requestIndexes: [0], force: true });
+    // Правка цены руками помечает её как ручную.
+    stage = 'done';
+    await act(async () => cbs.render!());
+    await flush();
+    await setInput(document.querySelector('input[placeholder="Нет цены"]'), '100000');
+    expect(text()).toContain('Цена · изменено менеджером');
   });
 
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
@@ -256,7 +323,11 @@ describe('виджет «Агент опт»: настройки', () => {
   it('вкладки КП, Модель, Письмо, Журнал; письмо сохраняется вместе с паролем', async () => {
     const saved: string[] = [];
     const { self } = fakeSelf('settings', {
-      'GET /widget/v1/kp/settings': { constants: { vatRate: 22 }, certsDir: null, numbering: { prefix: 'КП', year: null, counter: 0 }, template: { exists: false, name: null, md5: null, updatedAt: null } },
+      'GET /widget/v1/kp/settings': { constants: { vatRate: 22, priceCoefficient: 1, manufacturerCoefficients: { 'Профиль Дорс': 0.9 }, autoResearch: false, researchCacheDays: 7, maxPositionsPerRun: 30 }, certsDir: null, numbering: { prefix: 'КП', year: null, counter: 0 }, template: { exists: false, name: null, md5: null, updatedAt: null } },
+      'PUT /widget/v1/kp/settings': (data?: string) => {
+        saved.push(data ?? '');
+        return { ok: true };
+      },
       'GET /widget/v1/settings': { settings, version: 1 },
       'PUT /widget/v1/settings': (data?: string) => {
         saved.push(data ?? '');
@@ -279,6 +350,16 @@ describe('виджет «Агент опт»: настройки', () => {
     expect(document.body.textContent).toContain('Фраза о ценах');
     expect(document.body.textContent).toContain('Домены производителей');
     expect([...document.querySelectorAll('button')].map((b) => b.textContent)).not.toContain('База знаний');
+    // Настройки поиска цен (этап 6): переключатель автопоиска, коэффициенты (справочник строками «имя = число»), кэш, лимит.
+    expect(document.body.textContent).toContain('Искать цены автоматически при сборке черновика');
+    const pairs = [...document.querySelectorAll('textarea')].find((t) => t.value === 'Профиль Дорс = 0.9')!;
+    await setInput(pairs, 'Профиль Дорс = 0.9\nБраво: 1,1\nмусор');
+    const auto = [...document.querySelectorAll('input[type=checkbox]')][0] as HTMLInputElement;
+    await act(async () => auto.click());
+    await click('Сохранить');
+    await flush();
+    expect(JSON.parse(saved.at(-1)!)).toMatchObject({ constants: { priceCoefficient: 1, manufacturerCoefficients: { 'Профиль Дорс': 0.9, Браво: 1.1 }, autoResearch: true, researchCacheDays: 7, maxPositionsPerRun: 30 } });
+    saved.length = 0;
     await click('Модель');
     await flush();
     expect(document.body.textContent).toContain('Сохранён ключ sk-…ab12');
