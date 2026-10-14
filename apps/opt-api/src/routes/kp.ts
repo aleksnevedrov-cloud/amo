@@ -55,7 +55,8 @@ const linesSchema = z.object({
         page_id: z.string().max(100).nullable(),
         name: z.string().max(300),
         size: z.string().max(100),
-        qty: z.number().int().min(1).max(10_000),
+        // Дробное количество допустимо («24,5» наличников из заявки клиента, XLSX-2).
+        qty: z.number().positive().max(10_000),
         price: z.number().min(0).max(100_000_000).nullable(),
         lead_time: z.string().max(100),
         discount: z.number().min(0).max(100),

@@ -245,6 +245,8 @@
 /* Позиции: плитка #F5F7F9 радиус 6, название переносится по словам, поля под ним. */
 .opt-kp .opt-kp-tiles { display: flex; flex-direction: column; gap: 8px; }
 .opt-kp .opt-kp-tile { background: var(--kp-soft); border-radius: var(--kp-radius-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; container-type: inline-size; }
+/* Заголовок группы «Работы и услуги» перед первой работой (XLSX-2). */
+.opt-kp .opt-kp-group { font-size: 12px; font-weight: 600; color: var(--kp-muted); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 6px; }
 .opt-kp .opt-kp-tile-name { font-size: 12px; font-weight: 600; color: var(--kp-text); overflow-wrap: break-word; word-break: normal; }
 /*
  * Поля позиции (DESIGN-FIX-2, п. 1): по умолчанию «Количество» и «Скидка» по 50 % в первой строке, «Цена» второй

@@ -57,7 +57,9 @@ export function researchInputOf(payload: Partial<KpPayload>, line: KpLine): Mark
 /** Позиции, по которым имеет смысл искать: без цены (режим «по всем») или заданные явно. */
 export function researchablePositions(payload: Partial<KpPayload>, which: number[] | 'all', max = DEFAULT_MAX_POSITIONS_PER_RUN): number[] {
   const items = payload.items ?? [];
-  const idx = which === 'all' ? items.filter((l) => l.price === null).map((l) => l.request_index) : which.filter((i) => items.some((l) => l.request_index === i));
+  // Работы и услуги (kind = service) в поиск цен не отправляются ни «все», ни по номеру (XLSX-2, п. 3).
+  const goods = items.filter((l) => l.kind !== 'service');
+  const idx = which === 'all' ? goods.filter((l) => l.price === null).map((l) => l.request_index) : which.filter((i) => goods.some((l) => l.request_index === i));
   return [...new Set(idx)].slice(0, Math.max(1, max));
 }
 

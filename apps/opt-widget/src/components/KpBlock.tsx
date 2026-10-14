@@ -416,16 +416,20 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
       {lines.map((l, i) => {
         const why = reasons(l.request_index);
         const pos = research?.positions?.find((p) => p.requestIndex === l.request_index) ?? null;
+        const service = l.kind === 'service';
+        // Работы и услуги идут после товаров: заголовок перед первой из них (XLSX-2, п. 3).
+        const firstService = service && !lines.slice(0, i).some((x) => x.kind === 'service');
         return (
-          <div key={`${l.request_index}-${i}`} className="opt-kp-tile">
+          <div key={`${l.request_index}-${i}`} className={`opt-kp-tile${service ? ' opt-kp-tile-service' : ''}`}>
+            {firstService && <div className="opt-kp-group">Работы и услуги</div>}
             <div className="opt-kp-tile-name">{l.name || '—'}</div>
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
             {why.length > 0 && <div className="opt-kp-sub">{why.join('; ')}</div>}
-            <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />
+            {!service && <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />}
             <div className="opt-kp-fields">
               <label className="opt-kp-field">
                 <span className="opt-kp-label">Количество</span>
-                <input type="number" min={1} value={l.qty} onChange={(e) => onEdit(i, { qty: Math.max(1, Number(e.target.value) || 1) })} />
+                <input type="number" min={0.5} step="any" value={l.qty} onChange={(e) => onEdit(i, { qty: Math.max(0.5, Number(e.target.value) || 1) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-price">
                 <span className="opt-kp-label">Цена{l.priceSource === 'manager' ? ' · изменено менеджером' : l.priceSource === 'analog' ? ' · по аналогу' : l.priceSource === 'research' ? ' · по рынку' : ''}</span>

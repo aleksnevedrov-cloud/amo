@@ -46,6 +46,8 @@ export interface KpDraftLine {
   priceSource?: 'research' | 'analog' | 'manager';
   market?: { median: number; min: number; max: number; count: number; unit: 'piece'; researchId: number; researchedAt: string } | null;
   coefficient?: number;
+  /** service — работы и услуги: после товаров под заголовком, без размера и без поиска цены (XLSX-2). */
+  kind?: 'product' | 'service';
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */

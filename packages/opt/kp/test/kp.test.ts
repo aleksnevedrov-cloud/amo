@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
 import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
+import { researchablePositions } from '../src/research-job.ts';
 
 const noDiag: MailSearchDiag = { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] };
 
@@ -57,6 +58,42 @@ describe('черновик: разбор ответа модели и позиц
     const r = positionToRequest({ name: 'Дверь противопожарная', marking: 'ДПС 01 EI30', width_mm: 900, height_mm: 2100, qty: 3, unit: 'компл.', price_rub: 25_000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: null });
     expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3 });
     expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1 });
+    // XLSX-2: работы — без размера и с признаком service; дробное количество из заявки сохраняется.
+    expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, kind: 'service' });
+    expect(positionToRequest(position('Наличник ТЕЛЕСКОП', 70, 2150, 24.5))).toMatchObject({ raw: 'Наличник ТЕЛЕСКОП 70×2150 24.5 шт', qty: 24.5 });
+  });
+
+  it('работы и услуги идут после товаров, порядок внутри групп как в файле, одинаковые названия не склеиваются; в поиск цен работы не попадают (XLSX-2)', async () => {
+    const { gateway } = fakeGateway(modelAnswer);
+    const amo = fakeAmo({ files: [file('u1', 'Заявка.xlsx')], mails: [letter] });
+    const analyze: KpDraftDeps['analyze'] = async (f) => ({
+      id: 502,
+      filename: f.filename,
+      kind: 'request',
+      positions: [
+        { ...position('Дверь ДПГ', 850, 2020, 1), note: 'раздел: 1 ЭТАЖ' },
+        { ...position('Врезка замка', null, null, 1), kind: 'service', note: 'раздел: 1 ЭТАЖ' },
+        { ...position('Ручка Apecs', null, null, 21), note: 'раздел: 1 ЭТАЖ' },
+        { ...position('Дверь ДПГ', 850, 2020, 2), note: 'раздел: 2 ЭТАЖ' },
+        { ...position('Ручка Apecs', null, null, 20), note: 'раздел: 2 ЭТАЖ' },
+        { ...position('Доставка г. Москва', null, null, 1), kind: 'service' },
+      ],
+      questions: [],
+      requirements: [],
+    });
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 89835, route, pricing: {} }, { amo, analyze });
+    expect(r.payload.items.map((l) => [l.request_index, l.name, l.qty, l.kind ?? 'product'])).toEqual([
+      [0, 'Дверь ДПГ', 1, 'product'],
+      [1, 'Ручка Apecs', 21, 'product'],
+      [2, 'Дверь ДПГ', 2, 'product'],
+      [3, 'Ручка Apecs', 20, 'product'],
+      [4, 'Врезка замка', 1, 'service'],
+      [5, 'Доставка г. Москва', 1, 'service'],
+    ]);
+    expect(r.payload.request_items.map((it) => it.kind ?? 'product')).toEqual(['product', 'product', 'product', 'product', 'service', 'service']);
+    expect(r.payload.items[4]).toMatchObject({ size: '' });
+    expect(researchablePositions(r.payload, 'all', 30)).toEqual([0, 1, 2, 3]);
+    expect(researchablePositions(r.payload, [0, 4, 5], 30)).toEqual([0]);
   });
 });
 

@@ -118,7 +118,7 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     n: i + 1,
     name: l.name || '—',
     size: l.size || '—',
-    qty: `${l.qty} шт`,
+    qty: `${l.qty.toLocaleString('ru-RU')} шт`,
     price: l.price === null ? '—' : money(l.price),
     sum: money(lineSum(l)),
   }));

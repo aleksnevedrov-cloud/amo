@@ -1,8 +1,9 @@
+import { readFileSync } from 'node:fs';
 import ExcelJS from 'exceljs';
 import { LlmError, LlmUnavailableError, type LlmGateway, type RoutedRequest, type RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { analyzeDraftFile, isSpreadsheet, type DraftFileDeps } from '../src/file-analyze.ts';
-import { columnsOf, detectHeader, mergeNormalized, parseTable, readSheetRows, tableItems, TABLE_CHUNK_ROWS } from '../src/table-parse.ts';
+import { columnsOf, detectHeader, detectHeaderless, isService, mergeNormalized, parseTable, readSheetRows, sizeFromText, tableItems, TABLE_CHUNK_ROWS } from '../src/table-parse.ts';
 import { defaultOptSettings, toWidgetSettings } from '../src/settings.ts';
 
 const route = { primary: { provider: 'openai' as const, model: 'gpt-5.5' }, fallback: { provider: 'openai' as const, model: 'gpt-5.1' } };
@@ -95,7 +96,7 @@ describe('таблица xlsx по колонкам (RFD-AI-AGENT-OPT-XLSX-TIMEO
   });
 
   it('ответ модели не перекрывает количество и размер из файла; имя и обозначение — от модели', () => {
-    const it0 = { i: 1, sheet: 's', row: 2, section: null, name: 'Дверь ДПМ 900х2100 2 шт', width_mm: 900, height_mm: 2100, qty: 2, unit: 'шт', note: 'раздел: 1 этаж', raw: '' };
+    const it0 = { i: 1, sheet: 's', row: 2, section: null, name: 'Дверь ДПМ 900х2100 2 шт', width_mm: 900, height_mm: 2100, qty: 2, unit: 'шт', note: 'раздел: 1 этаж', kind: 'product' as const, raw: '' };
     const p = mergeNormalized(it0, { i: 1, name: 'Дверь противопожарная ДПМ', marking: 'ДПМ-01/60', width_mm: 1000, height_mm: 2000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: 'с доводчиком' });
     expect(p).toMatchObject({ name: 'Дверь противопожарная ДПМ', marking: 'ДПМ-01/60', width_mm: 900, height_mm: 2100, qty: 2, unit: 'шт', material: 'сталь', color: 'RAL 7035', fireproof: true, note: 'раздел: 1 этаж; с доводчиком', price_rub: null });
     // Размера в файле нет — берётся из ответа модели; пустое имя — остаётся как в файле.
@@ -276,5 +277,91 @@ describe('разбор файла для черновика (file-analyze.ts)', 
     const d = deps(gateway, [], []);
     const limited: DraftFileDeps = { ...d, settings: { ...settings, vision: { ...settings.vision, maxFilesPerDay: 0 } } };
     await expect(analyzeDraftFile(limited, { filename: 'z.xlsx', mime: 'application/octet-stream', bytes: await xlsx({ Заявка: requestRows() }) })).rejects.toThrow('Достигнут дневной лимит разбора файлов (0)');
+  });
+});
+
+describe('заявка без шапки: колонки A/B (RFD-AI-AGENT-OPT-XLSX-2, файл сделки 30008823)', () => {
+  const fixture = () => new Uint8Array(readFileSync(new URL('./fixtures/zayavka-30008823.xlsx', import.meta.url)));
+  const sum = (ps: { name: string; qty: number | null }[], rx: RegExp) => ps.filter((p) => rx.test(p.name)).reduce((s, p) => s + (p.qty ?? 0), 0);
+  const count = (ps: { name: string }[], rx: RegExp) => ps.filter((p) => rx.test(p.name)).length;
+
+  it('размер из названия: полотно с толщиной, погонаж с сечением и длиной, автопорог «24*20-1020мм», метры; мелкие пары пропускаются', () => {
+    expect(sizeFromText('ДПГ + УПД (сота) 850*2020*40 мм/кромка ПВХ 1 мм')).toEqual({ widthMm: 850, heightMm: 2020, note: 'толщина 40 мм' });
+    expect(sizeFromText('ДПГУЧ + УПД (45S3K) (обратная чет-ть 10*12 с 3-х сторон) 820*2020*52 мм/кромка')).toEqual({ widthMm: 820, heightMm: 2020, note: 'толщина 52 мм' });
+    expect(sizeFromText('Добор ТЕЛЕСКОП (паз-паз) 300*10*2150 мм/МДФ')).toEqual({ widthMm: 300, heightMm: 2150, note: 'толщина 10 мм' });
+    expect(sizeFromText('Коробка ТЕЛЕСКОП 74*32*2150 мм уплотнит./сэндвич')).toEqual({ widthMm: 74, heightMm: 2150, note: 'сечение 74×32 мм, длина 2150 мм' });
+    expect(sizeFromText('Автопорог LDM-03 (ЛДМ-03) 24*20-1020мм')).toEqual({ widthMm: 24, heightMm: 1020, note: 'сечение 24×20 мм, длина 1020 мм' });
+    expect(sizeFromText('дверь двухпольная 1,4х2,7 м')).toEqual({ widthMm: 1400, heightMm: 2700, note: null });
+    expect(sizeFromText('Петля Fuaro IN4400U-R10 INOX (4BB-R10 102х76х3)/44603')).toBeNull();
+    expect(sizeFromText('Петля Rucetti без врезки RFH-100*75*2,5 SN')).toBeNull();
+    expect(sizeFromText('Ручка дверная Apecs H-0203-INOX')).toBeNull();
+    expect(isService('Врезка замка на производстве')).toBe(true);
+    expect(isService('Установка доборов')).toBe(true);
+    expect(isService('Доставка г. Москва')).toBe(true);
+    expect(isService('Добор ТЕЛЕСКОП')).toBe(false);
+    expect(isService('Коробка под установку')).toBe(false);
+  });
+
+  it('колонки без шапки: текстовая — наименование, числовая в ≥ 70 % строк — количество', () => {
+    expect(detectHeaderless([
+      { sheet: 's', row: 1, cells: ['1 ЭТАЖ', '1 ЭТАЖ'] },
+      { sheet: 's', row: 2, cells: ['Двери:', 'кол-во'] },
+      { sheet: 's', row: 3, cells: ['Дверь А', '1'] },
+      { sheet: 's', row: 4, cells: ['Дверь Б', '24,5'] },
+      { sheet: 's', row: 5, cells: ['Дверь В', '2'] },
+      { sheet: 's', row: 6, cells: ['Дверь Г', '2'] },
+      { sheet: 's', row: 7, cells: ['Дверь Д', '3'] },
+    ])).toMatchObject({ name: 0, qty: 1, titles: ['A: наименование', 'B: количество'] });
+    // Одна колонка или числа реже 70 % — не таблица.
+    expect(detectHeaderless([{ sheet: 's', row: 1, cells: ['а'] }, { sheet: 's', row: 2, cells: ['б'] }, { sheet: 's', row: 3, cells: ['в'] }])).toBeNull();
+    expect(detectHeaderless([{ sheet: 's', row: 1, cells: ['а', 'x'] }, { sheet: 's', row: 2, cells: ['б', '1'] }, { sheet: 's', row: 3, cells: ['в', 'y'] }, { sheet: 's', row: 4, cells: ['г', 'z'] }])).toBeNull();
+  });
+
+  it('файл клиента: 136 позиций по колонкам без модели, суммы по группам как в заявке, работы отдельным типом, разделы в примечании', async () => {
+    const lines: string[] = [];
+    // Модель молчит — позиции и количество всё равно из файла (п. 5).
+    const dead = gatewayBy(() => timeout());
+    const r = await parseTable(fixture(), { llm: dead.gateway, route, settings, filename: 'Заявка на двери. Москва..xlsx', onProgress: (l) => lines.push(l) });
+    expect(r.method).toBe('columns');
+    expect(lines[0]).toContain('таблица по колонкам без шапки (A: наименование | B: количество) — позиций 136, из них работ 28');
+    const ps = r.data.positions;
+    expect(ps).toHaveLength(136);
+    expect(sum(ps, /^ДПГУЧ/)).toBe(9);
+    expect(sum(ps, /^ДПГ \+ УПД \(сота\)/)).toBe(35);
+    expect(sum(ps, /^Аква 01/)).toBe(16);
+    expect([count(ps, /^ДПГУЧ/), count(ps, /^ДПГ \+ УПД \(сота\)/), count(ps, /^Аква 01/)]).toEqual([9, 27, 10]);
+    expect(sum(ps, /^Коробка/)).toBe(137);
+    expect(sum(ps, /^Наличник/)).toBe(278);
+    expect(sum(ps, /^Добор/)).toBe(154);
+    expect(sum(ps, /^Петля/)).toBe(155);
+    expect(sum(ps, /^Доводчик/)).toBe(60);
+    expect(sum(ps, /^Автопорог/)).toBe(9);
+    expect(ps.filter((p) => p.kind === 'service')).toHaveLength(28);
+    expect(ps.filter((p) => p.kind === 'service').every((p) => p.width_mm === null && p.height_mm === null)).toBe(true);
+    expect(ps.every((p) => p.qty !== null && p.qty > 0)).toBe(true);
+    // Полотно: размер и толщина из названия, раздел — в примечании; подзаголовок «кол-во» не позиция; количество с запятой.
+    expect(ps[0]).toMatchObject({ name: expect.stringMatching(/^ДПГУЧ \+ УПД \(45S3K\)/), width_mm: 820, height_mm: 2020, qty: 1, note: 'раздел: 1 ЭТАЖ; толщина 52 мм', kind: 'product' });
+    expect(ps[1]).toMatchObject({ width_mm: 850, height_mm: 2020, note: 'раздел: 1 ЭТАЖ; толщина 40 мм' });
+    expect(ps.find((p) => /^Наличник ТЕЛЕСКОП 70\*10\*2150/.test(p.name))).toMatchObject({ qty: 24.5, width_mm: 70, height_mm: 2150, note: 'раздел: 1 ЭТАЖ; сечение 70×10 мм, длина 2150 мм' });
+    expect(ps.find((p) => /^Автопорог/.test(p.name))).toMatchObject({ width_mm: 24, height_mm: 1020, qty: 1 });
+    expect(ps.find((p) => p.kind === 'service')).toMatchObject({ name: 'Врезка карточных петель на производстве', qty: 3, note: 'раздел: 1 ЭТАЖ' });
+    // Одинаковые названия в разных разделах — отдельные строки (п. 4).
+    const same = ps.filter((p) => p.name === 'Ручка дверная Apecs H-0203-INOX');
+    expect(same.map((p) => [p.qty, p.note])).toEqual([[21, 'раздел: 1 ЭТАЖ'], [20, 'раздел: 2 ЭТАЖ'], [19, 'раздел: 3 ЭТАЖ']]);
+    expect(ps[135]).toMatchObject({ name: 'Доставка г. Москва', kind: 'service', note: 'раздел: 3 ЭТАЖ' });
+    expect(r.data.summary).toContain('136 позиций, из них работ 28');
+    // С отвечающей моделью: 108 изделий в 6 порциях, работы в модель не уходят, количество и размеры не меняются.
+    const live = gatewayBy((text) => normalizeAnswer(text));
+    const r2 = await parseTable(fixture(), { llm: live.gateway, route, settings, filename: 'Заявка на двери. Москва..xlsx' });
+    expect(r2.method).toBe('columns+model');
+    expect(live.requests).toHaveLength(6);
+    // Порции по 20 изделий; from/to — номера строк в файле, работы (42–50 и т. д.) в порции не входят.
+    expect(r2.chunks).toHaveLength(6);
+    expect(r2.chunks[0]).toMatchObject({ from: 1, to: 20, ok: true });
+    expect(r2.chunks[1]).toMatchObject({ from: 21, to: 49, ok: true });
+    expect(r2.data.positions).toHaveLength(136);
+    expect(r2.data.positions[1]).toMatchObject({ name: 'Изделие 2', width_mm: 850, height_mm: 2020, qty: 1 });
+    expect(sum(r2.data.positions, /^Изделие/)).toBe(sum(ps.filter((p) => p.kind === 'product'), /./));
+    expect(r2.data.positions.filter((p) => p.kind === 'service').map((p) => p.name)).toEqual(ps.filter((p) => p.kind === 'service').map((p) => p.name));
   });
 });

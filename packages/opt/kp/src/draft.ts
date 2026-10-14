@@ -1,5 +1,5 @@
 import { fieldValues, type AmoApiClient } from '@core/amo';
-import type { Position } from '@core/docs';
+import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
@@ -18,6 +18,8 @@ export interface KpRequestItem {
   width_mm: number | null;
   height_mm: number | null;
   qty: number;
+  /** service — работы (врезка, монтаж, доставка): без размера, без поиска цен, в блоке после товаров (XLSX-2, п. 3). */
+  kind?: 'product' | 'service';
 }
 
 /** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
@@ -46,6 +48,8 @@ export interface KpLine {
   market?: KpLineMarket | null;
   /** Коэффициент, применённый к медиане (общий или производителя). */
   coefficient?: number;
+  /** Работы и услуги идут после товаров; нет поля — товар. */
+  kind?: 'product' | 'service';
 }
 
 export interface KpPayload {
@@ -118,7 +122,7 @@ export interface ParsedFile {
   id: number;
   filename: string;
   kind: string;
-  positions: Position[];
+  positions: OptPosition[];
   questions: string[];
   requirements: string[];
   /** Время разбора, мс — в журнал (RFD-AI-AGENT-OPT-XLSX-TIMEOUT, п. 1). */
@@ -208,8 +212,9 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const letter = card.letter ? await parseLetter(llm, input, card.letter.text) : null;
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
-  const fromDocs = files.parsed.flatMap((f) => f.positions);
-  const requestItems = fromDocs.length ? fromDocs.map(positionToRequest) : (letter?.parsed.request_items ?? []);
+  // Работы и услуги — после товаров (XLSX-2, п. 3), внутри групп порядок как в файле; одинаковые названия не склеиваются (п. 4).
+  const fromDocs = files.parsed.flatMap((f) => f.positions).map(positionToRequest);
+  const requestItems = fromDocs.length ? [...fromDocs.filter((it) => it.kind !== 'service'), ...fromDocs.filter((it) => it.kind === 'service')] : (letter?.parsed.request_items ?? []);
   const items = requestItems.map(toLine);
   const needs = items.map((l) => ({ request_index: l.request_index, reason: NO_PRICE }));
   if (!requestItems.length) {
@@ -508,20 +513,23 @@ export function parseDraft(text: string): ParsedDraft {
 }
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */
-export function positionToRequest(p: Position): KpRequestItem {
-  const size = p.width_mm && p.height_mm ? `${p.width_mm}×${p.height_mm}` : '';
-  const qty = p.qty && p.qty > 0 ? Math.round(p.qty) : 1;
+export function positionToRequest(p: OptPosition): KpRequestItem {
+  const service = p.kind === 'service';
+  const size = !service && p.width_mm && p.height_mm ? `${p.width_mm}×${p.height_mm}` : '';
+  // Дробное количество («24,5» наличников, «2,5» доборов) сохраняется как в файле (XLSX-2): суммы по группам должны сходиться с заявкой.
+  const qty = p.qty && p.qty > 0 ? Math.round(p.qty * 100) / 100 : 1;
   return {
     raw: [p.marking, p.name, size, `${qty} ${p.unit ?? 'шт'}`].filter(Boolean).join(' ').slice(0, 500),
     name: [p.name, p.material, p.color].filter(Boolean).join(', ').slice(0, 300),
-    width_mm: p.width_mm,
-    height_mm: p.height_mm,
+    width_mm: service ? null : p.width_mm,
+    height_mm: service ? null : p.height_mm,
     qty,
+    ...(service ? { kind: 'service' as const } : {}),
   };
 }
 
 function toLine(it: KpRequestItem, i: number): KpLine {
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0 };
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, ...(it.kind === 'service' ? { kind: 'service' as const } : {}) };
 }
 
 /** Размер в строке позиции — ширина × высота (RFD-AI-AGENT-OPT-MAIL-READ-6, п. 3). */

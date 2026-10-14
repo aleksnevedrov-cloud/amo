@@ -190,7 +190,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
   });
 
   it('поиск цен (этап 6): «Найти цены» ставит задание, строка позиции показывает ход поиска, затем цену с пометкой и раскрытие «Источники»; «Искать заново» идёт мимо кэша', async () => {
-    let current = { ...draft, needsManager: [{ request_index: 0, reason: 'цена не задана' }] };
+    // Вторая строка — работа (XLSX-2): после товаров под заголовком «Работы и услуги», без размера и без кнопки поиска цены.
+    const service = { request_index: 1, page_id: null, name: 'Врезка замка на производстве', size: '', qty: 21, price: null, lead_time: '', discount: 0, kind: 'service' as const };
+    let current = { ...draft, items: [...draft.items, service], needsManager: [{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }] };
     let stage: 'idle' | 'running' | 'done' = 'idle';
     const posts: string[] = [];
     const offers = [
@@ -214,6 +216,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const text = () => document.body.textContent ?? '';
     expect(button('Найти цены')?.disabled).toBe(false);
     expect(button('Найти цену')).toBeDefined();
+    expect([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === 'Найти цену')).toHaveLength(1);
+    expect([...document.querySelectorAll('.opt-kp-group')].map((g) => g.textContent)).toEqual(['Работы и услуги']);
+    expect(document.querySelector('.opt-kp-tile-service')?.textContent).toContain('Врезка замка на производстве');
     await click('Найти цены');
     await flush();
     expect(JSON.parse(posts[0]!)).toEqual({ draftId: 7, requestIndexes: 'all', force: false });
