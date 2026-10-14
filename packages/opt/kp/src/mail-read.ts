@@ -30,11 +30,19 @@ export interface MailReadConfig {
   password: string;
 }
 
+/** Откуда взято окно дат: письмо в карточке (±2 дня), дата создания сделки (−14 дней … сейчас) или последние 30 дней. */
+export type MailWindowSource = 'letter' | 'lead' | 'default';
+
 export interface MailSearch {
-  /** Адрес отправителя (из последнего входящего письма сделки или email контакта). */
+  /** Адрес отправителя (входящее письмо в карточке → e-mail контакта → примечание розницы «От: … <адрес>»). */
   from: string;
-  /** Дата письма по карточке; ищем ±1 день. */
+  /** Дата письма по карточке; ищем ±2 дня. */
   around: Date;
+  /**
+   * Явное окно дат (RFD-AI-AGENT-OPT-MAIL-READ-6): когда даты письма в карточке нет — от создания сделки минус 14 дней
+   * до сейчас, без даты сделки — последние 30 дней; весь ящик без даты не читается.
+   */
+  window?: { since: Date; before: Date; source: MailWindowSource };
   /** Тема, если известна: при совпадении берётся письмо с ней, иначе — самое свежее от отправителя. */
   subject?: string | null;
 }
@@ -50,20 +58,22 @@ export interface MailAttachment {
 
 /** Диагностика поиска (без содержимого писем) — в mail_fetch при «не найдено». */
 export interface MailSearchDiag {
-  /** domain — null, если домен публичный (поиск только по точному адресу). */
-  criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null };
+  /** domain — null, если домен публичный (поиск только по точному адресу); windowSource — откуда взято окно дат. */
+  criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null; windowSource?: MailWindowSource };
   /**
    * Папки в порядке просмотра: inWindow — писем в окне дат (SEARCH SINCE/BEFORE), bySender — из них прошло
    * фильтр отправителя по ENVELOPE; scannedWithoutDate / bySenderWithoutDate — то же для запасного прохода
    * по последним письмам папки без даты (0, если он не понадобился).
    */
-  folders: { path: string; specialUse: string | null; inWindow: number; bySender: number; scannedWithoutDate: number; bySenderWithoutDate: number; envelopes: number; ms: number }[];
+  folders: { path: string; specialUse: string | null; inWindow: number; bySender: number; scannedWithoutDate: number; bySenderWithoutDate: number; envelopes: number; ms: number; ranges?: string[] }[];
   /** Папки, которые не смотрели (Отправленные, Черновики, Корзина, несёлектируемые). */
   skippedFolders: string[];
   /** Запасной проход без даты нашёл письмо отправителя хотя бы в одной папке. */
   fallbackWithoutDate: boolean;
   /** Письмо отправителя найдено во «Входящих» — остальные папки не обходились. */
   stoppedAfterInbox?: boolean;
+  /** Ящик просмотрен не полностью: общий бюджет времени вышел на FETCH; ranges — что успели просмотреть (папка: диапазоны). */
+  partial?: { where: string; ranges: string[] } | null;
   /** Сбои SEARCH по дате по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
   errors: string[];
 }
@@ -83,6 +93,8 @@ export interface MailReadOptions {
   totalMs?: number;
   /** Строка прогресса на каждую папку — в консоль mail-check и в debug-лог задания. */
   onProgress?: (line: string) => void;
+  /** UID в одной команде FETCH (500); в тестах меньше. */
+  fetchBatch?: number;
 }
 
 export const MAIL_CONNECT_MS = 20_000;
@@ -122,8 +134,10 @@ export const MAIL_MIN_INLINE_BYTES = 20 * 1024;
 /** Пауза после ошибки входа: Яндекс блокирует IP при частых неверных входах (как в рознице). */
 export const MAIL_AUTH_PAUSE_MS = 30 * 60_000;
 const MAX_TEXT = 12_000;
-/** Писем из папки на проверку отправителя: последние N в окне дат и последние N папки при запасном проходе без даты. */
+/** Писем из папки на проверку отправителя при запасном проходе без даты (последние N папки). */
 const MAX_CANDIDATES = 200;
+/** FETCH ENVELOPE по окну дат — порциями по 500 UID (MAIL-READ-6), общий лимит — totalMs (90 с). */
+export const FETCH_BATCH = 500;
 /** Окно даты: ±2 дня (SINCE/BEFORE в IMAP — по дате сервера, без времени и пояса). */
 const DATE_WINDOW_DAYS = 2;
 /** Папки, где письма заявок не ищем, по special-use. */
@@ -434,14 +448,15 @@ export class ImapMailReader {
     // По домену сверяем только корпоративные домены; публичные (yandex.ru, mail.ru, gmail.com…) — только точный адрес.
     const domainRaw = domainOf(from);
     const domain = domainRaw && !isPublicDomain(domainRaw) ? domainRaw : null;
-    const since = dayStart(search.around, -DATE_WINDOW_DAYS);
-    const before = dayStart(search.around, DATE_WINDOW_DAYS + 1);
+    const since = search.window ? dayStart(search.window.since, 0) : dayStart(search.around, -DATE_WINDOW_DAYS);
+    const before = search.window ? dayStart(search.window.before, 1) : dayStart(search.around, DATE_WINDOW_DAYS + 1);
     const diag: MailSearchDiag = {
-      criteria: { from, domain, since: since.toISOString().slice(0, 10), before: before.toISOString().slice(0, 10), subject: search.subject ?? null },
+      criteria: { from, domain, since: since.toISOString().slice(0, 10), before: before.toISOString().slice(0, 10), subject: search.subject ?? null, windowSource: search.window?.source ?? 'letter' },
       folders: [],
       skippedFolders: [],
       fallbackWithoutDate: false,
       stoppedAfterInbox: false,
+      partial: null,
       errors: [],
     };
     const matchSender = (sender: string): 'address' | 'domain' | null => (sender === from ? 'address' : domain && sender.endsWith(`@${domain}`) ? 'domain' : null);
@@ -474,7 +489,33 @@ export class ImapMailReader {
         return { scanned, found };
       };
 
+      /** Порционный FETCH по UID: по FETCH_BATCH за команду; таймаут — не ошибка, а partial с просмотренными диапазонами. */
+      const scanBatches = async (folder: string, uids: number[], ranges: string[]): Promise<{ scanned: number; found: Candidate[]; timedOut: boolean }> => {
+        let scanned = 0;
+        const found: Candidate[] = [];
+        // Свежие письма первыми: UID растут со временем.
+        const sorted = [...uids].sort((a, b) => b - a);
+        const batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
+        for (let i = 0; i < sorted.length; i += batch) {
+          const part = sorted.slice(i, i + batch);
+          const range = compressUids(part);
+          try {
+            const r = await scan(folder, range, true, `FETCH ENVELOPE ${folder} (${range.length > 40 ? `${part.length} UID` : range})`);
+            scanned += r.scanned;
+            found.push(...r.found);
+            ranges.push(range.length > 60 ? `${Math.min(...part)}…${Math.max(...part)}` : range);
+          } catch (err) {
+            if (!(err instanceof MailTimeoutError)) throw err;
+            diag.partial = { where: err.where, ranges: diag.folders.flatMap((f) => (f.ranges ?? []).map((r) => `${f.path}: ${r}`)).concat(ranges.map((r) => `${folder}: ${r}`)) };
+            return { scanned, found, timedOut: true };
+          }
+        }
+        return { scanned, found, timedOut: false };
+      };
+
+      let stopped = false;
       for (const folder of use) {
+        if (stopped) break;
         const t0 = Date.now();
         let box;
         try {
@@ -485,7 +526,7 @@ export class ImapMailReader {
           continue;
         }
         readOnly = readOnly && Boolean(box.readOnly);
-        const stat = { path: folder.path, specialUse: folder.specialUse, inWindow: 0, bySender: 0, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 0, ms: 0 };
+        const stat: MailSearchDiag['folders'][number] = { path: folder.path, specialUse: folder.specialUse, inWindow: 0, bySender: 0, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 0, ms: 0, ranges: [] };
         // SEARCH только по дате. false — сервер отверг; таймаут — переподключение и проход по номерам сообщений (Входящие и Спам).
         let searchTimedOut = false;
         let inWindow: number[] = [];
@@ -502,13 +543,17 @@ export class ImapMailReader {
         }
         stat.inWindow = inWindow.length;
         if (inWindow.length) {
-          const r = await scan(folder.path, compressUids(inWindow.slice(-MAX_CANDIDATES)), true, `FETCH ENVELOPE ${folder.path}`);
+          const r = await scanBatches(folder.path, inWindow, stat.ranges as string[]);
           stat.envelopes += r.scanned;
           stat.bySender = r.found.length;
           candidates.push(...r.found);
+          if (r.timedOut) {
+            stopped = true;
+            diag.errors.push(`${folder.path}: FETCH ENVELOPE прерван по общему лимиту времени — просмотрено ${stat.envelopes} из ${inWindow.length}`);
+          }
         }
         // В окне дат от отправителя ничего (или SEARCH завис) — последние письма Входящих/Спама по номерам сообщений.
-        if (!stat.bySender && box.exists > 0 && (fallbackFolder(folder) || searchTimedOut)) {
+        if (!stopped && !stat.bySender && box.exists > 0 && (fallbackFolder(folder) || searchTimedOut)) {
           const r = await scan(folder.path, `${Math.max(1, box.exists - MAX_CANDIDATES + 1)}:*`, false, `FETCH ENVELOPE ${folder.path} (без даты)`);
           stat.envelopes += r.scanned;
           stat.scannedWithoutDate = r.scanned;
@@ -518,7 +563,7 @@ export class ImapMailReader {
         }
         stat.ms = Date.now() - t0;
         diag.folders.push(stat);
-        progress(`${folder.path}: в окне дат ${stat.inWindow}, ENVELOPE загружено ${stat.envelopes}, от отправителя ${stat.bySender + stat.bySenderWithoutDate}${searchTimedOut ? ', SEARCH по таймауту' : ''}, ${(stat.ms / 1000).toFixed(1)} с`);
+        progress(`${folder.path}: в окне дат ${stat.inWindow}, ENVELOPE загружено ${stat.envelopes}, от отправителя ${stat.bySender + stat.bySenderWithoutDate}${searchTimedOut ? ', SEARCH по таймауту' : ''}${stopped ? ', просмотр прерван по лимиту времени' : ''}, ${(stat.ms / 1000).toFixed(1)} с`);
         if (isInbox(folder.path) && foundHere(candidates)) {
           diag.stoppedAfterInbox = true;
           progress('письмо отправителя найдено во Входящих — остальные папки не смотрим');
@@ -527,6 +572,8 @@ export class ImapMailReader {
       }
       const chosen = chooseLatest(candidates, search.subject);
       if (!chosen) return { mail: null, diag, readOnly };
+      // После таймаута соединение закрыто — для чтения найденного письма открываем новое (в пределах общего лимита).
+      if (stopped) c = await connect();
       await run(`EXAMINE ${chosen.folder}`, commandMs, () => c.mailboxOpen(chosen.folder, { readOnly: true }));
       const one = await run(`FETCH BODY ${chosen.folder}/${chosen.uid}`, commandMs, () => c.fetchOne(String(chosen.uid), { uid: true, source: true }, { uid: true }));
       if (!one || !one.source) return { mail: null, diag, readOnly };

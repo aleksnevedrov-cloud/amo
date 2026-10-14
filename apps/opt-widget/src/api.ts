@@ -122,7 +122,7 @@ export interface KpDraftInfo {
 
 /** Чтение письма из ящика — как сохранено в payload черновика (те же данные, что в событии mail_fetch журнала). */
 export interface MailSourceInfo {
-  status: 'found' | 'not_found' | 'error';
+  status: 'found' | 'not_found' | 'error' | 'partial';
   searchedFrom: string;
   from?: string | null;
   fromName?: string | null;
@@ -139,11 +139,12 @@ export interface MailSourceInfo {
   error: string | null;
   retryAt: string | null;
   diag?: {
-    criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null };
+    criteria: { from: string; domain: string | null; since: string; before: string; subject: string | null; windowSource?: 'letter' | 'lead' | 'default' };
     folders: { path: string; inWindow: number; bySender: number; scannedWithoutDate?: number; bySenderWithoutDate?: number }[];
     skippedFolders: string[];
     fallbackWithoutDate: boolean;
     stoppedAfterInbox?: boolean;
+    partial?: { where: string; ranges: string[] } | null;
     errors: string[];
   } | null;
 }

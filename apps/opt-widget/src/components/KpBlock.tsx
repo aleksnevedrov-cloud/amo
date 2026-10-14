@@ -306,8 +306,10 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
       ? `Письмо: ${m.date ? dateTimeMsk(m.date) : 'дата неизвестна'} · ${m.attachments ? plural(m.attachments, 'вложение', 'вложения', 'вложений') : 'без вложений'}`
       : m?.status === 'not_found'
         ? 'Письмо: не найдено'
-        : m?.status === 'error'
-          ? 'Письмо: ящик не прочитан'
+        : m?.status === 'partial'
+          ? 'Письмо: не найдено, ящик просмотрен не полностью'
+          : m?.status === 'error'
+            ? 'Письмо: ящик не прочитан'
           : src.letterAt
             ? `Письмо: ${date(src.letterAt)} (из карточки, ящик не настроен)`
             : 'Письмо: в карточке нет';
@@ -327,7 +329,7 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
               <MailFiles m={m} parseErrors={parseErrors} />
             </>
           )}
-          {m?.status === 'not_found' && <SearchDiag m={m} />}
+          {(m?.status === 'not_found' || m?.status === 'partial') && <SearchDiag m={m} />}
           {m?.status === 'error' && (
             <div className="opt-error">
               Ящик не прочитан: {m.error}
@@ -386,7 +388,9 @@ function SearchDiag({ m }: { m: MailSourceInfo }) {
   const d = m.diag;
   return (
     <div className="opt-col">
-      <div>Искали от {m.searchedFrom}{d?.criteria.domain ? ` (и весь домен @${d.criteria.domain})` : ''}{d ? `, даты ${d.criteria.since} – ${d.criteria.before}` : ''}{d?.criteria.subject ? `, тема «${d.criteria.subject}»` : ''}. Черновик собран по карточке.</div>
+      <div>Искали от {m.searchedFrom}{d?.criteria.domain ? ` (и весь домен @${d.criteria.domain})` : ''}{d ? `, даты ${d.criteria.since} – ${d.criteria.before}${d.criteria.windowSource === 'lead' ? ' (от создания сделки)' : d.criteria.windowSource === 'default' ? ' (последние 30 дней)' : ''}` : ''}{d?.criteria.subject ? `, тема «${d.criteria.subject}»` : ''}. Черновик собран по карточке.</div>
+      {m.status === 'partial' && <div className="opt-error">{m.error}</div>}
+      {d?.partial && d.partial.ranges.length > 0 && <div className="opt-muted">Просмотрено: {d.partial.ranges.join('; ')}</div>}
       {d && d.folders.length > 0 && (
         <div className="opt-col">
           <span className="opt-muted">Папки ({d.folders.length}):</span>

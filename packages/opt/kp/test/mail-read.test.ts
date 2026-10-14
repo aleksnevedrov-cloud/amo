@@ -144,12 +144,12 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     expect(r.mail?.attachments.map((a) => [a.filename, a.size])).toEqual([['ТЗ.pdf', 2_000]]);
     expect(r.mail?.matchedBy).toBe('address');
     // Публичный домен: по домену не ищем — в критериях domain = null.
-    expect(r.diag.criteria).toEqual({ from: SENDER, domain: null, since: isoDay(NOW, -2), before: isoDay(NOW, 3), subject: 'Запрос ООО Стройоптпоставка' });
+    expect(r.diag.criteria).toEqual({ from: SENDER, domain: null, since: isoDay(NOW, -2), before: isoDay(NOW, 3), subject: 'Запрос ООО Стройоптпоставка', windowSource: 'letter' });
     expect(r.diag.folders.map((f) => f.path)).toEqual(['INBOX', 'Requests', 'Spam']);
     expect(r.diag.skippedFolders).toEqual(expect.arrayContaining(['Sent', 'Drafts']));
     expect(r.diag.fallbackWithoutDate).toBe(false);
     // Во «Входящих» в окне все 5 писем (hoodiecrow считает SINCE/BEFORE по дате записи на сервер — сегодня), от отправителя два (uid 1 и 5); запасной проход не понадобился.
-    expect(r.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 5, bySender: 2, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 5, ms: expect.any(Number) });
+    expect(r.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 5, bySender: 2, scannedWithoutDate: 0, bySenderWithoutDate: 0, envelopes: 5, ms: expect.any(Number), ranges: ['1:5'] });
     // Во Входящих есть письма отправителя, но не с этой темой — остальные папки просмотрены.
     expect(r.diag.stoppedAfterInbox).toBe(false);
     // Флаги прочитанных писем не менялись ни в одной папке.
@@ -194,7 +194,7 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
   it('окно дат пустое — запасной поиск без даты по последним письмам Входящих и Спама', async () => {
     const far = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: FAR, subject: 'Карточка организации' });
     expect(far.diag.fallbackWithoutDate).toBe(true);
-    expect(far.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 0, bySender: 0, scannedWithoutDate: 5, bySenderWithoutDate: 2, envelopes: 5, ms: expect.any(Number) });
+    expect(far.diag.folders[0]).toEqual({ path: 'INBOX', specialUse: '\\Inbox', inWindow: 0, bySender: 0, scannedWithoutDate: 5, bySenderWithoutDate: 2, envelopes: 5, ms: expect.any(Number), ranges: [] });
     expect(far.mail).toMatchObject({ folder: 'INBOX', uid: 5, subject: 'Карточка организации' });
     expect(far.diag.stoppedAfterInbox).toBe(true);
     // Совсем чужой домен — ничего, диагностика по папкам с нулями.
@@ -237,6 +237,60 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     resetMailAuthPauses();
     expect((await new ImapMailReader(cfg).findLatest(search)).mail?.folder).toBe('INBOX');
   });
+
+  it('окно дат задано явно (без даты письма в карточке): SEARCH по нему, windowSource в критериях; FETCH порциями по UID с перечнем диапазонов', async () => {
+    const since = new Date(Date.now() - 14 * 86_400_000);
+    const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, window: { since, before: NOW, source: 'lead' } }, { fetchBatch: 2 });
+    expect(r.diag.criteria).toMatchObject({ since: isoDay(since, 0), before: isoDay(NOW, 1), windowSource: 'lead' });
+    expect(r.mail).toMatchObject({ folder: 'INBOX', uid: 5 });
+    // Пять писем INBOX в окне — три команды FETCH по 2 UID, свежие первыми.
+    expect(r.diag.folders[0]).toMatchObject({ inWindow: 5, envelopes: 5, ranges: ['4:5', '2:3', '1'] });
+    expect(r.diag.partial).toBeNull();
+  });
+
+  it('общий лимит времени вышел на FETCH: результат partial с просмотренными диапазонами, а не ошибка; найденное до обрыва письмо отдаётся', async () => {
+    resetMailAuthPauses();
+    // Прокси: после второй команды FETCH ответы сервера не передаются — как будто ящик завис на большом FETCH.
+    const sockets = new Set<Socket>();
+    let fetches = 0;
+    const proxy: Server = createServer((client) => {
+      const upstream = netConnect(cfg.port, cfg.host);
+      sockets.add(client).add(upstream);
+      let mute = false;
+      client.on('data', (b) => {
+        // Глушим только второй FETCH ENVELOPE; FETCH BODY найденного письма после переподключения проходит.
+        if (/ UID FETCH .*ENVELOPE/i.test(b.toString()) && ++fetches >= 2) mute = true;
+        upstream.write(b);
+      });
+      upstream.on('data', (b) => {
+        if (!mute) client.write(b);
+      });
+      const end = () => {
+        client.destroy();
+        upstream.destroy();
+      };
+      client.on('close', end).on('error', end);
+      upstream.on('close', end).on('error', end);
+    });
+    await new Promise<void>((r) => proxy.listen(0, r));
+    try {
+      const reader = new ImapMailReader({ ...cfg, port: (proxy.address() as AddressInfo).port });
+      // Отправителя нет среди первых двух UID (5 и 4) — обрыв на втором FETCH даёт partial без письма.
+      const none = await reader.findLatest({ from: 'x@nowhere.test', around: NOW }, { fetchBatch: 2, commandMs: 700 });
+      expect(none.mail).toBeNull();
+      expect(none.diag.partial).toEqual({ where: 'FETCH ENVELOPE INBOX (2:3)', ranges: ['INBOX: 4:5'] });
+      expect(none.diag.errors).toEqual(['INBOX: FETCH ENVELOPE прерван по общему лимиту времени — просмотрено 2 из 5']);
+      expect(none.diag.folders).toHaveLength(1);
+      // Отправитель найден в первой порции (uid 5) — письмо отдаётся, хотя дальше ящик завис.
+      fetches = 0;
+      const found = await reader.findLatest({ from: SENDER, around: NOW }, { fetchBatch: 2, commandMs: 700 });
+      expect(found.mail).toMatchObject({ uid: 5, folder: 'INBOX' });
+      expect(found.diag.partial?.ranges).toEqual(['INBOX: 4:5']);
+    } finally {
+      for (const s of sockets) s.destroy();
+      proxy.close();
+    }
+  }, 30_000);
 
   it('зависший сервер: без приветствия и с приветствием без ответа на вход — таймаут с понятной ошибкой, а не вечное ожидание', async () => {
     resetMailAuthPauses();

@@ -35,6 +35,8 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith('/oauth2/access_token')) return json(200, { token_type: 'Bearer', expires_in: 86400, access_token: 'ACCESS', refresh_token: 'REFRESH' });
     if (url.endsWith('/api/v4/account?with=drive_url')) return json(200, { id: ACCOUNT_ID, drive_url: 'https://drive-b.amocrm.ru' });
     if (url.endsWith('/api/v4/account')) return json(200, { id: ACCOUNT_ID, name: 'РУС-ДВЕРИ', subdomain: 'aleksnevedrov' });
+    if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`) && url.includes('note_type%5D%5B%5D=common')) return new Response(null, { status: 204 });
+    if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`) && url.includes('note_type][]=common')) return new Response(null, { status: 204 });
     if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`)) return mock.mail ? json(200, { _embedded: { notes: [mock.mail] } }) : new Response(null, { status: 204 });
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/notes`) && method === 'POST') return json(200, { _embedded: { notes: [{ id: 1 }] } });
     if (url.includes(`/api/v4/leads/${LEAD_ID}/files`) && method === 'GET') return mock.files.length ? json(200, { _embedded: { files: mock.files } }) : new Response(null, { status: 204 });

@@ -31,7 +31,8 @@ try {
     if (!Number.isInteger(leadId) || leadId <= 0) fail('--lead должен быть числом');
     const amo = await core.amoFor(accountId);
     const r = await leadMailSearch(amo, leadId);
-    console.log(`Сделка ${leadId}: писем в карточке ${r.mails}; отправитель последнего входящего: ${r.letterFrom ?? '—'}; e-mail контакта: ${r.contactEmail || '—'}`);
+    console.log(`Сделка ${leadId}: писем в карточке ${r.mails}; отправитель последнего входящего: ${r.letterFrom ?? '—'}; e-mail контакта: ${r.contactEmail || '—'}; адрес из примечания розницы: ${r.noteFrom ?? '—'}; сделка создана: ${r.leadCreatedAt?.toISOString().slice(0, 10) ?? '—'}`);
+    if (r.search.window) console.log(`Окно дат: ${r.search.window.since.toISOString().slice(0, 10)} – ${r.search.window.before.toISOString().slice(0, 10)} (${r.search.window.source === 'lead' ? 'от даты создания сделки − 14 дней' : 'последние 30 дней'}); даты письма в карточке нет`);
     if (!r.search.from) fail('в карточке нет e-mail отправителя — искать нечего');
     search = r.search;
   } else {
@@ -51,6 +52,7 @@ try {
   if (r.diag.stoppedAfterInbox) console.log('Письмо найдено во Входящих — остальные папки не смотрели');
   if (r.diag.skippedFolders.length) console.log(`Пропущены: ${r.diag.skippedFolders.join(', ')}`);
   if (r.diag.fallbackWithoutDate) console.log('Сработал запасной проход без даты');
+  if (r.diag.partial) console.log(`Ящик просмотрен не полностью: лимит времени вышел на ${r.diag.partial.where}; просмотрено: ${r.diag.partial.ranges.join('; ') || '—'}`);
   if (r.diag.errors.length) console.log(`Ошибки SEARCH: ${r.diag.errors.join('; ')}`);
   if (r.mail) {
     console.log('\n— Найдено —');

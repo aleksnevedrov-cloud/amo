@@ -2,7 +2,7 @@ import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, extractEmail, parseDraft, positionToRequest, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 
 const noDiag: MailSearchDiag = { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] };
@@ -83,7 +83,7 @@ const route = { primary: { provider: 'openai' as const, model: 'gpt-5.5' }, fall
 const file = (uuid: string, name: string, size = 1000): LeadFile => ({ uuid, name, size, mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', createdAt: null, downloadUrl: `https://drive/${uuid}` });
 const position = (name: string, w: number | null, h: number | null, qty: number | null): ParsedFile['positions'][number] => ({ name, marking: null, width_mm: w, height_mm: h, qty, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null });
 
-function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftDeps['amo']['leadMailNotes']>> } = {}): KpDraftDeps['amo'] & { downloaded: string[]; uploaded: { filename: string; size: number }[] } {
+function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftDeps['amo']['leadMailNotes']>>; notes?: Awaited<ReturnType<KpDraftDeps['amo']['getLeadNotes']>> } = {}): KpDraftDeps['amo'] & { downloaded: string[]; uploaded: { filename: string; size: number }[] } {
   const downloaded: string[] = [];
   const uploaded: { filename: string; size: number }[] = [];
   return {
@@ -96,6 +96,7 @@ function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftD
     getLead: async () => ({ id: 89835, name: 'Двери для офиса', price: null, status_id: 1, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } }),
     getContact: async () => ({ id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }, { field_id: 2, field_code: 'PHONE', values: [{ value: '+7 900 000-00-00' }] }] }),
     leadMailNotes: async () => opts.mails ?? [],
+    getLeadNotes: async () => opts.notes ?? [],
     listLeadFiles: async () => opts.files ?? [],
     downloadFile: async (f) => {
       downloaded.push(f.name);
@@ -305,5 +306,42 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.source.from).toBe('none');
     expect(r.payload.client).toEqual({ org: '', fio: 'Иванов Иван', email: 'ivanov@romashka.ru', phone: '+7 900 000-00-00' });
     expect(r).toMatchObject({ cost: { usd: 0 }, provider: null, model: null });
+  });
+});
+
+describe('критерии поиска письма без даты в карточке (RFD-AI-AGENT-OPT-MAIL-READ-6)', () => {
+  const now = new Date('2026-10-14T12:00:00Z');
+  it('адрес: письмо → контакт → примечание розницы «От: Имя <адрес>»; окно: дата письма → [создание сделки − 14 дней; сейчас] → последние 30 дней', () => {
+    const base = { contact: { fio: '', email: '', phone: '' }, letter: null, leadCreatedAt: null, noteFrom: null };
+    expect(senderFromNotes([{ params: { text: 'Запрос КП «89813». От: Туркина Татьяна <t_turkina@sviaznoyalliance.ru>. Вложение: Заявка на двери. Москва..xlsx' } }])).toBe('t_turkina@sviaznoyalliance.ru');
+    expect(senderFromNotes([{ params: { text: 'Письмо от клиента: ivanov@romashka.ru, просит КП' } }])).toBe('ivanov@romashka.ru');
+    expect(senderFromNotes([{ params: { text: 'Позвонить завтра' } }, { params: {} }])).toBeNull();
+    // Только примечание: адрес из него, окно от даты сделки.
+    const fromNote = mailSearchOf({ ...base, noteFrom: 't_turkina@sviaznoyalliance.ru', leadCreatedAt: new Date('2026-10-12T06:00:00Z') }, now);
+    expect(fromNote).toEqual({ from: 't_turkina@sviaznoyalliance.ru', around: now, subject: null, window: { since: new Date('2026-09-28T06:00:00Z'), before: now, source: 'lead' } });
+    // Контакт важнее примечания, письмо важнее контакта; у письма с датой окно не задаётся (±2 дня вокруг даты).
+    expect(mailSearchOf({ ...base, contact: { fio: '', email: 'Иван <ivanov@romashka.ru>', phone: '' }, noteFrom: 'x@y.ru' }, now).from).toBe('ivanov@romashka.ru');
+    const letter = mailSearchOf({ ...base, letter: { text: '', createdAt: new Date('2026-10-12T09:13:00Z'), from: 'Туркина t_turkina@sviaznoyalliance.ru', subject: 'Заявка' } }, now);
+    expect(letter).toEqual({ from: 't_turkina@sviaznoyalliance.ru', around: new Date('2026-10-12T09:13:00Z'), subject: 'Заявка' });
+    // Ни письма, ни сделки — последние 30 дней; адреса нет — from пустой.
+    expect(mailSearchOf(base, now)).toEqual({ from: '', around: now, subject: null, window: { since: new Date('2026-09-14T12:00:00Z'), before: now, source: 'default' } });
+  });
+
+  it('сборка черновика: в карточке письмо без отправителя и даты, адрес только в примечании розницы — ящик читается по окну от даты сделки; partial — пометка, не ошибка', async () => {
+    const { gateway } = fakeGateway(modelAnswer);
+    const amo = fakeAmo({ notes: [{ id: 1, note_type: 'common', created_at: 0, created_by: 0, params: { text: 'Запрос КП. От: Туркина Татьяна <t_turkina@sviaznoyalliance.ru>' } }] });
+    amo.getLead = async () => ({ id: 30008823, name: '89813', price: null, status_id: 1, pipeline_id: 1, responsible_user_id: 3, created_at: Math.floor(new Date('2026-10-12T06:00:00Z').getTime() / 1000), custom_fields_values: null, _embedded: { contacts: [] } });
+    const searches: unknown[] = [];
+    const partialDiag: MailSearchDiag = { ...noDiag, criteria: { ...noDiag.criteria, windowSource: 'lead' }, partial: { where: 'FETCH ENVELOPE INBOX (500 UID)', ranges: ['INBOX: 9001…9500'] } };
+    const mail: KpDraftDeps['mail'] = async (search) => {
+      searches.push(search);
+      return { mail: null, diag: partialDiag };
+    };
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 30008823, route }, { amo, analyze: null, mail });
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toMatchObject({ from: 't_turkina@sviaznoyalliance.ru', subject: null, window: { since: new Date('2026-09-28T06:00:00Z'), source: 'lead' } });
+    expect(r.payload.source.mail).toMatchObject({ status: 'partial', searchedFrom: 't_turkina@sviaznoyalliance.ru', error: 'ящик просмотрен не полностью: лимит времени вышел на FETCH ENVELOPE INBOX (500 UID); просмотрено диапазонов 1' });
+    expect(r.payload.needs_manager.map((n) => n.reason)).toContainEqual(expect.stringContaining('письмо в ящике не найдено среди просмотренного'));
+    expect(r.payload.needs_manager.map((n) => n.reason)).not.toContainEqual(expect.stringMatching(/^почта:/));
   });
 });

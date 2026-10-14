@@ -87,7 +87,8 @@ export interface MailSourceFile {
 }
 
 export interface MailSource {
-  status: 'found' | 'not_found' | 'error';
+  /** partial — ящик просмотрен не полностью (лимит времени на FETCH), письмо среди просмотренного не найдено. */
+  status: 'found' | 'not_found' | 'error' | 'partial';
   messageId: string | null;
   date: string | null;
   subject: string;
@@ -123,7 +124,7 @@ export interface ParsedFile {
 }
 
 export interface KpDraftDeps {
-  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'listLeadFiles' | 'downloadFile' | 'uploadFileToLead'>;
+  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'getLeadNotes' | 'listLeadFiles' | 'downloadFile' | 'uploadFileToLead'>;
   /**
    * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
    * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
@@ -208,6 +209,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
   if (mail.source?.status === 'not_found') needs.push({ request_index: -1, reason: `письмо в ящике не найдено (искали от ${mail.source.searchedFrom}) — черновик по тому, что есть в карточке` });
   if (mail.source?.status === 'error') needs.push({ request_index: -1, reason: `почта: ${mail.source.error}` });
+  if (mail.source?.status === 'partial') needs.push({ request_index: -1, reason: `письмо в ящике не найдено среди просмотренного (${mail.source.error}) — черновик по тому, что есть в карточке` });
   if (mail.source?.status === 'found' && mail.source.matchedBy === 'domain') {
     needs.push({ request_index: -1, reason: `письмо найдено по домену ${mail.source.diag?.criteria.domain ?? ''}, не по адресу ${mail.source.searchedFrom} (папка ${mail.source.folder ?? '?'}, «${mail.source.subject}») — проверьте, что это та заявка; вложения в сделку не загружены` });
   }
@@ -262,6 +264,37 @@ interface Card {
   letter: { text: string; createdAt: Date; from: string; subject: string } | null;
   mails: number;
   files: Awaited<ReturnType<AmoApiClient['listLeadFiles']>>;
+  /** Дата создания сделки — опора для окна дат, когда у письма в карточке даты нет. */
+  leadCreatedAt: Date | null;
+  /** Адрес из примечания розницы «Запрос КП … От: Имя <адрес>» — когда ни в письме, ни у контакта адреса нет. */
+  noteFrom: string | null;
+}
+
+const WINDOW_BEFORE_LEAD_DAYS = 14;
+const WINDOW_DEFAULT_DAYS = 30;
+
+/**
+ * Критерии поиска в ящике по карточке (RFD-AI-AGENT-OPT-MAIL-READ-6): адрес — входящее письмо → e-mail
+ * контакта → примечание розницы; окно — дата письма (±2 дня) → [создание сделки − 14 дней; сейчас] → последние 30 дней.
+ */
+export function mailSearchOf(card: Pick<Card, 'contact' | 'letter' | 'leadCreatedAt' | 'noteFrom'>, now = new Date()): MailSearch & { from: string } {
+  const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email) || extractEmail(card.noteFrom) || '';
+  const subject = card.letter?.subject || null;
+  if (card.letter?.createdAt) return { from, around: card.letter.createdAt, subject };
+  const since = new Date((card.leadCreatedAt ?? now).getTime() - (card.leadCreatedAt ? WINDOW_BEFORE_LEAD_DAYS : WINDOW_DEFAULT_DAYS) * 86_400_000);
+  return { from, around: now, subject, window: { since, before: now, source: card.leadCreatedAt ? 'lead' : 'default' } };
+}
+
+/** Адрес из примечания розницы: «От: Имя <addr>» или любой e-mail в тексте примечания о запросе КП. */
+export function senderFromNotes(notes: { params?: { text?: string } & Record<string, unknown> }[]): string | null {
+  for (const n of notes) {
+    const text = typeof n.params?.text === 'string' ? n.params.text : '';
+    if (!/запрос\s+кп|письм|от:/i.test(text)) continue;
+    const angle = /<\s*([^<>\s]+@[^<>\s]+)\s*>/.exec(text);
+    const found = extractEmail(angle?.[1]) || extractEmail(text);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** Файл для разбора: из карточки (скачать) или из письма (байты уже есть). */
@@ -290,19 +323,24 @@ export function extractEmail(s: string | null | undefined): string {
  * Не найдено или ошибка — черновик собирается по карточке, с пометкой.
  */
 async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDeps['amo'], leadId: number, card: Card): Promise<{ source: MailSource | null; files: SourceFile[] }> {
-  // Адрес: из последнего входящего письма сделки, иначе email главного контакта; только e-mail, без имени.
-  const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email);
+  // Адрес: входящее письмо сделки → e-mail контакта → примечание розницы «От: … <адрес>»; только e-mail, без имени.
+  const search = mailSearchOf(card);
+  const from = search.from;
   const base: MailSource = { status: 'not_found', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: from, from: null, fromName: null, files: [], attachments: 0, taken: [], uploaded: [], skipped: [], error: null, retryAt: null, folder: null, matchedBy: null, diag: null };
-  if (!from) return { source: { ...base, error: 'в карточке нет e-mail отправителя' }, files: [] };
+  if (!from) return { source: { ...base, error: 'в карточке нет e-mail отправителя (ни в письме, ни у контакта, ни в примечании о запросе)' }, files: [] };
   let result: MailReadResult;
   try {
     // Тема — из письма в mail-note (не название сделки); пустая — не используется.
-    result = await read({ from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject || null });
+    result = await read(search);
   } catch (err) {
     const retryAt = err instanceof MailAuthError ? err.retryAt.toISOString() : null;
     return { source: { ...base, status: 'error', error: (err as Error).message, retryAt }, files: [] };
   }
   const found = result.mail;
+  if (!found && result.diag.partial) {
+    const p = result.diag.partial;
+    return { source: { ...base, status: 'partial', diag: result.diag, error: `ящик просмотрен не полностью: лимит времени вышел на ${p.where}; просмотрено диапазонов ${p.ranges.length}` }, files: [] };
+  }
   if (!found) return { source: { ...base, diag: result.diag }, files: [] };
   card.letter = {
     text: [found.subject ? `Тема: ${found.subject}` : '', found.text].filter(Boolean).join('\n'),
@@ -352,10 +390,9 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
  * адрес из последнего входящего письма сделки, иначе e-mail контакта; дата и тема письма из amo.
  * Для консольной проверки без сборки КП (RFD-AI-AGENT-OPT-MAIL-READ-4); from пустой — искать нечего.
  */
-export async function leadMailSearch(amo: KpDraftDeps['amo'], leadId: number): Promise<{ search: MailSearch; letterFrom: string | null; contactEmail: string; mails: number }> {
+export async function leadMailSearch(amo: KpDraftDeps['amo'], leadId: number): Promise<{ search: MailSearch; letterFrom: string | null; contactEmail: string; noteFrom: string | null; leadCreatedAt: Date | null; mails: number }> {
   const card = await readCard(amo, leadId);
-  const from = extractEmail(card.letter?.from) || extractEmail(card.contact.email);
-  return { search: { from, around: card.letter?.createdAt ?? new Date(), subject: card.letter?.subject || null }, letterFrom: card.letter?.from ?? null, contactEmail: card.contact.email, mails: card.mails };
+  return { search: mailSearchOf(card), letterFrom: card.letter?.from ?? null, contactEmail: card.contact.email, noteFrom: card.noteFrom, leadCreatedAt: card.leadCreatedAt, mails: card.mails };
 }
 
 /** Карточка сделки: главный контакт, последнее входящее письмо из примечаний amo, список файлов. */
@@ -367,7 +404,13 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
   const incoming = mails.filter((m) => m.income).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const last = incoming.at(-1) ?? null;
   const files = await amo.listLeadFiles(leadId).catch(() => []);
+  // Примечания розницы читаются только когда адреса нет ни в письме, ни у контакта — лишний запрос к amo не нужен.
+  const contactEmail = contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '';
+  const noteFrom = extractEmail(last?.from) || extractEmail(contactEmail) ? null : senderFromNotes(await amo.getLeadNotes(leadId, 50).catch(() => []));
+  const leadCreatedAt = lead?.created_at ? new Date(Number(lead.created_at) * 1000) : null;
   return {
+    leadCreatedAt,
+    noteFrom,
     contact: {
       fio: contact?.name ?? '',
       email: contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '',

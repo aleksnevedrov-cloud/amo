@@ -66,8 +66,8 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
         summary:
           ms.status === 'found'
             ? `Письмо из ящика найдено (${ms.matchedBy === 'domain' ? `по домену ${ms.diag?.criteria.domain ?? ''}, не по адресу ` : 'от '}${ms.searchedFrom}${ms.folder ? `, папка ${ms.folder}` : ''}${ms.date ? `, ${new Date(ms.date).toLocaleDateString('ru-RU')}` : ''}): вложений ${ms.attachments}, взято ${ms.taken.length}, загружено в сделку ${ms.uploaded.length}` + (ms.skipped.length ? `, пропущено ${ms.skipped.length}` : '')
-            : ms.status === 'not_found'
-              ? `Письмо в ящике не найдено (искали от ${ms.searchedFrom}${ms.diag ? `, папок просмотрено ${ms.diag.folders.length}, писем в окне дат ${ms.diag.folders.reduce((n, f) => n + f.inWindow, 0)}, от отправителя ${ms.diag.folders.reduce((n, f) => n + f.bySender + f.bySenderWithoutDate, 0)}` : ''}${ms.error ? `: ${ms.error}` : ''})`
+            : ms.status === 'not_found' || ms.status === 'partial'
+              ? `Письмо в ящике не найдено${ms.status === 'partial' ? ' — ящик просмотрен не полностью' : ''} (искали от ${ms.searchedFrom}${ms.diag ? `${ms.diag.criteria.since ? `, окно ${ms.diag.criteria.since}–${ms.diag.criteria.before} (${ms.diag.criteria.windowSource ?? 'letter'})` : ''}, папок просмотрено ${ms.diag.folders.length}, писем в окне дат ${ms.diag.folders.reduce((n, f) => n + f.inWindow, 0)}, от отправителя ${ms.diag.folders.reduce((n, f) => n + f.bySender + f.bySenderWithoutDate, 0)}` : ''}${ms.error ? `: ${ms.error}` : ''})`
               : `Ящик не прочитан: ${ms.error}`,
         details: { userId: job.userId, status: ms.status, messageId: ms.messageId, folder: ms.folder, matchedBy: ms.matchedBy, taken: ms.taken, uploaded: ms.uploaded, skipped: ms.skipped, retryAt: ms.retryAt, diag: ms.diag },
       });
