@@ -75,6 +75,7 @@ export type RejectReason =
   | 'другое число створок'
   | 'единица не приводится'
   | 'цена за м² без размера позиции'
+  | 'размер не указан'
   | 'другой размер'
   | 'другая модель'
   | 'доставка в цене без суммы'
@@ -304,7 +305,7 @@ const SEARCH_PROMPT = `Вы ищете публичные розничные ц�
 Обязательно воспользуйтесь веб-поиском; без поиска ответ не принимается. Верните ТОЛЬКО JSON по схеме.
 Правила:
 - В offers — только предложения со страниц, где цена указана явно; url — страница товара. Цену с памяти не называть.
-- price — число как на странице, currency — код валюты (RUB). unit: piece — за полотно/штуку, set — за комплект (quantityInUnit — сколько штук), m2 — за квадратный метр.
+- price — число как на странице, currency — код валюты (RUB). unit: piece — за полотно/штуку/изделие (в том числе когда у товара указан размер), set — за комплект (quantityInUnit — сколько штук), m2 — только если на странице прямо сказано «за м²» / «за квадратный метр».
 - vatStated: included — конечная цена с НДС; no_vat — продавец без НДС, цена конечная; pre_net — цена до НДС (vatRateStated — ставка, если указана); unknown — не сказано.
 - sourceKind: manufacturer — сайт производителя, retail — магазин, marketplace — маркетплейс, aggregator — агрегатор. Сайты производителей — в приоритете.
 - includesDelivery — включены ли в цену доставка или монтаж; deliveryRub — их сумма, только если указана явно.
@@ -455,6 +456,13 @@ export function notRfShop(url: string): string | null {
 
 /** Площадь полотна из размера позиции, м². */
 const areaM2 = (card: ItemCard) => (card.heightMm && card.widthMm ? (card.heightMm * card.widthMm) / 1_000_000 : null);
+/** «3,780 м²» — площадь с запятой, как в формулах для менеджера. */
+const fmtArea = (m2: number) => `${m2.toFixed(3).replace('.', ',')} м²`;
+/**
+ * Цена за м² принимается только когда это подтверждает заголовок/описание предложения: модель помечала m2
+ * цены за изделие с размером (77 000 ₽ за дверь 1000×2700 → ×3,78 м²), и цена вырастала в разы (дефект 5.1).
+ */
+export const isPerSquareMetre = (offer: Pick<MarketOffer, 'unit' | 'title' | 'seller'>) => offer.unit === 'm2' && /м²|м2\b|кв\.?\s*м|квадратн|за\s+м\b|per\s*m2|\/м/i.test(`${offer.title} ${offer.seller}`);
 
 /**
  * Проверка одного предложения: подтверждённая ссылка → валюта → тип → единица → размер → модель →
@@ -486,16 +494,18 @@ export function judgeOffer(offer: MarketOffer, card: ItemCard, sources: WebSourc
     price = Math.max(price - offer.deliveryRub, 0);
     steps.push(`${fmt(offer.price)} − доставка ${fmt(offer.deliveryRub)} = ${fmt(price)}`);
   }
+  const perM2 = isPerSquareMetre(offer);
+  if (offer.unit === 'm2' && !perM2) notes.push('цена за м² не подтверждена описанием — считаем за изделие');
   if (offer.unit === 'set') {
     if (!offer.quantityInUnit || offer.quantityInUnit <= 0) return reject('единица не приводится');
     price = price / offer.quantityInUnit;
     steps.push(`комплект ${offer.quantityInUnit.toLocaleString('ru-RU')} шт → за штуку ${fmt(price)}`);
-  } else if (offer.unit === 'm2') {
-    // Цена за м² → за изделие по площади ширина × высота позиции; размера нет — приводить не к чему.
+  } else if (perM2) {
+    // Подтверждённая цена за м² → за изделие по площади ширина × высота позиции; размера нет — приводить не к чему.
     const area = areaM2(card);
     if (!area) return reject('цена за м² без размера позиции');
     price = price * area;
-    steps.push(`${fmt(offer.price)}/м² × (${card.widthMm} × ${card.heightMm} мм = ${area.toFixed(3)} м²) = ${fmt(price)}`);
+    steps.push(`${fmt(offer.price)}/м² × ${fmtArea(area)} (${card.widthMm}×${card.heightMm}) = ${fmt(price)}`);
   }
   // Модель: фабрика или модель позиции заданы и у предложения заданы, но не совпали — кандидат в аналоги.
   if (!card.lowConfidence) {
@@ -514,12 +524,12 @@ export function judgeOffer(offer: MarketOffer, card: ItemCard, sources: WebSourc
     vatAssumed = true;
     notes.push(VAT_ASSUMED_NOTE);
   }
-  // Размер — только если известен и у позиции, и у предложения; у предложения тоже меньшее — ширина.
-  // Отказ «другой размер» идёт последним: такие предложения — кандидаты в пересчёт по площади (5.1).
-  const tol = opts.sizeToleranceMm ?? 0;
-  const os = orientSize(offer.widthMm, offer.heightMm);
-  const sizeKnown = (card.heightMm !== null && os.heightMm !== null) || (card.widthMm !== null && os.widthMm !== null);
-  if (sizeKnown && offer.unit !== 'm2') {
+  // Размер (кроме подтверждённой цены за м²): у позиции размер есть, у предложения нет — «размер не указан»
+  // (5.1: без размера не берём); расходится — «другой размер», кандидат в пересчёт по площади. Меньшее — ширина.
+  if (!perM2 && (card.heightMm !== null || card.widthMm !== null)) {
+    const tol = opts.sizeToleranceMm ?? 0;
+    const os = orientSize(offer.widthMm, offer.heightMm);
+    if (os.heightMm === null && os.widthMm === null) return { ...reject('размер не указан', round2(price), steps.join('; ') || null), vatAssumed };
     const dh = card.heightMm !== null && os.heightMm !== null ? Math.abs(card.heightMm - os.heightMm) : 0;
     const dw = card.widthMm !== null && os.widthMm !== null ? Math.abs(card.widthMm - os.widthMm) : 0;
     if (dh > tol || dw > tol) return { ...reject('другой размер', round2(price), steps.join('; ') || null), vatAssumed };
@@ -536,7 +546,8 @@ export const AREA_ANALOG_MAX = 3;
  * Без размера у позиции или у предложения — не берутся.
  */
 export function scaleByArea(judged: OfferJudgement[], card: ItemCard, max = AREA_ANALOG_MAX): { judged: OfferJudgement[]; scaled: boolean } {
-  if (judged.some((j) => j.accepted)) return { judged, scaled: false };
+  // Точных совпадений нет или их меньше целевых трёх — одиночное точное совпадение не должно перекрывать аналоги (дефект 5.1: 3 500 ₽ «за статью»).
+  if (judged.filter((j) => j.accepted).length >= AREA_ANALOG_MAX) return { judged, scaled: false };
   const area = areaM2(card);
   if (!area) return { judged, scaled: false };
   const candidates = judged
@@ -559,7 +570,7 @@ export function scaleByArea(judged: OfferJudgement[], card: ItemCard, max = AREA
       accepted: true,
       reason: null,
       unitPrice,
-      formula: `${j.formula ? `${j.formula}; ` : ''}пересчёт по площади: ${fmt(j.unitPrice as number)} × (${area.toFixed(3)} / ${s.toFixed(3)} м²) = ${fmt(unitPrice)}`,
+      formula: `${j.formula ? `${j.formula}; ` : ''}${fmt(j.unitPrice as number)} × (${fmtArea(area)} / ${fmtArea(s)}) = ${fmt(unitPrice)}`,
       notes: [...j.notes, `аналог, пересчёт по площади с ${sourceSize}`],
       areaScaled: true,
       sourceSize,
@@ -644,6 +655,7 @@ export async function researchMarketPrice(llm: LlmGateway, route: ChatRoute, inp
     const area = scaleByArea(exact, card as ItemCard);
     const judged = dropOutliers(area.judged);
     const stats = statsOf(judged);
+    const areaScaled = judged.some((j) => j.accepted && j.areaScaled);
     const analog = stats ? null : pickAnalog(judged, input, stats, opts);
     return {
       query,
@@ -658,7 +670,7 @@ export async function researchMarketPrice(llm: LlmGateway, route: ChatRoute, inp
       webSearchCalls: found.res.usage.webSearchCalls ?? 0,
       cost,
       sources: found.sources,
-      areaScaled: area.scaled && stats !== null,
+      areaScaled,
     };
   } catch (err) {
     if (err instanceof WebSearchUnavailableError || err instanceof LlmError) {

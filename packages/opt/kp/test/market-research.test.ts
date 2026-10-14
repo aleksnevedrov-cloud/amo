@@ -138,10 +138,13 @@ describe('фильтр предложений', () => {
     expect(set).toMatchObject({ accepted: true, unitPrice: 10_000 });
     expect(set.formula?.replace(/\u00a0/g, ' ')).toBe('комплект 4 шт → за штуку 10 000 ₽');
     expect(judgeOffer(offer({ unit: 'set', quantityInUnit: null }), card, SRC)).toMatchObject({ accepted: false, reason: 'единица не приводится' });
-    const m2 = judgeOffer(offer({ url: 'https://m2.ru/z', unit: 'm2', price: 5_000, widthMm: null, heightMm: null }), card, SRC);
+    // Цена за м² — только когда это сказано в заголовке; иначе модель метит m2 цены за изделие (дефект 5.1).
+    const m2 = judgeOffer(offer({ url: 'https://m2.ru/z', unit: 'm2', title: 'Полотно, цена за м²', price: 5_000, widthMm: null, heightMm: null }), card, SRC);
     expect(m2).toMatchObject({ accepted: true, unitPrice: 8_000 });
-    expect(m2.formula?.replace(/\u00a0/g, ' ')).toBe('5 000 ₽/м² × (800 × 2000 мм = 1.600 м²) = 8 000 ₽');
-    expect(judgeOffer(offer({ unit: 'm2' }), { ...card, heightMm: null, widthMm: null }, SRC)).toMatchObject({ accepted: false, reason: 'цена за м² без размера позиции' });
+    expect(m2.formula?.replace(/\u00a0/g, ' ')).toBe('5 000 ₽/м² × 1,600 м² (800×2000) = 8 000 ₽');
+    expect(judgeOffer(offer({ unit: 'm2', title: 'Дверь за кв. м' }), { ...card, heightMm: null, widthMm: null }, SRC)).toMatchObject({ accepted: false, reason: 'цена за м² без размера позиции' });
+    const fakeM2 = judgeOffer(offer({ unit: 'm2', price: 77_000 }), card, SRC);
+    expect(fakeM2).toMatchObject({ accepted: true, unitPrice: 77_000, notes: ['цена за м² не подтверждена описанием — считаем за изделие'] });
   });
 
   it('размер: меньшее значение — ширина; «1400x2700», «1,4х2,7м» и «2000×800» разбираются одинаково; у предложения размер тоже ориентируется', async () => {
@@ -170,11 +173,12 @@ describe('фильтр предложений', () => {
     expect(buildQuery(c, { raw: text, name: text, width_mm: null, height_mm: null }, { name: text, size: '', qty: 2, price: null })).toBe('Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo 1400×2700 купить цена Москва');
   });
 
-  it('размер: отклонение больше допуска отклоняется, в допуске принимается, неизвестный размер не проверяется', () => {
+  it('размер: отклонение больше допуска отклоняется, в допуске принимается; у позиции размер есть, у предложения нет — «размер не указан» (5.1); у позиции размера нет — не проверяется', () => {
     expect(judgeOffer(offer({ widthMm: 700 }), card, SRC)).toMatchObject({ accepted: false, reason: 'другой размер', unitPrice: 10_000 });
     expect(judgeOffer(offer({ widthMm: 790 }), card, SRC, { sizeToleranceMm: 10 })).toMatchObject({ accepted: true });
     expect(judgeOffer(offer({ widthMm: 789 }), card, SRC, { sizeToleranceMm: 10 })).toMatchObject({ accepted: false, reason: 'другой размер' });
-    expect(judgeOffer(offer({ widthMm: null, heightMm: null }), card, SRC)).toMatchObject({ accepted: true });
+    expect(judgeOffer(offer({ widthMm: null, heightMm: null }), card, SRC)).toMatchObject({ accepted: false, reason: 'размер не указан', unitPrice: 10_000 });
+    expect(judgeOffer(offer({ widthMm: null, heightMm: null }), { ...card, widthMm: null, heightMm: null }, SRC)).toMatchObject({ accepted: true });
   });
 
   it('доставка в цене: без суммы отклоняется, с суммой вычитается и попадает в формулу', () => {
@@ -225,7 +229,7 @@ describe('аналог по площади (5.1)', () => {
     // 77 000 × (3,78 / 2,70) = 107 800; 148 000 × (3,78 / 5,40) = 103 600; 162 000 × 0,7 = 113 400.
     expect(scaled.filter((j) => j.accepted).map((j) => [j.sourceSize, j.unitPrice, j.vatAssumed])).toEqual([['1000×2700', 107_800, true], ['2000×2700', 103_600, true], ['2000×2700', 113_400, true]]);
     expect(scaled[0]?.notes).toEqual(['НДС по умолчанию (не указан на сайте)', 'аналог, пересчёт по площади с 1000×2700']);
-    expect(scaled[0]?.formula?.replace(/\u00a0/g, ' ')).toBe('пересчёт по площади: 77 000 ₽ × (3.780 / 2.700 м²) = 107 800 ₽');
+    expect(scaled[0]?.formula?.replace(/\u00a0/g, ' ')).toBe('77 000 ₽ × (3,780 м² / 2,700 м²) = 107 800 ₽');
     expect(scaled.filter((j) => !j.accepted).map((j) => j.reason)).toEqual(['другое число створок', 'другое число створок']);
     expect(statsOf(dropOutliers(scaled))).toEqual({ min: 103_600, max: 113_400, median: 107_800, count: 3, unit: 'piece' });
   });
@@ -238,13 +242,41 @@ describe('аналог по площади (5.1)', () => {
     const r = scaleByArea(many, door);
     // Выбраны три ближайших (1300 и 1500 по 100 мм, затем 1200); порядок в списке — исходный.
     expect(r.judged.filter((j) => j.accepted).map((j) => j.sourceSize)).toEqual(['1200×2700', '1300×2700', '1500×2700']);
-    const exact = [judgeOffer(wood('https://woodwindows.ru/1', 90_000, 1400, 2700), door, src), judgeOffer(wood('https://woodwindows.ru/2', 148_000, 2000, 2700), door, src)];
-    expect(scaleByArea(exact, door)).toMatchObject({ scaled: false });
-    expect(scaleByArea(exact, door).judged[1]?.accepted).toBe(false);
+    // Точных совпадений три и больше — пересчёт не нужен; одно-два — пересчёт добавляется к ним (иначе одно случайное точное перекрывает аналоги).
+    const three = [1, 2, 3].map((i) => judgeOffer(wood(`https://woodwindows.ru/${i}`, 90_000 + i, 1400, 2700), door, src));
+    expect(scaleByArea([...three, judgeOffer(wood('https://woodwindows.ru/4', 148_000, 2000, 2700), door, [...src, { url: 'https://woodwindows.ru/4' }])], door)).toMatchObject({ scaled: false });
+    const one = [judgeOffer(wood('https://woodwindows.ru/1', 90_000, 1400, 2700), door, src), judgeOffer(wood('https://woodwindows.ru/2', 148_000, 2000, 2700), door, src)];
+    const withOne = scaleByArea(one, door);
+    expect(withOne.scaled).toBe(true);
+    expect(withOne.judged.map((j) => [j.accepted, j.areaScaled ?? false, j.unitPrice])).toEqual([[true, false, 90_000], [true, true, 103_600]]);
     expect(scaleByArea(judged1(), { ...door, heightMm: null, widthMm: null }).scaled).toBe(false);
     function judged1() {
       return [judgeOffer(wood('https://woodwindows.ru/1', 77_000, 1000, 2700), door, src)];
     }
+  });
+
+  it('запись #2 с сервера: Винчелли без размера — «размер не указан»; Альянс ×3 с меткой «м²» без подтверждения — пересчёт по площади как за изделие; Стеклофорт 3 500 — выброс; итог 107 800', async () => {
+    const wrong = (url: string, seller: string, price: number, widthMm: number | null, heightMm: number | null) => offer({ url, seller, title: 'Дверь двупольная из массива лиственницы', price, unit: 'm2', vatStated: 'unknown', factory: null, model: null, widthMm, heightMm, kind: 'door', leaves: 2 });
+    const srcs = [{ url: 'https://vinchelli.ru/1' }, { url: 'https://woodwindows.ru/1' }, { url: 'https://woodwindows.ru/2' }, { url: 'https://woodwindows.ru/3' }, { url: 'https://steklofort.ru/5' }];
+    const llm = fakeLlm({ ...CARD, kind: 'door', factory: null, model: null, leaves: 2, heightMm: 2700, widthMm: 1400 }, { offers: [
+      wrong('https://vinchelli.ru/1', 'Винчелли', 63_540, null, null),
+      wrong('https://woodwindows.ru/1', 'Альянс', 77_000, 1000, 2700),
+      wrong('https://woodwindows.ru/2', 'Альянс', 148_000, 2000, 2700),
+      wrong('https://woodwindows.ru/3', 'Альянс', 162_000, 2000, 2700),
+      offer({ url: 'https://steklofort.ru/5', seller: 'Стеклофорт', title: 'Статья: двери из лиственницы', price: 3_500, vatStated: 'unknown', factory: null, model: null, widthMm: 1400, heightMm: 2700, kind: 'door', leaves: 2 }),
+    ] }, srcs);
+    const text = 'Дверь межкомнатная двухпольная из массива лиственницы 1400x2700 мм, окраска L429 Indigo, 2 шт';
+    const r = await researchMarketPrice(llm, route, { line: { name: text, size: '1400×2700 мм', qty: 2, price: null }, item: { raw: text, name: text, width_mm: 1400, height_mm: 2700 }, requirements: [] });
+    expect(r).toMatchObject({ status: 'ok', areaScaled: true, stats: { min: 103_600, max: 113_400, median: 107_800, count: 3 } });
+    expect(r.offers.map((j) => [j.offer.seller, j.accepted, j.reason, j.unitPrice])).toEqual([
+      ['Альянс', true, null, 103_600],
+      ['Альянс', true, null, 107_800],
+      ['Альянс', true, null, 113_400],
+      ['Стеклофорт', false, 'выброс', 3_500],
+      ['Винчелли', false, 'размер не указан', 63_540],
+    ]);
+    expect(r.offers[1]?.formula?.replace(/\u00a0/g, ' ')).toBe('77 000 ₽ × (3,780 м² / 2,700 м²) = 107 800 ₽');
+    expect(r.offers[1]?.notes).toEqual(['цена за м² не подтверждена описанием — считаем за изделие', 'НДС по умолчанию (не указан на сайте)', 'аналог, пересчёт по площади с 1000×2700']);
   });
 
   it('полный прогон по примеру: status ok, медиана 107 800 по трём пересчитанным, areaScaled', async () => {
