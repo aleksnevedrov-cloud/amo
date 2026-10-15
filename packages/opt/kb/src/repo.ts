@@ -28,6 +28,11 @@ export interface KbSource {
   createdAt: Date;
   updatedAt: Date;
   indexedAt: Date | null;
+  /** Ссылка-раздел: при индексации найденные страницы раздела добавляются источниками-детьми (до 50). */
+  crawl: boolean;
+  parentId: number | null;
+  httpStatus: number | null;
+  contentHash: string | null;
 }
 
 export interface NewKbSource {
@@ -40,6 +45,8 @@ export interface NewKbSource {
   sizeBytes?: number;
   refreshDays?: number | null;
   createdBy?: number | null;
+  crawl?: boolean;
+  parentId?: number | null;
 }
 
 export interface KbChunkRow {
@@ -80,10 +87,10 @@ export class KbRepo {
 
   async createSource(s: NewKbSource): Promise<number> {
     const { rows } = await this.db.query<{ id: string }>(
-      `INSERT INTO kb_sources (account_id, kind, title, original, file_path, mime, size_bytes, refresh_days, next_refresh_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $8::int IS NULL THEN NULL ELSE now() + make_interval(days => $8::int) END, $9)
+      `INSERT INTO kb_sources (account_id, kind, title, original, file_path, mime, size_bytes, refresh_days, next_refresh_at, created_by, crawl, parent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $8::int IS NULL THEN NULL ELSE now() + make_interval(days => $8::int) END, $9, $10, $11)
        RETURNING id`,
-      [s.accountId, s.kind, s.title.slice(0, 500), s.original ?? null, s.filePath ?? null, s.mime ?? null, s.sizeBytes ?? 0, s.refreshDays ?? null, s.createdBy ?? null],
+      [s.accountId, s.kind, s.title.slice(0, 500), s.original ?? null, s.filePath ?? null, s.mime ?? null, s.sizeBytes ?? 0, s.refreshDays ?? null, s.createdBy ?? null, s.crawl ?? false, s.parentId ?? null],
     );
     return Number(rows[0]?.id ?? 0);
   }
@@ -95,6 +102,31 @@ export class KbRepo {
   async get(accountId: number, id: number): Promise<KbSource | null> {
     const { rows } = await this.db.query('SELECT * FROM kb_sources WHERE account_id = $1 AND id = $2', [accountId, id]);
     return rows[0] ? mapSource(rows[0]) : null;
+  }
+
+  /** Ссылка уже добавлена в этот аккаунт? */
+  async findUrl(accountId: number, url: string): Promise<KbSource | null> {
+    const { rows } = await this.db.query("SELECT * FROM kb_sources WHERE account_id = $1 AND kind = 'url' AND original = $2", [accountId, url]);
+    return rows[0] ? mapSource(rows[0]) : null;
+  }
+
+  /** Ссылки, у которых подошёл срок обновления; каждая сразу переводится в new, чтобы соседний запуск её не взял. */
+  async takeDueForRefresh(limit = 20): Promise<KbSource[]> {
+    const { rows } = await this.db.query(
+      `UPDATE kb_sources SET status = 'new', error = NULL, updated_at = now()
+        WHERE id IN (SELECT id FROM kb_sources WHERE kind = 'url' AND status <> 'new' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now() ORDER BY next_refresh_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+        RETURNING *`,
+      [limit],
+    );
+    return rows.map(mapSource);
+  }
+
+  async setTitle(id: number, title: string): Promise<void> {
+    await this.db.query('UPDATE kb_sources SET title = $2, updated_at = now() WHERE id = $1', [id, title.slice(0, 500)]);
+  }
+
+  async setFetchInfo(id: number, info: { httpStatus: number | null; contentHash: string | null; mime: string | null; refreshDays?: number | null }): Promise<void> {
+    await this.db.query('UPDATE kb_sources SET http_status = $2, content_hash = $3, mime = COALESCE($4, mime), refresh_days = COALESCE($5, refresh_days), updated_at = now() WHERE id = $1', [id, info.httpStatus, info.contentHash, info.mime, info.refreshDays ?? null]);
   }
 
   async list(accountId: number): Promise<KbSource[]> {
@@ -222,6 +254,10 @@ function mapSource(r: Record<string, unknown>): KbSource {
     createdAt: r.created_at as Date,
     updatedAt: r.updated_at as Date,
     indexedAt: (r.indexed_at ?? null) as Date | null,
+    crawl: Boolean(r.crawl),
+    parentId: r.parent_id === null || r.parent_id === undefined ? null : Number(r.parent_id),
+    httpStatus: r.http_status === null || r.http_status === undefined ? null : Number(r.http_status),
+    contentHash: (r.content_hash ?? null) as string | null,
   };
 }
 

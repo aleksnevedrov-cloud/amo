@@ -3,7 +3,7 @@ import { AccountsRepo, createPool, DocumentsRepo, JournalRepo, ModelsCacheRepo, 
 import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, type OcrProvider } from '@core/docs';
 import type { LLMProvider, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
-import { createKbCore, DEFAULT_EMBEDDING_MODEL, loadKbEnv, OpenAiEmbedder, type EmbedderFor, type KbCore } from '@opt/kb';
+import { createKbCore, createUrlFetcher, DEFAULT_EMBEDDING_MODEL, loadKbEnv, OpenAiEmbedder, type EmbedderFor, type KbCore, type UrlFetcher } from '@opt/kb';
 import { createOptAi, OPT_LLM_TIMEOUT_MS, type OptAiProvider } from './llm.ts';
 import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailReadResult, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
@@ -59,6 +59,8 @@ export interface OptCoreOverrides {
   kbFilesRoot?: string;
   /** Эмбеддер по аккаунту (в тестах подменяется); по умолчанию — OpenAI по ключу аккаунта или серверному. */
   embedderFor?: EmbedderFor;
+  /** Скачивание ссылок базы знаний (в тестах подменяется). */
+  kbFetchUrl?: UrlFetcher;
 }
 
 /**
@@ -122,6 +124,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     ocrFor: async (accountId) => ocr((await settings.get(accountId)).settings.vision.provider),
     journal,
     usdRubRate: async (accountId) => (await settings.get(accountId)).settings.billing.usdRubRate,
+    fetchUrl: overrides.kbFetchUrl ?? createUrlFetcher({ fetch: fetchImpl }),
   });
   return {
     env,

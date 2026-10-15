@@ -55,7 +55,7 @@ docker compose build opt-api opt-worker
 docker compose up -d opt-kb-db                                  # первый старт создаёт БД ai_door_opt_kb
 docker compose up -d opt-api opt-worker                         # opt-api применяет миграции 001_kb_init.sql
 curl -s http://127.0.0.1:3001/health                            # {"status":"ok","checks":{"db":"ok","redis":"ok","kb_db":"ok"}}
-docker compose logs --tail=5 opt-worker                         # «opt-worker запущен: очереди kp, kp-research и kb-index»
+docker compose logs --tail=5 opt-worker                         # «opt-worker запущен: очереди kp, kp-research, kb-index и kb-maintenance (ссылки раз в час)» — после этапа 2
 docker compose exec opt-kb-db psql -U aidoor_opt_kb -d ai_door_opt_kb -c '\dt'   # kb_sources, kb_chunks, kb_prices, kb_aliases, schema_migrations
 ```
 

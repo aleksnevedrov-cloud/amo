@@ -14,8 +14,19 @@ describe('opt-api: база знаний — источники, индекса�
   let fileId = 0;
   const fake = fakeEmbedder();
 
+  let pageVersion = 1;
+  const fetched: string[] = [];
+  const PRICE_PAGE = () => `<html><head><title>Цены | РФ-Двери</title></head><body><header><ul class="menu"><li><a href="/">Главная</a></li></ul></header><main><h1>Цены на двери</h1><table><tr><td>ДПГ сота</td><td>800×2000</td><td>${pageVersion === 1 ? '3 450' : '3 650'} ₽</td></tr></table></main><footer>© РФ-Двери</footer></body></html>`;
+
   beforeAll(async () => {
-    ctx = await setup({ embedder: fake.embedder });
+    ctx = await setup({
+      embedder: fake.embedder,
+      fetchUrl: async (url) => {
+        fetched.push(url);
+        if (url !== 'https://rf-dveri.ru/ceny/') throw new Error('HTTP 404');
+        return { bytes: new TextEncoder().encode(PRICE_PAGE()), mime: 'text/html', finalUrl: url, status: 200 };
+      },
+    });
     headers = { 'x-auth-token': await widgetToken() };
     // Аккаунт появляется в БД опта после OAuth; здесь — напрямую, как в остальных тестах.
     await ctx.deps.accounts.upsertInstalled({ id: ACCOUNT_ID, subdomain: 'aleksnevedrov', accountDomain: 'aleksnevedrov.amocrm.ru' });
@@ -66,6 +77,32 @@ describe('opt-api: база знаний — источники, индекса�
     const list = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json();
     expect(list.sources.map((s: { id: number; status: string }) => [s.id, s.status])).toEqual([[fileId, 'indexed'], [textId, 'indexed']]);
     expect(list.usage).toMatchObject({ sources: 2, bytes: bytes.byteLength + 51, chunks: add.json().source.chunks + 1 });
+  });
+
+  it('ссылка на страницу rf-dveri.ru с ценами → indexed без меню и подвала; повторная индексация по кнопке скачивает заново (этап 2)', async () => {
+    const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/ceny/', refreshDays: 30, crawl: false } });
+    expect(add.statusCode).toBe(202);
+    expect(add.json()).toMatchObject({ existed: false, source: { kind: 'url', title: 'Цены на двери', original: 'https://rf-dveri.ru/ceny/', status: 'indexed', chunks: 1, refreshDays: 30, crawl: false, httpStatus: 200 } });
+    expect(add.json().source.nextRefreshAt).toBeTruthy();
+    const urlId = add.json().source.id as number;
+    const chunks = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kb/sources/${urlId}/chunks`, headers })).json().chunks as { text: string }[];
+    expect(chunks[0]?.text).toContain('ДПГ сота\t800×2000\t3 450 ₽');
+    expect(chunks[0]?.text).not.toContain('Главная');
+    expect(fetched).toEqual(['https://rf-dveri.ru/ceny/']);
+    // Кнопка «Переиндексировать»: страница скачивается снова; содержимое поменялось — фрагменты обновлены.
+    pageVersion = 2;
+    const re = await ctx.app.inject({ method: 'POST', url: `/widget/v1/kb/sources/${urlId}/reindex`, headers });
+    expect(re.statusCode).toBe(202);
+    expect(re.json().source).toMatchObject({ id: urlId, status: 'indexed', chunks: 1 });
+    expect(fetched).toHaveLength(2);
+    expect((await ctx.app.inject({ method: 'GET', url: `/widget/v1/kb/sources/${urlId}/chunks`, headers })).json().chunks[0].text).toContain('3 650 ₽');
+    // Недоступный адрес — источник со статусом error и текстом; внутренний адрес отклоняется сразу.
+    const bad = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/net/' } });
+    expect(bad.statusCode).toBe(202);
+    expect(bad.json().source).toMatchObject({ status: 'error', error: 'HTTP 404' });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'http://127.0.0.1:3001/health' } })).json()).toMatchObject({ error: 'rejected', message: expect.stringContaining('внутреннюю сеть') });
+    await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${bad.json().source.id}`, headers });
+    await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${urlId}`, headers });
   });
 
   it('переиндексация возвращает тот же результат; удаление убирает источник; чужой формат и не-админ отклоняются', async () => {

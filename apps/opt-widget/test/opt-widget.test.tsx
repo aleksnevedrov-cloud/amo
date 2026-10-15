@@ -390,7 +390,7 @@ describe('виджет «Агент опт»: настройки', () => {
 });
 
 describe('виджет «Агент опт»: вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1)', () => {
-  const src = (over: Record<string, unknown>) => ({ id: 1, kind: 'text', title: 'Скидка опт от 50 полотен — 12 %', original: null, mime: 'text/plain', status: 'indexed', sizeBytes: 51, chunks: 1, embeddedChunks: 1, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', job: null, ...over });
+  const src = (over: Record<string, unknown>) => ({ id: 1, kind: 'text', title: 'Скидка опт от 50 полотен — 12 %', original: null, mime: 'text/plain', status: 'indexed', sizeBytes: 51, chunks: 1, embeddedChunks: 1, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', crawl: false, parentId: null, httpStatus: null, job: null, ...over });
 
   it('список с объёмом, добавление текста → «в очереди», переиндексация, фрагменты, поиск, удаление с подтверждением', async () => {
     let sources: Record<string, unknown>[] = [];
@@ -401,6 +401,11 @@ describe('виджет «Агент опт»: вкладка «База знан
         posted.push({ url: 'text', data: JSON.parse(data ?? '{}') });
         sources = [src({ status: 'new', chunks: 0, embeddedChunks: 0, indexedAt: null, job: { state: 'queued' } })];
         return { source: sources[0] };
+      },
+      'POST /widget/v1/kb/sources/url': (data?: string) => {
+        posted.push({ url: 'url', data: JSON.parse(data ?? '{}') });
+        sources = [src({ id: 2, kind: 'url', title: 'Цены на двери', original: 'https://rf-dveri.ru/ceny/', mime: 'text/html', status: 'indexed', chunks: 3, embeddedChunks: 3, refreshDays: 30, nextRefreshAt: '2026-11-14T10:00:00Z', crawl: true, httpStatus: 200 })];
+        return { source: sources[0], existed: false };
       },
       'POST /widget/v1/kb/sources/1/reindex': () => {
         sources = [src({ status: 'new', job: { state: 'running' } })];
@@ -461,5 +466,17 @@ describe('виджет «Агент опт»: вкладка «База знан
     await flush();
     expect(calls.filter((c) => c.method === 'DELETE').map((c) => new URL(c.url).pathname)).toEqual(['/widget/v1/kb/sources/1']);
     expect(document.body.textContent).toContain('Источников пока нет');
+    // Ссылка (этап 2): адрес, период обновления и обход раздела уходят в тело запроса; в списке — период и следующая дата.
+    expect(button('Добавить ссылку')?.disabled).toBe(true);
+    await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'https://rf-dveri.ru/ceny/')!, 'https://rf-dveri.ru/ceny/');
+    await setInput([...document.querySelectorAll('input[type=number]')][0]!, '14');
+    await act(async () => ([...document.querySelectorAll('input[type=checkbox]')][0] as HTMLInputElement).click());
+    expect(button('Добавить ссылку')?.disabled).toBe(false);
+    await click('Добавить ссылку');
+    await flush();
+    expect(posted.at(-1)).toEqual({ url: 'url', data: { url: 'https://rf-dveri.ru/ceny/', refreshDays: 14, crawl: true } });
+    expect(document.body.textContent).toContain('Ссылка добавлена, скачивается, раздел будет обойдён (до 50 страниц)');
+    expect(document.body.textContent).toContain('ссылка · 1 КБ · фрагментов 3 · добавлен 15.10.2026 · индекс 15.10.2026 · обновление каждые 30 дн., следующее 14.11.2026 · раздел');
+    expect(document.body.textContent).toContain('https://rf-dveri.ru/ceny/');
   });
 });

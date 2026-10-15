@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { loadEnv } from '@core/shared';
-import type { Embedder, KbIndexJob } from '@opt/kb';
+import type { Embedder, KbIndexJob, UrlFetcher } from '@opt/kb';
 import { runDraftJob, runResearchJob, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SmtpConfig } from '@opt/kp';
 import { SignJWT } from 'jose';
 import { freshKbDb } from '../../../packages/opt/kb/test/setup.ts';
@@ -75,7 +75,7 @@ export interface SentMail {
   mail: KpMail;
 }
 
-export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null } = {}) {
+export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null; fetchUrl?: UrlFetcher } = {}) {
   const { db, drop } = await freshOptDb();
   // База знаний — своя схема с миграциями @opt/kb (расширение vector в тестовой БД: образ pgvector/pgvector:pg16).
   const kb = await freshKbDb();
@@ -111,6 +111,8 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
     kbDb: kb.db,
     kbFilesRoot: mkdtempSync(join(tmpdir(), 'opt-kb-')),
     embedderFor: async () => opts.embedder ?? null,
+    // Ссылки базы знаний: без сети — подмена скачивания; по умолчанию любой адрес «недоступен».
+    kbFetchUrl: opts.fetchUrl ?? (async (url) => { throw new Error(`HTTP 503 (тест: ${url})`); }),
     // Ящик по IMAP в тестах не читаем: письмо «не найдено», сборка идёт по карточке.
     mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } }),
     mailer,
@@ -131,7 +133,8 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
     // Индексация базы знаний — сразу, как воркер kb-index; ошибки разбора оседают в источнике (status error), задание завершено.
     kbQueue: {
       async enqueue(job: KbIndexJob) {
-        await core!.kb.index(job);
+        // Страницы раздела (обход) индексируются тут же, рекурсивно — как в воркере, по одной.
+        await core!.kb.index(job, { enqueue: (j) => this.enqueue(j) });
       },
       async states() {
         return {};

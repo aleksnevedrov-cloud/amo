@@ -47,7 +47,8 @@ mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/
 том данных `opt-kb-data`, том файлов источников `opt-kb-files` (смонтирован в opt-api и opt-worker как `/kb-files`).
 Порт наружу не открывается. В `.env` опта: `KB_DB_PASSWORD` и `KB_DATABASE_URL` (см. `.env.opt.example`).
 Миграции `packages/opt/kb/migrations` применяет opt-api при старте; `/health` отвечает `kb_db: ok`.
-Подробно — [kb-etap-1-report.md](kb-etap-1-report.md).
+Ссылки (этап 2) скачивает opt-worker: страницы и файлы по адресу, обход раздела до 50 страниц, переиндексация по сроку
+(очередь `kb-maintenance`, проверка раз в час) — наружу нужен доступ opt-worker к сайтам (https). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md).
 
 ## Запуск
 
@@ -57,7 +58,7 @@ cp src/docker-compose.opt.yml docker-compose.yml   # после обновлен
 docker compose -f docker-compose.yml build opt-api opt-worker
 docker compose up -d opt-kb-db opt-api opt-worker  # миграции опта и базы знаний применяет opt-api при старте
 curl -s http://127.0.0.1:3001/health               # {"status":"ok","checks":{"db":"ok","redis":"ok","kb_db":"ok"}}
-docker compose logs --tail=20 opt-worker           # «opt-worker запущен: очереди kp, kp-research и kb-index»
+docker compose logs --tail=20 opt-worker           # «opt-worker запущен: очереди kp, kp-research, kb-index и kb-maintenance (ссылки раз в час)»
 ```
 
 nginx: отдельный server-блок для `opt.rf-dveri.ru` (`scripts/opt/nginx-opt.conf`: 80 → 301, 443 ssl с уже выпущенным сертификатом

@@ -5,7 +5,8 @@ import type { KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '.
 /**
  * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
  * менеджера; список источников с действиями — переиндексировать, удалить, посмотреть фрагменты; строка поиска
- * для проверки, что агент найдёт. Ссылки на сайты — этап 2, выгрузка цен в xlsx — этап 4.
+ * для проверки, что агент найдёт. Ссылки (этап 2): страница сайта или файл по адресу, переиндексация по сроку,
+ * обход раздела до 50 страниц. Выгрузка цен в xlsx — этап 4.
  */
 const ACCEPT = '.pdf,.docx,.xlsx,.xlsm,.csv,.txt,.md,.jpg,.jpeg,.png,.webp';
 const POLL_MS = 3000;
@@ -69,6 +70,10 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
       </div>
       {usage && <Usage usage={usage} />}
       <AddFile busy={busy} onAdd={(f) => void run(async () => (await api.kbAddFile(f.name, f.type, await fileBase64(f)), `Файл «${f.name}» добавлен, индексируется`))} />
+      <AddUrl busy={busy} onAdd={(url, days, crawl) => void run(async () => {
+        const r = await api.kbAddUrl(url, days, crawl);
+        return r.existed ? 'Ссылка уже была в базе — поставлена на переиндексацию' : `Ссылка добавлена, скачивается${crawl ? ', раздел будет обойдён (до 50 страниц)' : ''}`;
+      })} />
       <AddText busy={busy} onAdd={(title, content) => void run(async () => (await api.kbAddText(title, content), 'Текст добавлен, индексируется'))} />
       <Search api={api} />
       {msg && <div style={{ ...s.muted, marginTop: 8 }}>{msg}</div>}
@@ -113,6 +118,40 @@ function AddFile({ busy, onAdd }: { busy: boolean; onAdd: (f: File) => void }) {
           e.target.value = '';
         }}
       />
+    </Field>
+  );
+}
+
+function AddUrl({ busy, onAdd }: { busy: boolean; onAdd: (url: string, refreshDays: number, crawl: boolean) => void }) {
+  const [url, setUrl] = useState('');
+  const [days, setDays] = useState(30);
+  const [crawl, setCrawl] = useState(false);
+  const ok = /^https?:\/\/\S+\.\S+/i.test(url.trim());
+  return (
+    <Field label="Ссылка" hint="Адрес страницы сайта или файла (pdf/xlsx по ссылке). Берётся основной текст без меню и подвала; переиндексация по сроку, по умолчанию раз в 30 дней">
+      <input style={{ ...s.input, marginBottom: 6 }} placeholder="https://rf-dveri.ru/ceny/" value={url} onChange={(e) => setUrl(e.target.value)} />
+      <div style={{ ...s.row, marginBottom: 6 }}>
+        <label style={{ ...s.small, display: 'flex', alignItems: 'center', gap: 6 }}>
+          Обновлять каждые
+          <input style={{ ...s.input, width: 70 }} type="number" min={0} max={365} value={days} onChange={(e) => setDays(Math.max(0, Math.min(365, Number(e.target.value) || 0)))} />
+          дн. (0 — не обновлять)
+        </label>
+        <label style={{ ...s.small, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={crawl} onChange={(e) => setCrawl(e.target.checked)} />
+          обойти раздел (до 50 страниц)
+        </label>
+      </div>
+      <button
+        type="button"
+        style={s.button}
+        disabled={busy || !ok}
+        onClick={() => {
+          onAdd(url.trim(), days, crawl);
+          setUrl('');
+        }}
+      >
+        Добавить ссылку
+      </button>
     </Field>
   );
 }
@@ -217,7 +256,12 @@ function SourceRow({ src, api, busy, onReindex, onRemove }: { src: KbSourceInfo;
             {KIND_LABEL[src.kind]} · {mb(src.sizeBytes)} · фрагментов {src.chunks}
             {src.chunks > 0 && src.embeddedChunks === 0 ? ' (без эмбеддингов)' : ''} · добавлен {date(src.createdAt)}
             {src.indexedAt ? ` · индекс ${date(src.indexedAt)}` : ''}
+            {src.kind === 'url' && src.refreshDays ? ` · обновление каждые ${src.refreshDays} дн.${src.nextRefreshAt ? `, следующее ${date(src.nextRefreshAt)}` : ''}` : ''}
+            {src.kind === 'url' && !src.refreshDays ? ' · без обновления' : ''}
+            {src.crawl ? ' · раздел' : ''}
+            {src.parentId ? ' · страница раздела' : ''}
           </div>
+          {src.kind === 'url' && src.original && src.original !== src.title && <div style={{ ...s.small, ...s.muted, wordBreak: 'break-all' }}>{src.original}</div>}
           {src.error && <div style={s.error}>{src.error}</div>}
         </div>
         {status}

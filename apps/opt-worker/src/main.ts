@@ -1,5 +1,5 @@
 import { loadEnv } from '@core/shared';
-import { KB_INDEX_JOB, KB_QUEUE, type KbIndexJob } from '@opt/kb';
+import { KB_INDEX_JOB, KB_QUEUE, kbIndexJobId, type KbIndexJob } from '@opt/kb';
 import { createOptCore, DRAFT_JOB, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
 import { Queue, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -9,7 +9,8 @@ import { pino } from 'pino';
  * Фоновый обработчик «Агента опт» (Redis база 1): очередь kp — задание «собрать черновик» по кнопке
  * менеджера; очередь kp-research (RFD-AI-AGENT-OPT-PRICE, этап 5) — поиск рыночной цены по одной позиции
  * черновика, по кнопке «Найти цены» или автоматически при сборке, если включено в настройках КП.
- * Плановых задач, опроса почты и вебхуков нет (ТЗ 6.5); токены amoCRM обновляются при обращении.
+ * Опроса почты и вебхуков нет (ТЗ 6.5); токены amoCRM обновляются при обращении. Единственная плановая задача —
+ * переиндексация ссылок базы знаний по сроку (kb-maintenance, раз в час; RFD-AI-AGENT-OPT-KB, этап 2).
  */
 const env = loadEnv();
 const log = pino({ level: env.LOG_LEVEL });
@@ -64,23 +65,54 @@ const researchWorker = new Worker<ResearchJob>(
 );
 researchWorker.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data, attempts: job?.attemptsMade }, 'kp-research: задача упала'));
 
-// База знаний (RFD-AI-AGENT-OPT-KB): индексация источника — извлечение текста, фрагменты, эмбеддинги; по одному заданию за раз.
+// База знаний (RFD-AI-AGENT-OPT-KB): индексация источника — скачивание ссылки, извлечение текста, фрагменты, эмбеддинги; по одному заданию за раз.
+const KB_JOB_OPTIONS = { removeOnComplete: 500, removeOnFail: 500, attempts: 2, backoff: { type: 'fixed' as const, delay: 60_000 } };
+const kbQueue = new Queue<KbIndexJob>(KB_QUEUE, { connection });
+const enqueueKb = async (j: KbIndexJob) => {
+  const id = kbIndexJobId(j.accountId, j.sourceId);
+  const existing = await kbQueue.getJob(id);
+  if (existing) {
+    const st = await existing.getState();
+    if (st === 'completed' || st === 'failed') await existing.remove();
+    else return;
+  }
+  await kbQueue.add(KB_INDEX_JOB, j, { jobId: id, ...KB_JOB_OPTIONS });
+};
 const kbWorker = new Worker<KbIndexJob>(
   KB_QUEUE,
   async (job) => {
     if (job.name !== KB_INDEX_JOB) throw new Error(`Неизвестная задача ${job.name}`);
-    const r = await core.kb.index(job.data);
+    // Страницы раздела (обход) ставятся в эту же очередь по одной.
+    const r = await core.kb.index(job.data, { enqueue: enqueueKb });
     log.info({ ...job.data, status: r.status, chunks: r.chunks, embedded: r.embeddedChunks, ms: r.ms, error: r.error }, 'kb-index: источник обработан');
     return r;
   },
   { connection, concurrency: 1 },
 );
 kbWorker.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data, attempts: job?.attemptsMade }, 'kb-index: задача упала'));
-log.info('opt-worker запущен: очереди kp, kp-research и kb-index');
+
+// Плановое обновление ссылок: раз в час берём до 20 ссылок с подошедшим next_refresh_at и ставим их в kb-index.
+const KB_MAINTENANCE_QUEUE = 'kb-maintenance';
+const KB_REFRESH_JOB = 'refresh-urls';
+const KB_REFRESH_EVERY_MS = 3600_000;
+const kbMaintenance = new Queue(KB_MAINTENANCE_QUEUE, { connection });
+await kbMaintenance.upsertJobScheduler(KB_REFRESH_JOB, { every: KB_REFRESH_EVERY_MS }, { name: KB_REFRESH_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+const kbMaintenanceWorker = new Worker(
+  KB_MAINTENANCE_QUEUE,
+  async (job) => {
+    if (job.name !== KB_REFRESH_JOB) throw new Error(`Неизвестная задача ${job.name}`);
+    const n = await core.kb.refreshDue(enqueueKb);
+    if (n) log.info({ n }, 'kb-maintenance: ссылки поставлены на переиндексацию');
+    return { n };
+  },
+  { connection, concurrency: 1 },
+);
+kbMaintenanceWorker.on('failed', (job, err) => log.error({ err, job: job?.name }, 'kb-maintenance: задача упала'));
+log.info('opt-worker запущен: очереди kp, kp-research, kb-index и kb-maintenance (ссылки раз в час)');
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
-    await Promise.all([worker.close(), researchWorker.close(), kbWorker.close(), researchQueue.close()]);
+    await Promise.all([worker.close(), researchWorker.close(), kbWorker.close(), kbMaintenanceWorker.close(), researchQueue.close(), kbQueue.close(), kbMaintenance.close()]);
     await connection.quit();
     await core.close();
     process.exit(0);

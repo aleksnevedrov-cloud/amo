@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Db, JournalKind, JournalRepo } from '@core/db';
@@ -5,6 +6,9 @@ import type { OcrProvider } from '@core/docs';
 import { chunkDocument } from './chunk.ts';
 import type { EmbedderFor } from './embeddings.ts';
 import { extractForKb, KB_FILE_EXTENSIONS, KB_MAX_FILE_BYTES, kbFormatOf } from './extract.ts';
+import { createUrlFetcher, type UrlFetcher } from './fetch-url.ts';
+import { htmlToKbText, sectionLinks } from './html.ts';
+import { parsePublicUrl } from './safe-url.ts';
 import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
 import { searchKb, type KbSearchResult } from './search.ts';
 
@@ -29,6 +33,16 @@ export interface KbIndexJob {
   userId: number | null;
 }
 
+/** Хуки задания индексации: постановка дочерних страниц раздела в очередь (обход до CRAWL_MAX_PAGES страниц). */
+export interface KbIndexHooks {
+  enqueue?: (job: KbIndexJob) => Promise<void>;
+}
+
+/** Период обновления ссылки по умолчанию, дни (ТЗ раздел 3). */
+export const DEFAULT_URL_REFRESH_DAYS = 30;
+/** Обход раздела: не больше страниц, включая саму страницу раздела. */
+export const CRAWL_MAX_PAGES = 50;
+
 export interface KbIndexResult {
   sourceId: number;
   status: 'indexed' | 'error';
@@ -50,6 +64,8 @@ export interface KbCoreDeps {
   journal: Pick<JournalRepo, 'add'>;
   /** Курс для cost_rub в журнале. */
   usdRubRate(accountId: number): Promise<number>;
+  /** Скачивание по ссылке (в тестах подменяется); по умолчанию — с проверкой адреса и лимитом 50 МБ. */
+  fetchUrl?: UrlFetcher;
 }
 
 export class KbLimitError extends Error {
@@ -65,12 +81,19 @@ export interface KbCore {
   addText(accountId: number, input: { title: string; content: string; userId: number | null }): Promise<number>;
   /** Файл из вкладки: проверка формата и лимитов, копия на томе, статус new. */
   addFile(accountId: number, input: { filename: string; mime: string | null; bytes: Uint8Array; userId: number | null }): Promise<number>;
+  /**
+   * Ссылка на страницу сайта или файл (pdf/xlsx по ссылке): проверка адреса, статус new; скачивание — в задании индексации.
+   * Повторное добавление того же адреса — переиндексация существующего источника. crawl — обойти раздел (до 50 страниц).
+   */
+  addUrl(accountId: number, input: { url: string; refreshDays?: number | null; crawl?: boolean; userId: number | null }): Promise<{ id: number; existed: boolean }>;
+  /** Ссылки с подошедшим сроком обновления → статус new и в очередь; возвращает, сколько поставлено. */
+  refreshDue(enqueue: (job: KbIndexJob) => Promise<void>, limit?: number): Promise<number>;
   /** Источник снова в статус new; постановку в очередь делает вызывающий. */
   reindex(accountId: number, sourceId: number): Promise<KbSource>;
   /** Удаление источника, фрагментов и файла. */
   remove(accountId: number, sourceId: number): Promise<KbSource | null>;
   /** Индексация одного источника (задание очереди kb-index). */
-  index(job: KbIndexJob): Promise<KbIndexResult>;
+  index(job: KbIndexJob, hooks?: KbIndexHooks): Promise<KbIndexResult>;
   /** Семантический поиск с записью стоимости в журнал. */
   search(accountId: number, query: string, opts?: { limit?: number; userId?: number | null; leadId?: number | null; silent?: boolean }): Promise<KbSearchResult>;
   close(): Promise<void>;
@@ -80,6 +103,8 @@ const safeName = (name: string) => name.replace(/[^0-9A-Za-zА-Яа-яЁё._-]+/
 
 export function createKbCore(d: KbCoreDeps): KbCore {
   const repo = new KbRepo(d.db);
+  const fetchUrl = d.fetchUrl ?? createUrlFetcher();
+  const sha = (data: Uint8Array | string) => createHash('sha256').update(data).digest('hex');
   const pathFor = (accountId: number, sourceId: number, name: string) => join(d.filesRoot, String(accountId), `${sourceId}-${safeName(name)}`);
 
   async function store(accountId: number, sourceId: number, name: string, bytes: Uint8Array): Promise<string> {
@@ -124,6 +149,27 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       return id;
     },
 
+    async addUrl(accountId, input) {
+      // Синтаксис и буквальные внутренние адреса — сразу; DNS и редиректы проверяет скачивание в задании.
+      const url = parsePublicUrl(input.url).toString();
+      const existing = await repo.findUrl(accountId, url);
+      const refreshDays = input.refreshDays === undefined ? DEFAULT_URL_REFRESH_DAYS : input.refreshDays;
+      if (existing) {
+        await repo.setFetchInfo(existing.id, { httpStatus: existing.httpStatus, contentHash: existing.contentHash, mime: null, refreshDays });
+        if (input.crawl && !existing.crawl) await d.db.query('UPDATE kb_sources SET crawl = true WHERE id = $1', [existing.id]);
+        await repo.markNew(existing.id);
+        return { id: existing.id, existed: true };
+      }
+      const id = await repo.createSource({ accountId, kind: 'url', title: url, original: url, sizeBytes: 0, refreshDays, createdBy: input.userId, crawl: Boolean(input.crawl) });
+      return { id, existed: false };
+    },
+
+    async refreshDue(enqueue, limit = 20) {
+      const due = await repo.takeDueForRefresh(limit);
+      for (const s of due) await enqueue({ accountId: s.accountId, sourceId: s.id, userId: null });
+      return due.length;
+    },
+
     async reindex(accountId, sourceId) {
       const s = await repo.get(accountId, sourceId);
       if (!s) throw new Error('Источник не найден');
@@ -137,12 +183,28 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       return s;
     },
 
-    async index(job) {
+    async index(job, hooks = {}) {
       const t0 = Date.now();
       const { accountId, sourceId } = job;
-      const source = await repo.get(accountId, sourceId);
+      let source = await repo.get(accountId, sourceId);
       if (!source) throw new Error(`источник ${sourceId} не найден`);
       try {
+        let crawlHtml: string | null = null;
+        if (source.kind === 'url') {
+          // Ссылка: скачиваем заново при каждой индексации; неизменённая страница (тот же хэш) эмбеддинги не пересчитывает.
+          const got = await downloadUrl(source);
+          crawlHtml = got.html;
+          if (got.hash === source.contentHash && source.status !== 'error' && source.chunks > 0) {
+            await repo.setFetchInfo(sourceId, { httpStatus: got.status, contentHash: got.hash, mime: got.mime });
+            await repo.markIndexed(sourceId, { chunks: source.chunks, embeddedChunks: source.embeddedChunks, sizeBytes: got.size });
+            await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: «${source.title}» без изменений — фрагментов ${source.chunks}, следующая проверка через ${source.refreshDays ?? DEFAULT_URL_REFRESH_DAYS} дн.`, details: { sourceId, kind: 'url', unchanged: true, httpStatus: got.status, userId: job.userId } });
+            if (source.crawl && crawlHtml) await crawl(source, crawlHtml, hooks);
+            return { sourceId, status: 'indexed', chunks: source.chunks, embeddedChunks: source.embeddedChunks, tokens: 0, usd: 0, textChars: 0, ms: Date.now() - t0, error: null };
+          }
+          await repo.setFetchInfo(sourceId, { httpStatus: got.status, contentHash: got.hash, mime: got.mime });
+          if (got.title && (source.title === source.original || !source.title)) await repo.setTitle(sourceId, got.title);
+          source = (await repo.get(accountId, sourceId)) ?? source;
+        }
         const text = await textOf(source);
         const chunks = chunkDocument(text);
         if (!chunks.length) throw new Error('В источнике не найден текст');
@@ -174,6 +236,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
           costUsd: usd,
           costRub: usd * rate,
         });
+        if (source.crawl && crawlHtml) await crawl(source, crawlHtml, hooks);
         return { sourceId, status: 'indexed', chunks: chunks.length, embeddedChunks: embedded, tokens, usd, textChars: text.length, ms, error: null };
       } catch (err) {
         const message = (err as Error).message;
@@ -209,16 +272,61 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     },
   };
 
-  /** Текст источника: заметка — как есть; файл — извлечение с OCR аккаунта; ссылка — этап 2. */
+  /** Текст источника: заметка — как есть; файл и файл по ссылке — извлечение с OCR аккаунта; страница — текст уже сохранён при скачивании. */
   async function textOf(source: KbSource): Promise<string> {
     if (!source.filePath) throw new Error('У источника нет файла на томе — добавьте его заново');
     const bytes = new Uint8Array(await readFile(source.filePath));
-    if (source.kind === 'text') return new TextDecoder('utf-8').decode(bytes);
-    if (source.kind === 'file') {
-      const r = await extractForKb(bytes, source.mime ?? '', source.original ?? source.title, { ocr: await d.ocrFor(source.accountId) });
-      return r.text;
+    if (source.kind === 'text' || source.mime === 'text/html') return new TextDecoder('utf-8').decode(bytes);
+    const name = source.kind === 'url' ? new URL(source.original ?? '').pathname.split('/').pop() || 'page' : (source.original ?? source.title);
+    const r = await extractForKb(bytes, source.mime ?? '', name, { ocr: await d.ocrFor(source.accountId) });
+    return r.text;
+  }
+
+  /**
+   * Скачивание ссылки: страница → основной текст (без меню и подвала) сохраняется как text/html-источник в .txt;
+   * pdf/xlsx/docx по ссылке → байты сохраняются и разбираются как файл. Возвращает хэш содержимого для сравнения.
+   */
+  async function downloadUrl(source: KbSource): Promise<{ hash: string; status: number; mime: string; title: string | null; html: string | null; size: number }> {
+    const got = await fetchUrl(source.original ?? '');
+    const path = new URL(got.finalUrl).pathname;
+    const looksHtml = got.mime === 'text/html' || got.mime === 'application/xhtml+xml' || (!got.mime && /^\s*</.test(new TextDecoder().decode(got.bytes.subarray(0, 64))));
+    if (looksHtml) {
+      const html = new TextDecoder('utf-8').decode(got.bytes);
+      const { title, text } = htmlToKbText(html);
+      if (text.length < 20) throw new Error('На странице не найден текст');
+      // Заголовок страницы — первой строкой «# …», если извлечение его уже не поставило (h1 внутри основного блока).
+      const bytes = new TextEncoder().encode(title && !text.startsWith('# ') ? `# ${title}\n\n${text}` : text);
+      await store(source.accountId, source.id, 'page.txt', bytes);
+      return { hash: sha(bytes), status: got.status, mime: 'text/html', title, html, size: bytes.byteLength };
     }
-    throw new Error('Источники-ссылки появятся на этапе 2');
+    const name = path.split('/').pop() || 'file';
+    const format = kbFormatOf(got.mime, name);
+    const mime = got.mime || (format === 'pdf' ? 'application/pdf' : format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'text/plain');
+    await store(source.accountId, source.id, name, got.bytes);
+    return { hash: sha(got.bytes), status: got.status, mime, title: name, html: null, size: got.bytes.byteLength };
+  }
+
+  /** Обход раздела: страницы раздела становятся источниками-детьми с тем же периодом обновления; уже добавленные пропускаются. */
+  async function crawl(root: KbSource, html: string, hooks: KbIndexHooks): Promise<void> {
+    const { rows } = await d.db.query<{ n: number }>('SELECT count(*)::int AS n FROM kb_sources WHERE parent_id = $1', [root.id]);
+    let room = CRAWL_MAX_PAGES - 1 - (rows[0]?.n ?? 0);
+    if (room <= 0) return;
+    const links = sectionLinks(html, root.original ?? '', CRAWL_MAX_PAGES * 2);
+    let added = 0;
+    for (const link of links) {
+      if (room <= 0) break;
+      if (await repo.findUrl(root.accountId, link)) continue;
+      try {
+        parsePublicUrl(link);
+      } catch {
+        continue;
+      }
+      const id = await repo.createSource({ accountId: root.accountId, kind: 'url', title: link, original: link, refreshDays: root.refreshDays, createdBy: root.createdBy, parentId: root.id });
+      room -= 1;
+      added += 1;
+      if (hooks.enqueue) await hooks.enqueue({ accountId: root.accountId, sourceId: id, userId: root.createdBy });
+    }
+    if (added) await d.journal.add({ accountId: root.accountId, kind: KB_INDEX_KIND, summary: `База знаний: обход раздела ${root.original} — добавлено страниц ${added} (ссылок на странице ${links.length})`, details: { sourceId: root.id, added, links: links.length, userId: root.createdBy } });
   }
 
   return core;

@@ -9,6 +9,8 @@ const FILE_BODY_LIMIT = 72 * 1024 * 1024;
 
 const textBody = z.object({ title: z.string().trim().max(300).default(''), content: z.string().min(1).max(2_000_000) });
 const fileBody = z.object({ filename: z.string().trim().min(1).max(200), mime: z.string().max(200).optional(), contentBase64: z.string().min(1) });
+/** Ссылка: период обновления в днях (по умолчанию 30, 0 — не обновлять), crawl — обойти раздел до 50 страниц. */
+const urlBody = z.object({ url: z.string().trim().min(8).max(2000), refreshDays: z.number().int().min(0).max(365).optional(), crawl: z.boolean().optional() });
 const searchQuery = z.object({ q: z.string().trim().min(1).max(500), limit: z.coerce.number().int().min(1).max(50).optional() });
 const chunksQuery = z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() });
 
@@ -57,6 +59,22 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       await deps.kbQueue.enqueue({ accountId: p.accountId, sourceId: id, userId: p.userId });
       await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: загружен файл «${b.data.filename}» (${Math.round(bytes.byteLength / 1024)} КБ)`, details: { sourceId: id, kind: 'file', userId: p.userId, audit: 'kb' } });
       return reply.code(202).send({ source: view(await kb.repo.get(p.accountId, id)) });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  /** Ссылка на страницу или файл по url (этап 2): скачивание и разбор — в задании очереди; тот же адрес повторно — переиндексация. */
+  api.post('/kb/sources/url', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const b = urlBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const p = principal(req);
+    try {
+      const { id, existed } = await kb.addUrl(p.accountId, { url: b.data.url, refreshDays: b.data.refreshDays === 0 ? null : b.data.refreshDays, crawl: b.data.crawl, userId: p.userId });
+      await deps.kbQueue.enqueue({ accountId: p.accountId, sourceId: id, userId: p.userId });
+      if (!existed) await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: добавлена ссылка ${b.data.url}${b.data.crawl ? ' (обход раздела)' : ''}`, details: { sourceId: id, kind: 'url', crawl: Boolean(b.data.crawl), refreshDays: b.data.refreshDays ?? 30, userId: p.userId, audit: 'kb' } });
+      return reply.code(202).send({ source: view(await kb.repo.get(p.accountId, id)), existed });
     } catch (err) {
       return fail(reply, err);
     }
@@ -130,5 +148,8 @@ function view(s: Awaited<ReturnType<Deps['kb']['repo']['get']>>) {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     indexedAt: s.indexedAt,
+    crawl: s.crawl,
+    parentId: s.parentId,
+    httpStatus: s.httpStatus,
   };
 }

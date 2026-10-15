@@ -217,6 +217,10 @@ export interface KbSourceInfo {
   createdAt: string;
   updatedAt: string;
   indexedAt: string | null;
+  /** Ссылка-раздел (обход до 50 страниц), родитель для страниц раздела, код последнего ответа сервера. */
+  crawl: boolean;
+  parentId: number | null;
+  httpStatus: number | null;
   /** Состояние задания очереди kb-index; null — не в очереди. */
   job?: DraftJob;
 }
@@ -286,6 +290,8 @@ export class KpApi extends ApiClient {
   kbSources = () => this.call<{ sources: KbSourceInfo[]; usage: KbUsageInfo }>('GET', '/widget/v1/kb/sources');
   kbAddText = (title: string, content: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/text', { title, content });
   kbAddFile = (filename: string, mime: string, contentBase64: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/file', { filename, mime, contentBase64 });
+  /** Ссылка на страницу или файл: refreshDays — период обновления (0 — не обновлять), crawl — обойти раздел до 50 страниц. */
+  kbAddUrl = (url: string, refreshDays: number, crawl: boolean) => this.call<{ source: KbSourceInfo; existed: boolean }>('POST', '/widget/v1/kb/sources/url', { url, refreshDays, crawl });
   kbReindex = (id: number) => this.call<{ source: KbSourceInfo }>('POST', `/widget/v1/kb/sources/${id}/reindex`);
   kbRemove = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/sources/${id}`);
   kbChunks = (id: number, limit = 100) => this.call<{ source: KbSourceInfo; chunks: KbChunkInfo[] }>('GET', `/widget/v1/kb/sources/${id}/chunks?limit=${limit}`);
