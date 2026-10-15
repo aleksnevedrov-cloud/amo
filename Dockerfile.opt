@@ -23,6 +23,7 @@ COPY packages/retail/agent/package.json packages/retail/agent/
 COPY packages/retail/pricing/package.json packages/retail/pricing/
 COPY packages/retail/mail/package.json packages/retail/mail/
 COPY packages/opt/kp/package.json packages/opt/kp/
+COPY packages/opt/kb/package.json packages/opt/kb/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .
@@ -35,12 +36,14 @@ WORKDIR /app
 # LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП, Writer и Calc — старые .doc/.rtf/.xls из писем → DOCX/XLSX.
 RUN apk add --no-cache libredwg || true
 RUN apk add --no-cache libreoffice-writer libreoffice-calc ttf-dejavu font-noto || true
-ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data
+ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data KB_MIGRATIONS_DIR=/app/kb-migrations KB_FILES_ROOT=/kb-files
 COPY --from=build /out/opt-api apps/opt-api
 COPY --from=build /out/opt-worker apps/opt-worker
 COPY packages/opt/kp/migrations migrations
-# Файлы опта: шаблон КП, собранные документы; том opt_data монтируется сюда.
-RUN mkdir -p /data && chown -R node:node /data
+# Миграции базы знаний (RFD-AI-AGENT-OPT-KB): применяются opt-api при старте к БД ai_door_opt_kb (контейнер opt-kb-db).
+COPY packages/opt/kb/migrations kb-migrations
+# Файлы опта: шаблон КП, собранные документы (том opt_data); файлы базы знаний — том opt-kb-files.
+RUN mkdir -p /data /kb-files && chown -R node:node /data /kb-files
 USER node
 # Порт задаёт API_PORT из .env (на сервере 3001); EXPOSE — только справочно.
 EXPOSE 3001

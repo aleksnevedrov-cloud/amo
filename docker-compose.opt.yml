@@ -2,7 +2,23 @@
 # (ТЗ разделение, раздел 4): отдельная БД ai_door_opt со своим пользователем и Redis база 1.
 # Подключение к сети розничного compose-проекта: имя сети = <папка проекта розницы>_default.
 # Файл копируется в /opt/agent-opt/docker-compose.yml, клон репозитория лежит рядом в ./src — отсюда контекст сборки.
+# База знаний опта (RFD-AI-AGENT-OPT-KB): свой контейнер Postgres с pgvector (opt-kb-db), том данных opt-kb-data,
+# том файлов источников opt-kb-files; порт наружу не открывается — только сеть compose. Розница и БД ai_door_opt не затронуты.
 services:
+  opt-kb-db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ai_door_opt_kb
+      POSTGRES_USER: aidoor_opt_kb
+      POSTGRES_PASSWORD: ${KB_DB_PASSWORD:?задайте KB_DB_PASSWORD в .env опта}
+    volumes:
+      - opt-kb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aidoor_opt_kb -d ai_door_opt_kb"]
+      interval: 5s
+      retries: 10
+
   opt-api:
     build:
       context: ./src
@@ -15,6 +31,9 @@ services:
       - "127.0.0.1:${API_PORT:-3001}:${API_PORT:-3001}"
     volumes:
       - opt_data:/data
+      - opt-kb-files:/kb-files
+    depends_on:
+      opt-kb-db: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${API_PORT:-3001}/health"]
       interval: 15s
@@ -29,6 +48,7 @@ services:
     env_file: .env
     volumes:
       - opt_data:/data
+      - opt-kb-files:/kb-files
     command: ["node", "apps/opt-worker/dist/main.js"]
     depends_on:
       opt-api: { condition: service_healthy }
@@ -40,3 +60,5 @@ networks:
 
 volumes:
   opt_data:
+  opt-kb-data:
+  opt-kb-files:

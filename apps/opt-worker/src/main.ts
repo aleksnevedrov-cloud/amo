@@ -1,4 +1,5 @@
 import { loadEnv } from '@core/shared';
+import { KB_INDEX_JOB, KB_QUEUE, type KbIndexJob } from '@opt/kb';
 import { createOptCore, DRAFT_JOB, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
 import { Queue, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -62,11 +63,24 @@ const researchWorker = new Worker<ResearchJob>(
   { connection, concurrency: 2 },
 );
 researchWorker.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data, attempts: job?.attemptsMade }, 'kp-research: задача упала'));
-log.info('opt-worker запущен: очереди kp и kp-research');
+
+// База знаний (RFD-AI-AGENT-OPT-KB): индексация источника — извлечение текста, фрагменты, эмбеддинги; по одному заданию за раз.
+const kbWorker = new Worker<KbIndexJob>(
+  KB_QUEUE,
+  async (job) => {
+    if (job.name !== KB_INDEX_JOB) throw new Error(`Неизвестная задача ${job.name}`);
+    const r = await core.kb.index(job.data);
+    log.info({ ...job.data, status: r.status, chunks: r.chunks, embedded: r.embeddedChunks, ms: r.ms, error: r.error }, 'kb-index: источник обработан');
+    return r;
+  },
+  { connection, concurrency: 1 },
+);
+kbWorker.on('failed', (job, err) => log.error({ err, job: job?.name, data: job?.data, attempts: job?.attemptsMade }, 'kb-index: задача упала'));
+log.info('opt-worker запущен: очереди kp, kp-research и kb-index');
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
-    await Promise.all([worker.close(), researchWorker.close(), researchQueue.close()]);
+    await Promise.all([worker.close(), researchWorker.close(), kbWorker.close(), researchQueue.close()]);
     await connection.quit();
     await core.close();
     process.exit(0);

@@ -2,13 +2,15 @@ import { useState } from 'react';
 import { s } from '@core/widget-core';
 import type { KpApi } from '../api.ts';
 import { Journal } from './Journal.tsx';
+import { KnowledgeBase } from './KnowledgeBase.tsx';
 import { KpSettings } from './KpSettings.tsx';
 import { MailSettings } from './MailSettings.tsx';
 import { ModelSettings } from './ModelSettings.tsx';
 
-/** Вкладка «Поиск цен» появится на этапе 9 ТЗ. */
+/** Вкладка «База знаний» — RFD-AI-AGENT-OPT-KB: файлы, ссылки и тексты, по которым агент разбирает заявки и подбирает цены. */
 const TABS = [
   ['kp', 'КП'],
+  ['kb', 'База знаний'],
   ['model', 'Модель'],
   ['mail', 'Письмо'],
   ['journal', 'Журнал сборок'],
@@ -36,6 +38,7 @@ export function SettingsPage({ api, fullPageUrl }: { api: KpApi; fullPageUrl?: s
         ))}
       </div>
       {tab === 'kp' && <KpSettings api={api} />}
+      {tab === 'kb' && <KnowledgeBase api={api} />}
       {tab === 'model' && <ModelSettings api={api} />}
       {tab === 'mail' && <MailSettings api={api} />}
       {tab === 'journal' && <Journal api={api} />}

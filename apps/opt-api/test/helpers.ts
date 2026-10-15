@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { loadEnv } from '@core/shared';
+import type { Embedder, KbIndexJob } from '@opt/kb';
 import { runDraftJob, runResearchJob, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SmtpConfig } from '@opt/kp';
 import { SignJWT } from 'jose';
+import { freshKbDb } from '../../../packages/opt/kb/test/setup.ts';
 import { freshOptDb } from '../../../packages/opt/kp/test/setup.ts';
 import { buildApp } from '../src/app.ts';
 import { createDeps, type Deps, type DraftJobState } from '../src/deps.ts';
@@ -73,8 +75,10 @@ export interface SentMail {
   mail: KpMail;
 }
 
-export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}) {
+export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null } = {}) {
   const { db, drop } = await freshOptDb();
+  // База знаний — своя схема с миграциями @opt/kb (расширение vector в тестовой БД: образ pgvector/pgvector:pg16).
+  const kb = await freshKbDb();
   const env = loadEnv({
     NODE_ENV: 'test',
     LOG_LEVEL: 'fatal',
@@ -104,6 +108,9 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
     alerter: { alert: async () => undefined },
     ...(opts.ai ? { ai: opts.ai } : {}),
     filesRoot: mkdtempSync(join(tmpdir(), 'opt-kp-')),
+    kbDb: kb.db,
+    kbFilesRoot: mkdtempSync(join(tmpdir(), 'opt-kb-')),
+    embedderFor: async () => opts.embedder ?? null,
     // Ящик по IMAP в тестах не читаем: письмо «не найдено», сборка идёт по карточке.
     mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } }),
     mailer,
@@ -118,6 +125,16 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
       },
       async state() {
         return jobs.at(-1)?.state ?? null;
+      },
+      close: async () => undefined,
+    },
+    // Индексация базы знаний — сразу, как воркер kb-index; ошибки разбора оседают в источнике (status error), задание завершено.
+    kbQueue: {
+      async enqueue(job: KbIndexJob) {
+        await core!.kb.index(job);
+      },
+      async states() {
+        return {};
       },
       close: async () => undefined,
     },
@@ -141,7 +158,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string } = {}
   });
   core = deps;
   const app = await buildApp(deps);
-  return { app, deps, amo, sent, close: async () => (await app.close(), await drop()) };
+  return { app, deps, amo, sent, close: async () => (await app.close(), await drop(), await kb.drop()) };
 }
 
 export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_SECRET) {

@@ -325,7 +325,7 @@ describe('виджет «Агент опт»: настройки', () => {
     billing: { usdRubRate: 90, pricing: {} },
   };
 
-  it('вкладки КП, Модель, Письмо, Журнал; письмо сохраняется вместе с паролем', async () => {
+  it('вкладки КП, База знаний, Модель, Письмо, Журнал; письмо сохраняется вместе с паролем', async () => {
     const saved: string[] = [];
     const { self } = fakeSelf('settings', {
       'GET /widget/v1/kp/settings': { constants: { vatRate: 22, priceCoefficient: 1, manufacturerCoefficients: { 'Профиль Дорс': 0.9 }, autoResearch: false, researchCacheDays: 7, maxPositionsPerRun: 30 }, certsDir: null, numbering: { prefix: 'КП', year: null, counter: 0 }, template: { exists: false, name: null, md5: null, updatedAt: null } },
@@ -351,10 +351,10 @@ describe('виджет «Агент опт»: настройки', () => {
     await act(async () => cbs.advancedSettings!());
     await flush();
     expect(document.body.textContent).toContain('Шаблон ещё не загружен');
-    // Фраза о ценах редактируется в константах КП; вкладки «База знаний» нет (решение заказчика 12.10.2026).
+    // Фраза о ценах редактируется в константах КП; вкладка «База знаний» — новая база опта (RFD-AI-AGENT-OPT-KB), не пять справочников 12.10.2026.
     expect(document.body.textContent).toContain('Фраза о ценах');
     expect(document.body.textContent).toContain('Домены производителей');
-    expect([...document.querySelectorAll('button')].map((b) => b.textContent)).not.toContain('База знаний');
+    expect([...document.querySelectorAll('button')].map((b) => b.textContent)).toContain('База знаний');
     // Настройки поиска цен (этап 6): переключатель автопоиска, коэффициенты (справочник строками «имя = число»), кэш, лимит.
     expect(document.body.textContent).toContain('Искать цены автоматически при сборке черновика');
     const pairs = [...document.querySelectorAll('textarea')].find((t) => t.value === 'Профиль Дорс = 0.9')!;
@@ -386,5 +386,80 @@ describe('виджет «Агент опт»: настройки', () => {
     await click('Журнал сборок');
     await flush();
     expect(document.body.textContent).toContain('КП КП-2026-1 отправлено на ivanov@romashka.ru');
+  });
+});
+
+describe('виджет «Агент опт»: вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1)', () => {
+  const src = (over: Record<string, unknown>) => ({ id: 1, kind: 'text', title: 'Скидка опт от 50 полотен — 12 %', original: null, mime: 'text/plain', status: 'indexed', sizeBytes: 51, chunks: 1, embeddedChunks: 1, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', job: null, ...over });
+
+  it('список с объёмом, добавление текста → «в очереди», переиндексация, фрагменты, поиск, удаление с подтверждением', async () => {
+    let sources: Record<string, unknown>[] = [];
+    const posted: { url: string; data: unknown }[] = [];
+    const { self, calls } = fakeSelf('settings', {
+      'GET /widget/v1/kb/sources': () => ({ sources, usage: { sources: sources.length, bytes: 51 * sources.length, chunks: sources.length, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
+      'POST /widget/v1/kb/sources/text': (data?: string) => {
+        posted.push({ url: 'text', data: JSON.parse(data ?? '{}') });
+        sources = [src({ status: 'new', chunks: 0, embeddedChunks: 0, indexedAt: null, job: { state: 'queued' } })];
+        return { source: sources[0] };
+      },
+      'POST /widget/v1/kb/sources/1/reindex': () => {
+        sources = [src({ status: 'new', job: { state: 'running' } })];
+        return { source: sources[0] };
+      },
+      'GET /widget/v1/kb/sources/1/chunks': { source: src({}), chunks: [{ id: 10, sourceId: 1, position: 0, text: 'Скидка опт от 50 полотен — 12 %', meta: {}, hasEmbedding: true }] },
+      'GET /widget/v1/kb/search': { query: 'скидка опт', hits: [{ chunkId: 10, sourceId: 1, position: 0, text: 'Скидка опт от 50 полотен — 12 %', meta: {}, score: 0.03, matched: ['vector', 'text'], source: { title: 'Скидка опт от 50 полотен — 12 %', kind: 'text', original: null, indexedAt: '2026-10-15T10:00:05Z' } }], model: 'text-embedding-3-small', tokens: 4, costUsd: 0.00000008, ms: 12 },
+      'DELETE /widget/v1/kb/sources/1': () => {
+        sources = [];
+        return { ok: true };
+      },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    expect(document.body.textContent).toContain('Источников пока нет');
+    expect(document.body.textContent).toContain('Занято: 1 КБ из 500.0 МБ');
+    // Текст менеджера: кнопка активна только с содержимым; после отправки — источник в очереди.
+    expect(button('Добавить текст')?.disabled).toBe(true);
+    await setInput([...document.querySelectorAll('textarea')][0]!, 'Скидка опт от 50 полотен — 12 %');
+    expect(button('Добавить текст')?.disabled).toBe(false);
+    await click('Добавить текст');
+    await flush();
+    expect(posted).toEqual([{ url: 'text', data: { title: '', content: 'Скидка опт от 50 полотен — 12 %' } }]);
+    expect(document.body.textContent).toContain('Текст добавлен, индексируется');
+    expect(document.body.textContent).toContain('в очереди…');
+    expect(button('Переиндексировать')?.disabled).toBe(true);
+    // Воркер закончил — опрос списка приносит indexed.
+    sources = [src({})];
+    await act(async () => new Promise((r) => setTimeout(r, 3100)));
+    await flush();
+    expect(document.body.textContent).toContain('проиндексирован');
+    expect(document.body.textContent).toContain('текст · 1 КБ · фрагментов 1 · добавлен 15.10.2026 · индекс 15.10.2026');
+    await click('Фрагменты');
+    await flush();
+    expect(document.body.textContent).toContain('#1');
+    await click('Переиндексировать');
+    await flush();
+    expect(document.body.textContent).toContain('индексируется…');
+    sources = [src({})];
+    // Поиск: пять лучших фрагментов с источником и способом совпадения.
+    await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'скидка опт')!, 'скидка опт');
+    await click('Найти');
+    await flush();
+    expect(document.body.textContent).toContain('Найдено 1 · эмбеддинг text-embedding-3-small, 4 токенов · 12 мс');
+    expect(document.body.textContent).toContain('текст: Скидка опт от 50 полотен — 12 % · смысл+текст');
+    expect(calls.some((c) => c.url.includes('/widget/v1/kb/search?q=%D1%81%D0%BA%D0%B8%D0%B4%D0%BA%D0%B0%20%D0%BE%D0%BF%D1%82&limit=5'))).toBe(true);
+    // Удаление — только после подтверждения.
+    window.confirm = () => false;
+    await click('Удалить');
+    await flush();
+    expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    window.confirm = () => true;
+    await click('Удалить');
+    await flush();
+    expect(calls.filter((c) => c.method === 'DELETE').map((c) => new URL(c.url).pathname)).toEqual(['/widget/v1/kb/sources/1']);
+    expect(document.body.textContent).toContain('Источников пока нет');
   });
 });

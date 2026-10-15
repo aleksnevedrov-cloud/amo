@@ -1,0 +1,261 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { errorMessage, Field, s } from '@core/widget-core';
+import type { KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
+
+/**
+ * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
+ * менеджера; список источников с действиями — переиндексировать, удалить, посмотреть фрагменты; строка поиска
+ * для проверки, что агент найдёт. Ссылки на сайты — этап 2, выгрузка цен в xlsx — этап 4.
+ */
+const ACCEPT = '.pdf,.docx,.xlsx,.xlsm,.csv,.txt,.md,.jpg,.jpeg,.png,.webp';
+const POLL_MS = 3000;
+const KIND_LABEL: Record<KbSourceInfo['kind'], string> = { file: 'файл', url: 'ссылка', text: 'текст' };
+
+const mb = (bytes: number) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`);
+const date = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
+
+export function KnowledgeBase({ api }: { api: KpApi }) {
+  const [sources, setSources] = useState<KbSourceInfo[] | null>(null);
+  const [usage, setUsage] = useState<KbUsageInfo | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const alive = useRef(true);
+
+  const reload = useCallback(async () => {
+    try {
+      const r = await api.kbSources();
+      if (!alive.current) return;
+      setSources(r.sources);
+      setUsage(r.usage);
+    } catch (e) {
+      if (alive.current) setMsg(errorMessage(e));
+    }
+  }, [api]);
+
+  useEffect(() => {
+    alive.current = true;
+    void reload();
+    return () => {
+      alive.current = false;
+    };
+  }, [reload]);
+
+  // Пока есть источники в статусе new (в очереди или индексируются) — опрашиваем список.
+  const pending = Boolean(sources?.some((x) => x.status === 'new'));
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => void reload(), POLL_MS);
+    return () => clearInterval(t);
+  }, [pending, reload]);
+
+  const run = async (fn: () => Promise<string | null>) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const m = await fn();
+      if (alive.current && m) setMsg(m);
+      await reload();
+    } catch (e) {
+      if (alive.current) setMsg(errorMessage(e));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  return (
+    <div style={s.block}>
+      <div style={{ ...s.muted, marginBottom: 8 }}>
+        Агент использует базу при разборе заявок, подборе цен и ответах на вопросы покупателя. Файлы и тексты режутся на фрагменты до 1 500 символов; эмбеддинги считаются ключом OpenAI из вкладки «Модель».
+      </div>
+      {usage && <Usage usage={usage} />}
+      <AddFile busy={busy} onAdd={(f) => void run(async () => (await api.kbAddFile(f.name, f.type, await fileBase64(f)), `Файл «${f.name}» добавлен, индексируется`))} />
+      <AddText busy={busy} onAdd={(title, content) => void run(async () => (await api.kbAddText(title, content), 'Текст добавлен, индексируется'))} />
+      <Search api={api} />
+      {msg && <div style={{ ...s.muted, marginTop: 8 }}>{msg}</div>}
+      <div style={{ ...s.label, marginTop: 16 }}>Источники{sources ? ` (${sources.length})` : ''}</div>
+      {sources === null && <div style={s.muted}>Загрузка…</div>}
+      {sources?.length === 0 && <div style={s.muted}>Источников пока нет — добавьте файл или текст</div>}
+      {sources?.map((src) => (
+        <SourceRow
+          key={src.id}
+          src={src}
+          api={api}
+          busy={busy}
+          onReindex={() => void run(async () => (await api.kbReindex(src.id), null))}
+          onRemove={() => {
+            if (!window.confirm(`Удалить источник «${src.title}» и его фрагменты?`)) return;
+            void run(async () => (await api.kbRemove(src.id), `Источник «${src.title}» удалён`));
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Usage({ usage }: { usage: KbUsageInfo }) {
+  return (
+    <div style={{ ...s.small, ...s.muted, marginBottom: 8 }}>
+      Занято: {mb(usage.bytes)} из {mb(usage.limits.bytes)} · фрагментов {usage.chunks.toLocaleString('ru-RU')} из {usage.limits.chunks.toLocaleString('ru-RU')} · источников {usage.sources}
+    </div>
+  );
+}
+
+function AddFile({ busy, onAdd }: { busy: boolean; onAdd: (f: File) => void }) {
+  return (
+    <Field label="Файл" hint="pdf, docx, xlsx, csv, txt, md, jpg/png (сканы — через распознавание из настроек КП); до 50 МБ. Из xlsx-прайсов цены извлекаются отдельно (этап 3)">
+      <input
+        type="file"
+        accept={ACCEPT}
+        disabled={busy}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onAdd(f);
+          e.target.value = '';
+        }}
+      />
+    </Field>
+  );
+}
+
+function AddText({ busy, onAdd }: { busy: boolean; onAdd: (title: string, content: string) => void }) {
+  const [title, setTitle] = useState('');
+  const [content, setContent] = useState('');
+  return (
+    <Field label="Текст" hint="Заметка менеджера: правила, условия, скидки, описание моделей. Сохраняется как есть">
+      <input style={{ ...s.input, marginBottom: 6 }} placeholder="Название (необязательно)" value={title} onChange={(e) => setTitle(e.target.value)} />
+      <textarea style={s.textarea} placeholder="Например: Скидка опт от 50 полотен — 12 %" value={content} onChange={(e) => setContent(e.target.value)} />
+      <button
+        type="button"
+        style={{ ...s.button, marginTop: 6 }}
+        disabled={busy || !content.trim()}
+        onClick={() => {
+          onAdd(title, content);
+          setTitle('');
+          setContent('');
+        }}
+      >
+        Добавить текст
+      </button>
+    </Field>
+  );
+}
+
+function Search({ api }: { api: KpApi }) {
+  const [q, setQ] = useState('');
+  const [hits, setHits] = useState<KbHitInfo[] | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const search = async () => {
+    if (!q.trim()) return;
+    setBusy(true);
+    setInfo(null);
+    try {
+      const r = await api.kbSearch(q.trim());
+      setHits(r.hits);
+      setInfo(`Найдено ${r.hits.length}${r.model ? ` · эмбеддинг ${r.model}, ${r.tokens} токенов` : ' · без эмбеддингов (нет ключа OpenAI)'} · ${r.ms} мс`);
+    } catch (e) {
+      setInfo(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Field label="Проверить поиск" hint="Что найдёт агент по вопросу покупателя: пять лучших фрагментов с источником">
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          style={s.input}
+          placeholder="скидка опт"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void search();
+          }}
+        />
+        <button type="button" style={s.buttonGhost} disabled={busy || !q.trim()} onClick={() => void search()}>
+          Найти
+        </button>
+      </div>
+      {info && <div style={{ ...s.muted, ...s.small, marginTop: 4 }}>{info}</div>}
+      {hits?.map((h) => (
+        <div key={h.chunkId} style={{ ...s.card, marginTop: 6 }}>
+          <div style={{ ...s.small, ...s.muted }}>
+            {h.source ? `${KIND_LABEL[h.source.kind]}: ${h.source.original ?? h.source.title}` : 'источник удалён'}
+            {h.meta.page ? ` · стр. ${h.meta.page}` : ''}
+            {h.meta.sheet ? ` · лист «${h.meta.sheet}»` : ''}
+            {h.meta.heading ? ` · ${h.meta.heading}` : ''}
+            {` · ${h.matched.map((m) => (m === 'vector' ? 'смысл' : 'текст')).join('+')}`}
+          </div>
+          <div style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{h.text.length > 600 ? `${h.text.slice(0, 600)}…` : h.text}</div>
+        </div>
+      ))}
+    </Field>
+  );
+}
+
+function SourceRow({ src, api, busy, onReindex, onRemove }: { src: KbSourceInfo; api: KpApi; busy: boolean; onReindex: () => void; onRemove: () => void }) {
+  const [chunks, setChunks] = useState<KbChunkInfo[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const toggle = async () => {
+    if (open) return setOpen(false);
+    setOpen(true);
+    if (chunks) return;
+    try {
+      setChunks((await api.kbChunks(src.id)).chunks);
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
+  const status =
+    src.status === 'indexed' ? <span style={s.badgeOk}>проиндексирован</span> : src.status === 'error' ? <span style={s.badgeBad}>ошибка</span> : <span style={s.badgeWarn}>{src.job?.state === 'running' ? 'индексируется…' : 'в очереди…'}</span>;
+  return (
+    <div style={{ ...s.card, marginTop: 6 }}>
+      <div style={s.row}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600 }}>{src.title}</div>
+          <div style={{ ...s.small, ...s.muted }}>
+            {KIND_LABEL[src.kind]} · {mb(src.sizeBytes)} · фрагментов {src.chunks}
+            {src.chunks > 0 && src.embeddedChunks === 0 ? ' (без эмбеддингов)' : ''} · добавлен {date(src.createdAt)}
+            {src.indexedAt ? ` · индекс ${date(src.indexedAt)}` : ''}
+          </div>
+          {src.error && <div style={s.error}>{src.error}</div>}
+        </div>
+        {status}
+      </div>
+      <div style={{ ...s.row, marginTop: 6 }}>
+        <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => void toggle()}>
+          {open ? 'Скрыть фрагменты' : 'Фрагменты'}
+        </button>
+        <button type="button" style={s.buttonGhost} disabled={busy || src.status === 'new'} onClick={onReindex}>
+          Переиндексировать
+        </button>
+        <button type="button" style={s.buttonGhost} disabled={busy} onClick={onRemove}>
+          Удалить
+        </button>
+      </div>
+      {open && err && <div style={s.error}>{err}</div>}
+      {open && chunks && chunks.length === 0 && <div style={{ ...s.muted, ...s.small }}>Фрагментов нет</div>}
+      {open &&
+        chunks?.map((c) => (
+          <div key={c.id} style={{ ...s.small, marginTop: 6, padding: '6px 8px', background: '#f6f8fa', borderRadius: 6, whiteSpace: 'pre-wrap' }}>
+            <span style={s.muted}>
+              #{c.position + 1}
+              {c.meta.page ? ` · стр. ${c.meta.page}` : ''}
+              {c.meta.sheet ? ` · лист «${c.meta.sheet}»` : ''}
+              {c.meta.heading ? ` · ${c.meta.heading}` : ''}
+              {c.hasEmbedding ? '' : ' · без эмбеддинга'}
+            </span>
+            <div>{c.text}</div>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/** Файл → base64 для JSON-тела (как шаблон КП): отдельная зависимость на multipart не нужна. */
+async function fileBase64(file: File): Promise<string> {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return btoa(bin);
+}

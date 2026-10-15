@@ -200,6 +200,54 @@ export interface ModelsInfo {
   error?: string;
 }
 
+/** Источник базы знаний опта (RFD-AI-AGENT-OPT-KB): файл, ссылка или текст менеджера. */
+export interface KbSourceInfo {
+  id: number;
+  kind: 'file' | 'url' | 'text';
+  title: string;
+  original: string | null;
+  mime: string | null;
+  status: 'new' | 'indexed' | 'error';
+  sizeBytes: number;
+  chunks: number;
+  embeddedChunks: number;
+  refreshDays: number | null;
+  nextRefreshAt: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  indexedAt: string | null;
+  /** Состояние задания очереди kb-index; null — не в очереди. */
+  job?: DraftJob;
+}
+
+export interface KbUsageInfo {
+  sources: number;
+  bytes: number;
+  chunks: number;
+  limits: { bytes: number; chunks: number };
+}
+
+export interface KbChunkInfo {
+  id: number;
+  sourceId: number;
+  position: number;
+  text: string;
+  meta: { page?: number; sheet?: string; heading?: string };
+  hasEmbedding: boolean;
+}
+
+export interface KbHitInfo {
+  chunkId: number;
+  sourceId: number;
+  position: number;
+  text: string;
+  meta: KbChunkInfo['meta'];
+  score: number;
+  matched: ('vector' | 'text')[];
+  source: { title: string; kind: KbSourceInfo['kind']; original: string | null; indexedAt: string | null } | null;
+}
+
 /** Клиент бэкенда «Агента опт» (opt.rf-dveri.ru): маршруты /widget/v1/*. */
 export class KpApi extends ApiClient {
   status = () => this.call<Status>('GET', '/widget/v1/status');
@@ -233,6 +281,15 @@ export class KpApi extends ApiClient {
   send = (body: { draftId: number; to: string; cc?: string; subject: string; text: string; resendConfirmed?: boolean }) =>
     this.call<{ draft: KpDraftInfo | null; to: string }>('POST', '/widget/v1/kp/send', body);
 
+
+  /** База знаний: источники, добавление текста и файла (base64 в JSON), переиндексация, удаление, фрагменты, поиск. */
+  kbSources = () => this.call<{ sources: KbSourceInfo[]; usage: KbUsageInfo }>('GET', '/widget/v1/kb/sources');
+  kbAddText = (title: string, content: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/text', { title, content });
+  kbAddFile = (filename: string, mime: string, contentBase64: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/file', { filename, mime, contentBase64 });
+  kbReindex = (id: number) => this.call<{ source: KbSourceInfo }>('POST', `/widget/v1/kb/sources/${id}/reindex`);
+  kbRemove = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/sources/${id}`);
+  kbChunks = (id: number, limit = 100) => this.call<{ source: KbSourceInfo; chunks: KbChunkInfo[] }>('GET', `/widget/v1/kb/sources/${id}/chunks?limit=${limit}`);
+  kbSearch = (q: string, limit = 5) => this.call<{ query: string; hits: KbHitInfo[]; model: string | null; tokens: number; costUsd: number; ms: number }>('GET', `/widget/v1/kb/search?q=${encodeURIComponent(q)}&limit=${limit}`);
 
   kpSettings = () => this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
   saveKpSettings = (patch: { constants?: KpConstants; certsDir?: string | null; numbering?: { prefix?: string; counter?: number } }) =>

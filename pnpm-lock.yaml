@@ -156,6 +156,9 @@ importers:
       '@fastify/rate-limit':
         specifier: ^10.3.0
         version: 10.3.0
+      '@opt/kb':
+        specifier: workspace:*
+        version: link:../../packages/opt/kb
       '@opt/kp':
         specifier: workspace:*
         version: link:../../packages/opt/kp
@@ -251,6 +254,9 @@ importers:
       '@core/shared':
         specifier: workspace:*
         version: link:../../packages/core/shared
+      '@opt/kb':
+        specifier: workspace:*
+        version: link:../../packages/opt/kb
       '@opt/kp':
         specifier: workspace:*
         version: link:../../packages/opt/kp
@@ -590,6 +596,37 @@ importers:
         specifier: ^0.8.3
         version: 0.8.3
 
+  packages/opt/kb:
+    dependencies:
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../core/docs
+      exceljs:
+        specifier: ^4.4.0
+        version: 4.4.0
+      mammoth:
+        specifier: ^1.12.3
+        version: 1.12.3
+      openai:
+        specifier: ^7.23.0
+        version: 7.23.0(ws@8.21.3)(zod@3.25.76)
+      unpdf:
+        specifier: ^1.8.1
+        version: 1.8.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
+
   packages/opt/kp:
     dependencies:
       '@core/amo':
@@ -607,6 +644,9 @@ importers:
       '@core/shared':
         specifier: workspace:*
         version: link:../../core/shared
+      '@opt/kb':
+        specifier: workspace:*
+        version: link:../kb
       docxtemplater:
         specifier: 3.50.0
         version: 3.50.0

@@ -19,6 +19,7 @@
     "@core/docs": "workspace:*",
     "@core/llm": "workspace:*",
     "@core/shared": "workspace:*",
+    "@opt/kb": "workspace:*",
     "docxtemplater": "3.50.0",
     "exceljs": "^4.4.0",
     "imapflow": "^2.0.6",

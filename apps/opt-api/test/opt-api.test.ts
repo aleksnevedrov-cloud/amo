@@ -33,7 +33,7 @@ describe('opt-api: от подключения интеграции до пис�
 
   it('health и OAuth: аккаунт и токены своей интеграции', async () => {
     const h = await ctx.app.inject({ method: 'GET', url: '/health' });
-    expect(h.json()).toEqual({ status: 'ok', checks: { db: 'ok', redis: 'ok' } });
+    expect(h.json()).toEqual({ status: 'ok', checks: { db: 'ok', redis: 'ok', kb_db: 'ok' } });
     const cb = await ctx.app.inject({ method: 'GET', url: '/oauth/amo/callback', query: { code: 'c', referer: 'aleksnevedrov.amocrm.ru', from_widget: '1', client_id: '8b4f5e3a-2c1d-4e5f-9a8b-7c6d5e4f3a2b' } });
     expect(cb.statusCode).toBe(200);
     expect(cb.body).toContain('подключён к «Агенту опт»');
@@ -179,8 +179,8 @@ describe('opt-api: ошибка SMTP не меняет статус; без LLM 
   });
 });
 
-describe('opt-api: черновик без базы знаний (решение заказчика 12.10.2026)', () => {
-  it('в черновике только пометка «цена не задана», маршрутов базы знаний нет', async () => {
+describe('opt-api: черновик без справочников старой базы знаний (решение заказчика 12.10.2026)', () => {
+  it('в черновике только пометка «цена не задана», маршрутов /kp/knowledge нет (новая база — /widget/v1/kb, RFD-AI-AGENT-OPT-KB)', async () => {
     const { ai } = fakeGateway(JSON.stringify({ client: { org: 'ООО Ромашка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Турин 2000*800 срочно — 2 шт', name: 'дверь Турин', width_mm: 800, height_mm: 2000, qty: 2 }], required_blocks: ['delivery'], questions: [] }));
     const ctx = await setup({ ai });
     try {
@@ -188,7 +188,7 @@ describe('opt-api: черновик без базы знаний (решение
       await ctx.app.inject({ method: 'GET', url: '/oauth/amo/callback', query: { code: 'c', referer: 'aleksnevedrov.amocrm.ru', from_widget: '1' } });
       ctx.amo.mail = { id: 5, created_at: 1_760_000_000, params: { income: true, subject: 'Запрос', text: 'Нужна доставка', from: 'ivanov@romashka.ru' } };
 
-      // Черновик без базы знаний (убрана по решению заказчика 12.10.2026): только пометка «цена не задана».
+      // Пять справочников старой базы убраны 12.10.2026: в черновике только пометка «цена не задана»; новая база знаний (kb) подключается к разбору на этапе 4.
       await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
       const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
       expect(d.needsManager).toEqual([{ request_index: 0, reason: 'цена не задана' }]);
