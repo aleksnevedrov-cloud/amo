@@ -29,7 +29,12 @@ export interface KpConstants {
   maxPositionsPerRun?: number;
   /** Объём текста источников в контексте модели (search_context_size) и лимит вызовов поиска — удешевление. */
   searchContext?: 'low' | 'medium' | 'high';
+  /** Не больше N вызовов web_search на позицию; не задан — 5 (RFD-AI-AGENT-OPT-KB). */
   maxSearchCalls?: number;
+  /** Дневной лимит веб-поиска, $; не задан — 5. Достигнут — агент останавливается, пишет в журнал и в блок. */
+  webSearchDailyUsd?: number;
+  /** Цены из базы знаний не искать (всегда веб); по умолчанию база первая. */
+  skipKnowledgeBase?: boolean;
 }
 
 export interface KpNumbering {

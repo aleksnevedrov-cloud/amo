@@ -256,6 +256,34 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(text()).toContain('Цена · изменено менеджером');
   });
 
+  it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {
+    const kbDraft = { ...draft, items: [
+      { request_index: 0, page_id: null, name: 'ДПГ сота', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5 },
+      { request_index: 1, page_id: null, name: 'Турин', size: '800×2000 мм', qty: 3, price: 8000, lead_time: '', discount: 0, priceSource: 'research', priceLabel: 'по рынку (01.08.2026)', market: { median: 8000, min: 7800, max: 8200, count: 3, unit: 'piece', researchId: 9, researchedAt: '2026-08-01T10:00:00Z' } },
+      { request_index: 2, page_id: null, name: 'ДПО сота', size: '800×2000 мм', qty: 1, price: 4100, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'изменено менеджером', priceStale: true },
+    ], needsManager: [{ request_index: 2, reason: 'цена устарела: актуальна на 01.01.2026, срок 90 дн.' }] };
+    const posted: unknown[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': { draft: kbDraft, job: null },
+      'GET /widget/v1/kp/research': { draftId: 7, pending: false, positions: [{ requestIndex: 0, job: null, research: null }, { requestIndex: 1, job: null, research: null }, { requestIndex: 2, job: null, research: null }] },
+      'POST /widget/v1/kp/research': (data?: string) => {
+        posted.push(JSON.parse(data ?? '{}'));
+        return { queued: [0] };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    const labels = [...document.querySelectorAll('.opt-kp-field-price .opt-kp-label')].map((l) => l.textContent);
+    expect(labels).toEqual(['Цена · по базе: прайс Текона.xlsx (01.10.2026)', 'Цена · по рынку (01.08.2026) · цена устарела', 'Цена · изменено менеджером · цена устарела']);
+    expect(document.body.textContent).toContain('из базы знаний: по базе: прайс Текона.xlsx (01.10.2026)');
+    const buttons = [...document.querySelectorAll('button')].filter((b) => b.textContent === 'Искать в интернете');
+    expect(buttons).toHaveLength(2);
+    await act(async () => buttons[0]!.click());
+    await flush();
+    expect(posted).toEqual([{ draftId: 7, requestIndexes: [0], force: true }]);
+  });
+
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
     const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: null, job: { state: 'failed', error: 'LLM не настроена' } } });
     const cbs = createCallbacks(self, 'https://opt.test.ru');
@@ -417,6 +445,16 @@ describe('виджет «Агент опт»: вкладка «База знан
         sources = [];
         return { ok: true };
       },
+      'GET /widget/v1/kb/prices': { items: [{ id: 3, sourceId: 2, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', validAt: '2026-10-01T00:00:00Z', confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdAt: '2026-10-15T10:00:00Z', sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file' }], total: 1 },
+      'POST /widget/v1/kb/prices': (data?: string) => {
+        posted.push({ url: 'price', data: JSON.parse(data ?? '{}') });
+        return { price: {} };
+      },
+      'GET /widget/v1/kb/aliases': { aliases: [{ id: 1, alias: 'ДПГ + УПД (сота)', canonical: 'ДПГ сота' }] },
+      'POST /widget/v1/kb/aliases': (data?: string) => {
+        posted.push({ url: 'aliases', data: JSON.parse(data ?? '{}') });
+        return { added: 1, aliases: [] };
+      },
     });
     document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
     const cbs = createCallbacks(self, 'https://opt.test.ru');
@@ -478,5 +516,22 @@ describe('виджет «Агент опт»: вкладка «База знан
     expect(document.body.textContent).toContain('Ссылка добавлена, скачивается, раздел будет обойдён (до 50 страниц)');
     expect(document.body.textContent).toContain('ссылка · 1 КБ · фрагментов 3 · добавлен 15.10.2026 · индекс 15.10.2026 · обновление каждые 30 дн., следующее 14.11.2026 · раздел');
     expect(document.body.textContent).toContain('https://rf-dveri.ru/ceny/');
+    // Цены и синонимы (этап 3): таблица цен с происхождением и доверием, ручная запись, синонимы строками.
+    expect(document.body.textContent).toContain('Цены (1)');
+    const priceRow = document.querySelector('.opt-kb-price')!;
+    expect(priceRow.textContent?.replace(/\u00a0/g, ' ')).toContain('ДПГ сота · Текона800×20003 450 ₽с НДСпрайс · 7001.10.2026прайс Текона.xlsx');
+    const inputs = [...document.querySelectorAll('input')];
+    await setInput(inputs.find((i) => i.placeholder === 'Модель')!, 'ДПО сота');
+    await setInput(inputs.find((i) => i.placeholder === '800×2000')!, '800x2000');
+    await setInput(inputs.find((i) => i.placeholder === 'цена, ₽')!, '4 100');
+    await click('Добавить цену');
+    await flush();
+    expect(posted.at(-1)).toMatchObject({ url: 'price', data: { model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 4100, origin: 'manager' } });
+    expect(document.body.textContent).toContain('Синонимы и артикулы (1)');
+    expect(document.body.textContent).toContain('ДПГ + УПД (сота)= ДПГ сота');
+    await setInput([...document.querySelectorAll('textarea')].find((t) => t.placeholder.startsWith('ДПГ сота ='))!, 'Турин = Turin');
+    await click('Добавить синонимы');
+    await flush();
+    expect(posted.at(-1)).toEqual({ url: 'aliases', data: { lines: 'Турин = Turin' } });
   });
 });

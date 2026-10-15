@@ -9,6 +9,7 @@ import { extractForKb, KB_FILE_EXTENSIONS, KB_MAX_FILE_BYTES, kbFormatOf } from 
 import { createUrlFetcher, type UrlFetcher } from './fetch-url.ts';
 import { htmlToKbText, sectionLinks } from './html.ts';
 import { parsePublicUrl } from './safe-url.ts';
+import { KbAliasesRepo, KbPricesRepo } from './prices.ts';
 import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
 import { searchKb, type KbSearchResult } from './search.ts';
 
@@ -75,6 +76,9 @@ export class KbLimitError extends Error {
 export interface KbCore {
   db: Db;
   repo: KbRepo;
+  /** Структурные цены и синонимы (этап 3). */
+  prices: KbPricesRepo;
+  aliases: KbAliasesRepo;
   filesRoot: string;
   embedderFor: EmbedderFor;
   /** Заметка менеджера: сохраняется файлом на томе и ждёт индексации (статус new). */
@@ -123,6 +127,8 @@ export function createKbCore(d: KbCoreDeps): KbCore {
   const core: KbCore = {
     db: d.db,
     repo,
+    prices: new KbPricesRepo(d.db),
+    aliases: new KbAliasesRepo(d.db),
     filesRoot: d.filesRoot,
     embedderFor: d.embedderFor,
 

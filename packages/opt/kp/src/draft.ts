@@ -43,9 +43,15 @@ export interface KpLine {
   price: number | null;
   lead_time: string;
   discount: number;
-  /** Откуда цена: поиск по точной модели, аналог или менеджер руками; нет поля — цены ещё не было. */
-  priceSource?: 'research' | 'analog' | 'manager';
+  /** Откуда цена: поиск по точной модели, аналог, менеджер руками или база знаний (kb); нет поля — цены ещё не было. */
+  priceSource?: 'research' | 'analog' | 'manager' | 'kb';
   market?: KpLineMarket | null;
+  /** Подпись источника для плитки (RFD-AI-AGENT-OPT-KB): «по базе: прайс Текона (01.10.2026)», «по закупке», «по рынку», «изменено менеджером». */
+  priceLabel?: string | null;
+  /** Срок актуальности цены вышел — в плитке «цена устарела». */
+  priceStale?: boolean;
+  /** Запись kb_prices, из которой взята цена. */
+  kbPriceId?: number | null;
   /** Коэффициент, применённый к медиане (общий или производителя). */
   coefficient?: number;
   /** Работы и услуги идут после товаров; нет поля — товар. */

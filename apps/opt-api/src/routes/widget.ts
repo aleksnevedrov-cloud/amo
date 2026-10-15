@@ -4,7 +4,7 @@ import { optSettingsSchema, resolveOptRoute } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
-import { kbRoutes } from './kb.ts';
+import { kbPriceRoutes, kbRoutes } from './kb.ts';
 import { kpRoutes } from './kp.ts';
 import { llmRoutes } from './llm.ts';
 
@@ -144,6 +144,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
       llmRoutes(api, deps, principal, requireAdmin);
       kpRoutes(api, deps, principal, requireAdmin);
       kbRoutes(api, deps, principal, requireAdmin);
+      kbPriceRoutes(api, deps, principal, requireAdmin);
     },
     { prefix: '/widget/v1' },
   );

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage, Field, s } from '@core/widget-core';
 import type { KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
+import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
 
 /**
  * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
  * менеджера; список источников с действиями — переиндексировать, удалить, посмотреть фрагменты; строка поиска
  * для проверки, что агент найдёт. Ссылки (этап 2): страница сайта или файл по адресу, переиндексация по сроку,
- * обход раздела до 50 страниц. Выгрузка цен в xlsx — этап 4.
+ * обход раздела до 50 страниц. Цены и синонимы (этап 3): «Цены из прайса» у xlsx-источника, разделы «Цены» и «Синонимы».
+ * Выгрузка цен в xlsx — этап 4.
  */
 const ACCEPT = '.pdf,.docx,.xlsx,.xlsm,.csv,.txt,.md,.jpg,.jpeg,.png,.webp';
 const POLL_MS = 3000;
@@ -20,6 +22,7 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
   const [usage, setUsage] = useState<KbUsageInfo | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pricesKey, setPricesKey] = useState(0);
   const alive = useRef(true);
 
   const reload = useCallback(async () => {
@@ -86,6 +89,10 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
           src={src}
           api={api}
           busy={busy}
+          onPricesImported={(m) => {
+            setMsg(m);
+            setPricesKey((k) => k + 1);
+          }}
           onReindex={() => void run(async () => (await api.kbReindex(src.id), null))}
           onRemove={() => {
             if (!window.confirm(`Удалить источник «${src.title}» и его фрагменты?`)) return;
@@ -93,6 +100,8 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
           }}
         />
       ))}
+      <PricesSection key={`prices-${pricesKey}`} api={api} />
+      <AliasesSection api={api} />
     </div>
   );
 }
@@ -231,9 +240,10 @@ function Search({ api }: { api: KpApi }) {
   );
 }
 
-function SourceRow({ src, api, busy, onReindex, onRemove }: { src: KbSourceInfo; api: KpApi; busy: boolean; onReindex: () => void; onRemove: () => void }) {
+function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { src: KbSourceInfo; api: KpApi; busy: boolean; onReindex: () => void; onRemove: () => void; onPricesImported: (msg: string) => void }) {
   const [chunks, setChunks] = useState<KbChunkInfo[] | null>(null);
   const [open, setOpen] = useState(false);
+  const [prices, setPrices] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const toggle = async () => {
     if (open) return setOpen(false);
@@ -273,10 +283,25 @@ function SourceRow({ src, api, busy, onReindex, onRemove }: { src: KbSourceInfo;
         <button type="button" style={s.buttonGhost} disabled={busy || src.status === 'new'} onClick={onReindex}>
           Переиндексировать
         </button>
+        {isXlsxSource(src) && src.status === 'indexed' && (
+          <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => setPrices((v) => !v)}>
+            {prices ? 'Скрыть прайс' : 'Цены из прайса'}
+          </button>
+        )}
         <button type="button" style={s.buttonGhost} disabled={busy} onClick={onRemove}>
           Удалить
         </button>
       </div>
+      {prices && (
+        <PriceImport
+          api={api}
+          src={src}
+          onDone={(m) => {
+            setPrices(false);
+            onPricesImported(m);
+          }}
+        />
+      )}
       {open && err && <div style={s.error}>{err}</div>}
       {open && chunks && chunks.length === 0 && <div style={{ ...s.muted, ...s.small }}>Фрагментов нет</div>}
       {open &&

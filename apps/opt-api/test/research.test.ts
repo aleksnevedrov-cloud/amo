@@ -62,7 +62,7 @@ describe('поиск цен из черновика: кнопка «Найти �
   afterAll(() => ctx.close());
 
   it('настройки поиска: значения по умолчанию и сохранение коэффициентов, режима и кэша', async () => {
-    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/settings', headers })).json().constants).toMatchObject({ priceCoefficient: 1, manufacturerCoefficients: {}, autoResearch: false, researchCacheDays: 7, maxPositionsPerRun: 30 });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kp/settings', headers })).json().constants).toMatchObject({ priceCoefficient: 1, manufacturerCoefficients: {}, autoResearch: false, researchCacheDays: 30, maxPositionsPerRun: 30, maxSearchCalls: 5, webSearchDailyUsd: 5, skipKnowledgeBase: false });
     expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { priceCoefficient: 0.95, manufacturerCoefficients: { 'Фабрика Л': 0.9 }, autoResearch: false, researchCacheDays: 7 } } })).json()).toEqual({ ok: true });
     expect((await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { priceCoefficient: 0 } } })).statusCode).toBe(400);
   });
@@ -107,8 +107,10 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toEqual({ queued: [], reason: 'у всех позиций уже есть цена' });
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } })).json()).toEqual({ queued: [0] });
     expect(g.searches()).toBe(2);
+    // Результат первого поиска уже в базе знаний (доверие 40): явная позиция берётся оттуда, веб-поиск не вызывается.
     const cached = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items[0];
-    expect(cached.summary).toContain('(из кэша)');
+    expect(cached.summary).toContain('из базы знаний (по рынку');
+    expect(cached.summary).toContain('веб-поиск не вызывался');
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0], force: true } })).statusCode).toBe(202);
     expect(g.searches()).toBe(3);
   });
@@ -121,8 +123,12 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect(saved.items[1].priceSource).toBe('research');
     // «По всем» — позицию с ценой не трогает вовсе.
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toEqual({ queued: [], reason: 'у всех позиций уже есть цена' });
-    // Явный список — это «Заменить»: цена поиска возвращается.
+    // Явный список — это «Заменить». Ручная цена уже легла в базу знаний (доверие 90, RFD-AI-AGENT-OPT-KB): без force
+    // она возвращается из базы с подписью «изменено менеджером»; «искать заново» (force) идёт мимо базы — цена поиска.
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } });
+    const fromKb = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(fromKb.items[0]).toMatchObject({ price: 70_000, priceSource: 'kb', priceLabel: 'изменено менеджером' });
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0], force: true } });
     const after = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(after.items[0]).toMatchObject({ price: 76_500, priceSource: 'research' });
   });

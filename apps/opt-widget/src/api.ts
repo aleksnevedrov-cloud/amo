@@ -17,6 +17,10 @@ export type KpConstants = CoreKpConstants & {
   autoResearch?: boolean;
   researchCacheDays?: number;
   maxPositionsPerRun?: number;
+  // База знаний (RFD-AI-AGENT-OPT-KB): лимит вызовов поиска на позицию, дневной лимит $, выключатель приоритета базы.
+  maxSearchCalls?: number;
+  webSearchDailyUsd?: number;
+  skipKnowledgeBase?: boolean;
 };
 
 export interface Status {
@@ -42,10 +46,15 @@ export interface KpDraftLine {
   price: number | null;
   lead_time: string;
   discount: number;
-  /** Откуда цена: поиск по точной модели, аналог или менеджер руками (этап 5). */
-  priceSource?: 'research' | 'analog' | 'manager';
+  /** Откуда цена: поиск по точной модели, аналог, менеджер руками или база знаний (kb). */
+  priceSource?: 'research' | 'analog' | 'manager' | 'kb';
   market?: { median: number; min: number; max: number; count: number; unit: 'piece'; researchId: number; researchedAt: string } | null;
   coefficient?: number;
+  /** Подпись источника цены в плитке: «по базе: прайс Текона (01.10.2026)», «по закупке», «по рынку», «изменено менеджером». */
+  priceLabel?: string | null;
+  /** Срок актуальности вышел — «цена устарела». */
+  priceStale?: boolean;
+  kbPriceId?: number | null;
   /** service — работы и услуги: после товаров под заголовком, без размера и без поиска цены (XLSX-2). */
   kind?: 'product' | 'service';
 }
@@ -252,6 +261,66 @@ export interface KbHitInfo {
   source: { title: string; kind: KbSourceInfo['kind']; original: string | null; indexedAt: string | null } | null;
 }
 
+/** Запись цены базы знаний (kb_prices). */
+export interface KbPriceInfo {
+  id: number;
+  sourceId: number | null;
+  model: string;
+  modelKey: string;
+  factory: string | null;
+  unit: string;
+  baseSize: string | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  price: number;
+  vat: 'included' | 'no_vat' | 'unknown';
+  validAt: string;
+  confidence: number;
+  origin: 'price_list' | 'web' | 'manager' | 'purchase';
+  nonstandard: { heightPct?: number; heightOverMm?: number; widthPct?: number; widthOverMm?: number; thicknessPct?: number; doubleLeafPct?: number; areaScale?: boolean };
+  url: string | null;
+  note: string | null;
+  createdAt: string;
+  sourceTitle: string | null;
+  sourceKind: 'file' | 'url' | 'text' | null;
+}
+
+export interface KbAliasInfo {
+  id: number;
+  alias: string;
+  canonical: string;
+}
+
+export interface ColumnMappingInfo {
+  sheet: string | null;
+  model: number;
+  price: number;
+  size: number | null;
+  width: number | null;
+  height: number | null;
+  factory: number | null;
+  unit: number | null;
+  headerRow: number | null;
+}
+
+export interface PriceListPreviewInfo {
+  sheets: string[];
+  columns: { index: number; header: string; sample: string[] }[];
+  mapping: ColumnMappingInfo;
+  headerFound: boolean;
+  sample: { sheet: string; row: number; model: string; factory: string | null; unit: string; widthMm: number | null; heightMm: number | null; price: number; section: string | null }[];
+  total: number;
+  skipped: number;
+}
+
+export interface PriceImportBody {
+  mapping: Partial<ColumnMappingInfo>;
+  factory?: string;
+  validAt?: string;
+  vat?: KbPriceInfo['vat'];
+  nonstandard?: KbPriceInfo['nonstandard'];
+}
+
 /** Клиент бэкенда «Агента опт» (opt.rf-dveri.ru): маршруты /widget/v1/*. */
 export class KpApi extends ApiClient {
   status = () => this.call<Status>('GET', '/widget/v1/status');
@@ -296,6 +365,16 @@ export class KpApi extends ApiClient {
   kbRemove = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/sources/${id}`);
   kbChunks = (id: number, limit = 100) => this.call<{ source: KbSourceInfo; chunks: KbChunkInfo[] }>('GET', `/widget/v1/kb/sources/${id}/chunks?limit=${limit}`);
   kbSearch = (q: string, limit = 5) => this.call<{ query: string; hits: KbHitInfo[]; model: string | null; tokens: number; costUsd: number; ms: number }>('GET', `/widget/v1/kb/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+
+  /** Цены и синонимы базы знаний (этап 3). */
+  kbPricePreview = (sourceId: number, mapping?: Partial<ColumnMappingInfo>) => this.call<PriceListPreviewInfo>('GET', `/widget/v1/kb/sources/${sourceId}/prices/preview${mapping ? `?mapping=${encodeURIComponent(JSON.stringify(mapping))}` : ''}`);
+  kbPriceImport = (sourceId: number, body: PriceImportBody) => this.call<{ imported: number; skipped: number }>('POST', `/widget/v1/kb/sources/${sourceId}/prices/import`, body);
+  kbPrices = (q = '', limit = 200) => this.call<{ items: KbPriceInfo[]; total: number }>('GET', `/widget/v1/kb/prices?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
+  kbAddPrice = (body: { model: string; factory?: string | null; widthMm?: number | null; heightMm?: number | null; price: number; vat?: KbPriceInfo['vat']; validAt?: string; origin?: KbPriceInfo['origin']; note?: string | null }) => this.call<{ price: KbPriceInfo }>('POST', '/widget/v1/kb/prices', body);
+  kbRemovePrice = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/prices/${id}`);
+  kbAliases = () => this.call<{ aliases: KbAliasInfo[] }>('GET', '/widget/v1/kb/aliases');
+  kbAddAliases = (lines: string) => this.call<{ added: number; aliases: KbAliasInfo[] }>('POST', '/widget/v1/kb/aliases', { lines });
+  kbRemoveAlias = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/aliases/${id}`);
 
   kpSettings = () => this.call<KpSettingsInfo>('GET', '/widget/v1/kp/settings');
   saveKpSettings = (patch: { constants?: KpConstants; certsDir?: string | null; numbering?: { prefix?: string; counter?: number } }) =>

@@ -19,6 +19,20 @@ const plural = (n: number, one: string, few: string, many: string) => {
 /** Размер по макету: «1400 × 2700 мм». */
 const sizeLabel = (size: string) => size.replace(/\s*[×x]\s*/i, ' × ');
 const POLL_MS = 3000;
+/** Срок актуальности рыночной цены (веб-поиск), дни — после него в плитке «цена устарела» (RFD-AI-AGENT-OPT-KB). */
+const MARKET_STALE_DAYS = 30;
+
+/** Подпись источника цены в плитке: с сервера (база знаний, рынок, менеджер) либо по старому полю priceSource. */
+function priceSourceLabel(l: KpDraftLine): string {
+  if (l.priceLabel) return l.priceLabel;
+  return l.priceSource === 'manager' ? 'изменено менеджером' : l.priceSource === 'analog' ? 'по аналогу' : l.priceSource === 'research' ? 'по рынку' : l.priceSource === 'kb' ? 'по базе' : '';
+}
+function priceIsStale(l: KpDraftLine, now = Date.now()): boolean {
+  if (l.price === null) return false;
+  if (l.priceStale) return true;
+  if ((l.priceSource === 'research' || l.priceSource === 'analog') && l.market?.researchedAt) return now - new Date(l.market.researchedAt).getTime() > MARKET_STALE_DAYS * 86_400_000;
+  return false;
+}
 
 const rub = (n: number | null) => (n === null ? '—' : `${n.toLocaleString('ru-RU')} ₽`);
 const date = (iso: string) => new Date(iso).toLocaleDateString('ru-RU');
@@ -432,7 +446,10 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
                 <input type="number" min={0.5} step="any" value={l.qty} onChange={(e) => onEdit(i, { qty: Math.max(0.5, Number(e.target.value) || 1) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-price">
-                <span className="opt-kp-label">Цена{l.priceSource === 'manager' ? ' · изменено менеджером' : l.priceSource === 'analog' ? ' · по аналогу' : l.priceSource === 'research' ? ' · по рынку' : ''}</span>
+                <span className="opt-kp-label">
+                  Цена{priceSourceLabel(l) ? ` · ${priceSourceLabel(l)}` : ''}
+                  {priceIsStale(l) && <span className="opt-kp-stale"> · цена устарела</span>}
+                </span>
                 <input type="number" min={0} value={l.price ?? ''} placeholder="Нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-discount">
@@ -464,8 +481,10 @@ function PriceState({ line, pos, locked, onFind }: { line: KpDraftLine; pos: Res
   const r = pos?.research ?? null;
   const busy = job?.state === 'queued' || job?.state === 'running';
   let status: string;
+  const fromKb = line.priceSource === 'kb' && line.price !== null;
   if (busy) status = job?.state === 'queued' ? 'поиск цены в очереди…' : 'идёт поиск цены…';
   else if (job?.state === 'failed') status = `поиск не выполнен: ${job.error}`;
+  else if (fromKb && !r) status = `из базы знаний: ${line.priceLabel ?? 'по базе'}`;
   else if (!r) status = line.market ? `источников ${line.market.count}` : '';
   else if (r.status === 'failed') status = `ошибка поиска: ${r.error ?? 'без текста'}`;
   else if (r.status === 'none') status = 'цены не найдены';
@@ -482,8 +501,8 @@ function PriceState({ line, pos, locked, onFind }: { line: KpDraftLine; pos: Res
           </button>
         )}
         {!busy && !locked && (
-          <button type="button" className="opt-btn opt-btn-small" onClick={() => onFind(Boolean(r))} title={r ? 'Искать заново, не используя сохранённый результат' : 'Найти рыночную цену по этой позиции'}>
-            {r ? 'Искать заново' : 'Найти цену'}
+          <button type="button" className="opt-btn opt-btn-small" onClick={() => onFind(Boolean(r) || fromKb)} title={fromKb && !r ? 'Веб-поиск мимо базы знаний и кэша' : r ? 'Искать заново, не используя сохранённый результат' : 'Сначала база знаний, затем веб-поиск'}>
+            {fromKb && !r ? 'Искать в интернете' : r ? 'Искать заново' : 'Найти цену'}
           </button>
         )}
       </div>

@@ -1,9 +1,10 @@
 import type { JournalKind } from '@core/db';
+import { lookupPrice, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
 import { NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
-import { VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
+import { cleanName, VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { manufacturerCoefficient, offerPrice, type OfferPrice } from './offer-price.ts';
-import { DEFAULT_CACHE_DAYS, researchWithCache, type CachedResearch } from './research-repo.ts';
+import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
 import { resolveOptRoute } from './settings.ts';
 
 /**
@@ -16,13 +17,16 @@ import { resolveOptRoute } from './settings.ts';
 export const KP_RESEARCH_QUEUE = 'kp-research';
 export const RESEARCH_JOB = 'research';
 export const DEFAULT_MAX_POSITIONS_PER_RUN = 30;
+/** RFD-AI-AGENT-OPT-KB, раздел 4–5: не больше 5 вызовов web_search на позицию, дневной лимит веб-поиска $5. */
+export const DEFAULT_MAX_SEARCH_CALLS = 5;
+export const DEFAULT_WEB_SEARCH_DAILY_USD = 5;
 
 export interface ResearchJob {
   accountId: number;
   draftId: number;
   requestIndex: number;
   userId: number | null;
-  /** «Искать заново»: кэш не читается. */
+  /** «Искать заново» / «Искать в интернете»: база знаний и кэш не читаются. */
   force?: boolean;
   /** Заменить цену, введённую менеджером руками; без флага такая цена не трогается. */
   replace?: boolean;
@@ -46,6 +50,8 @@ export interface ResearchJobResult {
   /** Цена не записана: менеджер задал её руками, а replace не передан. */
   keptManagerPrice: boolean;
   notes: string[];
+  /** Цена взята из базы знаний (kb_prices) — веб-поиск не вызывался. */
+  fromKb?: boolean;
 }
 
 /** Вход исследования из строки черновика и позиции заявки. */
@@ -79,6 +85,33 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     const route = resolveOptRoute(settings);
     const { constants } = await core.kp.getSettings(accountId);
     const input = researchInputOf(payload, line);
+    const size = sizeOfInput(input);
+    // 1. База знаний (RFD-AI-AGENT-OPT-KB): модель и размер из kb_prices → базовая цена × правила нестандарта, без веб-поиска.
+    //    force («искать заново» / «искать в интернете») идёт мимо базы и кэша.
+    if (!job.force && !constants.skipKnowledgeBase) {
+      const hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm });
+      if (hit) {
+        const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
+        await core.journal.add({
+          accountId,
+          leadId: draft.leadId,
+          kind: KP_PRICE_RESEARCH_KIND,
+          summary: `Цена по позиции «${lineLabel}»: ${hit.price.toLocaleString('ru-RU')} ₽ из базы знаний (${hit.label}), веб-поиск не вызывался${hit.stale ? ' — цена устарела' : ''}${applied.keptManagerPrice ? ' — цена менеджера сохранена' : ''}`,
+          details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
+        });
+        return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : hit.price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
+      }
+    }
+    // 2. Дневной лимит веб-поиска в $: достигнут — цена не ищется, пометка в блок и запись в журнал.
+    const dailyLimit = constants.webSearchDailyUsd ?? DEFAULT_WEB_SEARCH_DAILY_USD;
+    const spent = await core.research.spentTodayUsd(accountId);
+    if (spent >= dailyLimit) {
+      const message = `дневной лимит веб-поиска $${dailyLimit} исчерпан (потрачено $${spent.toFixed(2)}) — цена не искалась; добавьте цену в базу знаний или введите руками`;
+      const failed: CachedResearch = { result: { query: '', card: null, status: 'failed', offers: [], stats: null, analog: null, error: message, provider: null, model: null, webSearchCalls: 0, cost: { inputTokens: 0, outputTokens: 0, usd: 0 }, sources: [] }, cached: false, researchId: 0, createdAt: new Date() };
+      await applyResearchToDraft(core, accountId, draftId, requestIndex, offerPrice(failed.result), failed, false);
+      await core.journal.add({ accountId, leadId: draft.leadId, kind: KP_PRICE_ERROR_KIND, summary: `Цена не найдена: ${lineLabel} — ${message}`, details: { draftId, requestIndex, limitUsd: dailyLimit, spentUsd: spent, userId: job.userId } });
+      return { researchId: 0, status: 'failed', cached: false, price: null, keptManagerPrice: false, notes: [message] };
+    }
     const r: CachedResearch = await researchWithCache(core.research, ai.llm, route, input, {
       accountId,
       draftId,
@@ -89,10 +122,19 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
       manufacturerDomains: constants.manufacturerDomains,
       pricing: settings.billing.pricing,
       ...(constants.searchContext ? { searchContext: constants.searchContext } : {}),
-      ...(constants.maxSearchCalls ? { maxSearchCalls: constants.maxSearchCalls } : {}),
+      maxSearchCalls: constants.maxSearchCalls ?? DEFAULT_MAX_SEARCH_CALLS,
     });
     const price = offerPrice(r.result, { manufacturer: manufacturerCoefficient(r.result.card?.factory, constants.manufacturerCoefficients), general: constants.priceCoefficient });
     const applied = await applyResearchToDraft(core, accountId, draftId, requestIndex, price, r, Boolean(job.replace));
+    // 3. Найденное веб-поиском — в базу знаний с доверием 40: следующая заявка с этой моделью обойдётся без поиска.
+    if (!r.cached && r.result.status === 'ok' && r.result.stats) {
+      const card = r.result.card;
+      const accepted = r.result.offers.find((o) => o.accepted);
+      await core.kb.prices
+        // Модель — как названа в заявке (так её ищет следующая заявка), фабрика — из карточки.
+        .upsert({ accountId, model: cleanName(input.item.name || line.name), factory: card?.factory ?? null, widthMm: card?.widthMm ?? size.widthMm, heightMm: card?.heightMm ?? size.heightMm, price: r.result.stats.median, origin: 'web', vat: 'included', url: accepted?.offer.url ?? null, note: `медиана ${r.result.stats.count} источников, запрос: ${r.result.query}`.slice(0, 500), createdBy: job.userId })
+        .catch(() => undefined);
+    }
     const costRub = r.result.cost.usd * settings.billing.usdRubRate;
     const kind = r.result.status === 'failed' ? KP_PRICE_ERROR_KIND : KP_PRICE_RESEARCH_KIND;
     const stats = r.result.stats;
@@ -117,6 +159,43 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
   }
 }
 
+/** Пометки позиции, которые ставит сам поиск цен (их мы заменяем при повторе); остальное — слова менеджера или разбора. */
+const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела');
+
+/**
+ * Цена из базы знаний в строку черновика: price, priceSource = kb, подпись и пометка «устарела», ссылка на kb_prices;
+ * coefficient сбрасывается (это не рыночная цена), прошлая рыночная статистика market остаётся справочно.
+ * Ручная цена менеджера без replace не трогается.
+ */
+export async function applyKbPriceToDraft(core: OptCore, accountId: number, draftId: number, requestIndex: number, hit: PriceHit, replace: boolean): Promise<{ keptManagerPrice: boolean }> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const draft = await core.kp.byId(accountId, draftId);
+    if (!draft) throw new Error(`черновик ${draftId} не найден`);
+    const payload = draft.payload as unknown as Partial<KpPayload>;
+    const items = [...(payload.items ?? [])];
+    const i = items.findIndex((l) => l.request_index === requestIndex);
+    if (i < 0) throw new Error(`в черновике ${draftId} нет позиции ${requestIndex}`);
+    const line = items[i] as KpLine;
+    const keptManagerPrice = line.priceSource === 'manager' && line.price !== null && !replace;
+    const next: KpLine = { ...line };
+    if (!keptManagerPrice) {
+      next.price = hit.price;
+      next.priceSource = 'kb';
+      next.priceLabel = hit.label;
+      next.priceStale = hit.stale;
+      next.kbPriceId = hit.row.id;
+      delete next.coefficient;
+    }
+    items[i] = next;
+    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
+    if (next.price === null) needs.push({ request_index: requestIndex, reason: NO_PRICE });
+    for (const n of hit.notes) needs.push({ request_index: requestIndex, reason: n.startsWith('цена устарела') ? n : `цена из базы: ${n}` });
+    const ok = await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items, needs_manager: needs } as unknown as Record<string, unknown>);
+    if (ok) return { keptManagerPrice };
+  }
+  throw new Error(`черновик ${draftId} меняется параллельно — цена позиции ${requestIndex} не записана`);
+}
+
 /**
  * Автозаполнение строки черновика: цена предложения, market, priceSource, coefficient; пометки раздела 8.1 — в
  * needs_manager по позиции вместо «цена не задана». Пишется только своя позиция с проверкой версии: при гонке
@@ -138,11 +217,13 @@ export async function applyResearchToDraft(core: OptCore, accountId: number, dra
       next.price = price.price;
       next.priceSource = price.basis === 'analog' ? 'analog' : 'research';
       next.coefficient = price.coefficient.value;
+      next.priceLabel = `${price.basis === 'analog' ? 'по аналогу' : 'по рынку'} (${r.createdAt.toLocaleDateString('ru-RU')})`;
+      next.priceStale = false;
+      next.kbPriceId = null;
     }
     items[i] = next;
     const notes = price.notes;
-    const ours = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:');
-    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ours(n.reason)));
+    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
     // Без цены пометка «цена не задана» остаётся: менеджеру всё равно её вводить.
     if (next.price === null) needs.push({ request_index: requestIndex, reason: NO_PRICE });
     for (const n of notes) needs.push({ request_index: requestIndex, reason: price.status === 'failed' ? `поиск цены: ${n}` : n });

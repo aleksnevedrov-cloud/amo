@@ -48,7 +48,8 @@ mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/
 Порт наружу не открывается. В `.env` опта: `KB_DB_PASSWORD` и `KB_DATABASE_URL` (см. `.env.opt.example`).
 Миграции `packages/opt/kb/migrations` применяет opt-api при старте; `/health` отвечает `kb_db: ok`.
 Ссылки (этап 2) скачивает opt-worker: страницы и файлы по адресу, обход раздела до 50 страниц, переиндексация по сроку
-(очередь `kb-maintenance`, проверка раз в час) — наружу нужен доступ opt-worker к сайтам (https). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md).
+(очередь `kb-maintenance`, проверка раз в час) — наружу нужен доступ opt-worker к сайтам (https). Цены: прайсы xlsx импортируются во вкладке («Цены из прайса»), поиск цен в черновике идёт сначала по базе, веб-поиск — только для того,
+чего в базе нет (дневной лимит $5 в настройках КП). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md), [этап 3](kb-etap-3-report.md).
 
 ## Запуск
 

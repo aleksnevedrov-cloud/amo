@@ -4,7 +4,7 @@ import type { ChatRoute, LlmGateway, RoutedRequest, RoutedResponse } from '@core
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MarketResearchInput, MarketResearchResult } from '../src/market-research.ts';
 import { KpRepo } from '../src/repo.ts';
-import { itemKey, KpPriceResearchRepo, queryKey, researchWithCache, rowToResult } from '../src/research-repo.ts';
+import { itemKey, KpPriceResearchRepo, modelKey, queryKey, rescaleResult, researchWithCache, rowToResult } from '../src/research-repo.ts';
 import { freshOptDb } from './setup.ts';
 
 const route: ChatRoute = { primary: { provider: 'openai', model: 'gpt-5' }, fallback: null };
@@ -85,9 +85,10 @@ describe('KpPriceResearchRepo на БД опта', () => {
     expect(await repo.latestByQueryKey(1, queryKey(r.result.query))).toMatchObject({ id: r.researchId });
     expect(await repo.latestByQueryKey(1, r.result.query.toUpperCase().replace(/\s+/g, '   ').trim())).toBeNull();
     expect(await repo.latestByQueryKey(1, queryKey(r.result.query.toUpperCase().replace(/\s+/g, '   ')))).toMatchObject({ id: r.researchId });
-    await db.query("UPDATE kp_price_research SET created_at = now() - interval '8 days' WHERE id = $1", [r.researchId]);
-    expect(await repo.latestByItemKey(1, itemKey(other), 7)).toBeNull();
-    expect(await repo.latestByItemKey(1, itemKey(other), 30)).toMatchObject({ id: r.researchId });
+    // Срок кэша по умолчанию — 30 дней (RFD-AI-AGENT-OPT-KB): запись старше 30 дней не берётся ни по позиции, ни по модели.
+    await db.query("UPDATE kp_price_research SET created_at = now() - interval '31 days' WHERE id = $1", [r.researchId]);
+    expect(await repo.latestByItemKey(1, itemKey(other), 30)).toBeNull();
+    expect(await repo.latestByItemKey(1, itemKey(other), 60)).toMatchObject({ id: r.researchId });
     const stale = await researchWithCache(repo, llm, route, other, { accountId: 1, draftId, requestIndex: 1 });
     expect(stale.cached).toBe(false);
     expect(llm.calls).toBe(4);
@@ -118,5 +119,25 @@ describe('KpPriceResearchRepo на БД опта', () => {
     const res: MarketResearchResult = rowToResult(ok);
     expect(res).toMatchObject({ status: 'ok', query: ok.query, webSearchCalls: 0, cost: { usd: 0 } });
     expect(res.offers.map((o) => o.accepted)).toEqual([true, true, true]);
+  });
+
+  it('кэш по модели (RFD-AI-AGENT-OPT-KB): та же модель другого размера — без вызовов модели, статистика и принятые предложения пересчитаны по площади; расход за сутки считается', async () => {
+    const repo = new KpPriceResearchRepo(db);
+    const llm = fakeLlm({ offers: [offer('https://dveri.ru/p1', 30_000), offer('https://dveri.ru/p2', 32_000), offer('https://dveri.ru/p3', 31_000)] });
+    expect(modelKey(input)).toBe('двухпольная из массива лиственницы окраска l429 indigo');
+    const other: MarketResearchInput = { ...input, line: { ...input.line, size: '1200×2400 мм' }, item: { ...input.item, raw: text.replace('1400x2700', '1200x2400'), width_mm: 1200, height_mm: 2400 } };
+    const r = await researchWithCache(repo, llm, route, other, { accountId: 1, draftId, requestIndex: 5 });
+    expect(r.cached).toBe(true);
+    expect(llm.calls).toBe(0);
+    const ratio = (1200 * 2400) / (1400 * 2700);
+    expect(r.result.stats?.median).toBeCloseTo(31_000 * ratio, 2);
+    expect(r.result.areaScaled).toBe(true);
+    expect(r.result.card).toMatchObject({ widthMm: 1200, heightMm: 2400 });
+    expect(r.result.offers.filter((o) => o.accepted).every((o) => o.areaScaled && o.sourceSize === '1400×2700')).toBe(true);
+    // Та же модель и тот же размер — как есть, без пересчёта.
+    const row = await repo.byId(1, r.researchId);
+    expect(rescaleResult(row!, { widthMm: 1400, heightMm: 2700 }).areaScaled).toBeUndefined();
+    expect(await repo.spentTodayUsd(1)).toBeGreaterThan(0.02);
+    expect(await repo.spentTodayUsd(2)).toBe(0);
   });
 });

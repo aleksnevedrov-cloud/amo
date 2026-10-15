@@ -21,6 +21,10 @@ const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; k
   { key: 'manufacturerCoefficients', label: 'Коэффициенты по производителям', hint: 'По одному в строке: «Профиль Дорс = 0.9». Имеет приоритет над общим коэффициентом', kind: 'pairs' },
   { key: 'researchCacheDays', label: 'Срок кэша результатов поиска, дней', hint: 'Повторный поиск той же позиции в этот срок не обращается к провайдеру; 0 — без кэша', kind: 'number' },
   { key: 'maxPositionsPerRun', label: 'Позиций за одно нажатие «Найти цены»', hint: 'Не больше 200', kind: 'number' },
+  // База знаний (RFD-AI-AGENT-OPT-KB, этап 3): приоритет «база → веб», лимиты веб-поиска.
+  { key: 'skipKnowledgeBase', label: 'Не брать цены из базы знаний', hint: 'Выключено — сначала kb_prices (прайсы, закупка, правки менеджера, прошлые поиски), веб-поиск только для того, чего в базе нет', kind: 'bool' },
+  { key: 'maxSearchCalls', label: 'Вызовов веб-поиска на позицию, не больше', hint: 'По умолчанию 5', kind: 'number' },
+  { key: 'webSearchDailyUsd', label: 'Дневной лимит веб-поиска, $', hint: 'По умолчанию 5. Достигнут — поиск останавливается, в журнале и в плитке позиции появляется пометка', kind: 'number' },
   { key: 'signature', label: 'Подпись', kind: 'input' },
 ];
 

@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
-import { buildKp, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_PRICE_NOTE, findCertificates, renderMailTemplate, researchablePositions, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { sizeOf } from '@opt/kb';
+import { buildKp, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, findCertificates, renderMailTemplate, researchablePositions, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -34,6 +35,9 @@ const constantsSchema = z.object({
   maxPositionsPerRun: z.number().int().min(1).max(200).optional(),
   searchContext: z.enum(['low', 'medium', 'high']).optional(),
   maxSearchCalls: z.number().int().min(1).max(20).optional(),
+  // База знаний (RFD-AI-AGENT-OPT-KB): дневной лимит веб-поиска в $ и выключатель приоритета базы.
+  webSearchDailyUsd: z.number().min(0).max(1000).optional(),
+  skipKnowledgeBase: z.boolean().optional(),
 });
 
 const settingsSchema = z.object({
@@ -61,9 +65,12 @@ const linesSchema = z.object({
         lead_time: z.string().max(100),
         discount: z.number().min(0).max(100),
         // Поля автозаполнения цен идут сквозь правки менеджера без изменений (сервер решает, что цена стала ручной).
-        priceSource: z.enum(['research', 'analog', 'manager']).optional(),
+        priceSource: z.enum(['research', 'analog', 'manager', 'kb']).optional(),
         market: z.object({ median: z.number(), min: z.number(), max: z.number(), count: z.number().int(), unit: z.literal('piece'), researchId: z.number().int(), researchedAt: z.string() }).nullable().optional(),
         coefficient: z.number().optional(),
+        priceLabel: z.string().max(200).nullable().optional(),
+        priceStale: z.boolean().optional(),
+        kbPriceId: z.number().int().nullable().optional(),
       }),
     )
     .max(200),
@@ -98,7 +105,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const s = await repo.getSettings(principal(req).accountId);
     return {
       // Фраза о ценах есть в каждом КП: пока заказчик её не менял, показываем текст по умолчанию.
-      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, manufacturerDomains: [], priceCoefficient: 1, manufacturerCoefficients: {}, autoResearch: false, researchCacheDays: DEFAULT_CACHE_DAYS, maxPositionsPerRun: DEFAULT_MAX_POSITIONS_PER_RUN, ...s.constants },
+      constants: { priceNote: DEFAULT_PRICE_NOTE, analogPriceTolerancePct: 10, manufacturerDomains: [], priceCoefficient: 1, manufacturerCoefficients: {}, autoResearch: false, researchCacheDays: DEFAULT_CACHE_DAYS, maxPositionsPerRun: DEFAULT_MAX_POSITIONS_PER_RUN, maxSearchCalls: DEFAULT_MAX_SEARCH_CALLS, webSearchDailyUsd: DEFAULT_WEB_SEARCH_DAILY_USD, skipKnowledgeBase: false, ...s.constants },
       certsDir: s.certsDir,
       numbering: s.numbering,
       template: { exists: Boolean(s.templatePath), name: s.templateName, md5: s.templateMd5, updatedAt: s.templateUpdatedAt },
@@ -176,12 +183,27 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (d.status !== 'draft' && d.status !== 'built') return reply.code(409).send({ error: 'locked' });
     // Цена, которую менеджер поменял руками, становится ручной: автозаполнение её не затирает (этап 5, 9.3).
     const before = (d.payload as unknown as Partial<KpPayload>).items ?? [];
+    const requestItems = (d.payload as unknown as Partial<KpPayload>).request_items ?? [];
+    const manual: KpLine[] = [];
     const items = (b.data.items as KpLine[]).map((l) => {
       const prev = before.find((x) => x.request_index === l.request_index);
       const changed = l.price !== (prev?.price ?? null);
-      return { ...prev, ...l, priceSource: changed && l.price !== null ? 'manager' : (l.priceSource ?? prev?.priceSource) } as KpLine;
+      if (changed && l.price !== null) {
+        manual.push(l);
+        return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null } as KpLine;
+      }
+      return { ...prev, ...l, priceSource: l.priceSource ?? prev?.priceSource } as KpLine;
     });
     await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
+    // Правка менеджера — в базу знаний с доверием 90 (RFD-AI-AGENT-OPT-KB): следующая заявка с этой моделью возьмёт её без поиска.
+    for (const l of manual) {
+      if (l.kind === 'service' || l.price === null) continue;
+      const ri = requestItems[l.request_index];
+      const size = ri?.width_mm && ri?.height_mm ? { widthMm: Math.min(ri.width_mm, ri.height_mm), heightMm: Math.max(ri.width_mm, ri.height_mm) } : sizeOf(`${l.size} ${l.name}`);
+      await deps.kb.prices
+        .upsert({ accountId: p.accountId, model: l.name, widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null, price: l.price, origin: 'manager', createdBy: p.userId, note: `черновик ${id}, сделка ${d.leadId}` })
+        .catch((err: Error) => req.log.warn({ err: err.message }, 'kb: цена менеджера не записана'));
+    }
     const fresh = await repo.byId(p.accountId, id);
     return { draft: fresh ? view(fresh) : null };
   });
