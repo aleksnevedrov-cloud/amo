@@ -5,6 +5,7 @@ export * from './deps.ts';
 export * from './draft.ts';
 export * from './file-analyze.ts';
 export * from './job.ts';
+export * from './kb-answer.ts';
 export * from './llm.ts';
 export * from './mail-read.ts';
 export * from './market-research.ts';

@@ -114,8 +114,8 @@ describe('раскладка блока в колонке amoCRM', () => {
     for (const width of [320, 340, 400]) {
       const m = measure(html, width);
       expect(m.overflow, `${width}: прокрутка`).toBe(false);
-      expect(m.titles.map((t) => t.text)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Действия с КП']);
-      expect(m.titles.map((t) => t.lines), `${width}: заголовки`).toEqual([1, 1, 1, 1]);
+      expect(m.titles.map((t) => t.text)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Ответ из базы знаний', 'Действия с КП']);
+      expect(m.titles.map((t) => t.lines), `${width}: заголовки`).toEqual([1, 1, 1, 1, 1]);
       expect(m.badges.every((b) => b.sameLineAsTitle), `${width}: бейдж в строке заголовка`).toBe(true);
       expect(m.labels.map((l) => [l.text, l.lines]), `${width}: подписи`).toEqual([['Количество', 1], ['Цена', 1], ['Скидка', 1]]);
       const [qty, price, discount] = m.inputs;

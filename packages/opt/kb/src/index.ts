@@ -2,6 +2,7 @@ export * from './chunk.ts';
 export * from './core.ts';
 export * from './embeddings.ts';
 export * from './env.ts';
+export * from './export.ts';
 export * from './extract.ts';
 export * from './fetch-url.ts';
 export * from './html.ts';

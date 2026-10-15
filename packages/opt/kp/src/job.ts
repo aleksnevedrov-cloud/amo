@@ -1,3 +1,4 @@
+import { knownModelNames } from '@opt/kb';
 import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob } from './research-job.ts';
 import type { OptCore } from './deps.ts';
 import { buildKpDraft, type KpDraftDeps, type ParsedFile } from './draft.ts';
@@ -49,7 +50,20 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
         ? null
         : (orig) =>
             analyzeDraftFile(
-              { docs: core.docs, documents: core.documents, llm: ai.llm, settings: widgetSettings, route, pricing: settings.billing.pricing, accountId, leadId, userId: job.userId ?? null, ...(hooks.onProgress ? { onProgress: hooks.onProgress } : {}) },
+              {
+                docs: core.docs,
+                documents: core.documents,
+                llm: ai.llm,
+                settings: widgetSettings,
+                route,
+                pricing: settings.billing.pricing,
+                accountId,
+                leadId,
+                userId: job.userId ?? null,
+                ...(hooks.onProgress ? { onProgress: hooks.onProgress } : {}),
+                // База знаний первая (RFD-AI-AGENT-OPT-KB, этап 4): известные модели — без модели.
+                known: (names) => knownModelNames(core.kb.prices, core.kb.aliases, accountId, names),
+              },
               orig,
             );
     // Ящик, подключённый к amoCRM, читается по IMAP только на чтение и только здесь — по кнопке (вариант А).
@@ -89,7 +103,7 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
       summary:
         `Черновик КП: позиций ${r.payload.items.length}, документов ${r.payload.source.documents.length}` +
         (r.payload.source.skipped.length ? `, пропущено файлов ${r.payload.source.skipped.length}` : '') +
-        (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : ''),
+        (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''}${f.knownFromKb ? `, из базы знаний ${f.knownFromKb}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : ''),
       details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files },
       inputTokens: r.cost.inputTokens,
       outputTokens: r.cost.outputTokens,

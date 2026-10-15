@@ -1,5 +1,6 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { draftsToPrices, KbLimitError, previewPriceList, readKbSheetRows, extractPrices, type ColumnMapping } from '@opt/kb';
+import { draftsToPrices, exportPricesXlsx, extractPrices, KbLimitError, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping } from '@opt/kb';
+import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -149,6 +150,20 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     return { source: view(source), chunks: await kb.repo.listChunks(accountId, id, q.data) };
   });
 
+  /**
+   * Ответ на вопрос покупателя из базы (этап 4): top-5 фрагментов → модель отвечает только по ним со ссылками [n].
+   * Нужна настроенная LLM; без фрагментов ответа нет, модель не вызывается.
+   */
+  api.post('/kb/answer', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const b = z.object({ question: z.string().trim().min(2).max(500), leadId: z.coerce.number().int().positive().optional() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const p = principal(req);
+    const ai = await deps.ai(p.accountId);
+    if (!ai) return reply.code(409).send({ error: 'no_llm' });
+    const { settings } = await deps.settings.get(p.accountId);
+    return answerFromKb(deps, { accountId: p.accountId, question: b.data.question, route: resolveOptRoute(settings), llm: ai.llm, pricing: settings.billing.pricing, userId: p.userId, leadId: b.data.leadId ?? null });
+  });
+
   /** Семантический поиск по фрагментам (top-5 по умолчанию) — для проверки базы менеджером и для ответов агента. */
   api.get('/kb/search', async (req, reply) => {
     const q = searchQuery.safeParse(req.query ?? {});
@@ -213,6 +228,13 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     const q = pricesQuery.safeParse(req.query ?? {});
     if (!q.success) return reply.code(400).send({ error: 'bad_query' });
     return kb.prices.list(principal(req).accountId, q.data);
+  });
+
+  /** Выгрузка всех цен аккаунта в xlsx (этап 4): файл base64 внутри JSON — виджет скачивает его сам. */
+  api.get('/kb/prices/export', async (req) => {
+    const rows = await kb.prices.all(principal(req).accountId);
+    const bytes = await exportPricesXlsx(rows);
+    return { filename: pricesExportFilename(), rows: rows.length, contentBase64: Buffer.from(bytes).toString('base64') };
   });
 
   /** Ручная запись цены (менеджер): по умолчанию origin manager, доверие 90. */

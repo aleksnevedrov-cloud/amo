@@ -139,6 +139,8 @@ export interface ParsedFile {
   model?: string | null;
   warnings?: string[];
   costUsd?: number;
+  /** Названий, взятых из базы знаний без модели (этап 4). */
+  knownFromKb?: number;
 }
 
 export interface KpDraftDeps {
@@ -177,7 +179,7 @@ export interface KpDraftResult {
   provider: string | null;
   model: string | null;
   /** Разобранные файлы: способ, порции, время — для журнала (без позиций). */
-  files: { name: string; positions: number; ms: number | null; method: ParsedFile['method'] | null; chunks: number | null; model: string | null; warnings: string[]; costUsd: number | null }[];
+  files: { name: string; positions: number; ms: number | null; method: ParsedFile['method'] | null; chunks: number | null; model: string | null; warnings: string[]; costUsd: number | null; knownFromKb: number }[];
 }
 
 /** Блоки, которые клиент может попросить включить в КП. */
@@ -277,7 +279,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,
     model: letter?.model ?? null,
-    files: files.parsed.map((f) => ({ name: f.filename, positions: f.positions.length, ms: f.ms ?? null, method: f.method ?? null, chunks: f.chunks ?? null, model: f.model ?? null, warnings: f.warnings ?? [], costUsd: f.costUsd ?? null })),
+    files: files.parsed.map((f) => ({ name: f.filename, positions: f.positions.length, ms: f.ms ?? null, method: f.method ?? null, chunks: f.chunks ?? null, model: f.model ?? null, warnings: f.warnings ?? [], costUsd: f.costUsd ?? null, knownFromKb: f.knownFromKb ?? 0 })),
   };
 }
 

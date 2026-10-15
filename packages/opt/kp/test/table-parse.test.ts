@@ -3,7 +3,7 @@ import ExcelJS from 'exceljs';
 import { LlmError, LlmUnavailableError, type LlmGateway, type RoutedRequest, type RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { analyzeDraftFile, isSpreadsheet, type DraftFileDeps } from '../src/file-analyze.ts';
-import { columnsOf, detectHeader, detectHeaderless, isService, mergeNormalized, parseTable, readSheetRows, sizeFromText, tableItems, TABLE_CHUNK_ROWS } from '../src/table-parse.ts';
+import { columnsOf, detectHeader, detectHeaderless, isService, mergeNormalized, parseTable, readSheetRows, sizeFromText, tableItems, TABLE_CHUNK_ROWS, type KnownRowName } from '../src/table-parse.ts';
 import { defaultOptSettings, toWidgetSettings } from '../src/settings.ts';
 
 const route = { primary: { provider: 'openai' as const, model: 'gpt-5.5' }, fallback: { provider: 'openai' as const, model: 'gpt-5.1' } };
@@ -363,5 +363,50 @@ describe('заявка без шапки: колонки A/B (RFD-AI-AGENT-OPT-X
     expect(r2.data.positions[1]).toMatchObject({ name: 'Изделие 2', width_mm: 850, height_mm: 2020, qty: 1 });
     expect(sum(r2.data.positions, /^Изделие/)).toBe(sum(ps.filter((p) => p.kind === 'product'), /./));
     expect(r2.data.positions.filter((p) => p.kind === 'service').map((p) => p.name)).toEqual(ps.filter((p) => p.kind === 'service').map((p) => p.name));
+  });
+});
+
+describe('база знаний в разборе таблицы (RFD-AI-AGENT-OPT-KB, этап 4)', () => {
+  it('известные модели получают название из базы без модели; в модель уходят только неизвестные строки; база недоступна — все строки в модель с пометкой', async () => {
+    const bytes = await xlsx({ Лист1: [['Наименование', 'Размер', 'Кол-во'], ['Дверь ДПГ + УПД (сота) 800×2000', '800×2000', 10], ['Полотно Турин белое', '700×2000', 3], ['Добор телескопический 100 мм', null, 6], ['Монтаж двери', null, 13]] });
+    const { gateway, requests } = gatewayBy((text) => normalizeAnswer(text));
+    const known = async (names: string[]): Promise<Map<number, KnownRowName>> => {
+      const m = new Map<number, KnownRowName>();
+      names.forEach((n, i) => {
+        if (/ДПГ/.test(n)) m.set(i, { name: 'ДПГ сота', via: 'alias', factory: null });
+        else if (/Турин/.test(n)) m.set(i, { name: 'Турин', via: 'price', factory: 'Браво' });
+      });
+      return m;
+    };
+    const lines: string[] = [];
+    const r = await parseTable(bytes, { llm: gateway, route, settings, filename: 'z.xlsx', known, onProgress: (l) => lines.push(l) });
+    expect(r.knownFromKb).toBe(2);
+    expect(r.method).toBe('columns+model');
+    // В модель ушла одна порция с одной строкой — добор (работы в модель не идут).
+    expect(requests).toHaveLength(1);
+    expect(rowIndexes(String((requests[0]?.messages[0]?.content as { text: string }[])[0]?.text ?? ''))).toEqual([3]);
+    expect(r.data.positions.map((p) => [p.name, p.qty, p.kind ?? 'product'])).toEqual([
+      ['ДПГ сота', 10, 'product'],
+      ['Турин', 3, 'product'],
+      ['Изделие 3', 6, 'product'],
+      ['Монтаж двери', 13, 'service'],
+    ]);
+    expect(r.data.positions[0]?.note).toContain('название из базы знаний (синоним): «Дверь ДПГ + УПД (сота) 800×2000»');
+    expect(r.data.positions[1]?.note).toContain('название из базы знаний (прайс, Браво): «Полотно Турин белое»');
+    expect(r.data.positions[0]).toMatchObject({ width_mm: 800, height_mm: 2000 });
+    expect(r.data.summary).toContain('названия 2 строк из базы знаний');
+    expect(lines.some((l) => l.includes('названия 2 строк взяты из базы знаний, в модель уходит 1'))).toBe(true);
+    // Все известны — модель не вызывается вовсе, способ «по колонкам».
+    const all = gatewayBy((text) => normalizeAnswer(text));
+    const r2 = await parseTable(bytes, { llm: all.gateway, route, settings, filename: 'z.xlsx', known: async (names) => new Map<number, KnownRowName>(names.map((_, i) => [i, { name: `База ${i}`, via: 'price', factory: null }])) });
+    expect(all.requests).toHaveLength(0);
+    expect(r2.method).toBe('columns');
+    expect(r2.knownFromKb).toBe(3);
+    // База упала — предупреждение, все строки нормализует модель.
+    const down = gatewayBy((text) => normalizeAnswer(text));
+    const r3 = await parseTable(bytes, { llm: down.gateway, route, settings, filename: 'z.xlsx', known: async () => { throw new Error('connection refused'); } });
+    expect(r3.knownFromKb).toBe(0);
+    expect(down.requests).toHaveLength(1);
+    expect(r3.warnings).toContain('база знаний недоступна для нормализации: connection refused');
   });
 });

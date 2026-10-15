@@ -49,7 +49,8 @@ mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/
 Миграции `packages/opt/kb/migrations` применяет opt-api при старте; `/health` отвечает `kb_db: ok`.
 Ссылки (этап 2) скачивает opt-worker: страницы и файлы по адресу, обход раздела до 50 страниц, переиндексация по сроку
 (очередь `kb-maintenance`, проверка раз в час) — наружу нужен доступ opt-worker к сайтам (https). Цены: прайсы xlsx импортируются во вкладке («Цены из прайса»), поиск цен в черновике идёт сначала по базе, веб-поиск — только для того,
-чего в базе нет (дневной лимит $5 в настройках КП). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md), [этап 3](kb-etap-3-report.md).
+чего в базе нет (дневной лимит $5 в настройках КП). Бэкап базы знаний — `bash src/scripts/opt/kb-backup.sh --install-cron` (ежедневно 03:40,
+7 копий в `/opt/agent-opt/backups/kb/`). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md), [этап 3](kb-etap-3-report.md), [этап 4](kb-etap-4-report.md).
 
 ## Запуск
 

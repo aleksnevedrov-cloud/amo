@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage } from '@core/widget-core';
 import type { DraftJob, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo, ResearchPosition, ResearchState } from '../api.ts';
+import { KbAnswer } from './KbAnswer.tsx';
 import { SendPreview } from './SendPreview.tsx';
 
 /**
@@ -248,6 +249,14 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           </ul>
         </section>
       )}
+
+      {/* 4a. Ответ из базы знаний на вопрос покупателя (RFD-AI-AGENT-OPT-KB, этап 4) */}
+      <section className="opt-kp-card">
+        <div className="opt-kp-head">
+          <h3 className="opt-kp-title">Ответ из базы знаний</h3>
+        </div>
+        <KbAnswer api={api} leadId={leadId} compact />
+      </section>
 
       {/* 5. Действия с КП */}
       <section className="opt-kp-card">

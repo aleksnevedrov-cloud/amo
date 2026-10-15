@@ -285,6 +285,17 @@ export interface KbPriceInfo {
   sourceKind: 'file' | 'url' | 'text' | null;
 }
 
+export interface KbAnswerInfo {
+  question: string;
+  answer: string | null;
+  sources: { n: number; chunkId: number; sourceId: number; label: string; excerpt: string }[];
+  reason: string | null;
+  cost: { inputTokens: number; outputTokens: number; usd: number };
+  provider: string | null;
+  model: string | null;
+  ms: number;
+}
+
 export interface KbAliasInfo {
   id: number;
   alias: string;
@@ -372,6 +383,9 @@ export class KpApi extends ApiClient {
   kbPrices = (q = '', limit = 200) => this.call<{ items: KbPriceInfo[]; total: number }>('GET', `/widget/v1/kb/prices?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
   kbAddPrice = (body: { model: string; factory?: string | null; widthMm?: number | null; heightMm?: number | null; price: number; vat?: KbPriceInfo['vat']; validAt?: string; origin?: KbPriceInfo['origin']; note?: string | null }) => this.call<{ price: KbPriceInfo }>('POST', '/widget/v1/kb/prices', body);
   kbRemovePrice = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/prices/${id}`);
+  kbPricesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/prices/export');
+  /** Ответ на вопрос покупателя из базы знаний (этап 4): top-5 фрагментов, модель отвечает со ссылками [n]. */
+  kbAnswer = (question: string, leadId?: number) => this.call<KbAnswerInfo>('POST', '/widget/v1/kb/answer', { question, ...(leadId ? { leadId } : {}) });
   kbAliases = () => this.call<{ aliases: KbAliasInfo[] }>('GET', '/widget/v1/kb/aliases');
   kbAddAliases = (lines: string) => this.call<{ added: number; aliases: KbAliasInfo[] }>('POST', '/widget/v1/kb/aliases', { lines });
   kbRemoveAlias = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/aliases/${id}`);

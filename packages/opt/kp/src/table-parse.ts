@@ -387,6 +387,13 @@ export interface ChunkInfo {
   error: string | null;
 }
 
+/** Известное название позиции из базы знаний (синоним или модель из цен) — такие строки в модель не уходят. */
+export interface KnownRowName {
+  name: string;
+  via: 'alias' | 'price';
+  factory: string | null;
+}
+
 export interface TableParseOptions {
   llm: LlmGateway;
   route: ChatRoute;
@@ -395,6 +402,8 @@ export interface TableParseOptions {
   filename: string;
   chunkRows?: number;
   onProgress?: (line: string) => void;
+  /** База знаний (RFD-AI-AGENT-OPT-KB, этап 4): по названиям строк — канонические названия; нет — все строки идут в модель. */
+  known?: (names: string[]) => Promise<Map<number, KnownRowName>>;
 }
 
 export interface TableParsed {
@@ -408,6 +417,8 @@ export interface TableParsed {
   warnings: string[];
   textChars: number;
   piiRemoved: number;
+  /** Строк, названия которых взяты из базы знаний без модели. */
+  knownFromKb: number;
 }
 
 const isTimeout = (err: unknown): boolean =>
@@ -481,7 +492,29 @@ async function normalizeByModel(items: TableItem[], titles: string[], chunkRows:
   let piiRemoved = 0;
   let normalized = 0;
   // Работы в модель не уходят: название и так короткое, размера нет.
-  const products = items.filter((it) => it.kind === 'product');
+  let products = items.filter((it) => it.kind === 'product');
+  // База знаний первая (этап 4): известные модели (синонимы, цены) получают каноническое название без модели.
+  let knownFromKb = 0;
+  if (opts.known && products.length) {
+    try {
+      const known = await opts.known(products.map((it) => it.name));
+      const rest: TableItem[] = [];
+      for (const [k, it] of products.entries()) {
+        const hit = known.get(k);
+        if (!hit) {
+          rest.push(it);
+          continue;
+        }
+        const base = itemToPosition(it);
+        positions[it.i - 1] = { ...base, name: hit.name.slice(0, MAX_NAME), note: [base.note, `название из базы знаний (${hit.via === 'alias' ? 'синоним' : 'прайс'}${hit.factory ? `, ${hit.factory}` : ''}): «${it.name}»`].filter(Boolean).join('; ').slice(0, MAX_NOTE) };
+        knownFromKb += 1;
+      }
+      products = rest;
+      if (knownFromKb) progress(`${opts.filename}: названия ${knownFromKb} строк взяты из базы знаний, в модель уходит ${rest.length}`);
+    } catch (err) {
+      warnings.push(`база знаний недоступна для нормализации: ${(err as Error).message}`);
+    }
+  }
   const total = Math.ceil(products.length / chunkRows);
   for (let i = 0; i < products.length; i += chunkRows) {
     const part = products.slice(i, i + chunkRows);
@@ -520,7 +553,7 @@ async function normalizeByModel(items: TableItem[], titles: string[], chunkRows:
   const data: OptDocumentData = {
     kind: 'request',
     title: opts.filename.replace(/\.[^.]+$/, '').slice(0, 80) || 'Таблица заявки',
-    summary: `Таблица заявки: ${positions.length} позиций${positions.length - products.length ? `, из них работ ${positions.length - products.length}` : ''}, разобрано по колонкам (${titles.join(', ')})${normalized ? `, названия уточнены моделью (${normalized} из ${chunks.length} порций)` : chunks.length ? ', модель не отвечала — названия как в файле' : ''}.`,
+    summary: `Таблица заявки: ${positions.length} позиций${items.length - items.filter((it) => it.kind === 'product').length ? `, из них работ ${items.length - items.filter((it) => it.kind === 'product').length}` : ''}, разобрано по колонкам (${titles.join(', ')})${knownFromKb ? `, названия ${knownFromKb} строк из базы знаний` : ''}${normalized ? `, названия уточнены моделью (${normalized} из ${chunks.length} порций)` : chunks.length ? ', модель не отвечала — названия как в файле' : ''}.`,
     customer_type: 'unknown',
     openings: [],
     positions,
@@ -528,7 +561,7 @@ async function normalizeByModel(items: TableItem[], titles: string[], chunkRows:
     questions: [],
     photo: null,
   };
-  return { data, method: normalized ? 'columns+model' : 'columns', chunks, cost, model, provider, warnings, textChars, piiRemoved };
+  return { data, method: normalized ? 'columns+model' : 'columns', chunks, cost, model, provider, warnings, textChars, piiRemoved, knownFromKb };
 }
 
 /** Данные из колонок главнее ответа модели: количество и размер из файла не перекрываются; имя — от модели, если не пустое. */
@@ -606,7 +639,7 @@ async function analyzeByChunks(rows: SheetRow[], chunkRows: number, opts: TableP
   }
   if (!data) throw new Error('в таблице нет строк для разбора');
   if (chunks.length > 1) data.summary = `${data.summary} Разобрано порциями: ${chunks.length}, строк ${rows.length}, позиций ${data.positions.length}.`;
-  return { data, method: 'model-chunks', chunks, cost, model, provider, warnings, textChars, piiRemoved };
+  return { data, method: 'model-chunks', chunks, cost, model, provider, warnings, textChars, piiRemoved, knownFromKb: 0 };
 }
 
 function mergeDocuments(a: DocumentData, b: DocumentData): DocumentData {

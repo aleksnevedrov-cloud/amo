@@ -235,6 +235,11 @@
 .opt-kp .opt-kp-badge-green { background: var(--kp-accent-bg); color: var(--kp-accent); }
 .opt-kp .opt-kp-sub { font-size: 12px; color: var(--kp-muted); }
 .opt-kp .opt-kp-stale { color: #8a5a00; font-weight: 600; }
+/* Ответ из базы знаний (RFD-AI-AGENT-OPT-KB, этап 4): поле вопроса во всю ширину, ответ с источниками серым. */
+.opt-root .opt-kb-answer { gap: 6px; }
+.opt-root .opt-kb-answer-input { flex: 1; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--ad-line); border-radius: 6px; font: inherit; font-size: 12px; }
+.opt-root .opt-kb-answer-body { background: var(--ad-soft); border-radius: var(--ad-radius-sm); padding: 8px 10px; font-size: 12px; gap: 6px; }
+.opt-root .opt-kb-answer-sources { gap: 2px; }
 .opt-kp .opt-kp-sep { height: 1px; background: var(--kp-line); }
 .opt-kp .opt-kp-label { font-size: 11px; font-weight: 600; color: var(--kp-muted); text-transform: uppercase; letter-spacing: .02em; }
 .opt-kp .opt-kp-buyer { display: flex; flex-direction: column; gap: 2px; }

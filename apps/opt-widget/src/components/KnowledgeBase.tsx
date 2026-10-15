@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage, Field, s } from '@core/widget-core';
 import type { KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
+import { KbAnswer } from './KbAnswer.tsx';
 import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
 
 /**
@@ -79,6 +80,11 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
       })} />
       <AddText busy={busy} onAdd={(title, content) => void run(async () => (await api.kbAddText(title, content), 'Текст добавлен, индексируется'))} />
       <Search api={api} />
+      <Field label="Вопрос покупателя" hint="Ответ только по фрагментам базы со ссылками на источники; так же агент отвечает на вопросы покупателя">
+        <div className="opt-root">
+          <KbAnswer api={api} />
+        </div>
+      </Field>
       {msg && <div style={{ ...s.muted, marginTop: 8 }}>{msg}</div>}
       <div style={{ ...s.label, marginTop: 16 }}>Источники{sources ? ` (${sources.length})` : ''}</div>
       {sources === null && <div style={s.muted}>Загрузка…</div>}

@@ -3,7 +3,7 @@ import type { DocumentService } from '@core/docs';
 import type { ChatRoute, LlmGateway, PricingOverrides } from '@core/llm';
 import { convertLegacyOffice, type OfficeFile } from './convert.ts';
 import type { ParsedFile } from './draft.ts';
-import { parseTable } from './table-parse.ts';
+import { parseTable, type TableParseOptions } from './table-parse.ts';
 
 /**
  * Разбор одного файла заявки для черновика КП (RFD-AI-AGENT-OPT-XLSX-TIMEOUT):
@@ -23,6 +23,8 @@ export interface DraftFileDeps {
   onProgress?: (line: string) => void;
   /** Строк в порции для модели (в тестах меньше). */
   chunkRows?: number;
+  /** Названия из базы знаний (этап 4): известные модели — без вызова модели. */
+  known?: TableParseOptions['known'];
 }
 
 /** Таблица Excel (после конвертации старого .xls тоже xlsx). */
@@ -48,6 +50,7 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
     filename: orig.filename,
     ...(d.chunkRows ? { chunkRows: d.chunkRows } : {}),
     ...(d.onProgress ? { onProgress: d.onProgress } : {}),
+    ...(d.known ? { known: d.known } : {}),
   });
   const id = await d.documents.add({
     accountId: d.accountId,
@@ -59,7 +62,7 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
     format: 'xlsx',
     ocr: null,
     kind: t.data.kind,
-    data: { ...t.data, matches: [], kit: null, parse: { method: t.method, chunks: t.chunks, warnings: t.warnings } },
+    data: { ...t.data, matches: [], kit: null, parse: { method: t.method, chunks: t.chunks, warnings: t.warnings, knownFromKb: t.knownFromKb } },
     textChars: t.textChars,
     piiRemoved: t.piiRemoved,
     model: t.model,
@@ -79,5 +82,6 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
     model: t.model ? `${t.provider}/${t.model}` : null,
     warnings: t.warnings,
     costUsd: t.cost.usd,
+    knownFromKb: t.knownFromKb,
   };
 }

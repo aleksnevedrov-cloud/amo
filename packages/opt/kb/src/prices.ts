@@ -390,6 +390,39 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.similarity, stale, validityDays, notes, label: priceLabelOf(best.row) };
 }
 
+/** Известное название из базы (этап 4): синоним → каноническое; иначе точная модель из kb_prices (с фабрикой). */
+export interface KnownName {
+  name: string;
+  via: 'alias' | 'price';
+  factory: string | null;
+}
+
+/**
+ * Нормализация названий позиций без модели: для каждого названия — каноническое из синонимов или модель из цен
+ * (точное совпадение ключа). Что не нашлось — остаётся модели (gpt) на этапе разбора таблицы.
+ */
+export async function knownModelNames(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, names: string[]): Promise<Map<number, KnownName>> {
+  const out = new Map<number, KnownName>();
+  const cache = new Map<string, KnownName | null>();
+  for (const [i, name] of names.entries()) {
+    const key = modelKeyOf(name);
+    if (!key) continue;
+    let hit = cache.get(key);
+    if (hit === undefined) {
+      const alias = await aliases.resolve(accountId, key);
+      if (alias) hit = { name: alias.canonical, via: 'alias', factory: null };
+      else {
+        const rows = await prices.candidates(accountId, [key]);
+        const exact = rows.find((r) => r.row.modelKey === key)?.row;
+        hit = exact ? { name: exact.model, via: 'price', factory: exact.factory } : null;
+      }
+      cache.set(key, hit);
+    }
+    if (hit) out.set(i, hit);
+  }
+  return out;
+}
+
 function mapPrice(r: Record<string, unknown>): KbPrice {
   return {
     id: Number(r.id),

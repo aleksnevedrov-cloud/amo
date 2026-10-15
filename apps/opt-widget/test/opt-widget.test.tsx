@@ -95,10 +95,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Сторона открывания?');
     expect(button('Собрать документ')?.disabled).toBe(true);
     expect(button('Отправить клиенту')?.disabled).toBe(true);
-    // Макет Figma: 5 карточек (черновик, позиции, вопросы, действия, примечание), позиция — плитка с полями под названием, кнопки столбиком.
+    // Макет Figma: карточки черновик, позиции, вопросы, ответ из базы знаний (RFD-AI-AGENT-OPT-KB, этап 4), действия, примечание;
+    // позиция — плитка с полями под названием, кнопки столбиком.
     expect(document.querySelectorAll('.opt-root.opt-kp')).toHaveLength(1);
-    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Действия с КП']);
-    expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(5);
+    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Ответ из базы знаний', 'Действия с КП']);
+    expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(6);
     const tile = document.querySelector('.opt-kp-tile')!;
     const tileHas = (sel: string, text: string) => tile.querySelector(sel)?.textContent === text;
     expect([...document.querySelectorAll('.opt-kp-badge')].map((b) => b.textContent)).toEqual(['Черновик', '1']);
@@ -284,6 +285,30 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(posted).toEqual([{ draftId: 7, requestIndexes: [0], force: true }]);
   });
 
+  it('ответ из базы знаний в карточке сделки (этап 4): вопрос → POST /kb/answer с leadId, ответ и источники', async () => {
+    const posted: unknown[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': { draft, job: null },
+      'POST /widget/v1/kb/answer': (data?: string) => {
+        posted.push(JSON.parse(data ?? '{}'));
+        return { question: 'какая скидка от 50 полотен', answer: 'Скидка опт от 50 полотен — 12 % [1].', sources: [{ n: 1, chunkId: 10, sourceId: 1, label: 'заметка «Скидки» (15.10.2026)', excerpt: 'Скидка опт от 50 полотен — 12 %' }], reason: null, cost: { inputTokens: 400, outputTokens: 30, usd: 0.0012 }, provider: 'openai', model: 'gpt-5.5', ms: 900 };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toContain('Ответ из базы знаний');
+    expect(button('Ответить из базы')?.disabled).toBe(true);
+    await setInput(document.querySelector('.opt-kb-answer-input'), 'какая скидка от 50 полотен');
+    expect(button('Ответить из базы')?.disabled).toBe(false);
+    await click('Ответить из базы');
+    await flush();
+    expect(posted).toEqual([{ question: 'какая скидка от 50 полотен', leadId: 555 }]);
+    expect(document.body.textContent).toContain('Скидка опт от 50 полотен — 12 % [1].');
+    expect(document.body.textContent).toContain('[1] заметка «Скидки» (15.10.2026): Скидка опт от 50 полотен — 12 %');
+    expect(document.body.textContent).toContain('gpt-5.5, $0.0012, 900 мс');
+  });
+
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
     const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: null, job: { state: 'failed', error: 'LLM не настроена' } } });
     const cbs = createCallbacks(self, 'https://opt.test.ru');
@@ -450,6 +475,7 @@ describe('виджет «Агент опт»: вкладка «База знан
         posted.push({ url: 'price', data: JSON.parse(data ?? '{}') });
         return { price: {} };
       },
+      'GET /widget/v1/kb/prices/export': { filename: 'kb-prices-2026-10-15.xlsx', rows: 1, contentBase64: Buffer.from('PK').toString('base64') },
       'GET /widget/v1/kb/aliases': { aliases: [{ id: 1, alias: 'ДПГ + УПД (сота)', canonical: 'ДПГ сота' }] },
       'POST /widget/v1/kb/aliases': (data?: string) => {
         posted.push({ url: 'aliases', data: JSON.parse(data ?? '{}') });
@@ -533,5 +559,18 @@ describe('виджет «Агент опт»: вкладка «База знан
     await click('Добавить синонимы');
     await flush();
     expect(posted.at(-1)).toEqual({ url: 'aliases', data: { lines: 'Турин = Turin' } });
+    // Выгрузка в xlsx (этап 4): файл приходит base64 и скачивается ссылкой-blob.
+    const created: string[] = [];
+    URL.createObjectURL = () => 'blob:kb';
+    URL.revokeObjectURL = () => undefined;
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      created.push(`${this.download}|${this.href}`);
+    };
+    await click('Выгрузить в xlsx');
+    await flush();
+    HTMLAnchorElement.prototype.click = origClick;
+    expect(created).toEqual(['kb-prices-2026-10-15.xlsx|blob:kb']);
+    expect(document.body.textContent).toContain('Выгружено записей: 1');
   });
 });

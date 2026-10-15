@@ -153,9 +153,21 @@ export function PricesSection({ api }: { api: KpApi }) {
       setMsg(errorMessage(e));
     }
   };
+  const exportXlsx = async () => {
+    try {
+      const f = await api.kbPricesExport();
+      downloadBase64(f.contentBase64, f.filename);
+      setMsg(`Выгружено записей: ${f.rows}`);
+    } catch (e) {
+      setMsg(errorMessage(e));
+    }
+  };
   return (
     <div style={{ marginTop: 16 }}>
-      <div style={s.label}>Цены{state.status === 'ready' ? ` (${state.data.total})` : ''}</div>
+      <div style={{ ...s.row, justifyContent: 'space-between' }}>
+        <div style={s.label}>Цены{state.status === 'ready' ? ` (${state.data.total})` : ''}</div>
+        <button type="button" style={s.buttonGhost} disabled={state.status !== 'ready' || state.data.total === 0} onClick={() => void exportXlsx()}>Выгрузить в xlsx</button>
+      </div>
       <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>Агент берёт цену отсюда до веб-поиска: точное совпадение модели и размера, иначе базовая цена × правила нестандарта. Прайс — доверие 70, веб-поиск — 40, правка менеджера — 90.</div>
       <div style={{ ...s.row, marginBottom: 6 }}>
         <input style={{ ...s.input, maxWidth: 260 }} placeholder="модель или фабрика" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && setApplied(q.trim())} />
@@ -236,6 +248,19 @@ export function AliasesSection({ api }: { api: KpApi }) {
       )}
     </div>
   );
+}
+
+/** Скачивание файла из base64 (как у выгрузки прайса розницы): ссылка-blob, клик, отзыв адреса. */
+export function downloadBase64(base64: string, name: string, mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** «4 100,50» → 4100.5; не число — 0. */
