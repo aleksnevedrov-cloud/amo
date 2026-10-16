@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KP-NAME: полное наименование позиции в КП
 
-Дата: 16.10.2026. Ветка `claude/opt-kb`, отдельный коммит после ed5a0f4 (KB-MATCH). Сервер (`@opt/kb`, `@opt/kp`) и виджет
+Дата: 16.10.2026. Ветка `claude/opt-kb`, коммит dab2d61 (после ed5a0f4, KB-MATCH). Сервер (`@opt/kb`, `@opt/kp`) и виджет
 1.1.6. Розница и ядро не менялись (`git diff -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Причина дефекта (#30022107, КП-2026-9)
