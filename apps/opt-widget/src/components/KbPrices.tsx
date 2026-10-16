@@ -124,12 +124,50 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
   );
 }
 
-/** Раздел «Цены»: поиск, список, ручная запись, удаление. */
-export function PricesSection({ api }: { api: KpApi }) {
-  const [q, setQ] = useState('');
-  const [applied, setApplied] = useState('');
-  const load = useCallback(() => api.kbPrices(applied), [api, applied]);
+/** Вкладки раздела «Цены» (RFD-AI-AGENT-OPT-KB-PRICES-UI): прайс — только чтение; веб-цены и правки менеджера можно удалять. */
+type PriceTab = 'price_list' | 'web' | 'manager';
+const TAB_OF: Record<KbPriceInfo['origin'], PriceTab> = { price_list: 'price_list', web: 'web', manager: 'manager', purchase: 'manager' };
+const TAB_TITLE: Record<PriceTab, string> = { price_list: 'Прайс', web: 'Веб', manager: 'Правки' };
+/** Строк на странице таблицы цен. */
+export const PRICES_PAGE = 20;
+const plural = (n: number, one: string, few: string, many: string) => {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+};
+
+/** Сводка по ценам: прайс (число, дата актуальности, файл), веб-цены, правки менеджера. */
+export function pricesSummary(items: KbPriceInfo[]): { priceList: { count: number; validAt: string | null; file: string | null }; web: number; manager: number } {
+  const pl = items.filter((p) => p.origin === 'price_list');
+  const validAt = pl.reduce<string | null>((best, p) => (best === null || new Date(p.validAt) > new Date(best) ? p.validAt : best), null);
+  // Файл прайса — самый частый источник среди прайсовых строк (после замены он один).
+  const files = new Map<string, number>();
+  for (const p of pl) if (p.sourceTitle) files.set(p.sourceTitle, (files.get(p.sourceTitle) ?? 0) + 1);
+  const file = [...files.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  return { priceList: { count: pl.length, validAt, file }, web: items.filter((p) => p.origin === 'web').length, manager: items.filter((p) => TAB_OF[p.origin] === 'manager').length };
+}
+
+export function summaryText(sum: ReturnType<typeof pricesSummary>): string {
+  const pl = sum.priceList.count
+    ? `Прайс: ${sum.priceList.count} ${plural(sum.priceList.count, 'цена', 'цены', 'цен')}${sum.priceList.validAt ? ` · актуален на ${date(sum.priceList.validAt)}` : ''}${sum.priceList.file ? ` · файл «${sum.priceList.file}»` : ''}`
+    : 'Прайс не загружен';
+  return `${pl}  |  веб-цены: ${sum.web}  |  правки менеджера: ${sum.manager}`;
+}
+
+/**
+ * Раздел «Цены» (RFD-AI-AGENT-OPT-KB-PRICES-UI): по умолчанию одна строка-сводка; «Показать» раскрывает таблицу с
+ * вкладками «Прайс / Веб / Правки», поиском по модели по вводу и страницами по 20 строк. Строки прайса — только чтение,
+ * у веб-цен и правок — удаление. version — счётчик вкладки: растёт после загрузки/удаления источника, список перечитывается без перезагрузки.
+ */
+export function PricesSection({ api, version = 0 }: { api: KpApi; version?: number }) {
+  const load = useCallback(() => api.kbPrices('', 1000), [api, version]);
   const [state, reload] = useLoad(load);
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<PriceTab>('price_list');
+  const [q, setQ] = useState('');
+  const [page, setPage] = useState(0);
   const [model, setModel] = useState('');
   const [size, setSize] = useState('');
   const [price, setPrice] = useState('');
@@ -142,6 +180,7 @@ export function PricesSection({ api }: { api: KpApi }) {
       setSize('');
       setPrice('');
       setMsg('Цена записана (доверие 90)');
+      setTab('manager');
       reload();
     } catch (e) {
       setMsg(errorMessage(e));
@@ -165,50 +204,118 @@ export function PricesSection({ api }: { api: KpApi }) {
       setMsg(errorMessage(e));
     }
   };
+  const items = state.status === 'ready' ? state.data.items : [];
+  const sum = pricesSummary(items);
+  const counts: Record<PriceTab, number> = { price_list: sum.priceList.count, web: sum.web, manager: sum.manager };
+  const needle = q.trim().toLowerCase();
+  const filtered = items.filter((p) => TAB_OF[p.origin] === tab && (!needle || p.model.toLowerCase().includes(needle) || (p.factory ?? '').toLowerCase().includes(needle)));
+  const pages = Math.max(1, Math.ceil(filtered.length / PRICES_PAGE));
+  const current = Math.min(page, pages - 1);
+  const rows = filtered.slice(current * PRICES_PAGE, current * PRICES_PAGE + PRICES_PAGE);
+  const pick = (t: PriceTab) => {
+    setTab(t);
+    setPage(0);
+  };
   return (
-    <div style={{ marginTop: 16 }}>
+    <div style={{ marginTop: 16 }} className="opt-kb-prices">
       <div style={{ ...s.row, justifyContent: 'space-between' }}>
         <div style={s.label}>Цены{state.status === 'ready' ? ` (${state.data.total})` : ''}</div>
-        <button type="button" style={s.buttonGhost} disabled={state.status !== 'ready' || state.data.total === 0} onClick={() => void exportXlsx()}>Выгрузить в xlsx</button>
+        <div style={s.row}>
+          <button type="button" style={s.buttonGhost} disabled={state.status !== 'ready'} onClick={() => setOpen((v) => !v)}>
+            {open ? 'Скрыть' : 'Показать'}
+          </button>
+          <button type="button" style={s.buttonGhost} disabled={state.status !== 'ready' || state.data.total === 0} onClick={() => void exportXlsx()}>Выгрузить в xlsx</button>
+        </div>
       </div>
-      <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>Агент берёт цену отсюда до веб-поиска: точное совпадение модели и размера, иначе базовая цена × правила нестандарта. Прайс — доверие 70, веб-поиск — 40, правка менеджера — 90.</div>
-      <div style={{ ...s.row, marginBottom: 6 }}>
-        <input style={{ ...s.input, maxWidth: 260 }} placeholder="модель или фабрика" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && setApplied(q.trim())} />
-        <button type="button" style={s.buttonGhost} onClick={() => setApplied(q.trim())}>Найти</button>
-      </div>
-      <div style={{ ...s.row, marginBottom: 6 }}>
-        <input style={{ ...s.input, maxWidth: 220 }} placeholder="Модель" value={model} onChange={(e) => setModel(e.target.value)} />
-        <input style={{ ...s.input, maxWidth: 110 }} placeholder="800×2000" value={size} onChange={(e) => setSize(e.target.value)} />
-        <input style={{ ...s.input, maxWidth: 110 }} placeholder="цена, ₽" value={price} onChange={(e) => setPrice(e.target.value)} />
-        <button type="button" style={s.buttonGhost} disabled={!model.trim() || !priceNumber(price)} onClick={() => void add()}>Добавить цену</button>
-      </div>
-      {msg && <div style={{ ...s.muted, ...s.small, marginBottom: 6 }}>{msg}</div>}
       {state.status === 'loading' && <div style={s.muted}>Загрузка…</div>}
       {state.status === 'error' && <div style={s.error}>{state.message}</div>}
-      {state.status === 'ready' && state.data.items.length === 0 && <div style={s.muted}>Цен пока нет — импортируйте xlsx-прайс кнопкой «Цены из прайса» у источника или добавьте руками</div>}
-      {state.status === 'ready' && state.data.items.length > 0 && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <tbody>
-            {state.data.items.map((p) => (
-              <tr key={p.id} className="opt-kb-price">
-                <td style={td}>{p.model}{p.factory ? <span style={{ color: '#8A949F' }}> · {p.factory}</span> : ''}</td>
-                <td style={td}>{p.baseSize ?? '—'}</td>
-                <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>{rub(p.price)}</td>
-                <td style={{ ...td, whiteSpace: 'nowrap' }}>{VAT[p.vat]}</td>
-                <td style={{ ...td, whiteSpace: 'nowrap' }}>{ORIGIN[p.origin]} · {p.confidence}</td>
-                <td style={{ ...td, whiteSpace: 'nowrap' }}>{date(p.validAt)}</td>
-                <td style={{ ...td, color: '#8A949F' }}>{p.sourceTitle ?? p.url ?? p.note ?? ''}</td>
-                <td style={td}>
-                  <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} onClick={() => void remove(p)}>×</button>
-                </td>
-              </tr>
+      {state.status === 'ready' && <div className="opt-kb-prices-summary" style={{ ...s.small, marginBottom: 6 }}>{summaryText(sum)}</div>}
+      {msg && <div style={{ ...s.muted, ...s.small, marginBottom: 6 }}>{msg}</div>}
+      {open && state.status === 'ready' && (
+        <div className="opt-kb-prices-table">
+          <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>Агент берёт цену отсюда до веб-поиска: прайс › правка менеджера › веб; точное совпадение модели и размера, иначе базовая цена × правила нестандарта.</div>
+          <div style={{ ...s.row, marginBottom: 6 }}>
+            {(['price_list', 'web', 'manager'] as PriceTab[]).map((t) => (
+              <button key={t} type="button" className={`opt-kb-prices-tab${t === tab ? ' opt-kb-prices-tab-active' : ''}`} style={{ ...s.buttonGhost, ...(t === tab ? { fontWeight: 600, borderColor: '#1f6feb' } : {}) }} onClick={() => pick(t)}>
+                {TAB_TITLE[t]} ({counts[t]})
+              </button>
             ))}
-          </tbody>
-        </table>
+            <input
+              style={{ ...s.input, maxWidth: 240 }}
+              placeholder="поиск по модели"
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                setPage(0);
+              }}
+            />
+          </div>
+          {filtered.length === 0 && <div style={s.muted}>{items.length === 0 ? 'Цен пока нет — загрузите xlsx-прайс во вкладке или добавьте правку руками' : needle ? 'По запросу ничего не найдено' : tab === 'price_list' ? 'Прайс не загружен' : tab === 'web' ? 'Веб-цен ещё нет' : 'Правок менеджера нет'}</div>}
+          {filtered.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th style={th}>Модель</th>
+                  <th style={th}>Размер</th>
+                  <th style={{ ...th, textAlign: 'right' }}>Цена</th>
+                  <th style={th}>НДС</th>
+                  <th style={th}>Дата</th>
+                  <th style={th}>Источник</th>
+                  <th style={th} />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((p) => (
+                  <tr key={p.id} className="opt-kb-price">
+                    <td style={td}>{p.model}{p.factory ? <span style={{ color: '#8A949F' }}> · {p.factory}</span> : ''}</td>
+                    <td style={td}>{p.baseSize ?? '—'}</td>
+                    <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>{rub(p.price)}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{VAT[p.vat]}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{date(p.validAt)}</td>
+                    <td style={{ ...td, color: '#8A949F' }}>{sourceOf(p)}</td>
+                    <td style={td}>
+                      {p.origin !== 'price_list' && (
+                        <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} title="Удалить" onClick={() => void remove(p)}>×</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {filtered.length > PRICES_PAGE && (
+            <div style={{ ...s.row, ...s.small, marginTop: 6, alignItems: 'center' }} className="opt-kb-prices-pager">
+              <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} disabled={current === 0} onClick={() => setPage(current - 1)}>←</button>
+              <span>{current * PRICES_PAGE + 1}–{Math.min(filtered.length, (current + 1) * PRICES_PAGE)} из {filtered.length}</span>
+              <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>→</button>
+            </div>
+          )}
+          <div style={{ ...s.row, marginTop: 8 }}>
+            <input style={{ ...s.input, maxWidth: 220 }} placeholder="Модель" value={model} onChange={(e) => setModel(e.target.value)} />
+            <input style={{ ...s.input, maxWidth: 110 }} placeholder="800×2000" value={size} onChange={(e) => setSize(e.target.value)} />
+            <input style={{ ...s.input, maxWidth: 110 }} placeholder="цена, ₽" value={price} onChange={(e) => setPrice(e.target.value)} />
+            <button type="button" style={s.buttonGhost} disabled={!model.trim() || !priceNumber(price)} onClick={() => void add()}>Добавить цену</button>
+          </div>
+        </div>
       )}
     </div>
   );
 }
+
+/** Колонка «Источник»: файл прайса, сайт веб-цены или примечание правки. */
+function sourceOf(p: KbPriceInfo): string {
+  if (p.sourceTitle) return p.sourceTitle;
+  if (p.url) {
+    try {
+      return new URL(p.url).host;
+    } catch {
+      return p.url;
+    }
+  }
+  return p.note ?? ORIGIN[p.origin];
+}
+
+const th = { padding: '4px 6px', borderBottom: '1px solid #dfe3e8', textAlign: 'left', color: '#8A949F', fontWeight: 500 } as const;
 
 /** Раздел «Синонимы»: строки «каноническое = синоним = синоним», список, удаление. */
 export function AliasesSection({ api }: { api: KpApi }) {

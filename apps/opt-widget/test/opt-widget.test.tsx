@@ -559,10 +559,15 @@ describe('виджет «Агент опт»: вкладка «База знан
     expect(document.body.textContent).toContain('Ссылка добавлена, скачивается, раздел будет обойдён (до 50 страниц)');
     expect(document.body.textContent).toContain('ссылка · 1 КБ · фрагментов 3 · добавлен 15.10.2026 · индекс 15.10.2026 · обновление каждые 30 дн., следующее 14.11.2026 · раздел');
     expect(document.body.textContent).toContain('https://rf-dveri.ru/ceny/');
-    // Цены и синонимы (этап 3): таблица цен с происхождением и доверием, ручная запись, синонимы строками.
+    // Цены (KB-PRICES-UI): по умолчанию только сводка; «Показать» раскрывает таблицу прайса без кнопки удаления; ручная запись, синонимы строками.
     expect(document.body.textContent).toContain('Цены (1)');
+    expect(document.querySelector('.opt-kb-prices-summary')?.textContent).toBe('Прайс: 1 цена · актуален на 01.10.2026 · файл «прайс Текона.xlsx»  |  веб-цены: 0  |  правки менеджера: 0');
+    expect(document.querySelector('.opt-kb-price')).toBeNull();
+    await click('Показать');
+    await flush();
     const priceRow = document.querySelector('.opt-kb-price')!;
-    expect(priceRow.textContent?.replace(/\u00a0/g, ' ')).toContain('ДПГ сота · Текона800×20003 450 ₽с НДСпрайс · 7001.10.2026прайс Текона.xlsx');
+    expect(priceRow.textContent?.replace(/\u00a0/g, ' ')).toBe('ДПГ сота · Текона800×20003 450 ₽с НДС01.10.2026прайс Текона.xlsx');
+    expect(priceRow.querySelector('button')).toBeNull();
     const inputs = [...document.querySelectorAll('input')];
     await setInput(inputs.find((i) => i.placeholder === 'Модель')!, 'ДПО сота');
     await setInput(inputs.find((i) => i.placeholder === '800×2000')!, '800x2000');
@@ -589,5 +594,79 @@ describe('виджет «Агент опт»: вкладка «База знан
     HTMLAnchorElement.prototype.click = origClick;
     expect(created).toEqual(['kb-prices-2026-10-15.xlsx|blob:kb']);
     expect(document.body.textContent).toContain('Выгружено записей: 1');
+  });
+
+  it('раздел «Цены» (KB-PRICES-UI): сводка по прайсу, вебу и правкам; вкладки с числом строк, поиск по вводу, страницы по 20; удаление только у веб-цен и правок; обновление после удаления источника без перезагрузки', async () => {
+    const price = (i: number, origin: 'price_list' | 'web' | 'manager', extra: Record<string, unknown> = {}) => ({ id: i, sourceId: origin === 'price_list' ? 2 : null, model: origin === 'price_list' ? `ДВ CPL ${i}` : origin === 'web' ? `Турин ${i}` : `Тоскана ${i}`, modelKey: '', factory: null, unit: 'шт', baseSize: '910×2100', widthMm: 910, heightMm: 2100, price: 20000 + i, vat: 'no_vat', validAt: i === 5 ? '2026-10-16T00:00:00Z' : '2026-10-10T00:00:00Z', confidence: 70, origin, nonstandard: {}, url: origin === 'web' ? 'https://dveri-a.ru/turin' : null, note: null, createdAt: '2026-10-16T10:00:00Z', sourceTitle: origin === 'price_list' ? '475-2016 CPL.xlsx' : null, sourceKind: origin === 'price_list' ? 'file' : null, ...extra });
+    let items = [...Array.from({ length: 28 }, (_, i) => price(i + 1, 'price_list')), ...Array.from({ length: 16 }, (_, i) => price(100 + i, 'web')), price(200, 'manager')];
+    let sources: Record<string, unknown>[] = [{ id: 2, kind: 'file', title: '475-2016 CPL.xlsx', original: '475-2016 CPL.xlsx', mime: null, status: 'indexed', sizeBytes: 20000, chunks: 3, embeddedChunks: 3, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-16T09:00:00Z', updatedAt: '2026-10-16T09:00:00Z', indexedAt: '2026-10-16T09:00:05Z', crawl: false, parentId: null, httpStatus: null, job: null, prices: 28 }];
+    const { self, calls } = fakeSelf('settings', {
+      'GET /widget/v1/status': status,
+      'GET /widget/v1/settings': { version: 1, settings: {} },
+      'GET /widget/v1/kb/sources': () => ({ sources, usage: { sources: sources.length, bytes: 20000, chunks: 3, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
+      'GET /widget/v1/kb/prices': () => ({ items, total: items.length }),
+      'DELETE /widget/v1/kb/prices/100': () => {
+        items = items.filter((p) => p.id !== 100);
+        return { ok: true };
+      },
+      'DELETE /widget/v1/kb/sources/2': () => {
+        sources = [];
+        items = items.filter((p) => p.origin !== 'price_list');
+        return { ok: true };
+      },
+      'GET /widget/v1/kb/aliases': { aliases: [] },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    const summary = () => document.querySelector('.opt-kb-prices-summary')?.textContent;
+    expect(summary()).toBe('Прайс: 28 цен · актуален на 16.10.2026 · файл «475-2016 CPL.xlsx»  |  веб-цены: 16  |  правки менеджера: 1');
+    expect(document.querySelector('.opt-kb-prices-table')).toBeNull();
+    expect(document.body.textContent).toContain('прайс: цен 28');
+    await click('Показать');
+    await flush();
+    const tabs = () => [...document.querySelectorAll('.opt-kb-prices-tab')].map((b) => b.textContent);
+    expect(tabs()).toEqual(['Прайс (28)', 'Веб (16)', 'Правки (1)']);
+    const rowsShown = () => document.querySelectorAll('.opt-kb-price').length;
+    expect(rowsShown()).toBe(20);
+    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←1–20 из 28→');
+    expect([...document.querySelectorAll('.opt-kb-price button')]).toHaveLength(0);
+    await click('→');
+    await flush();
+    expect(rowsShown()).toBe(8);
+    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←21–28 из 28→');
+    expect(document.querySelector('.opt-kb-price')?.textContent).toContain('ДВ CPL 21');
+    // Поиск по вводу: фильтр внутри вкладки, страница сбрасывается.
+    await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'поиск по модели')!, 'cpl 1');
+    expect(rowsShown()).toBe(11);
+    expect(document.querySelector('.opt-kb-prices-pager')).toBeNull();
+    await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'поиск по модели')!, '');
+    // Вкладка «Веб»: удаление есть, строка с сайтом источника.
+    await click('Веб (16)');
+    await flush();
+    expect(rowsShown()).toBe(16);
+    expect(document.querySelector('.opt-kb-price')?.textContent).toContain('dveri-a.ru');
+    expect([...document.querySelectorAll('.opt-kb-price button')]).toHaveLength(16);
+    window.confirm = () => true;
+    await act(async () => (document.querySelector('.opt-kb-price button') as HTMLButtonElement).click());
+    await flush();
+    expect(calls.filter((c) => c.method === 'DELETE').map((c) => new URL(c.url).pathname)).toEqual(['/widget/v1/kb/prices/100']);
+    expect(tabs()).toEqual(['Прайс (28)', 'Веб (15)', 'Правки (1)']);
+    expect(summary()).toContain('веб-цены: 15');
+    // Удаление файла прайса из списка источников обновляет сводку и вкладки без перезагрузки страницы и без сворачивания.
+    await click('Удалить');
+    await flush();
+    expect(summary()).toBe('Прайс не загружен  |  веб-цены: 15  |  правки менеджера: 1');
+    expect(tabs()).toEqual(['Прайс (0)', 'Веб (15)', 'Правки (1)']);
+    expect(document.querySelector('.opt-kb-prices-table')).not.toBeNull();
+    await click('Правки (1)');
+    await flush();
+    expect(document.querySelector('.opt-kb-price')?.textContent).toContain('Тоскана 200');
+    await click('Скрыть');
+    await flush();
+    expect(document.querySelector('.opt-kb-prices-table')).toBeNull();
   });
 });

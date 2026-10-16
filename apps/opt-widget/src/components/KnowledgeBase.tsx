@@ -60,6 +60,7 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
       const m = await fn();
       if (alive.current && m) setMsg(m);
       await reload();
+      if (alive.current) setPricesKey((k) => k + 1);
     } catch (e) {
       if (alive.current) setMsg(errorMessage(e));
     } finally {
@@ -116,7 +117,8 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
           }}
         />
       ))}
-      <PricesSection key={`prices-${pricesKey}`} api={api} />
+      {/* Сводка и список цен перечитываются после загрузки/удаления источника и импорта прайса, без перезагрузки (KB-PRICES-UI, п. 4). */}
+      <PricesSection api={api} version={pricesKey} />
       <AliasesSection api={api} />
     </div>
   );
