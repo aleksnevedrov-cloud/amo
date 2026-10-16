@@ -1,7 +1,7 @@
 import { knownModelNames } from '@opt/kb';
 import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob } from './research-job.ts';
 import type { OptCore } from './deps.ts';
-import { buildKpDraft, type KpDraftDeps, type ParsedFile } from './draft.ts';
+import { buildKpDraft, type KpDraftDeps, type KpPayload, type ParsedFile } from './draft.ts';
 import { analyzeDraftFile } from './file-analyze.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
 
@@ -69,8 +69,14 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     // Ящик, подключённый к amoCRM, читается по IMAP только на чтение и только здесь — по кнопке (вариант А).
     const m = settings.mail;
     const mailPassword = m.username && m.imapHost ? await core.secrets.get(accountId, 'smtp') : null;
+    // Прежний черновик сделки (KP-REBUILD-MAIL): его письмо читается сразу по папке и UID (п. 1), а пустая пересборка
+    // его не затирает (п. 2).
+    const prev = await core.kp.latestByLead(accountId, leadId);
+    const prevPayload = (prev?.payload ?? {}) as unknown as Partial<KpPayload>;
+    const prevMail = prevPayload.source?.mail;
+    const known = prevMail && prevMail.status === 'found' && prevMail.folder && prevMail.uid ? { folder: prevMail.folder, uid: prevMail.uid, messageId: prevMail.messageId } : null;
     const mail: KpDraftDeps['mail'] = mailPassword
-      ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, search, { onProgress: hooks.onProgress })
+      ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, { ...search, ...(known ? { known } : {}) }, { onProgress: hooks.onProgress })
       : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
     const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze, mail });
@@ -88,6 +94,24 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
               : `Ящик не прочитан: ${ms.error}`,
         details: { userId: job.userId, status: ms.status, messageId: ms.messageId, folder: ms.folder, matchedBy: ms.matchedBy, taken: ms.taken, uploaded: ms.uploaded, skipped: ms.skipped, retryAt: ms.retryAt, diag: ms.diag },
       });
+    }
+    // Пересборка без единой позиции не заменяет рабочий черновик (KP-REBUILD-MAIL, п. 2): прежний остаётся с пометкой,
+    // причина — в журнале kp_error. Новый черновик создаётся, только если позиции есть или прежнего с позициями нет.
+    const prevItems = prevPayload.items?.length ?? 0;
+    if (!r.payload.items.length && prev && prevItems > 0) {
+      const why = r.payload.needs_manager.filter((n) => n.request_index === -1).map((n) => n.reason).join('; ') || 'позиции не найдены';
+      const note = `пересборка ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} без позиций (${why}) — черновик сохранён`;
+      const needs = (prevPayload.needs_manager ?? []).filter((n) => !(n.request_index === -1 && n.reason.startsWith('пересборка ')));
+      needs.push({ request_index: -1, reason: note });
+      await core.kp.setPayloadIfVersion(prev.id, prev.version, { ...prevPayload, needs_manager: needs } as unknown as Record<string, unknown>).catch(() => false);
+      await core.journal.add({
+        accountId,
+        leadId,
+        kind: 'kp_error',
+        summary: `Черновик ${prev.id} сохранён: пересборка не дала ни одной позиции (${why}); прежний черновик с позициями (${prevItems}) не заменён`,
+        details: { draftId: prev.id, userId: job.userId, keptDraft: true, reason: why, mail: ms ? { status: ms.status, error: ms.error } : null },
+      });
+      return { draftId: prev.id };
     }
     const draftId = await core.kp.createDraft(accountId, leadId, r.payload as unknown as Record<string, unknown>, job.userId);
     // Поиск цен при сборке — только если включено в настройках КП (по умолчанию выключено: поиск по кнопке «Найти цены»).

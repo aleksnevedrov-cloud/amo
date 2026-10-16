@@ -440,4 +440,30 @@ describe('база знаний опта: цены и синонимы → по�
     const left = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as typeof all;
     expect(byList(left)).toEqual({ Межкомнатные: 54 });
   });
+
+  it('KP-REBUILD-MAIL, п. 2: пересборка без единой позиции не затирает рабочий черновик — прежний остаётся с пометкой, причина в журнале; пересборка с позициями создаёт новый', async () => {
+    const before = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(before.items.length).toBeGreaterThan(0);
+    // Письмо разобралось в ноль позиций (как при таймауте IMAP и пустой карточке).
+    letter.request_items = [];
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const kept = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(kept.id).toBe(before.id);
+    expect(kept.items.map((l: { name: string }) => l.name)).toEqual(before.items.map((l: { name: string }) => l.name));
+    const notes = (kept.needsManager as { request_index: number; reason: string }[]).filter((n) => n.request_index === -1).map((n) => n.reason);
+    expect(notes.some((n) => /^пересборка \d{2}\.\d{2}, \d{2}:\d{2} без позиций \(позиции не найдены ни в файлах, ни в письме\) — черновик сохранён$/.test(n))).toBe(true);
+    const errors = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_error', headers })).json().items as { summary: string; details: { keptDraft?: boolean; draftId?: number } }[];
+    expect(errors[0]).toMatchObject({ summary: `Черновик ${before.id} сохранён: пересборка не дала ни одной позиции (позиции не найдены ни в файлах, ни в письме); прежний черновик с позициями (${before.items.length}) не заменён`, details: { keptDraft: true, draftId: before.id } });
+    // Повторная пустая пересборка не плодит пометки: одна строка «пересборка …».
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const again = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(again.id).toBe(before.id);
+    expect((again.needsManager as { reason: string }[]).filter((n) => n.reason.startsWith('пересборка ')).length).toBe(1);
+    // С позициями — новый черновик, как и раньше.
+    letter.request_items = [{ raw: 'Дверь ДПГ сота 800×2000 — 1 шт', name: 'Дверь ДПГ сота', width_mm: 800, height_mm: 2000, qty: 1 }];
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const fresh = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(fresh.id).toBeGreaterThan(before.id);
+    expect(fresh.items).toHaveLength(1);
+  });
 });

@@ -45,6 +45,11 @@ export interface MailSearch {
   window?: { since: Date; before: Date; source: MailWindowSource };
   /** Тема, если известна: при совпадении берётся письмо с ней, иначе — самое свежее от отправителя. */
   subject?: string | null;
+  /**
+   * Письмо прошлой сборки (KP-REBUILD-MAIL): папка и UID из черновика — сначала читается оно одной командой, без обхода
+   * папок и порций; если по UID его больше нет или отправитель другой — обычный поиск.
+   */
+  known?: { folder: string; uid: number; messageId: string | null } | null;
 }
 
 export interface MailAttachment {
@@ -100,6 +105,8 @@ export interface MailSearchDiag {
   partial?: { where: string; ranges: string[] } | null;
   /** Сбои SEARCH по дате по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
   errors: string[];
+  /** Быстрый путь к письму прошлой сборки по папке и UID: ok — прочитано им, иначе причина и обычный поиск. */
+  fastPath?: { folder: string; uid: number; ok: boolean; reason?: string } | null;
 }
 
 export interface MailReadResult {
@@ -115,7 +122,7 @@ export interface MailReadOptions {
   commandMs?: number;
   /** Одна порция FETCH ENVELOPE, мс (20 с): Яндекс отдаёт ≈3,5 конверта/с, порция в 20 UID укладывается с запасом. */
   fetchBatchMs?: number;
-  /** Весь поиск по ящику, мс (90 с). */
+  /** Весь поиск по ящику, мс (150 с; было 90 — Яндекс 16.10.2026 не укладывался: 18 писем, ни одной порции). */
   totalMs?: number;
   /** Строка прогресса на каждую папку — в консоль mail-check и в debug-лог задания. */
   onProgress?: (line: string) => void;
@@ -125,7 +132,7 @@ export interface MailReadOptions {
 
 export const MAIL_CONNECT_MS = 20_000;
 export const MAIL_COMMAND_MS = 30_000;
-export const MAIL_TOTAL_MS = 90_000;
+export const MAIL_TOTAL_MS = 150_000;
 export const MAIL_FETCH_BATCH_MS = 20_000;
 
 /** imapflow отверг команду, потому что соединение уже закрыто (простой сокета, BYE сервера). */
@@ -502,6 +509,31 @@ export class ImapMailReader {
     let readOnly = true;
     let c = await connect();
     try {
+      // Быстрый путь (KP-REBUILD-MAIL, п. 1): письмо прошлой сборки по папке и UID — EXAMINE + FETCH BODY, без обхода папок.
+      if (search.known) {
+        const k = search.known;
+        try {
+          await run(`EXAMINE ${k.folder}`, commandMs, () => c.mailboxOpen(k.folder, { readOnly: true }));
+          const fetched = await run(`FETCH BODY ${k.folder}/${k.uid}`, commandMs, () => c.fetchOne(String(k.uid), { uid: true, source: true, envelope: true }, { uid: true }));
+          const one = fetched || null;
+          const sender = (one?.envelope?.from?.[0]?.address ?? '').trim().toLowerCase();
+          const mid = one?.envelope?.messageId ?? null;
+          const matched = one && one.source ? matchSender(sender) : null;
+          if (one && one.source && matched && (!k.messageId || !mid || mid === k.messageId)) {
+            const mail = await parseMail(k.uid, one.source, k.folder);
+            diag.fastPath = { folder: k.folder, uid: k.uid, ok: true };
+            progress(`письмо прошлой сборки прочитано сразу: ${k.folder}/${k.uid}, «${mail.subject}» — папки и порции не просматривались`);
+            return { mail: { ...mail, matchedBy: matched }, diag, readOnly };
+          }
+          diag.fastPath = { folder: k.folder, uid: k.uid, ok: false, reason: !one || !one.source ? 'письма с этим UID в папке больше нет' : !matched ? `по UID другой отправитель (${sender || 'пусто'})` : 'другой Message-ID' };
+        } catch (err) {
+          if (err instanceof MailAuthError) throw err;
+          diag.fastPath = { folder: k.folder, uid: k.uid, ok: false, reason: (err as Error).message };
+          // После таймаута соединение закрыто — для обычного поиска открываем новое.
+          if (err instanceof MailTimeoutError || isConnectionLost(err)) c = await connect();
+        }
+        progress(`письмо прошлой сборки по ${k.folder}/${k.uid} не прочитано (${diag.fastPath?.reason ?? ''}) — обычный поиск`);
+      }
       const listed = await run('LIST', commandMs, () => c.list());
       const { use, skipped } = searchableFolders(listed);
       diag.skippedFolders = skipped;
@@ -533,11 +565,14 @@ export class ImapMailReader {
         const found: Candidate[] = [];
         // Свежие письма первыми: и UID, и номера сообщений растут со временем.
         const sorted = [...ids].sort((a, b) => b - a);
-        const batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
+        let batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
         const ranges = (stat.ranges ??= []);
         const batches = (stat.batches ??= []);
-        const total = Math.ceil(sorted.length / batch);
-        for (let i = 0; i < sorted.length; i += batch) {
+        let total = Math.ceil(sorted.length / batch);
+        // Порция не уложилась в лимит — один раз переподключаемся и читаем её вдвое меньшими порциями (KP-REBUILD-MAIL, п. 1).
+        let retried = false;
+        let i = 0;
+        while (i < sorted.length) {
           const part = sorted.slice(i, i + batch);
           const range = compressUids(part);
           const label = range.length > 60 ? `${Math.min(...part)}…${Math.max(...part)}` : range;
@@ -554,10 +589,21 @@ export class ImapMailReader {
             if (!(err instanceof MailTimeoutError) && !isConnectionLost(err)) throw err;
             const where = err instanceof MailTimeoutError ? err.where : `FETCH ENVELOPE ${folder} (${label}) — соединение оборвано`;
             batches.push({ range: label, envelopes: 0, ms: Date.now() - t0 });
+            if (!retried && batch > 1 && Date.now() + fetchBatchMs < deadline) {
+              retried = true;
+              batch = Math.max(1, Math.floor(batch / 2));
+              total = batches.length + Math.ceil((sorted.length - i) / batch);
+              diag.errors.push(`${folder}: порция ${label} не прочитана (${where}) — переподключение, дальше порции по ${batch}`);
+              progress(`${folder}: порция ${label} не прочитана — переподключение, дальше порции по ${batch}`);
+              c = await connect();
+              await run(`EXAMINE ${folder}`, commandMs, () => c.mailboxOpen(folder, { readOnly: true }));
+              continue;
+            }
             diag.partial = { where, ranges: diag.folders.flatMap((f) => (f.ranges ?? []).map((r) => `${f.path}: ${r}`)).concat(ranges.map((r) => `${folder}: ${r}`)) };
             return { scanned, found, timedOut: true };
           }
-          if (foundHere(found) && i + batch < sorted.length) {
+          i += part.length;
+          if (foundHere(found) && i < sorted.length) {
             stat.stoppedEarly = true;
             progress(`${folder}: письмо отправителя найдено в порции ${batches.length} — остальные ${total - batches.length} не читаем`);
             break;

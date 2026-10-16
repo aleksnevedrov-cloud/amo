@@ -166,6 +166,32 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
     }
   });
 
+  it('KP-REBUILD-MAIL: письмо прошлой сборки по папке и UID читается сразу, без обхода папок; UID пропал или другой отправитель — обычный поиск с причиной в diag', async () => {
+    const lines: string[] = [];
+    const fast = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, subject: 'Запрос ООО Стройоптпоставка', known: { folder: 'Requests', uid: 1, messageId: null } }, { onProgress: (l) => lines.push(l) });
+    expect(fast.mail).toMatchObject({ uid: 1, folder: 'Requests', from: SENDER, subject: 'Запрос ООО Стройоптпоставка', matchedBy: 'address' });
+    expect(fast.mail?.attachments.map((a) => a.filename)).toEqual(['ТЗ.pdf']);
+    expect(fast.diag.fastPath).toEqual({ folder: 'Requests', uid: 1, ok: true });
+    expect(fast.diag.folders).toEqual([]);
+    expect(lines[0]).toContain('письмо прошлой сборки прочитано сразу: Requests/1');
+    // Message-ID сохранён и совпадает — тоже быстрый путь.
+    const withId = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, known: { folder: 'Requests', uid: 1, messageId: fast.mail?.messageId ?? null } });
+    expect(withId.diag.fastPath?.ok).toBe(true);
+    // По UID во Входящих лежит чужое письмо (uid 2) — отправитель не совпал, идёт обычный поиск и находит письмо в Requests.
+    const other = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, subject: 'Запрос ООО Стройоптпоставка', known: { folder: 'INBOX', uid: 2, messageId: null } });
+    expect(other.diag.fastPath).toEqual({ folder: 'INBOX', uid: 2, ok: false, reason: 'по UID другой отправитель (other@mail.ru)' });
+    expect(other.mail).toMatchObject({ uid: 1, folder: 'Requests' });
+    expect(other.diag.folders.map((f) => f.path)).toEqual(['INBOX', 'Requests', 'Spam']);
+    // Письма с таким UID больше нет — обычный поиск.
+    const gone = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, subject: 'Запрос ООО Стройоптпоставка', known: { folder: 'Requests', uid: 99, messageId: null } });
+    expect(gone.diag.fastPath).toEqual({ folder: 'Requests', uid: 99, ok: false, reason: 'письма с этим UID в папке больше нет' });
+    expect(gone.mail).toMatchObject({ uid: 1, folder: 'Requests' });
+    // Папки нет — ошибка EXAMINE в причине, поиск идёт дальше.
+    const noFolder = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW, subject: 'Запрос ООО Стройоптпоставка', known: { folder: 'Nope', uid: 1, messageId: null } });
+    expect(noFolder.diag.fastPath?.ok).toBe(false);
+    expect(noFolder.mail).toMatchObject({ uid: 1, folder: 'Requests' });
+  });
+
   it('без темы — письмо отправителя есть во Входящих: берётся самое свежее оттуда, остальные папки не обходятся; прогресс по папкам', async () => {
     const lines: string[] = [];
     const r = await new ImapMailReader(cfg).findLatest({ from: SENDER, around: NOW }, { onProgress: (l) => lines.push(l) });
@@ -290,11 +316,12 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
       // Отправителя нет среди первых двух UID (5 и 4) — обрыв на втором FETCH даёт partial без письма.
       const none = await reader.findLatest({ from: 'x@nowhere.test', around: NOW }, { fetchBatch: 2, fetchBatchMs: 700 });
       expect(none.mail).toBeNull();
-      expect(none.diag.partial).toEqual({ where: 'FETCH ENVELOPE INBOX (2:3)', ranges: ['INBOX: 4:5'] });
-      expect(none.diag.errors).toEqual(['INBOX: FETCH ENVELOPE прерван по общему лимиту времени — просмотрено 2 из 5']);
+      // KP-REBUILD-MAIL: после таймаута порции 2:3 — переподключение и порция вдвое меньше (UID 3); прокси глушит и её → partial.
+      expect(none.diag.partial).toEqual({ where: 'FETCH ENVELOPE INBOX (3)', ranges: ['INBOX: 4:5'] });
+      expect(none.diag.errors).toEqual(['INBOX: порция 2:3 не прочитана (FETCH ENVELOPE INBOX (2:3)) — переподключение, дальше порции по 1', 'INBOX: FETCH ENVELOPE прерван по общему лимиту времени — просмотрено 2 из 5']);
       expect(none.diag.folders).toHaveLength(1);
-      // Порции в diag: первая прочитана, вторая оборвана по таймауту (0 конвертов, время ≈ лимит порции).
-      expect(none.diag.folders[0]?.batches).toEqual([{ range: '4:5', envelopes: 2, ms: expect.any(Number) }, { range: '2:3', envelopes: 0, ms: expect.any(Number) }]);
+      // Порции в diag: первая прочитана, вторая оборвана по таймауту (0 конвертов, время ≈ лимит порции), повтор по одному UID тоже оборван.
+      expect(none.diag.folders[0]?.batches).toEqual([{ range: '4:5', envelopes: 2, ms: expect.any(Number) }, { range: '2:3', envelopes: 0, ms: expect.any(Number) }, { range: '3', envelopes: 0, ms: expect.any(Number) }]);
       expect(none.diag.folders[0]?.batches?.[1]?.ms).toBeGreaterThanOrEqual(650);
       // Отправитель найден в первой порции (uid 5) — вторая порция не запрашивается вовсе, зависание ящика не мешает.
       fetches = 0;
@@ -307,7 +334,7 @@ describe('ImapMailReader (настоящий IMAP, только чтение)', 
       fetches = 0;
       const lost = await reader.findLatest({ from: 'x@nowhere.test', around: NOW }, { fetchBatch: 2, commandMs: 700, fetchBatchMs: 5000 });
       expect(lost.mail).toBeNull();
-      expect(lost.diag.partial).toEqual({ where: 'FETCH ENVELOPE INBOX (2:3) — соединение оборвано', ranges: ['INBOX: 4:5'] });
+      expect(lost.diag.partial).toEqual({ where: 'FETCH ENVELOPE INBOX (3) — соединение оборвано', ranges: ['INBOX: 4:5'] });
     } finally {
       for (const s of sockets) s.destroy();
       proxy.close();

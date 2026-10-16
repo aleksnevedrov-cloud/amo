@@ -2,7 +2,7 @@ import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineName } from '../src/draft.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineName, tidyName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
 
@@ -74,6 +74,11 @@ describe('черновик: разбор ответа модели и позиц
     expect(p.request_items[0]?.name).toBe(full);
     expect(kpLineName({ name: full, priceModel: 'ДВ CPL 0,2 мм' })).toBe(`${full} — по прайсу: ДВ CPL 0,2 мм`);
     expect(kpLineName({ name: full, priceModel: null })).toBe(full);
+    // KP-REBUILD-MAIL, п. 3: пометка «(h)» из спецификации клиента не попадает в название и строку.
+    expect(tidyName('Дверь ДПГ 2100 (h) × 900 , белая')).toBe('Дверь ДПГ 2100 × 900, белая');
+    expect(tidyName('Полотно 2000(H)х800')).toBe('Полотно 2000 х800');
+    expect(positionToRequest({ name: 'Дверь глухая 2100 (h) х 900', marking: null, width_mm: 900, height_mm: 2100, qty: 2, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null })).toMatchObject({ name: 'Дверь глухая 2100 х 900', raw: 'Дверь глухая 2100 х 900 900×2100 2 шт' });
+    expect(parseDraft(JSON.stringify({ request_items: [{ raw: 'Дверь глухая 2100 (h) х 900 — 2 шт', name: 'дверь глухая', qty: 2 }] })).request_items[0]).toMatchObject({ raw: 'Дверь глухая 2100 х 900 — 2 шт', name: 'дверь глухая' });
   });
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {

@@ -123,8 +123,9 @@ export interface MailSource {
   error: string | null;
   /** Пауза после ошибки входа: раньше этого времени ящик не читаем. */
   retryAt: string | null;
-  /** Папка, где найдено письмо. */
+  /** Папка и UID найденного письма: при повторной сборке оно читается сразу по ним (KP-REBUILD-MAIL). */
   folder: string | null;
+  uid?: number | null;
   /** Чем совпал отправитель; по домену — письмо нужно проверить, вложения в сделку не грузятся. */
   matchedBy: 'address' | 'domain' | null;
   /** Диагностика поиска (папки, критерии, совпадения по FROM) — без содержимого писем. */
@@ -388,7 +389,7 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
     subject: found.subject,
   };
   const { take, skipped } = pickMailAttachments(found.attachments);
-  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, from: found.from || null, fromName: found.fromName ?? null, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, matchedBy: found.matchedBy, diag: result.diag };
+  const source: MailSource = { ...base, status: 'found', messageId: found.messageId, date: found.date?.toISOString() ?? null, subject: found.subject, from: found.from || null, fromName: found.fromName ?? null, attachments: found.attachments.length, taken: take.map((a) => a.filename ?? a.contentType), skipped, folder: found.folder, uid: found.uid, matchedBy: found.matchedBy, diag: result.diag };
   const sizeOf = (a: MailAttachment) => a.size || a.content.byteLength;
   const list: MailSourceFile[] = skipped.map((x) => {
     const a = found.attachments.find((f) => (f.filename ?? f.contentType) === x.name);
@@ -527,7 +528,7 @@ export function parseDraft(text: string): ParsedDraft {
       .map((x) => {
         const o = x as Record<string, unknown>;
         const features = featuresFromModel(o.features);
-        const raw = str(o.raw).slice(0, 500);
+        const raw = tidyName(str(o.raw)).slice(0, 500);
         return { raw, name: fullItemName(raw, str(o.name)).slice(0, 500), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), ...(features ? { features } : {}) };
       })
       .filter((x) => x.raw || x.name)
@@ -535,6 +536,19 @@ export function parseDraft(text: string): ParsedDraft {
     required_blocks: arr(raw.required_blocks).map((x) => str(x)).filter((x) => BLOCKS.includes(x)),
     questions: arr(raw.questions).map((x) => str(x).slice(0, 300)).filter(Boolean).slice(0, 20),
   };
+}
+
+/**
+ * Мусор из названий (KP-REBUILD-MAIL, п. 3): пометки размера «(h)» / «(H)» из спецификаций клиента («2100 (h) × 900»),
+ * двойные пробелы и пробел перед запятой. Размер при этом остаётся в тексте как написал клиент.
+ */
+export function tidyName(name: string): string {
+  return name
+    .replace(/\(\s*[hH]\s*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,;:)])/g, '$1')
+    .replace(/\(\s+/g, '(')
+    .trim();
 }
 
 /**
@@ -558,11 +572,11 @@ export function fullItemName(raw: string, name: string): string {
   const words = (x: string) => x.toLowerCase().replace(/ё/g, 'е').split(/[^а-яa-z0-9]+/).filter((w) => w.length > 1);
   const nameWords = words(name);
   const rawWords = words(cleaned);
-  if (!nameWords.length) return cleaned || name;
-  if (rawWords.length <= nameWords.length) return name;
+  if (!nameWords.length) return tidyName(cleaned || name);
+  if (rawWords.length <= nameWords.length) return tidyName(name);
   const rawSet = new Set(rawWords);
   const common = nameWords.filter((w) => rawSet.has(w)).length;
-  return common * 2 >= nameWords.length ? cleaned : name;
+  return tidyName(common * 2 >= nameWords.length ? cleaned : name);
 }
 
 /** Наименование строки в КП: название клиента плюс модель и покрытие из прайса (KP-NAME, п. 2). */
@@ -577,8 +591,8 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
   // Дробное количество («24,5» наличников, «2,5» доборов) сохраняется как в файле (XLSX-2): суммы по группам должны сходиться с заявкой.
   const qty = p.qty && p.qty > 0 ? Math.round(p.qty * 100) / 100 : 1;
   return {
-    raw: [p.marking, p.name, size, `${qty} ${p.unit ?? 'шт'}`].filter(Boolean).join(' ').slice(0, 500),
-    name: [p.name, p.material, p.color].filter(Boolean).join(', ').slice(0, 300),
+    raw: tidyName([p.marking, p.name, size, `${qty} ${p.unit ?? 'шт'}`].filter(Boolean).join(' ')).slice(0, 500),
+    name: tidyName([p.name, p.material, p.color].filter(Boolean).join(', ')).slice(0, 500),
     width_mm: service ? null : p.width_mm,
     height_mm: service ? null : p.height_mm,
     qty,
