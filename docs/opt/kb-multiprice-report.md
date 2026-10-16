@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KB-MULTIPRICE: несколько прайсов, замена по файлу
 
-Дата: 16.10.2026. Ветка `claude/opt-kb`, отдельный коммит после a172c1c (KP-NAME). Сервер (`@opt/kb`, `apps/opt-api`) и
+Дата: 16.10.2026. Ветка `claude/opt-kb`, коммит fe45e6c (после a172c1c, KP-NAME). Сервер (`@opt/kb`, `apps/opt-api`) и
 виджет 1.1.7. Розница и ядро не менялись (`git diff -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Причина дефекта 16.10
