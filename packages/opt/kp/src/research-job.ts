@@ -1,5 +1,5 @@
 import type { JournalKind } from '@core/db';
-import { featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceListMedian, WEB_BAND, webPriceRealistic, type PriceHit } from '@opt/kb';
+import { featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceListMedian, priceModelOf, WEB_BAND, webPriceRealistic, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
 import { NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
 import { cleanName, VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
@@ -186,7 +186,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
 }
 
 /** Пометки позиции, которые ставит сам поиск цен (их мы заменяем при повторе); остальное — слова менеджера или разбора. */
-const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела');
+const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела') || reason.startsWith('цвет уточнить');
 
 /**
  * Цена из базы знаний в строку черновика: price, priceSource = kb, подпись и пометка «устарела», ссылка на kb_prices;
@@ -211,11 +211,14 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       next.priceStale = hit.stale;
       next.kbPriceId = hit.row.id;
       delete next.coefficient;
+      // KP-NAME: модель и покрытие строки прайса — в наименование КП, комплектация — строкой под позицией; у веб-записей и правок — нет.
+      next.priceModel = hit.row.origin === 'price_list' ? priceModelOf(hit.row) : null;
+      next.equipment = hit.row.origin === 'price_list' ? hit.row.equipment : null;
     }
     items[i] = next;
     const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
     if (next.price === null) needs.push({ request_index: requestIndex, reason: NO_PRICE });
-    for (const n of hit.notes) needs.push({ request_index: requestIndex, reason: n.startsWith('цена устарела') ? n : `цена из базы: ${n}` });
+    for (const n of hit.notes) needs.push({ request_index: requestIndex, reason: n.startsWith('цена устарела') || n.startsWith('цвет уточнить') ? n : `цена из базы: ${n}` });
     const ok = await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items, needs_manager: needs } as unknown as Record<string, unknown>);
     if (ok) return { keptManagerPrice };
   }
@@ -246,6 +249,8 @@ export async function applyResearchToDraft(core: OptCore, accountId: number, dra
       next.priceLabel = `${price.basis === 'analog' ? 'по аналогу' : 'по рынку'} (${r.createdAt.toLocaleDateString('ru-RU')})`;
       next.priceStale = false;
       next.kbPriceId = null;
+      next.priceModel = null;
+      next.equipment = null;
     }
     items[i] = next;
     const notes = price.notes;

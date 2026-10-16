@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeFeatures, featureKeyOf, featuresFromColumns, featuresFromModel, featuresOf, keysCompatible, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic } from '../src/features.ts';
+import { colorOf, describeFeatures, featureKeyOf, featuresFromColumns, featuresFromModel, featuresOf, keysCompatible, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, priceModelOf } from '../src/features.ts';
 
 describe('признаки двери (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
   it('из текста позиции письма: тип, материал, Г/О, створки, порог, открывание, покрытие, доводчик, замок', () => {
@@ -71,5 +71,19 @@ describe('признаки двери (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
     expect(webPriceRealistic(71_700, 23_900)).toBe(true);
     expect(webPriceRealistic(80_000, 23_900)).toBe(false);
     expect(webPriceRealistic(5683, null)).toBe(true);
+  });
+
+  it('KP-NAME: цвет из письма и модель с покрытием из прайса', () => {
+    expect(colorOf('облицовка CPL светлосерый 1010×2100')).toBe('светло-серый');
+    expect(colorOf('Дверь, покрытие CPL светло-серый')).toBe('светло-серый');
+    expect(colorOf('полотно экошпон дуб сонома')).toBe('дуб сонома');
+    expect(colorOf('эмаль белый матовый')).toBe('белый матовый');
+    expect(colorOf('эмаль RAL 7035, глухая')).toBe('RAL 7035');
+    expect(colorOf('цвет: капучино')).toBe('капучино');
+    expect(colorOf('Дверной блок деревянный глухой')).toBeNull();
+    expect(priceModelOf({ model: 'ДВ CPL', coating: 'CPL 0,2 мм' })).toBe('ДВ CPL 0,2 мм');
+    expect(priceModelOf({ model: 'ДВ CPL', coating: 'cpl' })).toBe('ДВ CPL');
+    expect(priceModelOf({ model: 'ДПГ сота', coating: 'ламинат' })).toBe('ДПГ сота ламинат');
+    expect(priceModelOf({ model: 'ДПГ сота', coating: null })).toBe('ДПГ сота');
   });
 });

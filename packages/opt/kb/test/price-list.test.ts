@@ -49,9 +49,9 @@ describe('цены из xlsx-прайса', () => {
     // KB-MATCH: у каждой строки — признаки, извлечённые из модели (ДПГ → полотно глухое, ДПО → остеклённое, «Турин» — ничего).
     expect(p.sample.map((x) => x.features)).toMatchObject([{ type: 'leaf', glazing: 'solid' }, { type: 'leaf', glazing: 'glazed' }, { type: null, glazing: null, coating: null }]);
     expect(p.sample.map(({ features: _f, ...rest }) => rest)).toEqual([
-      { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные', abbr: null, description: null },
-      { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные', abbr: null, description: null },
-      { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон', abbr: null, description: null },
+      { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные', abbr: null, description: null, coating: null, equipment: null },
+      { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные', abbr: null, description: null, coating: null, equipment: null },
+      { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон', abbr: null, description: null, coating: null, equipment: null },
     ]);
     // Менеджер переназначил колонку модели на «№» — предпросмотр пересчитан по его сопоставлению.
     const manual = await previewPriceList(bytes, { model: 0 });
@@ -103,6 +103,12 @@ describe('цены из xlsx-прайса', () => {
       [5, 'Дверь наружная', null, null, 45000, 'ДН'],
     ]);
     expect(p.sample[0]?.description).toBe('Дверной блок деревянный внутренний глухой однопольный без порога');
+    // KP-NAME: колонок «Покрытие» и «Комплектация» в этом прайсе нет — null.
+    expect(p.sample[0]).toMatchObject({ coating: null, equipment: null });
+    const withCols = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Покрытие', 'Комплектация', 'Размер', 'Цена'], ['ДВ CPL', 'CPL 0,2 мм', 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', '910×2100', 23900]] }));
+    expect(withCols.mapping).toMatchObject({ model: 0, coating: 1, equipment: 2, size: 3, price: 4 });
+    expect(withCols.sample[0]).toMatchObject({ coating: 'CPL 0,2 мм', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', features: { coating: 'cpl' } });
+    expect(draftsToPrices(withCols.sample, {})[0]).toMatchObject({ coating: 'CPL 0,2 мм', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' });
     const rows = draftsToPrices(p.sample, { vat: p.vatHint });
     expect(rows[0]).toMatchObject({ abbr: 'ДВ CPL', description: 'Дверной блок деревянный внутренний глухой однопольный без порога', sourceRow: 3, vat: 'no_vat', note: 'лист «Прайс», строка 3' });
     // Заявка клиента (без колонки цены) прайсом не считается — автоимпорта не будет.

@@ -1,9 +1,11 @@
 // RFD-AI-AGENT-OPT-KB, этап 3: цены из xlsx-прайса с предпросмотром, синонимы, приоритет «база → веб»,
 // автопополнение из веб-поиска и правок менеджера, группировка веб-поиска по модели, дневной лимит, подпись источника.
+import { readFileSync } from 'node:fs';
 import ExcelJS from 'exceljs';
+import PizZip from 'pizzip';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import type { OptAiProvider } from '@opt/kp';
-import { KP_PRICE_ERROR_KIND, KP_PRICE_RESEARCH_KIND } from '@opt/kp';
+import { KP_PRICE_ERROR_KIND, KP_PRICE_RESEARCH_KIND, resolveKpPath } from '@opt/kp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ACCOUNT_ID, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
@@ -53,6 +55,15 @@ function gateway() {
   };
   const ai: OptAiProvider = async () => ({ llm, source: 'account', providers: ['openai'], keySources: { openai: 'account' } });
   return { ai, requests, searches: () => searches, web };
+}
+
+/** Минимальный DOCX-шаблон: строки позиций и итог (как в opt-api.test.ts). */
+function templateDocx(): string {
+  const zip = new PizZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{#items}}{{n}}. {{name}} — {{sum}}; {{/items}}итого {{grand_total}}</w:t></w:r></w:p></w:body></w:document>');
+  return zip.generate({ type: 'base64' });
 }
 
 async function priceListXlsx(): Promise<Buffer> {
@@ -158,7 +169,7 @@ describe('база знаний опта: цены и синонимы → по�
     expect(spent).toBeLessThan(5);
     // Веб-результат — в kb_prices: Браво Турин 800×2000, медиана 8000, доверие 40.
     const prices = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=турин', headers })).json();
-    expect(prices.items.map((p: { model: string; factory: string; baseSize: string; price: number; confidence: number; origin: string }) => [p.model, p.factory, p.baseSize, p.price, p.confidence, p.origin])).toEqual([['Турин', 'Браво', '800×2000', 8000, 40, 'web']]);
+    expect(prices.items.map((p: { model: string; factory: string; baseSize: string; price: number; confidence: number; origin: string }) => [p.model, p.factory, p.baseSize, p.price, p.confidence, p.origin])).toEqual([['Дверь Турин', 'Браво', '800×2000', 8000, 40, 'web']]);
     expect(SRC.map((x) => x.url)).toContain(prices.items[0].url);
   });
 
@@ -186,7 +197,8 @@ describe('база знаний опта: цены и синонимы → по�
     const saved = (await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${draftId}`, headers, payload: { items } })).json().draft;
     expect(saved.items[0]).toMatchObject({ price: 3300, priceSource: 'manager', priceLabel: 'изменено менеджером' });
     const prices = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=дпг', headers })).json();
-    expect(prices.items.find((p: { origin: string }) => p.origin === 'manager')).toMatchObject({ model: 'ДПГ сота', baseSize: '800×2000', price: 3300, confidence: 90 });
+    // KP-NAME: название позиции — как в письме («Дверь ДПГ сота»), ключ модели тот же.
+    expect(prices.items.find((p: { origin: string }) => p.origin === 'manager')).toMatchObject({ model: 'Дверь ДПГ сота', baseSize: '800×2000', price: 3300, confidence: 90 });
     // Новый черновик: ДПГ 800×2000 — строка прайса выше правки менеджера при том же размере (KB-PRICELIST, д: прайс › менеджер › веб).
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
     const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
@@ -220,11 +232,11 @@ describe('база знаний опта: цены и синонимы → по�
     const ws = wb.addWorksheet('Прайс');
     for (const r of [
       ['Прайс ООО «Двери» от 10.10.2026'],
-      ['№', 'Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Материал', 'Конструкция', 'Назначение', 'Огнестойкость', 'Размер блока', 'Цена без НДС, руб.'],
-      [3, 'ДПГ сота', 'ДПГ', 'Г', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '800×2000', 8800],
-      [4, 'ДПО сота', 'ДПО', 'О', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '800×2000', 9900],
-      [17, 'ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', 'дерево', 'полнозаполненная, однопольная, распашная, без порога', 'внутренняя, общественные помещения', 'нет', 'Блок Ш×В: 1010×2100; 910×2100', '23 900'],
-      [18, 'ДВ ПВХ', 'ДВ 1Рп О', 'О', 'ПВХ', 'дерево', 'однопольная, распашная, с порогом', 'внутренняя', 'нет', '910×2100', 19900],
+      ['№', 'Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Материал', 'Конструкция', 'Назначение', 'Огнестойкость', 'Комплектация', 'Размер блока', 'Цена без НДС, руб.'],
+      [3, 'ДПГ сота', 'ДПГ', 'Г', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '', '800×2000', 8800],
+      [4, 'ДПО сота', 'ДПО', 'О', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '', '800×2000', 9900],
+      [17, 'ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', 'дерево', 'полнозаполненная, однопольная, распашная, без порога', 'внутренняя, общественные помещения', 'нет', 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', 'Блок Ш×В: 1010×2100; 910×2100', '23 900'],
+      [18, 'ДВ ПВХ', 'ДВ 1Рп О', 'О', 'ПВХ', 'дерево', 'однопольная, распашная, с порогом', 'внутренняя', 'нет', '', '910×2100', 19900],
     ]) ws.addRow(r);
     const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename: 'прайс 475.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') } });
     expect(add.json().source).toMatchObject({ status: 'indexed', prices: 5 });
@@ -240,7 +252,7 @@ describe('база знаний опта: цены и синонимы → по�
     const features = { type: 'block', material: 'wood', glazing: 'solid', leaves: 1, threshold: 'without', opening: 'swing', coating: 'cpl', fire: null, closer: true, lock: true };
     letter.request_items = [
       { raw: `${LETTER} 1010×2100 — 1 шт`, name: LETTER, width_mm: 1010, height_mm: 2100, qty: 1, features } as (typeof letter.request_items)[number],
-      { raw: `${LETTER} 910×2100 — 2 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 2, features } as (typeof letter.request_items)[number],
+      { raw: `${LETTER} 910×2100 — 1 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 1, features } as (typeof letter.request_items)[number],
       { raw: `${LETTER} 910×2100 — 1 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 1 },
     ];
     await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { webSearchDailyUsd: 5 } } });
@@ -258,6 +270,23 @@ describe('база знаний опта: цены и синонимы → по�
     ]);
     const notes = (d.needsManager as { request_index: number; reason: string }[]).map((n) => `${n.request_index}: ${n.reason}`);
     for (const i of [0, 1, 2]) expect(notes).toContain(`${i}: цена из базы: по прайсу: ДВ CPL (строка 5) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, распашной, CPL`);
+    // KP-NAME: полное название клиента, модель и покрытие из прайса, комплектация, «цвет уточнить» (в строке прайса цвета нет).
+    expect(d.items.map((l: { name: string; priceModel: string; equipment: string | null }) => [l.name, l.priceModel, l.equipment])).toEqual([
+      [LETTER, 'ДВ CPL 0,2 мм', 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик'],
+      [LETTER, 'ДВ CPL 0,2 мм', 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик'],
+      [LETTER, 'ДВ CPL 0,2 мм', 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик'],
+    ]);
+    for (const i of [0, 1, 2]) expect(notes).toContain(`${i}: цвет уточнить: в письме «светло-серый», в строке прайса ДВ CPL (строка 5) цвет не указан`);
+    // «Собрать документ»: в DOCX три строки с полным названием, «по прайсу: ДВ CPL 0,2 мм», комплектация под первой, итог 71 700 ₽.
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
+    const built = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } });
+    expect(built.json()).toMatchObject({ draft: { status: 'built', hasDocx: true } });
+    const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d0.id);
+    const xml = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
+    const text = xml.replace(/<w:br\s*\/>/g, '\n').replace(/<[^>]+>/g, '');
+    const row = `${LETTER} — по прайсу: ДВ CPL 0,2 мм\nКомплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик — 23 900 ₽`;
+    expect(text).toContain(`1. ${row}; 2. ${row}; 3. ${row}; итого 71 700 ₽`);
+    expect(xml).toContain('<w:br/>');
     const journal = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items as { summary: string; details: { draftId: number; match?: string; webSearchCalls?: number } }[];
     const mine = journal.filter((j) => j.details.draftId === d0.id);
     expect(mine).toHaveLength(3);

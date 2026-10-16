@@ -481,6 +481,8 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
           <div key={`${l.request_index}-${i}`} className={`opt-kp-tile${service ? ' opt-kp-tile-service' : ''}`}>
             {firstService && <div className="opt-kp-group">Работы и услуги</div>}
             <div className="opt-kp-tile-name">{l.name || '—'}</div>
+            {l.priceModel && <div className="opt-kp-sub opt-kp-tile-model">по прайсу: {l.priceModel}</div>}
+            {l.equipment && <div className="opt-kp-sub opt-kp-tile-equipment">Комплектация: {l.equipment}</div>}
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
             {why.length > 0 && <div className="opt-kp-sub">{why.join('; ')}</div>}
             {!service && <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />}

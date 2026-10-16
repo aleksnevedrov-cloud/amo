@@ -6,7 +6,7 @@ import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
 
 const ACCOUNT = 555;
-const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, ...over });
+const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, ...over });
 
 describe('ключ модели и правила нестандарта', () => {
   it('ключ без размера, количества и общих слов; размер и створки из текста', () => {
@@ -222,7 +222,7 @@ describe('подбор по смыслу: прайс в приоритете, в
     const src = await repo.createSource({ accountId: ACC, kind: 'file', title: 'прайс ДВ.xlsx', original: 'прайс ДВ.xlsx' });
     const cpl = { material: 'wood' as const, glazing: 'solid' as const, coating: 'cpl' as const, type: 'block' as const, leaves: 1 as const, threshold: 'without' as const, opening: 'swing' as const };
     await prices.replacePriceList(ACC, src, [
-      { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', description: 'внутренняя, общественные помещения', sourceRow: 17, validAt: new Date('2026-10-10'), features: cpl },
+      { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', description: 'внутренняя, общественные помещения', sourceRow: 17, validAt: new Date('2026-10-10'), features: cpl, coating: 'CPL 0,2 мм', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' },
       { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', description: 'внутренняя, общественные помещения', sourceRow: 17, validAt: new Date('2026-10-10'), features: cpl },
       { model: 'ДВ ПВХ', widthMm: 910, heightMm: 2100, price: 19_900, origin: 'price_list', abbr: 'ДВ 1Рп О', sourceRow: 18, validAt: new Date('2026-10-10'), features: { ...cpl, glazing: 'glazed', coating: 'pvc' } },
       { model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 8800, origin: 'price_list', sourceRow: 3, validAt: new Date('2026-10-10') },
@@ -239,8 +239,15 @@ describe('подбор по смыслу: прайс в приоритете, в
     for (const [w, h] of [[1010, 2100], [910, 2100]] as const) {
       const hit = await lookupPrice(prices, aliases, ACC, { name: LETTER, raw: `${LETTER} ${w}×${h}`, widthMm: w, heightMm: h }, new Date('2026-10-16'));
       expect(hit).toMatchObject({ price: 23_900, basis: 'exact', match: 'features', confidence: 70, label: 'по прайсу: ДВ CPL (строка 17)', row: { origin: 'price_list', widthMm: w }, features: { matched: ['type', 'material', 'glazing', 'leaves', 'threshold', 'opening', 'coating'] } });
-      expect(hit?.notes).toEqual(['по прайсу: ДВ CPL (строка 17) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, распашной, CPL']);
+      // KP-NAME: в письме «светлосерый», в строке прайса цвета нет — «цвет уточнить»; покрытие и комплектация у записи.
+      expect(hit?.notes).toEqual(['по прайсу: ДВ CPL (строка 17) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, распашной, CPL', 'цвет уточнить: в письме «светло-серый», в строке прайса ДВ CPL (строка 17) цвет не указан']);
+      expect(hit?.row).toMatchObject(w === 1010 ? { coating: 'CPL 0,2 мм', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' } : { coating: null, equipment: null });
     }
+    // Цвет назван и в строке прайса — пометки нет.
+    await prices.upsert({ accountId: ACC, sourceId: src, model: 'ДВ CPL светло-серый', widthMm: 710, heightMm: 2100, price: 23_900, origin: 'price_list', features: cpl, sourceRow: 19 });
+    const colored = await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный глухой однопольный CPL светло серый', widthMm: 710, heightMm: 2100 }, new Date('2026-10-16'));
+    expect(colored?.row.model).toBe('ДВ CPL светло-серый');
+    expect(colored?.notes.some((n) => n.startsWith('цвет уточнить'))).toBe(false);
     // Явные признаки от модели разбора письма дополняют текст: «дверь внутренняя» + material/glazing/coating → та же строка.
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверь внутренняя однопольная', widthMm: 910, heightMm: 2100, features: { type: 'block', material: 'wood', glazing: 'solid', coating: 'cpl' } }, new Date('2026-10-16'))).toMatchObject({ price: 23_900, match: 'features', row: { model: 'ДВ CPL' } });
     // «ДПГ + УПД, сота 2000×800» → ДПГ сота 8 800 (полотно глухое; ДПО отвергнуто по Г/О).

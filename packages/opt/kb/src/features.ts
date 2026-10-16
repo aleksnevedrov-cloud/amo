@@ -222,3 +222,45 @@ export function priceListMedian(rows: { featureKey: string | null; price: number
   const mid = Math.floor(prices.length / 2);
   return prices.length % 2 ? (prices[mid] as number) : ((prices[mid - 1] as number) + (prices[mid] as number)) / 2;
 }
+
+/** Цвета и декоры дверей, которые клиент называет в письме; порядок — от составных к простым. */
+const COLORS = [
+  'светло-серый', 'светло серый', 'тёмно-серый', 'темно-серый', 'темно серый', 'слоновая кость', 'белый матовый', 'белый глянец',
+  'дуб беленый', 'дуб белёный', 'дуб сонома', 'дуб серый', 'дуб', 'орех', 'венге', 'ясень', 'бук', 'вишня', 'махагон', 'антрацит', 'графит',
+  'капучино', 'латте', 'бежевый', 'серый', 'белый', 'чёрный', 'черный', 'коричневый', 'зелёный', 'зеленый', 'синий', 'красный', 'жёлтый', 'желтый',
+];
+
+/** Цвет из текста позиции: «облицовка CPL светло-серый» → «светло-серый»; «RAL 7035» / «цвет: …» — как написано; нет — null. */
+export function colorOf(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const t = ` ${text.toLowerCase().replace(/ё/g, 'е').replace(/[«»"'()[\],;:/\\|]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const ral = /\b(ral|ncs)\s?[a-z]?\s?-?\s?\d{3,4}[a-z0-9-]*/i.exec(t);
+  if (ral) return ral[0].trim().toUpperCase();
+  const explicit = /цвет[а-я]*\s*[-—:]?\s*([а-яa-z-]+(?:\s[а-яa-z-]+)?)/.exec(t);
+  for (const c of COLORS) {
+    const key = c.replace(/ё/g, 'е');
+    // «светло-серый», «светло серый» и «светлосерый» — один цвет.
+    const rx = new RegExp(`(^|[^а-яa-z])${key.replace(/[-\s]/g, '[-\\s]?')}(?![а-яa-z])`);
+    if (rx.test(t)) return c.replace(/ (серый)$/, '-$1');
+  }
+  if (explicit && explicit[1] && !/^(не|по|как|в|и|или)$/.test(explicit[1])) return explicit[1].trim();
+  return null;
+}
+
+/**
+ * Модель с покрытием из прайса для наименования строки КП (KP-NAME, п. 2): «ДВ CPL» + «CPL 0,2 мм» → «ДВ CPL 0,2 мм»
+ * (общий хвост модели и начало покрытия не повторяются); покрытия нет — модель как есть.
+ */
+export function priceModelOf(row: { model: string; coating: string | null }): string {
+  const model = row.model.trim();
+  const coating = row.coating?.trim() ?? '';
+  if (!coating) return model;
+  const low = (x: string) => x.toLowerCase().replace(/ё/g, 'е');
+  if (low(model).includes(low(coating))) return model;
+  const cw = coating.split(/\s+/);
+  for (let k = cw.length; k >= 1; k -= 1) {
+    const head = cw.slice(0, k).join(' ');
+    if (low(model).endsWith(low(head))) return `${model} ${cw.slice(k).join(' ')}`.trim();
+  }
+  return `${model} ${coating}`;
+}

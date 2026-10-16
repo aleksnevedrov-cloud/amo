@@ -1,6 +1,6 @@
 import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
-import { describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
+import { colorOf, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
 /** Куда писать: пул или клиент транзакции. */
@@ -69,6 +69,9 @@ export interface KbPrice {
   /** Признаки двери (KB-MATCH): из колонок прайса или текста; ключ группы по обязательным признакам. */
   features: DoorFeatures | null;
   featureKey: string | null;
+  /** Текст колонок прайса «Покрытие» («CPL 0,2 мм») и «Комплектация» («коробка, 3 петли, …») — в наименование строки КП (KP-NAME). */
+  coating: string | null;
+  equipment: string | null;
 }
 
 export interface NewKbPrice {
@@ -93,6 +96,8 @@ export interface NewKbPrice {
   sourceRow?: number | null;
   /** Явные признаки (из колонок прайса или разбора письма); из текста модели/сокращения/назначения извлекаются всегда. */
   features?: Partial<DoorFeatures> | null;
+  coating?: string | null;
+  equipment?: string | null;
 }
 
 export interface KbAlias {
@@ -127,10 +132,10 @@ export class KbPricesRepo {
     const searchTokens = searchTokensOf(p.model, abbr, description);
     // Признаки (KB-MATCH): из текста модели, сокращения и назначения, явные значения сверху.
     const features = mergeFeatures(featuresOf([p.model, abbr, description].filter(Boolean).join(' | ')), p.features);
-    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features)];
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null];
     const { rows } = await q.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
        RETURNING id`,
       params,
@@ -138,7 +143,7 @@ export class KbPricesRepo {
     if (rows[0]) return Number(rows[0].id);
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
-               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, updated_at = now()
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
         RETURNING id`,
       params,
@@ -525,10 +530,21 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
     if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
   }
+  // KP-NAME, п. 4: в письме назван цвет, которого нет в строке базы — менеджеру «цвет уточнить».
+  const color = colorOf(text);
+  if (color && !mentionsColor([best.row.model, best.row.coating, best.row.description, best.row.equipment, best.row.note].filter(Boolean).join(' | '), color)) {
+    notes.push(`цвет уточнить: в письме «${color}», в строке ${best.row.origin === 'price_list' ? 'прайса' : 'базы'} ${best.row.model}${where} цвет не указан`);
+  }
   if (stale) notes.push(`цена устарела: актуальна на ${best.row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
   const confidence = best.match === 'words' ? Math.round(best.row.confidence * best.words) : best.row.confidence;
   return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null };
 }
+
+/** Текст строки базы содержит цвет из письма (без регистра, «светло-серый» = «светло серый»). */
+const mentionsColor = (text: string, color: string): boolean => {
+  const n = (x: string) => x.toLowerCase().replace(/ё/g, 'е').replace(/[-\s]+/g, '');
+  return n(text).includes(n(color));
+};
 
 /** Приоритет происхождения при равном совпадении модели и размера (KB-PRICELIST, д). */
 export const ORIGIN_RANK: Record<PriceOrigin, number> = { price_list: 0, purchase: 1, manager: 2, web: 3 };
@@ -611,6 +627,8 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     sourceRow: r.source_row === null || r.source_row === undefined ? null : Number(r.source_row),
     features: (r.features ?? null) as DoorFeatures | null,
     featureKey: (r.feature_key ?? null) as string | null,
+    coating: (r.coating ?? null) as string | null,
+    equipment: (r.equipment ?? null) as string | null,
   };
 }
 

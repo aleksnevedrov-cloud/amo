@@ -255,7 +255,9 @@
 .opt-kp .opt-kp-downloads { display: inline-flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 /* Заголовок группы «Работы и услуги» перед первой работой (XLSX-2). */
 .opt-kp .opt-kp-group { font-size: 12px; font-weight: 600; color: var(--kp-muted); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 6px; }
-.opt-kp .opt-kp-tile-name { font-size: 12px; font-weight: 600; color: var(--kp-text); overflow-wrap: break-word; word-break: normal; }
+/* Полное название позиции с переносом, без обрезания (KP-NAME, п. 3); под ним — модель из прайса и комплектация. */
+.opt-kp .opt-kp-tile-name { font-size: 12px; font-weight: 600; color: var(--kp-text); overflow-wrap: anywhere; word-break: normal; white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.35; }
+.opt-kp .opt-kp-tile-model, .opt-kp .opt-kp-tile-equipment { white-space: normal; overflow-wrap: anywhere; }
 /*
  * Поля позиции (DESIGN-FIX-2, п. 1): по умолчанию «Количество» и «Скидка» по 50 % в первой строке, «Цена» второй
  * строкой во всю ширину; плитка ≥ 420 px — три в ряд (1 : 2.2 : 1.3); содержимое плитки уже 240 px (колонка < 290) — по одному в строку.

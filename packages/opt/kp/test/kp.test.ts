@@ -2,7 +2,7 @@ import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
 
@@ -54,8 +54,26 @@ describe('черновик: разбор ответа модели и позиц
     expect(parseDraft('не json').request_items).toEqual([]);
     // KB-MATCH: признаки двери от модели — только названные (словами или кодами), пустые/неизвестные отбрасываются, без признаков поля нет.
     const f = parseDraft('{"request_items":[{"raw":"Дверной блок деревянный глухой CPL 1010×2100","name":"дверной блок","width_mm":1010,"height_mm":2100,"qty":1,"features":{"type":"block","material":"деревянный","glazing":"solid","leaves":null,"threshold":"без порога","opening":"","coating":"CPL","fire":null,"closer":true,"lock":"нет"}},{"raw":"Добор","name":"добор","qty":2,"features":{"type":null}}]}');
-    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'дверной блок', width_mm: 1010, height_mm: 2100, qty: 1, features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
+    // KP-NAME: короткое название модели заменено строкой письма без размера.
+    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'Дверной блок деревянный глухой CPL', width_mm: 1010, height_mm: 2100, qty: 1, features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
     expect(f.request_items[1]).toEqual({ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 });
+  });
+
+  it('KP-NAME: полное наименование как у клиента — сокращение модели заменяется строкой письма без размера и количества; наименование КП с моделью прайса', () => {
+    const raw = 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый 1010×2100 — 1 шт';
+    const full = 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый';
+    expect(fullItemName(raw, 'Дверной блок деревянный внутренний глухой однопольный без порога распашной')).toBe(full);
+    expect(fullItemName('3. ' + raw, 'дверной блок')).toBe(full);
+    // Модель ответила полнее строки письма или строка — одно слово: остаётся ответ модели.
+    expect(fullItemName('Дверь 2100*900 — 3 шт', 'дверь белая')).toBe('дверь белая');
+    expect(fullItemName('п. 4 полотно 2000х800х40 мм 12 штук', 'полотно межкомнатное')).toBe('полотно межкомнатное');
+    // Слова письма не пересекаются с ответом модели (модель назвала другое) — ответ модели.
+    expect(fullItemName('ДПГ сота 800×2000 — 2 шт', 'дверь глухая ламинированная')).toBe('дверь глухая ламинированная');
+    expect(fullItemName('', 'добор')).toBe('добор');
+    const p = parseDraft(JSON.stringify({ request_items: [{ raw, name: 'Дверной блок деревянный внутренний глухой однопольный без порога распашной', width_mm: 1010, height_mm: 2100, qty: 1 }] }));
+    expect(p.request_items[0]?.name).toBe(full);
+    expect(kpLineName({ name: full, priceModel: 'ДВ CPL 0,2 мм' })).toBe(`${full} — по прайсу: ДВ CPL 0,2 мм`);
+    expect(kpLineName({ name: full, priceModel: null })).toBe(full);
   });
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
@@ -192,9 +210,10 @@ describe('черновик КП опта: источник — карточка 
       return item.name.includes('венге') ? [{ id: 'p1', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге'], standards: [] }] : [];
     };
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [{ ...letter, text: 'Нужны двери по ГОСТ 6629-88, см. список' }] }), analyze: null, analogs });
-    expect(asked).toEqual(['дверь шпон венге', 'добор']);
+    // KP-NAME: название как в письме (без размера), требование ГОСТ при этом выделено отдельно.
+    expect(asked).toEqual(['Дверь шпон венге по ГОСТ 6629-88', 'добор']);
     expect(r.payload.requirements).toEqual(['ГОСТ 6629-88']);
-    expect(r.payload.items.map((l) => [l.name, l.price])).toEqual([['дверь шпон венге', null], ['добор', null]]);
+    expect(r.payload.items.map((l) => [l.name, l.price])).toEqual([['Дверь шпон венге по ГОСТ 6629-88', null], ['добор', null]]);
     expect(r.payload.needs_manager.map((n) => [n.request_index, n.reason.replace(/\u00a0/g, ' ')])).toEqual([
       [0, 'цена не задана'],
       [1, 'цена не задана'],
@@ -250,7 +269,8 @@ describe('черновик КП опта: источник — карточка 
       { name: 'tz.pdf', size: 621_000, inline: false, status: 'uploaded', reason: null },
       { name: 'already.pdf', size: spec.byteLength, inline: false, status: 'not_uploaded', reason: 'уже есть в файлах сделки' },
     ]);
-    expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
+    // KP-NAME: название как в письме (массив и окраска сохранены), без размера и количества.
+    expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная, массив лиственницы, L429 Indigo']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
     // Привязка файла в amo упала (405) — вложение всё равно разбирается из памяти, причина — в skipped (RFD-AI-AGENT-OPT-MAIL-READ-7).
     const broken = fakeAmo({ mails: [{ ...letter, from: 'stoptpostavka@yandex.ru', subject: 'Запрос', text: 'Добрый день!' }] });

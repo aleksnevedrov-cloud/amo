@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, templateData } from './build.ts';
-import type { KpLine, KpPayload } from './draft.ts';
+import { kpLineName, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
 import type { KpDraft, KpRepo } from './repo.ts';
 
@@ -89,7 +89,8 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     basis: letterAt ? `запрос от ${letterAt.toLocaleDateString('ru-RU')}` : 'запрос клиента',
     clientName: payload.client?.org || payload.client?.fio || '',
     clientPhone: payload.client?.phone || '',
-    lines: lines.map((l) => ({ name: l.name, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
+    // KP-NAME: наименование = название клиента + «по прайсу: модель покрытие»; комплектация — строкой под позицией (перенос в ячейке).
+    lines: lines.map((l) => ({ name: `${kpLineName(l)}${l.equipment ? `\nКомплектация: ${l.equipment}` : ''}`, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
     vatRate: s.constants.vatRate ?? 0,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
   });

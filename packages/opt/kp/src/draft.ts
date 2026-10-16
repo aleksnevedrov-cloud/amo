@@ -59,6 +59,10 @@ export interface KpLine {
   coefficient?: number;
   /** Работы и услуги идут после товаров; нет поля — товар. */
   kind?: 'product' | 'service';
+  /** Модель и покрытие строки прайса, по которой взята цена («ДВ CPL 0,2 мм») — в наименование КП после названия клиента (KP-NAME, п. 2). */
+  priceModel?: string | null;
+  /** Комплектация из строки прайса — отдельной строкой под позицией в КП. */
+  equipment?: string | null;
 }
 
 export interface KpPayload {
@@ -198,7 +202,9 @@ const PROMPT = `Вы разбираете входящее письмо с за�
 
 Правила:
 - request_items — по одной записи на каждую позицию запроса; raw — строка из письма как есть.
-- name — что просят, своими словами клиента, без выдуманных моделей и артикулов.
+- name — полное наименование позиции словами клиента, как написано в письме, без сокращений и пересказа
+  (все характеристики: материал, глухая/остеклённая, порог, доводчик, замок, покрытие, цвет); убрать только размер и количество.
+  Выдуманных моделей и артикулов не добавлять.
 - Размеры в миллиметрах: 2100*900 — это height_mm 2100, width_mm 900. Размера нет — null.
 - qty — целое число, по умолчанию 1.
 - features — признаки двери, только те, что в письме названы прямо (иначе null): type — "block" (дверной блок) или "leaf" (полотно);
@@ -521,13 +527,47 @@ export function parseDraft(text: string): ParsedDraft {
       .map((x) => {
         const o = x as Record<string, unknown>;
         const features = featuresFromModel(o.features);
-        return { raw: str(o.raw).slice(0, 500), name: str(o.name).slice(0, 300), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), ...(features ? { features } : {}) };
+        const raw = str(o.raw).slice(0, 500);
+        return { raw, name: fullItemName(raw, str(o.name)).slice(0, 500), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), ...(features ? { features } : {}) };
       })
       .filter((x) => x.raw || x.name)
       .slice(0, 50),
     required_blocks: arr(raw.required_blocks).map((x) => str(x)).filter((x) => BLOCKS.includes(x)),
     questions: arr(raw.questions).map((x) => str(x).slice(0, 300)).filter(Boolean).slice(0, 20),
   };
+}
+
+/**
+ * Полное наименование позиции (KP-NAME, п. 1): модель разбора склонна сокращать («… без порога распашной» вместо текста
+ * с доводчиком, замком, покрытием и цветом). Если строка письма (raw) без размера, количества и нумерации длиннее ответа
+ * модели по словам и содержит его слова, берётся она — как написал клиент.
+ */
+export function fullItemName(raw: string, name: string): string {
+  const cleaned = raw
+    .replace(/^\s*(№\s*)?\d+\s*[.)]\s*/, '')
+    .replace(/\d{3,4}\s*[×xх*]\s*\d{3,4}(\s*[×xх*]\s*\d{2,3})?\s*(мм)?/gi, ' ')
+    .replace(/\d+[.,]\d+\s*[×xх*]\s*\d+[.,]\d+\s*м(?![а-яa-z])/gi, ' ')
+    .replace(/[—–-]?\s*\d+([.,]\d+)?\s*(шт|штук|штуки|компл|комплект[а-я]*|ед|пар[аы]?)\.?(?![а-яa-z])/gi, ' ')
+    .replace(/цен[аы]?\s*:?\s*[\d\s.,]+\s*(руб\.?|р\.|₽)?/gi, ' ')
+    .replace(/\d[\d\s]*\s*(руб\.?|₽|р\.)(?![а-яa-z])/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,;])/g, '$1')
+    .replace(/([,;])\s*(?=[,;])/g, '')
+    .replace(/^[\s,;:—–-]+|[\s,;:—–-]+$/g, '')
+    .trim();
+  const words = (x: string) => x.toLowerCase().replace(/ё/g, 'е').split(/[^а-яa-z0-9]+/).filter((w) => w.length > 1);
+  const nameWords = words(name);
+  const rawWords = words(cleaned);
+  if (!nameWords.length) return cleaned || name;
+  if (rawWords.length <= nameWords.length) return name;
+  const rawSet = new Set(rawWords);
+  const common = nameWords.filter((w) => rawSet.has(w)).length;
+  return common * 2 >= nameWords.length ? cleaned : name;
+}
+
+/** Наименование строки в КП: название клиента плюс модель и покрытие из прайса (KP-NAME, п. 2). */
+export function kpLineName(l: Pick<KpLine, 'name' | 'priceModel'>): string {
+  return l.priceModel ? `${l.name} — по прайсу: ${l.priceModel}` : l.name;
 }
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */

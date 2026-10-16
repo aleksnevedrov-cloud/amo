@@ -107,6 +107,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(tileHas('.opt-kp-suffix > span', '%')).toBe(true);
     expect(tile.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверь ДПС 01');
     expect(tile.querySelector('.opt-kp-sub')?.textContent).toBe('2100 × 900 мм');
+    // KP-NAME: без строки прайса под названием нет «по прайсу» и комплектации.
+    expect(tile.querySelector('.opt-kp-tile-model')).toBeNull();
+    expect(tile.querySelector('.opt-kp-tile-equipment')).toBeNull();
     expect([...tile.querySelectorAll('.opt-kp-label')].map((l) => l.textContent)).toEqual(['Количество', 'Цена', 'Скидка']);
     expect([...document.querySelectorAll('.opt-kp-questions li')].map((l) => l.textContent)).toEqual(['Сторона открывания?']);
     const actions = [...document.querySelectorAll('.opt-kp-card')].find((c) => c.querySelector('.opt-kp-title')?.textContent === 'Действия с КП')!;
@@ -259,7 +262,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
 
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {
     const kbDraft = { ...draft, items: [
-      { request_index: 0, page_id: null, name: 'ДПГ сота', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5 },
+      { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' },
       { request_index: 1, page_id: null, name: 'Турин', size: '800×2000 мм', qty: 3, price: 8000, lead_time: '', discount: 0, priceSource: 'research', priceLabel: 'по рынку (01.08.2026)', market: { median: 8000, min: 7800, max: 8200, count: 3, unit: 'piece', researchId: 9, researchedAt: '2026-08-01T10:00:00Z' } },
       { request_index: 2, page_id: null, name: 'ДПО сота', size: '800×2000 мм', qty: 1, price: 4100, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'изменено менеджером', priceStale: true },
     ], needsManager: [{ request_index: 2, reason: 'цена устарела: актуальна на 01.01.2026, срок 90 дн.' }] };
@@ -278,6 +281,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const labels = [...document.querySelectorAll('.opt-kp-field-price .opt-kp-label')].map((l) => l.textContent);
     expect(labels).toEqual(['Цена · по базе: прайс Текона.xlsx (01.10.2026)', 'Цена · по рынку (01.08.2026) · цена устарела', 'Цена · изменено менеджером · цена устарела']);
     expect(document.body.textContent).toContain('из базы знаний: по базе: прайс Текона.xlsx (01.10.2026)');
+    // KP-NAME: полное название без обрезания, под ним модель с покрытием из прайса и комплектация.
+    const first = document.querySelector('.opt-kp-tile')!;
+    expect(first.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый');
+    expect(first.querySelector('.opt-kp-tile-model')?.textContent).toBe('по прайсу: ДВ CPL 0,2 мм');
+    expect(first.querySelector('.opt-kp-tile-equipment')?.textContent).toBe('Комплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик');
     const buttons = [...document.querySelectorAll('button')].filter((b) => b.textContent === 'Искать в интернете');
     expect(buttons).toHaveLength(2);
     await act(async () => buttons[0]!.click());

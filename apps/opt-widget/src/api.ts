@@ -57,6 +57,9 @@ export interface KpDraftLine {
   kbPriceId?: number | null;
   /** service — работы и услуги: после товаров под заголовком, без размера и без поиска цены (XLSX-2). */
   kind?: 'product' | 'service';
+  /** Модель и покрытие строки прайса («ДВ CPL 0,2 мм») и комплектация — показываются под полным названием (KP-NAME). */
+  priceModel?: string | null;
+  equipment?: string | null;
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */
