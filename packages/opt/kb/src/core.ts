@@ -10,6 +10,7 @@ import { createUrlFetcher, type UrlFetcher } from './fetch-url.ts';
 import { htmlToKbText, sectionLinks } from './html.ts';
 import { parsePublicUrl } from './safe-url.ts';
 import { draftsToPrices, extractPrices, previewPriceList, type ColumnMapping, type ImportDefaults } from './price-list.ts';
+import { priceListKeyOf, priceListTitleOf } from './price-key.ts';
 import { KbAliasesRepo, KbPricesRepo } from './prices.ts';
 import { readKbSheetRows } from './extract.ts';
 import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
@@ -58,6 +59,8 @@ export interface KbIndexResult {
   error: string | null;
   /** Цены, импортированные автоматически из xlsx-прайса (KB-PRICELIST, б); null — файл не прайс. */
   prices: number | null;
+  /** Итог импорта прайса (KB-MULTIPRICE): обновление или новый прайс, было/стало/удалено/добавлено. */
+  priceImport?: PriceImportResult | null;
 }
 
 /** Импорт прайса (кнопка «Импортировать» или автоматически после индексации xlsx). */
@@ -71,9 +74,16 @@ export interface PriceImportInput extends ImportDefaults {
 export interface PriceImportResult {
   imported: number;
   skipped: number;
-  /** Сколько цен прежнего прайса удалено (один прайс на аккаунт). */
+  /** Сколько цен удалено перед вставкой: этого файла и файлов с тем же ключом прайса (KB-MULTIPRICE). */
   replaced: number;
   headerFound: boolean;
+  /** Ключ и короткое название прайса; updated — файл с тем же ключом уже был (обновление, а не новый прайс). */
+  priceKey: string;
+  priceTitle: string;
+  updated: boolean;
+  was: number;
+  removed: number;
+  added: number;
 }
 
 export interface KbCoreDeps {
@@ -221,16 +231,25 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       const preview = await previewPriceList(bytes, input.mapping ?? {});
       if (input.auto && !preview.isPriceList) return null;
       const { drafts, skipped } = extractPrices(await readKbSheetRows(bytes), preview.mapping);
-      if (!drafts.length) return { imported: 0, skipped, replaced: 0, headerFound: preview.headerFound };
+      // Ключ прайса — по имени файла (KB-MULTIPRICE): заменяются цены только файлов с тем же ключом.
+      const priceKey = priceListKeyOf(source.original ?? source.title);
+      const priceTitle = priceListTitleOf(priceKey);
+      if (!drafts.length) return { imported: 0, skipped, replaced: 0, headerFound: preview.headerFound, priceKey, priceTitle, updated: false, was: 0, removed: 0, added: 0 };
       const defaults: ImportDefaults = { factory: input.factory ?? null, validAt: input.validAt, vat: input.vat ?? preview.vatHint, nonstandard: input.nonstandard, confidence: input.confidence };
-      const r = await prices.replacePriceList(accountId, sourceId, draftsToPrices(drafts, defaults).map((x) => ({ ...x, createdBy: input.userId })));
+      const sameKey = await repo.byPriceKey(accountId, priceKey, sourceId);
+      const r = await prices.replacePriceList(accountId, sourceId, draftsToPrices(drafts, defaults).map((x) => ({ ...x, createdBy: input.userId })), sameKey.map((x) => x.id));
+      const updated = sameKey.length > 0 || (source.priceKey === priceKey && r.was > 0);
+      await repo.setPriceInfo(sourceId, priceKey, { title: priceTitle, updated, was: r.was, imported: r.imported, removed: r.removed, added: r.added, at: new Date().toISOString() });
+      const summary = updated
+        ? `прайс «${priceTitle}» обновлён: было ${r.was}, стало ${r.imported}; удалено ${r.removed}, добавлено ${r.added}${sameKey.length ? ` (прежний файл: ${sameKey.map((x) => `«${x.title}»`).join(', ')})` : ''}`
+        : `из прайса «${source.title}» импортировано цен ${r.imported}${input.auto ? ' автоматически' : ''} (прайс «${priceTitle}»)`;
       await d.journal.add({
         accountId,
         kind: KB_INDEX_KIND,
-        summary: `База знаний: из прайса «${source.title}» импортировано цен ${r.imported}${input.auto ? ' автоматически' : ''}${r.replaced ? `, прежний прайс заменён (удалено ${r.replaced})` : ''}${skipped ? `, пропущено строк ${skipped}` : ''}`,
-        details: { sourceId, imported: r.imported, replaced: r.replaced, skipped, auto: Boolean(input.auto), factory: input.factory ?? null, validAt: input.validAt ?? null, vat: defaults.vat, mapping: preview.mapping, userId: input.userId, audit: 'kb_prices' },
+        summary: `База знаний: ${summary}${skipped ? `, пропущено строк ${skipped}` : ''}`,
+        details: { sourceId, imported: r.imported, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, priceKey, priceTitle, replacedSources: sameKey.map((x) => x.id), skipped, auto: Boolean(input.auto), factory: input.factory ?? null, validAt: input.validAt ?? null, vat: defaults.vat, mapping: preview.mapping, userId: input.userId, audit: 'kb_prices' },
       });
-      return { imported: r.imported, skipped, replaced: r.replaced, headerFound: preview.headerFound };
+      return { imported: r.imported, skipped, replaced: r.replaced, headerFound: preview.headerFound, priceKey, priceTitle, updated, was: r.was, removed: r.removed, added: r.added };
     },
 
     async index(job, hooks = {}) {
@@ -289,15 +308,17 @@ export function createKbCore(d: KbCoreDeps): KbCore {
         if (source.crawl && crawlHtml) await crawl(source, crawlHtml, hooks);
         // Загруженный xlsx с колонками модели и цены — прайс: цены импортируются сразу, без отдельного шага (KB-PRICELIST, б).
         let pricesImported: number | null = null;
+        let priceImport: PriceImportResult | null = null;
         if (source.kind === 'file') {
           try {
             const imp = await this.importPriceList(accountId, sourceId, { userId: job.userId, auto: true });
             pricesImported = imp ? imp.imported : null;
+            priceImport = imp;
           } catch (err) {
             await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: «${source.title}» проиндексирован, но цены из прайса не импортированы — ${(err as Error).message}`, details: { sourceId, kind: source.kind, status: 'prices_error', userId: job.userId } }).catch(() => undefined);
           }
         }
-        return { sourceId, status: 'indexed', chunks: chunks.length, embeddedChunks: embedded, tokens, usd, textChars: text.length, ms, error: null, prices: pricesImported };
+        return { sourceId, status: 'indexed', chunks: chunks.length, embeddedChunks: embedded, tokens, usd, textChars: text.length, ms, error: null, prices: pricesImported, priceImport };
       } catch (err) {
         const message = (err as Error).message;
         await repo.markError(sourceId, message);

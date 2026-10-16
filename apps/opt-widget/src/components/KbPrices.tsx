@@ -138,20 +138,39 @@ const plural = (n: number, one: string, few: string, many: string) => {
   return many;
 };
 
-/** Сводка по ценам: прайс (число, дата актуальности, файл), веб-цены, правки менеджера. */
-export function pricesSummary(items: KbPriceInfo[]): { priceList: { count: number; validAt: string | null; file: string | null }; web: number; manager: number } {
-  const pl = items.filter((p) => p.origin === 'price_list');
-  const validAt = pl.reduce<string | null>((best, p) => (best === null || new Date(p.validAt) > new Date(best) ? p.validAt : best), null);
-  // Файл прайса — самый частый источник среди прайсовых строк (после замены он один).
-  const files = new Map<string, number>();
-  for (const p of pl) if (p.sourceTitle) files.set(p.sourceTitle, (files.get(p.sourceTitle) ?? 0) + 1);
-  const file = [...files.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-  return { priceList: { count: pl.length, validAt, file }, web: items.filter((p) => p.origin === 'web').length, manager: items.filter((p) => TAB_OF[p.origin] === 'manager').length };
+/** Прайс-файл в сводке (KB-MULTIPRICE): короткое название, число цен, дата актуальности. */
+export interface PriceListSummary {
+  key: string;
+  title: string;
+  sourceId: number | null;
+  count: number;
+  validAt: string | null;
 }
 
+/** Сводка по ценам: прайсы (по файлам), веб-цены, правки менеджера. */
+export function pricesSummary(items: KbPriceInfo[]): { priceLists: PriceListSummary[]; priceList: { count: number }; web: number; manager: number } {
+  const pl = items.filter((p) => p.origin === 'price_list');
+  const lists = new Map<string, PriceListSummary>();
+  for (const p of pl) {
+    const key = p.priceKey || p.sourceTitle || String(p.sourceId ?? '');
+    const cur = lists.get(key) ?? { key, title: p.priceTitle || p.sourceTitle || key, sourceId: p.sourceId, count: 0, validAt: null };
+    cur.count += 1;
+    if (cur.validAt === null || new Date(p.validAt) > new Date(cur.validAt)) cur.validAt = p.validAt;
+    lists.set(key, cur);
+  }
+  const priceLists = [...lists.values()].sort((a, b) => a.title.localeCompare(b.title, 'ru'));
+  return { priceLists, priceList: { count: pl.length }, web: items.filter((p) => p.origin === 'web').length, manager: items.filter((p) => TAB_OF[p.origin] === 'manager').length };
+}
+
+const dayMonth = (iso: string) => {
+  const d = new Date(iso);
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
 export function summaryText(sum: ReturnType<typeof pricesSummary>): string {
-  const pl = sum.priceList.count
-    ? `Прайс: ${sum.priceList.count} ${plural(sum.priceList.count, 'цена', 'цены', 'цен')}${sum.priceList.validAt ? ` · актуален на ${date(sum.priceList.validAt)}` : ''}${sum.priceList.file ? ` · файл «${sum.priceList.file}»` : ''}`
+  const lists = sum.priceLists;
+  const pl = lists.length
+    ? `${lists.length === 1 ? 'Прайс' : 'Прайсы'}: ${lists.map((l) => `${l.title} — ${l.count} ${plural(l.count, 'цена', 'цены', 'цен')}${l.validAt ? ` (${dayMonth(l.validAt)})` : ''}`).join(' · ')}`
     : 'Прайс не загружен';
   return `${pl}  |  веб-цены: ${sum.web}  |  правки менеджера: ${sum.manager}`;
 }
@@ -168,6 +187,8 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
   const [tab, setTab] = useState<PriceTab>('price_list');
   const [q, setQ] = useState('');
   const [page, setPage] = useState(0);
+  // Фильтр вкладки «Прайс» по файлу (KB-MULTIPRICE): '' — все прайсы.
+  const [list, setList] = useState('');
   const [model, setModel] = useState('');
   const [size, setSize] = useState('');
   const [price, setPrice] = useState('');
@@ -208,7 +229,8 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
   const sum = pricesSummary(items);
   const counts: Record<PriceTab, number> = { price_list: sum.priceList.count, web: sum.web, manager: sum.manager };
   const needle = q.trim().toLowerCase();
-  const filtered = items.filter((p) => TAB_OF[p.origin] === tab && (!needle || p.model.toLowerCase().includes(needle) || (p.factory ?? '').toLowerCase().includes(needle)));
+  const listKeyOf = (p: KbPriceInfo) => p.priceKey || p.sourceTitle || String(p.sourceId ?? '');
+  const filtered = items.filter((p) => TAB_OF[p.origin] === tab && (tab !== 'price_list' || !list || listKeyOf(p) === list) && (!needle || p.model.toLowerCase().includes(needle) || (p.factory ?? '').toLowerCase().includes(needle)));
   const pages = Math.max(1, Math.ceil(filtered.length / PRICES_PAGE));
   const current = Math.min(page, pages - 1);
   const rows = filtered.slice(current * PRICES_PAGE, current * PRICES_PAGE + PRICES_PAGE);
@@ -240,6 +262,22 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
                 {TAB_TITLE[t]} ({counts[t]})
               </button>
             ))}
+            {tab === 'price_list' && sum.priceLists.length > 1 && (
+              <select
+                className="opt-kb-prices-list"
+                style={{ ...s.input, maxWidth: 220 }}
+                value={list}
+                onChange={(e) => {
+                  setList(e.target.value);
+                  setPage(0);
+                }}
+              >
+                <option value="">все прайсы</option>
+                {sum.priceLists.map((l) => (
+                  <option key={l.key} value={l.key}>{l.title} ({l.count})</option>
+                ))}
+              </select>
+            )}
             <input
               style={{ ...s.input, maxWidth: 240 }}
               placeholder="поиск по модели"

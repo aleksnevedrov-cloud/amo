@@ -1,5 +1,5 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { exportPricesXlsx, KbLimitError, previewPriceList, pricesExportFilename, type ColumnMapping } from '@opt/kb';
+import { exportPricesXlsx, KbLimitError, previewPriceList, pricesExportFilename, type ColumnMapping, priceListTitleOf } from '@opt/kb';
 import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -323,5 +323,9 @@ function view(s: Awaited<ReturnType<Deps['kb']['repo']['get']>>) {
     crawl: s.crawl,
     parentId: s.parentId,
     httpStatus: s.httpStatus,
+    // KB-MULTIPRICE: ключ прайса, короткое название и итог последнего импорта (обновлён: было/стало/удалено/добавлено).
+    priceKey: s.priceKey,
+    priceTitle: s.priceKey ? priceListTitleOf(s.priceKey) : null,
+    priceImport: s.priceImport,
   };
 }

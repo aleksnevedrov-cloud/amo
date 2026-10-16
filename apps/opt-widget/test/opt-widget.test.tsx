@@ -569,7 +569,7 @@ describe('виджет «Агент опт»: вкладка «База знан
     expect(document.body.textContent).toContain('https://rf-dveri.ru/ceny/');
     // Цены (KB-PRICES-UI): по умолчанию только сводка; «Показать» раскрывает таблицу прайса без кнопки удаления; ручная запись, синонимы строками.
     expect(document.body.textContent).toContain('Цены (1)');
-    expect(document.querySelector('.opt-kb-prices-summary')?.textContent).toBe('Прайс: 1 цена · актуален на 01.10.2026 · файл «прайс Текона.xlsx»  |  веб-цены: 0  |  правки менеджера: 0');
+    expect(document.querySelector('.opt-kb-prices-summary')?.textContent).toBe('Прайс: прайс Текона.xlsx — 1 цена (01.10)  |  веб-цены: 0  |  правки менеджера: 0');
     expect(document.querySelector('.opt-kb-price')).toBeNull();
     await click('Показать');
     await flush();
@@ -606,8 +606,11 @@ describe('виджет «Агент опт»: вкладка «База знан
 
   it('раздел «Цены» (KB-PRICES-UI): сводка по прайсу, вебу и правкам; вкладки с числом строк, поиск по вводу, страницы по 20; удаление только у веб-цен и правок; обновление после удаления источника без перезагрузки', async () => {
     const price = (i: number, origin: 'price_list' | 'web' | 'manager', extra: Record<string, unknown> = {}) => ({ id: i, sourceId: origin === 'price_list' ? 2 : null, model: origin === 'price_list' ? `ДВ CPL ${i}` : origin === 'web' ? `Турин ${i}` : `Тоскана ${i}`, modelKey: '', factory: null, unit: 'шт', baseSize: '910×2100', widthMm: 910, heightMm: 2100, price: 20000 + i, vat: 'no_vat', validAt: i === 5 ? '2026-10-16T00:00:00Z' : '2026-10-10T00:00:00Z', confidence: 70, origin, nonstandard: {}, url: origin === 'web' ? 'https://dveri-a.ru/turin' : null, note: null, createdAt: '2026-10-16T10:00:00Z', sourceTitle: origin === 'price_list' ? '475-2016 CPL.xlsx' : null, sourceKind: origin === 'price_list' ? 'file' : null, ...extra });
-    let items = [...Array.from({ length: 28 }, (_, i) => price(i + 1, 'price_list')), ...Array.from({ length: 16 }, (_, i) => price(100 + i, 'web')), price(200, 'manager')];
-    let sources: Record<string, unknown>[] = [{ id: 2, kind: 'file', title: '475-2016 CPL.xlsx', original: '475-2016 CPL.xlsx', mime: null, status: 'indexed', sizeBytes: 20000, chunks: 3, embeddedChunks: 3, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-16T09:00:00Z', updatedAt: '2026-10-16T09:00:00Z', indexedAt: '2026-10-16T09:00:05Z', crawl: false, parentId: null, httpStatus: null, job: null, prices: 28 }];
+    // KB-MULTIPRICE: два прайса-файла — «Межкомнатные» (28 строк, источник 2) и «Металлические» (3 строки, источник 3).
+    const inner = (i: number) => ({ ...price(i, 'price_list'), priceKey: 'прайс межкомнатные двери гост', priceTitle: 'Межкомнатные' });
+    const metal = (i: number) => ({ ...price(i, 'price_list'), sourceId: 3, model: `ДМ ${i}`, sourceTitle: 'Прайс_металлические_двери_ГОСТ.xlsx', priceKey: 'прайс металлические двери гост', priceTitle: 'Металлические', validAt: '2026-10-16T00:00:00Z' });
+    let items = [...Array.from({ length: 28 }, (_, i) => inner(i + 1)), ...Array.from({ length: 3 }, (_, i) => metal(300 + i)), ...Array.from({ length: 16 }, (_, i) => price(100 + i, 'web')), price(200, 'manager')];
+    let sources: Record<string, unknown>[] = [{ id: 2, kind: 'file', title: '475-2016 CPL.xlsx', original: '475-2016 CPL.xlsx', mime: null, status: 'indexed', sizeBytes: 20000, chunks: 3, embeddedChunks: 3, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-16T09:00:00Z', updatedAt: '2026-10-16T09:00:00Z', indexedAt: '2026-10-16T09:00:05Z', crawl: false, parentId: null, httpStatus: null, job: null, prices: 28, priceKey: 'прайс межкомнатные двери гост', priceTitle: 'Межкомнатные', priceImport: { title: 'Межкомнатные', updated: true, was: 54, imported: 28, removed: 30, added: 4, at: '2026-10-16T09:00:05Z' } }];
     const { self, calls } = fakeSelf('settings', {
       'GET /widget/v1/status': status,
       'GET /widget/v1/settings': { version: 1, settings: {} },
@@ -619,7 +622,7 @@ describe('виджет «Агент опт»: вкладка «База знан
       },
       'DELETE /widget/v1/kb/sources/2': () => {
         sources = [];
-        items = items.filter((p) => p.origin !== 'price_list');
+        items = items.filter((p) => p.origin !== 'price_list' || p.sourceId !== 2);
         return { ok: true };
       },
       'GET /widget/v1/kb/aliases': { aliases: [] },
@@ -631,21 +634,38 @@ describe('виджет «Агент опт»: вкладка «База знан
     await click('База знаний');
     await flush();
     const summary = () => document.querySelector('.opt-kb-prices-summary')?.textContent;
-    expect(summary()).toBe('Прайс: 28 цен · актуален на 16.10.2026 · файл «475-2016 CPL.xlsx»  |  веб-цены: 16  |  правки менеджера: 1');
+    // KB-MULTIPRICE: сводка по прайсам-файлам с числом цен и датой; в карточке файла — итог обновления.
+    expect(summary()).toBe('Прайсы: Межкомнатные — 28 цен (16.10) · Металлические — 3 цены (16.10)  |  веб-цены: 16  |  правки менеджера: 1');
     expect(document.querySelector('.opt-kb-prices-table')).toBeNull();
-    expect(document.body.textContent).toContain('прайс: цен 28');
+    expect(document.body.textContent).toContain('прайс «Межкомнатные»: цен 28 · обновлён: было 54, стало 28; удалено 30, добавлено 4');
     await click('Показать');
     await flush();
     const tabs = () => [...document.querySelectorAll('.opt-kb-prices-tab')].map((b) => b.textContent);
-    expect(tabs()).toEqual(['Прайс (28)', 'Веб (16)', 'Правки (1)']);
+    expect(tabs()).toEqual(['Прайс (31)', 'Веб (16)', 'Правки (1)']);
     const rowsShown = () => document.querySelectorAll('.opt-kb-price').length;
     expect(rowsShown()).toBe(20);
-    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←1–20 из 28→');
+    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←1–20 из 31→');
     expect([...document.querySelectorAll('.opt-kb-price button')]).toHaveLength(0);
+    // Фильтр по файлу: «Металлические» → 3 строки; «все прайсы» → снова 31.
+    const listSelect = () => document.querySelector('.opt-kb-prices-list') as HTMLSelectElement;
+    expect([...listSelect().options].map((o) => o.textContent)).toEqual(['все прайсы', 'Межкомнатные (28)', 'Металлические (3)']);
+    await act(async () => {
+      listSelect().value = 'прайс металлические двери гост';
+      listSelect().dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(rowsShown()).toBe(3);
+    expect(document.querySelector('.opt-kb-price')?.textContent).toContain('ДМ 300');
+    await act(async () => {
+      listSelect().value = '';
+      listSelect().dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(rowsShown()).toBe(20);
     await click('→');
     await flush();
-    expect(rowsShown()).toBe(8);
-    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←21–28 из 28→');
+    expect(rowsShown()).toBe(11);
+    expect(document.querySelector('.opt-kb-prices-pager')?.textContent).toBe('←21–31 из 31→');
     expect(document.querySelector('.opt-kb-price')?.textContent).toContain('ДВ CPL 21');
     // Поиск по вводу: фильтр внутри вкладки, страница сбрасывается.
     await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'поиск по модели')!, 'cpl 1');
@@ -662,13 +682,13 @@ describe('виджет «Агент опт»: вкладка «База знан
     await act(async () => (document.querySelector('.opt-kb-price button') as HTMLButtonElement).click());
     await flush();
     expect(calls.filter((c) => c.method === 'DELETE').map((c) => new URL(c.url).pathname)).toEqual(['/widget/v1/kb/prices/100']);
-    expect(tabs()).toEqual(['Прайс (28)', 'Веб (15)', 'Правки (1)']);
+    expect(tabs()).toEqual(['Прайс (31)', 'Веб (15)', 'Правки (1)']);
     expect(summary()).toContain('веб-цены: 15');
-    // Удаление файла прайса из списка источников обновляет сводку и вкладки без перезагрузки страницы и без сворачивания.
+    // Удаление файла «Межкомнатные» уносит только его цены: «Металлические» остаются (KB-MULTIPRICE); сводка и вкладки обновляются без перезагрузки.
     await click('Удалить');
     await flush();
-    expect(summary()).toBe('Прайс не загружен  |  веб-цены: 15  |  правки менеджера: 1');
-    expect(tabs()).toEqual(['Прайс (0)', 'Веб (15)', 'Правки (1)']);
+    expect(summary()).toBe('Прайс: Металлические — 3 цены (16.10)  |  веб-цены: 15  |  правки менеджера: 1');
+    expect(tabs()).toEqual(['Прайс (3)', 'Веб (15)', 'Правки (1)']);
     expect(document.querySelector('.opt-kb-prices-table')).not.toBeNull();
     await click('Правки (1)');
     await flush();

@@ -237,6 +237,10 @@ export interface KbSourceInfo {
   job?: DraftJob;
   /** Цен из этого источника в базе (прайс импортируется автоматически, KB-PRICELIST). */
   prices?: number;
+  /** KB-MULTIPRICE: ключ прайса, короткое название и итог последнего импорта. */
+  priceKey?: string | null;
+  priceTitle?: string | null;
+  priceImport?: { title: string; updated: boolean; was: number; imported: number; removed: number; added: number; at: string } | null;
 }
 
 export interface KbUsageInfo {
@@ -287,6 +291,9 @@ export interface KbPriceInfo {
   note: string | null;
   createdAt: string;
   sourceTitle: string | null;
+  /** Ключ и короткое название прайса-файла (KB-MULTIPRICE): «Межкомнатные»; у веб-цен и правок — null. */
+  priceKey?: string | null;
+  priceTitle?: string | null;
   sourceKind: 'file' | 'url' | 'text' | null;
 }
 

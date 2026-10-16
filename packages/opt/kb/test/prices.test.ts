@@ -6,7 +6,7 @@ import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
 
 const ACCOUNT = 555;
-const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, ...over });
+const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, ...over });
 
 describe('ключ модели и правила нестандарта', () => {
   it('ключ без размера, количества и общих слов; размер и створки из текста', () => {
@@ -66,7 +66,7 @@ describe('kb_prices и kb_aliases на БД', () => {
       { model: 'Турин', factory: 'Браво', price: 7900, origin: 'price_list', validAt: new Date('2026-10-01') },
     ]);
     expect(n).toBe(4);
-    expect(await prices.replacePriceList(ACCOUNT, sourceId, [{ model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 3500, origin: 'price_list' }, { model: 'ДПГ сота', widthMm: 900, heightMm: 2000, price: 3650, origin: 'price_list', nonstandard: { heightPct: 15 } }, { model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 4100, origin: 'price_list' }, { model: 'Турин', factory: 'Браво', price: 7900, origin: 'price_list' }])).toEqual({ imported: 4, replaced: 4 });
+    expect(await prices.replacePriceList(ACCOUNT, sourceId, [{ model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 3500, origin: 'price_list' }, { model: 'ДПГ сота', widthMm: 900, heightMm: 2000, price: 3650, origin: 'price_list', nonstandard: { heightPct: 15 } }, { model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 4100, origin: 'price_list' }, { model: 'Турин', factory: 'Браво', price: 7900, origin: 'price_list' }])).toEqual({ imported: 4, replaced: 4, was: 4, removed: 0, added: 0 });
     const all = await prices.list(ACCOUNT);
     expect(all.total).toBe(4);
     expect(all.items.map((p) => [p.model, p.baseSize, p.price, p.confidence, p.sourceTitle])).toEqual([
@@ -144,15 +144,15 @@ describe('прайс — единый источник цен (RFD-AI-AGENT-OPT-
       { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ CPL', description: 'Дверной блок деревянный внутренний глухой однопольный без порога', sourceRow: 17 },
       { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ CPL', description: 'Дверной блок деревянный внутренний глухой однопольный без порога', sourceRow: 17 },
     ]);
-    expect(r1).toEqual({ imported: 2, replaced: 0 });
+    expect(r1).toEqual({ imported: 2, replaced: 0, was: 0, removed: 0, added: 2 });
     await prices.upsert({ accountId: ACC, model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_000, origin: 'manager', createdBy: 7 });
     await prices.upsert({ accountId: ACC, model: 'Турин', widthMm: 800, heightMm: 2000, price: 8000, origin: 'web' });
     expect((await prices.list(ACC, { q: 'cpl' })).items.find((p) => p.origin === 'price_list')).toMatchObject({ abbr: 'ДВ CPL', altKeys: ['блок деревянный внутренний глухой однопольный порога'], sourceRow: 17 });
     expect((await prices.countBySource(ACC)).get(first)).toBe(2);
-    // Второй файл: те же модели — конфликта по kb_prices_key нет, прежний прайс удалён.
+    // Второй файл того же прайса (KB-MULTIPRICE: тот же ключ — импорт передаёт прежний файл): те же модели — конфликта по kb_prices_key нет, прежний прайс удалён.
     const second = await repo.createSource({ accountId: ACC, kind: 'file', title: 'прайс-2.xlsx', original: 'прайс-2.xlsx' });
-    const r2 = await prices.replacePriceList(ACC, second, [{ model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 24_500, origin: 'price_list', sourceRow: 3 }]);
-    expect(r2).toEqual({ imported: 1, replaced: 2 });
+    const r2 = await prices.replacePriceList(ACC, second, [{ model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 24_500, origin: 'price_list', sourceRow: 3 }], [first]);
+    expect(r2).toEqual({ imported: 1, replaced: 2, was: 2, removed: 1, added: 0 });
     const left = await prices.list(ACC);
     // Список: по ключу модели и размеру, внутри — по доверию (менеджер 90 выше прайса 70).
     expect(left.items.map((p) => [p.model, p.baseSize, p.price, p.origin, p.sourceId])).toEqual([
@@ -280,5 +280,75 @@ describe('подбор по смыслу: прайс в приоритете, в
     expect(await prices.backfillFeatures()).toBe(4);
     expect((await prices.listByOrigin(ACC, 'web')).map((r) => r.featureKey)).toEqual(['block|wood|solid|cpl|*', 'block|wood|solid|cpl|*', '*|steel|solid|*|EI60', '*|plastic|glazed|*|*']);
     expect(await prices.backfillFeatures()).toBe(0);
+  });
+});
+
+describe('несколько прайсов, замена по файлу (RFD-AI-AGENT-OPT-KB-MULTIPRICE)', () => {
+  const ACC = 888;
+  let db: Db;
+  let drop: () => Promise<void>;
+  let prices: KbPricesRepo;
+  let aliases: KbAliasesRepo;
+  let repo: KbRepo;
+  beforeAll(async () => {
+    ({ db, drop } = await freshKbDb());
+    prices = new KbPricesRepo(db);
+    aliases = new KbAliasesRepo(db);
+    repo = new KbRepo(db);
+  });
+  afterAll(() => drop());
+
+  it('второй файл с другим ключом добавляет прайс рядом; файл с тем же ключом заменяет только свои цены (было/удалено/добавлено); удаление файла уносит только его цены', async () => {
+    const inner = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_межкомнатные_двери_ГОСТ.xlsx', original: 'Прайс_межкомнатные_двери_ГОСТ.xlsx' });
+    await repo.setPriceInfo(inner, 'прайс межкомнатные двери гост', null);
+    const r1 = await prices.replacePriceList(ACC, inner, [
+      { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_900, origin: 'price_list', validAt: new Date('2026-10-10') },
+      { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 23_900, origin: 'price_list', validAt: new Date('2026-10-10') },
+      { model: 'ДВ ПВХ', widthMm: 910, heightMm: 2100, price: 19_900, origin: 'price_list', validAt: new Date('2026-10-10') },
+    ]);
+    expect(r1).toEqual({ imported: 3, replaced: 0, was: 0, removed: 0, added: 3 });
+    // Металлические — другой ключ: цены межкомнатных не трогаются.
+    const metal = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_металлические_двери_ГОСТ.xlsx', original: 'Прайс_металлические_двери_ГОСТ.xlsx' });
+    await repo.setPriceInfo(metal, 'прайс металлические двери гост', null);
+    const r2 = await prices.replacePriceList(ACC, metal, [{ model: 'ДМ EI60', widthMm: 900, heightMm: 2100, price: 40_000, origin: 'price_list', validAt: new Date('2026-10-16') }], (await repo.byPriceKey(ACC, 'прайс металлические двери гост', metal)).map((x) => x.id));
+    expect(r2).toEqual({ imported: 1, replaced: 0, was: 0, removed: 0, added: 1 });
+    expect((await prices.listByOrigin(ACC, 'price_list')).map((p) => [p.model, p.priceTitle])).toEqual([['ДВ CPL', 'Межкомнатные'], ['ДВ CPL', 'Межкомнатные'], ['ДВ ПВХ', 'Межкомнатные'], ['ДМ EI60', 'Металлические']]);
+    expect(await prices.countBySource(ACC)).toEqual(new Map([[inner, 3], [metal, 1]]));
+    // Файл межкомнатных с тем же ключом: заменяются только цены межкомнатных; одна модель ушла, одна добавилась.
+    const inner2 = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_межкомнатные_двери_ГОСТ — обновил 16102026.xlsx', original: 'Прайс_межкомнатные_двери_ГОСТ — обновил 16102026.xlsx' });
+    const same = await repo.byPriceKey(ACC, 'прайс межкомнатные двери гост', inner2);
+    expect(same.map((x) => x.id)).toEqual([inner]);
+    const r3 = await prices.replacePriceList(ACC, inner2, [
+      { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 24_900, origin: 'price_list', validAt: new Date('2026-10-16') },
+      { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 24_900, origin: 'price_list', validAt: new Date('2026-10-16') },
+      { model: 'ДВ ламинат', widthMm: 910, heightMm: 2100, price: 15_900, origin: 'price_list', validAt: new Date('2026-10-16') },
+    ], same.map((x) => x.id));
+    expect(r3).toEqual({ imported: 3, replaced: 3, was: 3, removed: 1, added: 1 });
+    expect(await prices.countBySource(ACC)).toEqual(new Map([[inner2, 3], [metal, 1]]));
+    expect((await prices.listByOrigin(ACC, 'price_list')).map((p) => [p.model, p.price])).toEqual([['ДМ EI60', 40_000], ['ДВ CPL', 24_900], ['ДВ CPL', 24_900], ['ДВ ламинат', 15_900]]);
+    // Удаление металлических уносит только их цены.
+    await repo.remove(ACC, metal);
+    expect((await prices.listByOrigin(ACC, 'price_list')).map((p) => p.model)).toEqual(['ДВ CPL', 'ДВ CPL', 'ДВ ламинат']);
+    // backfillPriceKeys: у источника с ценами, но без ключа — ключ из имени файла.
+    await db.query('UPDATE kb_sources SET price_key = NULL WHERE id = $1', [inner2]);
+    expect(await repo.backfillPriceKeys((n) => n.toLowerCase().replace(/\.xlsx$/, '').replace(/_/g, ' ').replace(/ — обновил \d+$/, ''))).toBe(1);
+    expect((await repo.get(ACC, inner2))?.priceKey).toBe('прайс межкомнатные двери гост');
+    expect(await repo.backfillPriceKeys(() => 'x')).toBe(0);
+  });
+
+  it('одинаково подходящие строки в двух прайсах: берётся более свежая, пометка «найдено в двух прайсах»', async () => {
+    const a = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_А.xlsx', original: 'Прайс_А.xlsx' });
+    const b = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_Б.xlsx', original: 'Прайс_Б.xlsx' });
+    await repo.setPriceInfo(a, 'прайс а', null);
+    await repo.setPriceInfo(b, 'прайс б', null);
+    await prices.replacePriceList(ACC, a, [{ model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 8000, origin: 'price_list', validAt: new Date('2026-10-01') }]);
+    await prices.replacePriceList(ACC, b, [{ model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 8800, origin: 'price_list', validAt: new Date('2026-10-16') }]);
+    const hit = await lookupPrice(prices, aliases, ACC, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 }, new Date('2026-10-16'));
+    expect(hit).toMatchObject({ price: 8800, row: { sourceId: b } });
+    expect(hit?.notes).toContain('найдено в двух прайсах: «А» (16.10.2026), «Б» (01.10.2026) — взята более свежая'.replace('«А» (16.10.2026), «Б» (01.10.2026)', '«Б» (16.10.2026), «А» (01.10.2026)'));
+    // Строка только в одном прайсе — пометки нет.
+    await prices.replacePriceList(ACC, a, [{ model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 9000, origin: 'price_list', validAt: new Date('2026-10-01') }]);
+    const single = await lookupPrice(prices, aliases, ACC, { name: 'ДПО сота', widthMm: 800, heightMm: 2000 }, new Date('2026-10-16'));
+    expect(single?.notes.some((n) => n.startsWith('найдено в'))).toBe(false);
   });
 });

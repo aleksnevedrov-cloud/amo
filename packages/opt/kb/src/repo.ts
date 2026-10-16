@@ -33,6 +33,22 @@ export interface KbSource {
   parentId: number | null;
   httpStatus: number | null;
   contentHash: string | null;
+  /** Ключ прайса (KB-MULTIPRICE): нормализованное имя файла; NULL — источник не прайс. */
+  priceKey: string | null;
+  /** Итог последнего импорта цен из этого файла. */
+  priceImport: PriceImportSummary | null;
+}
+
+export interface PriceImportSummary {
+  /** Короткое название прайса («Межкомнатные»). */
+  title: string;
+  /** Файл с тем же ключом уже был: это обновление, а не новый прайс. */
+  updated: boolean;
+  was: number;
+  imported: number;
+  removed: number;
+  added: number;
+  at: string;
 }
 
 export interface NewKbSource {
@@ -127,6 +143,26 @@ export class KbRepo {
 
   async setFetchInfo(id: number, info: { httpStatus: number | null; contentHash: string | null; mime: string | null; refreshDays?: number | null }): Promise<void> {
     await this.db.query('UPDATE kb_sources SET http_status = $2, content_hash = $3, mime = COALESCE($4, mime), refresh_days = COALESCE($5, refresh_days), updated_at = now() WHERE id = $1', [id, info.httpStatus, info.contentHash, info.mime, info.refreshDays ?? null]);
+  }
+
+  /** Ключ прайса и итог импорта у файла (KB-MULTIPRICE). */
+  async setPriceInfo(id: number, priceKey: string, priceImport: PriceImportSummary | null): Promise<void> {
+    await this.db.query('UPDATE kb_sources SET price_key = $2, price_import = COALESCE($3::jsonb, price_import) WHERE id = $1', [id, priceKey, priceImport ? JSON.stringify(priceImport) : null]);
+  }
+
+  /** Источники аккаунта с тем же ключом прайса (кроме указанного). */
+  async byPriceKey(accountId: number, priceKey: string, exceptId: number | null = null): Promise<KbSource[]> {
+    const { rows } = await this.db.query('SELECT * FROM kb_sources WHERE account_id = $1 AND price_key = $2 AND ($3::bigint IS NULL OR id <> $3) ORDER BY created_at', [accountId, priceKey, exceptId]);
+    return rows.map(mapSource);
+  }
+
+  /** Старые прайсы без ключа (до KB-MULTIPRICE): ключ из имени файла у источников, у которых есть цены прайса — один раз при старте. */
+  async backfillPriceKeys(keyOf: (name: string) => string): Promise<number> {
+    const { rows } = await this.db.query<{ id: string; title: string; original: string | null }>(
+      "SELECT s.id, s.title, s.original FROM kb_sources s WHERE s.price_key IS NULL AND EXISTS (SELECT 1 FROM kb_prices p WHERE p.source_id = s.id AND p.origin = 'price_list')",
+    );
+    for (const r of rows) await this.db.query('UPDATE kb_sources SET price_key = $2 WHERE id = $1', [Number(r.id), keyOf(r.original ?? r.title)]);
+    return rows.length;
   }
 
   async list(accountId: number): Promise<KbSource[]> {
@@ -258,6 +294,8 @@ function mapSource(r: Record<string, unknown>): KbSource {
     parentId: r.parent_id === null || r.parent_id === undefined ? null : Number(r.parent_id),
     httpStatus: r.http_status === null || r.http_status === undefined ? null : Number(r.http_status),
     contentHash: (r.content_hash ?? null) as string | null,
+    priceKey: (r.price_key ?? null) as string | null,
+    priceImport: (r.price_import ?? null) as PriceImportSummary | null,
   };
 }
 

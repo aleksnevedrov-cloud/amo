@@ -1,5 +1,6 @@
 import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
+import { priceListTitleOf } from './price-key.ts';
 import { colorOf, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
@@ -72,6 +73,9 @@ export interface KbPrice {
   /** Текст колонок прайса «Покрытие» («CPL 0,2 мм») и «Комплектация» («коробка, 3 петли, …») — в наименование строки КП (KP-NAME). */
   coating: string | null;
   equipment: string | null;
+  /** Ключ и короткое название прайса-файла (KB-MULTIPRICE): «прайс межкомнатные двери гост» / «Межкомнатные»; у веб-цен и правок — null. */
+  priceKey: string | null;
+  priceTitle: string | null;
 }
 
 export interface NewKbPrice {
@@ -111,7 +115,7 @@ export interface KbAlias {
   createdAt: Date;
 }
 
-const SELECT = `SELECT p.*, s.title AS source_title, s.kind AS source_kind FROM kb_prices p LEFT JOIN kb_sources s ON s.id = p.source_id`;
+const SELECT = `SELECT p.*, s.title AS source_title, s.kind AS source_kind, s.price_key AS price_key FROM kb_prices p LEFT JOIN kb_sources s ON s.id = p.source_id`;
 
 export class KbPricesRepo {
   constructor(private readonly db: Db) {}
@@ -156,14 +160,28 @@ export class KbPricesRepo {
    * транзакции (удалить все price_list аккаунта → вставить новые). Правки менеджера (manager), веб-цены (web) и закупки
    * не трогаются. Возвращает число записанных цен и число удалённых прежних.
    */
-  async replacePriceList(accountId: number, sourceId: number, rows: Omit<NewKbPrice, 'accountId' | 'sourceId'>[]): Promise<{ imported: number; replaced: number }> {
+  /**
+   * Импорт прайса из файла (KB-MULTIPRICE): в одной транзакции удаляются цены этого файла и файлов аккаунта с тем же
+   * ключом прайса (replaceSourceIds), затем вставляются новые. Цены других прайсов, правки менеджера и веб-цены не
+   * трогаются. Возвращает, сколько было, сколько удалено (модель+размер, которых больше нет) и добавлено (новых).
+   */
+  async replacePriceList(accountId: number, sourceId: number, rows: Omit<NewKbPrice, 'accountId' | 'sourceId'>[], replaceSourceIds: number[] = []): Promise<{ imported: number; replaced: number; was: number; removed: number; added: number }> {
     return withTransaction(this.db, async (c) => {
-      const del = await c.query(`DELETE FROM kb_prices WHERE account_id = $1 AND origin = 'price_list'`, [accountId]);
+      const ids = [...new Set([sourceId, ...replaceSourceIds])];
+      const old = await c.query<{ k: string }>(`SELECT model_key || '|' || coalesce(width_mm::text, '') || '|' || coalesce(height_mm::text, '') AS k FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = ANY($2::bigint[])`, [accountId, ids]);
+      const del = await c.query(`DELETE FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = ANY($2::bigint[])`, [accountId, ids]);
       let imported = 0;
       for (const r of rows) {
         if (await this.upsertWith(c, { ...r, accountId, sourceId, origin: 'price_list' })) imported += 1;
       }
-      return { imported, replaced: del.rowCount ?? 0 };
+      const fresh = await c.query<{ k: string }>(`SELECT model_key || '|' || coalesce(width_mm::text, '') || '|' || coalesce(height_mm::text, '') AS k FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = $2`, [accountId, sourceId]);
+      const oldKeys = new Set(old.rows.map((r) => r.k));
+      const newKeys = new Set(fresh.rows.map((r) => r.k));
+      let removed = 0;
+      for (const k of oldKeys) if (!newKeys.has(k)) removed += 1;
+      let added = 0;
+      for (const k of newKeys) if (!oldKeys.has(k)) added += 1;
+      return { imported, replaced: del.rowCount ?? 0, was: old.rowCount ?? 0, removed, added };
     });
   }
 
@@ -513,7 +531,25 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
         closeness(a.row) - closeness(b.row) ||
         b.row.validAt.getTime() - a.row.validAt.getTime(),
     );
-  const best = ranked[0] as (typeof ranked)[number];
+  let best = ranked[0] as (typeof ranked)[number];
+  // KB-MULTIPRICE, п. 3: одинаково подходящие строки в двух прайсах-файлах — берётся более свежая, менеджеру пометка.
+  const twoLists: string[] = [];
+  if (best.row.origin === 'price_list') {
+    const same = (c: (typeof ranked)[number]) =>
+      Boolean(c.features) === Boolean(best.features) && strongKey(c) === strongKey(best) && (c.features?.score ?? 0) === (best.features?.score ?? 0) && MATCH_RANK[c.match] === MATCH_RANK[best.match] && BASIS_RANK[c.applied.basis] === BASIS_RANK[best.applied.basis];
+    const ties = ranked.filter((c) => c.row.origin === 'price_list' && same(c));
+    const bySource = new Map<number, (typeof ranked)[number]>();
+    for (const c of ties) {
+      const sid = c.row.sourceId ?? 0;
+      const prev = bySource.get(sid);
+      if (!prev || c.row.validAt.getTime() > prev.row.validAt.getTime()) bySource.set(sid, c);
+    }
+    if (bySource.size >= 2) {
+      const lists = [...bySource.values()].sort((a, b) => b.row.validAt.getTime() - a.row.validAt.getTime() || b.row.updatedAt.getTime() - a.row.updatedAt.getTime());
+      best = lists[0] as (typeof ranked)[number];
+      twoLists.push(...lists.map((c) => `«${c.row.priceTitle || c.row.sourceTitle || c.row.model}» (${c.row.validAt.toLocaleDateString('ru-RU')})`));
+    }
+  }
   const applied = best.applied;
   const validityDays = validityDaysOf(best.row);
   const stale = now.getTime() - best.row.validAt.getTime() > validityDays * 86_400_000;
@@ -530,6 +566,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
     if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
   }
+  if (twoLists.length) notes.push(`найдено в ${twoLists.length === 2 ? 'двух' : twoLists.length} прайсах: ${twoLists.join(', ')} — взята более свежая`);
   // KP-NAME, п. 4: в письме назван цвет, которого нет в строке базы — менеджеру «цвет уточнить».
   const color = colorOf(text);
   if (color && !mentionsColor([best.row.model, best.row.coating, best.row.description, best.row.equipment, best.row.note].filter(Boolean).join(' | '), color)) {
@@ -629,6 +666,8 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     featureKey: (r.feature_key ?? null) as string | null,
     coating: (r.coating ?? null) as string | null,
     equipment: (r.equipment ?? null) as string | null,
+    priceKey: (r.price_key ?? null) as string | null,
+    priceTitle: r.price_key ? priceListTitleOf(String(r.price_key)) : null,
   };
 }
 

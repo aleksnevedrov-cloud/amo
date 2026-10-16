@@ -81,7 +81,10 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
             const r = await api.kbAddFile(f.name, f.type, await fileBase64(f));
             // Прайс xlsx импортируется сразу (KB-PRICELIST, б): менеджеру не нужен отдельный шаг «Импортировать».
             const prices = r.source?.prices ?? 0;
-            return prices ? `Файл «${f.name}» добавлен: это прайс, импортировано цен ${prices} (прежний прайс заменён)` : `Файл «${f.name}» добавлен, индексируется; если это прайс с колонками «модель» и «цена», цены импортируются автоматически`;
+            const imp = r.source?.priceImport ?? null;
+            // KB-MULTIPRICE: файл с тем же ключом прайса обновляет только свой прайс; другой ключ — новый прайс рядом.
+            if (imp && imp.updated) return `Файл «${f.name}» добавлен: прайс «${imp.title}» обновлён: было ${imp.was}, стало ${imp.imported}; удалено ${imp.removed}, добавлено ${imp.added}`;
+            return prices ? `Файл «${f.name}» добавлен: это прайс${imp ? ` «${imp.title}»` : ''}, импортировано цен ${prices}` : `Файл «${f.name}» добавлен, индексируется; если это прайс с колонками «модель» и «цена», цены импортируются автоматически`;
           })
         }
       />
@@ -288,7 +291,8 @@ function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { 
             {src.kind === 'url' && !src.refreshDays ? ' · без обновления' : ''}
             {src.crawl ? ' · раздел' : ''}
             {src.parentId ? ' · страница раздела' : ''}
-            {src.prices ? ` · прайс: цен ${src.prices}` : ''}
+            {src.prices ? ` · прайс${src.priceTitle ? ` «${src.priceTitle}»` : ''}: цен ${src.prices}` : ''}
+            {src.priceImport?.updated ? ` · обновлён: было ${src.priceImport.was}, стало ${src.priceImport.imported}; удалено ${src.priceImport.removed}, добавлено ${src.priceImport.added}` : ''}
           </div>
           {src.kind === 'url' && src.original && src.original !== src.title && <div style={{ ...s.small, ...s.muted, wordBreak: 'break-all' }}>{src.original}</div>}
           {src.error && <div style={s.error}>{src.error}</div>}

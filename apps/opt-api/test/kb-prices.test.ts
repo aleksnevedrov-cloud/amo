@@ -98,7 +98,7 @@ describe('база знаний опта: цены и синонимы → по�
     expect(auto.total).toBe(3);
     expect(auto.items[0]).toMatchObject({ model: 'ДПГ сота', vat: 'included', origin: 'price_list', factory: null });
     const idx = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kb_index', headers })).json().items as { summary: string }[];
-    expect(idx.some((j) => j.summary === 'База знаний: из прайса «прайс Текона.xlsx» импортировано цен 3 автоматически')).toBe(true);
+    expect(idx.some((j) => j.summary === 'База знаний: из прайса «прайс Текона.xlsx» импортировано цен 3 автоматически (прайс «Текона»)')).toBe(true);
     const pv = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kb/sources/${priceSourceId}/prices/preview`, headers })).json();
     expect(pv).toMatchObject({ headerFound: true, isPriceList: true, vatHint: 'included', mapping: { sheet: 'Прайс', model: 0, size: 1, price: 2, abbr: null, description: null, headerRow: 2 }, total: 3, skipped: 0 });
     expect(pv.columns.map((c: { header: string }) => c.header)).toEqual(['Наименование', 'Размер', 'Цена с НДС, руб.']);
@@ -328,6 +328,9 @@ describe('база знаний опта: цены и синонимы → по�
   });
 
   it('приёмка #30022107: прайс с «ДВ CPL», «Сокращение в названии», «Назначение/Конструкция» и двумя размерами в ячейке → три позиции по 23 900 ₽ «по базе: прайс», веб-вызовов 0; второй прайс заменяет первый', async () => {
+    // KB-MULTIPRICE: прайс «475» из прошлого теста — другой ключ, сам не затирается; убираем его, чтобы остался один прайс.
+    const prev = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { id: number; title: string }[];
+    for (const sId of prev.filter((x) => x.title === 'прайс 475.xlsx').map((x) => x.id)) expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${sId}`, headers })).json()).toEqual({ ok: true });
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Прайс');
     for (const r of [
@@ -377,5 +380,64 @@ describe('база знаний опта: цены и синонимы → по�
     const src2 = (sources as unknown as { id: number; title: string }[]).find((x) => x.title === 'прайс ДВ v2.xlsx')!.id;
     expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${src2}`, headers })).json()).toEqual({ ok: true });
     expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json().items.some((p: { origin: string }) => p.origin === 'price_list')).toBe(false);
+  });
+
+  it('приёмка KB-MULTIPRICE: два прайса рядом (54 + 21), ДВ CPL из межкомнатных → 23 900; перезаливка металлических с тем же ключом не трогает межкомнатные («обновлён: было, стало; удалено, добавлено»); удаление металлических — межкомнатные на месте', async () => {
+    // Чистая база прайсов: файл «прайс 475» из прошлого теста убираем.
+    const before = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { id: number; title: string }[];
+    for (const sId of before.filter((x) => x.title === 'прайс 475.xlsx').map((x) => x.id)) await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${sId}`, headers });
+    const header = ['Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Материал', 'Конструкция', 'Размер блока', 'Цена без НДС, руб.'];
+    const innerRows = (price: number) => [
+      header,
+      ['ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', 'дерево', 'однопольная, распашная, без порога', 'Блок Ш×В: 1010×2100; 910×2100', price],
+      ...Array.from({ length: 52 }, (_, i) => [`ДВ ПВХ ${i + 1}`, 'ДВ 1Рп О', 'О', 'ПВХ', 'дерево', 'однопольная, распашная, с порогом', `${700 + i}×2100`, 19_900 + i]),
+    ];
+    const metalRows = (n: number, price: number) => [header, ...Array.from({ length: n }, (_, i) => [`ДМ EI60 ${i + 1}`, 'ДМ', 'Г', 'порошковая окраска', 'сталь', 'однопольная, распашная, с порогом', `${800 + i}×2100`, price + i])];
+    const upload = async (filename: string, rows: unknown[][]) => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Прайс');
+      for (const r of rows) ws.addRow(r);
+      return (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') } })).json().source as { id: number; prices: number; priceKey: string; priceTitle: string; priceImport: { title: string; updated: boolean; was: number; imported: number; removed: number; added: number } };
+    };
+    const inner = await upload('Прайс_межкомнатные_двери_ГОСТ.xlsx', innerRows(23_900));
+    expect(inner).toMatchObject({ prices: 54, priceKey: 'прайс межкомнатные двери гост', priceTitle: 'Межкомнатные', priceImport: { title: 'Межкомнатные', updated: false, was: 0, imported: 54, removed: 0, added: 54 } });
+    const metal = await upload('Прайс_металлические_двери_ГОСТ.xlsx', metalRows(21, 40_000));
+    expect(metal).toMatchObject({ prices: 21, priceTitle: 'Металлические', priceImport: { updated: false, imported: 21 } });
+    // Оба прайса рядом: 54 + 21.
+    const sources = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { id: number; prices: number; priceTitle: string | null }[];
+    expect(sources.filter((x) => x.prices > 0).map((x) => [x.priceTitle, x.prices])).toEqual(expect.arrayContaining([['Межкомнатные', 54], ['Металлические', 21]]));
+    const all = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { origin: string; priceTitle: string | null }[];
+    const byList = (rows: typeof all) => rows.filter((p) => p.origin === 'price_list').reduce<Record<string, number>>((m, p) => ({ ...m, [p.priceTitle ?? '?']: (m[p.priceTitle ?? '?'] ?? 0) + 1 }), {});
+    expect(byList(all)).toEqual({ Межкомнатные: 54, Металлические: 21 });
+    // #30022107: «Собрать заново» → «Найти цены» → три позиции по 23 900 «по прайсу: ДВ CPL».
+    const LETTER = 'Дверной блок деревянный внутренний глухой однопольный без порога распашной с доводчиком, внутренним механическим замком, облицовка CPL светлосерый';
+    letter.request_items = [
+      { raw: `${LETTER} 1010×2100 — 1 шт`, name: LETTER, width_mm: 1010, height_mm: 2100, qty: 1 },
+      { raw: `${LETTER} 910×2100 — 1 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 1 },
+      { raw: `${LETTER} 910×2100 — 1 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 1 },
+    ];
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const searches = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
+    expect(g.searches()).toBe(searches);
+    const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d.items.map((l: { price: number; priceLabel: string }) => [l.price, l.priceLabel])).toEqual([[23_900, 'по прайсу: ДВ CPL (строка 2)'], [23_900, 'по прайсу: ДВ CPL (строка 2)'], [23_900, 'по прайсу: ДВ CPL (строка 2)']]);
+    // Перезаливка металлических файлом с тем же ключом (другое имя): 21 → 23, одна модель ушла, три добавились; межкомнатные не тронуты.
+    const metal2 = await upload('Прайс_металлические_двери_ГОСТ — обновил 16102026.xlsx', [header, ...metalRows(20, 41_000).slice(1), ['ДМ EI30', 'ДМ', 'Г', 'порошковая окраска', 'сталь', 'однопольная', '900×2000', 35_000], ['ДМ EI90', 'ДМ', 'Г', 'порошковая окраска', 'сталь', 'однопольная', '900×2000', 55_000], ['ДМ EI90 2Рп', 'ДМ', 'Г', 'порошковая окраска', 'сталь', 'двупольная', '1300×2000', 75_000]]);
+    expect(metal2).toMatchObject({ prices: 23, priceKey: 'прайс металлические двери гост', priceTitle: 'Металлические', priceImport: { title: 'Металлические', updated: true, was: 21, imported: 23, removed: 1, added: 3 } });
+    const after = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as typeof all;
+    expect(byList(after)).toEqual({ Межкомнатные: 54, Металлические: 23 });
+    expect(after.filter((p) => p.origin === 'price_list' && p.priceTitle === 'Металлические').every((p) => (p as unknown as { sourceId: number }).sourceId === metal2.id)).toBe(true);
+    const sources2 = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { id: number; prices: number }[];
+    expect(sources2.find((x) => x.id === metal.id)?.prices).toBe(0);
+    expect(sources2.find((x) => x.id === inner.id)?.prices).toBe(54);
+    const journal = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kb_index', headers })).json().items as { summary: string }[];
+    expect(journal.some((j) => j.summary.includes('прайс «Металлические» обновлён: было 21, стало 23; удалено 1, добавлено 3'))).toBe(true);
+    // Удаление металлических (нового и старого файла) — межкомнатные на месте.
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${metal2.id}`, headers })).json()).toEqual({ ok: true });
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${metal.id}`, headers })).json()).toEqual({ ok: true });
+    const left = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as typeof all;
+    expect(byList(left)).toEqual({ Межкомнатные: 54 });
   });
 });
