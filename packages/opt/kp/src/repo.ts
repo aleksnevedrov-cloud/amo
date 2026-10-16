@@ -220,17 +220,19 @@ export class KpRepo {
     return (rowCount ?? 0) > 0;
   }
 
+  /** Пути — относительно KP_FILES_ROOT (paths.ts). false — черновика с таким id нет (дефект 2в: запись проверяется, а не считается сделанной). */
   async setBuilt(
     id: number,
     b: { docxPath: string; pdfPath: string | null; kpNo: string },
-  ): Promise<void> {
-    await this.db.query(
+  ): Promise<boolean> {
+    const { rowCount } = await this.db.query(
       `UPDATE kp_drafts
           SET status = 'built', docx_path = $2, pdf_path = $3,
               kp_no = COALESCE(kp_no, $4), built_at = now()
         WHERE id = $1`,
       [id, b.docxPath, b.pdfPath, b.kpNo],
     );
+    return (rowCount ?? 0) > 0;
   }
 
   async setStatus(id: number, status: KpDraftStatus): Promise<void> {

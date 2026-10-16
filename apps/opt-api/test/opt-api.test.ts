@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import PizZip from 'pizzip';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { signFileLink, verifyFileLink } from '../src/routes/kp.ts';
 import { decodeTokenClaims } from '../src/routes/widget.ts';
+import { resolveKpPath } from '@opt/kp';
 import { ACCOUNT_ID, CLIENT_ID, fakeGateway, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Минимальный DOCX с плейсхолдерами: номер, покупатель, строки и итог. */
@@ -97,7 +99,7 @@ describe('opt-api: от подключения интеграции до пис�
   });
 
   it('без цен сборка отклоняется; после правок — DOCX по шаблону, номер, файл в сделке', async () => {
-    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } })).json()).toEqual({ error: 'no_priced_lines' });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } })).json()).toMatchObject({ error: 'no_priced_lines' });
     const items = [
       { request_index: 0, page_id: null, name: 'дверь белая', size: '2000×800 мм', qty: 2, price: 14_900, lead_time: '', discount: 0 },
       { request_index: 1, page_id: null, name: 'добор', size: '', qty: 4, price: 1_200, lead_time: '', discount: 10 },
@@ -105,12 +107,56 @@ describe('opt-api: от подключения интеграции до пис�
     expect((await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${draftId}`, headers, payload: { items } })).json().draft.items[1].price).toBe(1_200);
     const built = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } });
     // PDF появляется, если на машине есть LibreOffice; иначе в сделку уходит DOCX.
-    expect(built.json()).toMatchObject({ draft: { status: 'built', kpNo: 'КП-2026-1', hasDocx: true }, attached: [expect.stringMatching(/^KP-КП-2026-1\.(pdf|docx)$/)] });
+    expect(built.json()).toMatchObject({ draft: { status: 'built', kpNo: 'КП-2026-1', hasDocx: true }, attached: [expect.stringMatching(/^KP-КП-2026-1\.(pdf|docx)$/)], files: expect.arrayContaining([expect.objectContaining({ kind: 'docx', name: 'KP-КП-2026-1.docx', bytes: expect.any(Number) })]) });
     const d = await ctx.deps.kp.byId(ACCOUNT_ID, draftId);
-    const xml = new PizZip(readFileSync(d!.docxPath!)).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
+    // Пути в kp_drafts — относительно KP_FILES_ROOT (KP-DOWNLOAD, дефект 2а); номер и built_at записаны (дефект 2в).
+    expect(d).toMatchObject({ docxPath: `kp/${ACCOUNT_ID}/${LEAD_ID}/KP-КП-2026-1.docx`, kpNo: 'КП-2026-1', builtAt: expect.any(Date) });
+    expect((await ctx.deps.kp.getSettings(ACCOUNT_ID)).templatePath).toBe(`kp/${ACCOUNT_ID}/template.docx`);
+    const xml = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, d!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
     expect(xml).toContain('КП КП-2026-1 для ООО Ромашка');
     expect(xml).toContain('1. дверь белая — 29 800 ₽; 2. добор — 4 320 ₽; итого 34 120 ₽. Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.');
     expect(ctx.amo.calls.filter((c) => c.url.endsWith(`/leads/${LEAD_ID}/files`) && c.method === 'PUT')).toHaveLength(1);
+    // Журнал kp_build — с размерами файлов и именем приложенного в amo файла (KP-DOWNLOAD, п. 3).
+    const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items;
+    expect(log[0].summary).toMatch(/^КП КП-2026-1 собрано: позиций 2; файлы: KP-КП-2026-1\.docx \(\d+ КБ\)(, KP-КП-2026-1\.pdf \(\d+ КБ\))?;.*в сделку: KP-КП-2026-1\.(pdf|docx);.*\d+\.\d с$/);
+    expect(log[0].details).toMatchObject({ draftId, kpNo: 'КП-2026-1', files: expect.arrayContaining([expect.objectContaining({ kind: 'docx', path: `kp/${ACCOUNT_ID}/${LEAD_ID}/KP-КП-2026-1.docx` })]), attached: [expect.stringMatching(/^KP-КП-2026-1\./)] });
+  });
+
+  it('скачивание КП из виджета (KP-DOWNLOAD, п. 1): файл с Content-Disposition по токену виджета и по подписанной ссылке; чужая или просроченная подпись — 403', async () => {
+    const byToken = await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/file?draftId=${draftId}&kind=docx`, headers });
+    expect(byToken.statusCode).toBe(200);
+    expect(byToken.headers['content-type']).toContain('wordprocessingml');
+    expect(byToken.headers['content-disposition']).toBe(`attachment; filename="KP-KP-2026-1.docx"; filename*=UTF-8''${encodeURIComponent('KP-КП-2026-1.docx')}`);
+    expect(byToken.rawPayload.subarray(0, 2).toString()).toBe('PK');
+    expect(Number(byToken.headers['content-length'])).toBe(byToken.rawPayload.length);
+    const d = await ctx.deps.kp.byId(ACCOUNT_ID, draftId);
+    if (!d?.pdfPath) expect((await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/file?draftId=${draftId}&kind=pdf`, headers })).json()).toMatchObject({ error: 'no_file' });
+    // Ссылка для клика из iframe amo: открытый маршрут с подписью на 10 минут.
+    const link = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/file/link?draftId=${draftId}&kind=docx`, headers })).json();
+    expect(link).toMatchObject({ filename: 'KP-КП-2026-1.docx', url: expect.stringMatching(/^https:\/\/opt\.example\.ru\/kp\/file\?draftId=\d+&kind=docx&t=/), expiresAt: expect.any(String) });
+    const pub = await ctx.app.inject({ method: 'GET', url: new URL(link.url).pathname + new URL(link.url).search });
+    expect(pub.statusCode).toBe(200);
+    expect(pub.headers['content-disposition']).toContain('filename="KP-KP-2026-1.docx"');
+    expect(pub.rawPayload.equals(byToken.rawPayload)).toBe(true);
+    const t = new URL(link.url).searchParams.get('t') ?? '';
+    expect((await ctx.app.inject({ method: 'GET', url: `/kp/file?draftId=${draftId}&kind=pdf&t=${t}` })).statusCode).toBe(403);
+    expect((await ctx.app.inject({ method: 'GET', url: `/kp/file?draftId=${draftId}&kind=docx&t=${t.slice(0, -4)}AAAA` })).statusCode).toBe(403);
+    expect((await ctx.app.inject({ method: 'GET', url: `/kp/file?draftId=${draftId}&kind=docx` })).statusCode).toBe(400);
+    const secret = ctx.deps.env.TOKEN_ENCRYPTION_KEY;
+    const expired = signFileLink(secret, ACCOUNT_ID, draftId, 'docx', Math.floor(Date.now() / 1000) - 1);
+    expect(verifyFileLink(secret, expired, draftId, 'docx')).toBeNull();
+    expect(verifyFileLink(secret, t, draftId, 'docx')).toBe(ACCOUNT_ID);
+    expect(verifyFileLink('0'.repeat(64), t, draftId, 'docx')).toBeNull();
+    expect((await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/file?draftId=999999&kind=docx`, headers })).statusCode).toBe(404);
+  });
+
+  it('сборка по устаревшему черновику отклоняется (KP-DOWNLOAD, дефект 2в): файлы и номер не уходят в запись, которой виджет не показывает', async () => {
+    const old = await ctx.deps.kp.byId(ACCOUNT_ID, draftId);
+    const newer = await ctx.deps.kp.createDraft(ACCOUNT_ID, LEAD_ID, old!.payload, 7);
+    const r = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } });
+    expect(r.statusCode).toBe(409);
+    expect(r.json()).toMatchObject({ error: 'stale_draft', latestDraftId: newer, message: expect.stringContaining(`более новый черновик ${newer}`) });
+    await ctx.deps.kp.setStatus(newer, 'cancelled');
   });
 
   it('предпросмотр и отправка: получатель из карточки, тема и текст из шаблонов, статус sent, примечание в сделке', async () => {

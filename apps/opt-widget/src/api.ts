@@ -356,7 +356,9 @@ export class KpApi extends ApiClient {
   makeDraft = (leadId: number) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', { leadId });
   saveDraftItems = (id: number, items: KpDraftLine[]) => this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   /** Кнопка «Собрать документ»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
-  buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[] }>('POST', '/widget/v1/kp/build', { draftId });
+  buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[]; files?: { kind: 'docx' | 'pdf'; name: string; bytes: number }[] }>('POST', '/widget/v1/kp/build', { draftId });
+  /** Подписанная ссылка на файл КП (10 минут): по ней браузер скачивает PDF/DOCX как вложение (RFD-AI-AGENT-OPT-KP-DOWNLOAD). */
+  fileLink = (draftId: number, kind: 'pdf' | 'docx') => this.call<{ url: string; filename: string; expiresAt: string }>('GET', `/widget/v1/kp/file/link?draftId=${draftId}&kind=${kind}`);
   /** Поиск цен: все позиции без цены ('all') или одна позиция; force — «искать заново» мимо кэша. */
   research = (draftId: number, requestIndexes: number[] | 'all' = 'all', force = false) => this.call<{ queued: number[]; reason?: string }>('POST', '/widget/v1/kp/research', { draftId, requestIndexes, force });
   researchState = (draftId: number) => this.call<ResearchState>('GET', `/widget/v1/kp/research?draftId=${draftId}`);

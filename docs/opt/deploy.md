@@ -52,6 +52,19 @@ mkdir -p /opt/agent-opt/dl && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/
 чего в базе нет (дневной лимит $5 в настройках КП). Бэкап базы знаний — `bash src/scripts/opt/kb-backup.sh --install-cron` (ежедневно 03:40,
 7 копий в `/opt/agent-opt/backups/kb/`). Подробно — [этап 1](kb-etap-1-report.md), [этап 2](kb-etap-2-report.md), [этап 3](kb-etap-3-report.md), [этап 4](kb-etap-4-report.md).
 
+## Файлы КП и права на том (RFD-AI-AGENT-OPT-KP-DOWNLOAD)
+
+Пути файлов КП в базе (`kp_settings.template_path`, `certs_dir`, `kp_drafts.docx_path`, `pdf_path`) хранятся относительно
+`KP_FILES_ROOT` (`kp/<аккаунт>/…`), абсолютный путь собирается при чтении — смена точки монтирования тома `opt_data`
+сборку не ломает; миграция `005_kp_relative_paths.sql` переписывает старые абсолютные записи. Контейнеры стартуют через
+`scripts/opt/entrypoint.sh`: если `/data` или `/kb-files` принадлежат не `node` (каталоги создавались от root при переносе),
+владелец выравнивается `chown -R node:node`, затем процесс запускается от `node` (`su-exec`). Ошибка прав при сборке
+пишется в журнал `kp_error` текстом «нет прав на запись в … (EACCES)». Серверная проверка сборки без виджета:
+`docker compose run --rm --no-deps opt-worker node apps/opt-worker/dist/kp-build.js --account 28528549 --draft N`
+(или `--lead <id сделки>` — последний черновик). Скачивание собранного КП: `GET /widget/v1/kp/file?draftId=N&kind=pdf|docx`
+(токен виджета) и подписанная ссылка `GET /widget/v1/kp/file/link` → открытый `GET /kp/file?…&t=…` на 10 минут.
+Подробно — [отчёт](kp-download-report.md).
+
 ## Запуск
 
 ```bash

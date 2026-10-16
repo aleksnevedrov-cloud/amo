@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js && node ../../scripts/build-app.mjs src/research-one.ts dist/research-one.js && node ../../scripts/build-app.mjs src/mail-check.ts dist/mail-check.js && node ../../scripts/build-app.mjs src/price-draft.ts dist/price-draft.js",
+    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js && node ../../scripts/build-app.mjs src/research-one.ts dist/research-one.js && node ../../scripts/build-app.mjs src/mail-check.ts dist/mail-check.js && node ../../scripts/build-app.mjs src/price-draft.ts dist/price-draft.js && node ../../scripts/build-app.mjs src/kp-build.ts dist/kp-build.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

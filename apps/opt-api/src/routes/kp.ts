@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { sizeOf } from '@opt/kb';
-import { buildKp, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, findCertificates, renderMailTemplate, researchablePositions, sendBlockers, templateData, type KpConstants, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -99,7 +99,8 @@ type RequireAdmin = (req: FastifyRequest, reply: FastifyReply) => boolean;
 /** Настройки КП, шаблон, черновики, сборка документа и отправка — весь путь менеджера от кнопки до письма. */
 export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal, requireAdmin: RequireAdmin) {
   const repo = deps.kp;
-  const templatePath = (accountId: number) => join(deps.filesRoot, 'kp', String(accountId), 'template.docx');
+  // Путь шаблона в базе — относительно KP_FILES_ROOT (дефект 2а); абсолютный собирается при чтении.
+  const templatePath = (accountId: number) => resolveKpPath(deps.filesRoot, kpTemplateRel(accountId));
 
   api.get('/kp/settings', async (req) => {
     const s = await repo.getSettings(principal(req).accountId);
@@ -130,10 +131,16 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!bytes.subarray(0, 4).equals(ZIP_MAGIC)) return reply.code(400).send({ error: 'not_docx' });
     const accountId = principal(req).accountId;
     const path = templatePath(accountId);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, bytes);
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+    } catch (err) {
+      const message = describeFsError(err, dirname(path));
+      await deps.journal.add({ accountId, kind: 'kp_error', summary: `Шаблон КП не сохранён: ${message}` });
+      return reply.code(500).send({ error: 'write_failed', message });
+    }
     const md5 = createHash('md5').update(bytes).digest('hex');
-    await repo.setTemplate(accountId, { path, name: b.data.filename, md5 });
+    await repo.setTemplate(accountId, { path: kpTemplateRel(accountId), name: b.data.filename, md5 });
     return { ok: true, md5, size: bytes.length };
   });
 
@@ -141,7 +148,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!requireAdmin(req, reply)) return;
     const s = await repo.getSettings(principal(req).accountId);
     if (!s.templatePath) return reply.code(404).send({ error: 'no_template' });
-    const bytes = await readFile(s.templatePath).catch(() => null);
+    const bytes = await readFile(resolveKpPath(deps.filesRoot, s.templatePath)).catch(() => null);
     if (!bytes) return reply.code(410).send({ error: 'file_removed' });
     return reply
       .type('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
@@ -263,27 +270,54 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     return { draftId: draft.id, pending, positions };
   });
 
-  /** Документ строится из строк, которые менеджер подтвердил: цены и количества берутся из черновика. Автосборки нет. */
+  /**
+   * Документ строится из строк, которые менеджер подтвердил: цены и количества берутся из черновика. Автосборки нет.
+   * Сама сборка — buildDraftDocument (@opt/kp/kp-build.ts), та же, что у консольной утилиты kp-build.
+   */
   api.post('/kp/build', async (req, reply) => {
     const p = principal(req);
     const b = draftBody.safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body' });
-    const draft = await repo.byId(p.accountId, b.data.draftId);
-    if (!draft) return reply.code(404).send({ error: 'not_found' });
-    if (draft.status === 'sent') return reply.code(409).send({ error: 'already_sent' });
-    const s = await repo.getSettings(p.accountId);
-    if (!s.templatePath) return reply.code(409).send({ error: 'no_template' });
-    const payload = draft.payload as unknown as KpPayload;
-    const lines = (payload.items ?? []).filter((l) => l.price !== null);
-    if (!lines.length) return reply.code(409).send({ error: 'no_priced_lines' });
     try {
-      const r = await buildDocument(deps, p, draft, lines, s.templatePath, s.constants, s.certsDir);
-      const fresh = await repo.byId(p.accountId, draft.id);
-      return { draft: fresh ? view(fresh) : null, pdf: r.pdf, attached: r.attached };
+      const r = await buildDraftDocument(deps, { accountId: p.accountId, draftId: b.data.draftId, userId: p.userId });
+      return { draft: view(r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })) };
     } catch (err) {
-      await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'kp_error', summary: `КП не собрано: ${(err as Error).message}`, details: { draftId: draft.id } });
-      return reply.code(502).send({ error: 'build_failed', message: (err as Error).message });
+      if (err instanceof KpBuildError) {
+        const status = err.code === 'not_found' ? 404 : err.code === 'build_failed' ? 502 : 409;
+        return reply.code(status).send({ error: err.code, message: err.message, ...(err.latestDraftId ? { latestDraftId: err.latestDraftId } : {}) });
+      }
+      throw err;
     }
+  });
+
+  /**
+   * Скачивание собранного КП в виджет (RFD-AI-AGENT-OPT-KP-DOWNLOAD, п. 1): файл уходит браузеру как вложение.
+   * GET /kp/file — с токеном виджета в X-Auth-Token; для клика по ссылке из iframe amo (заголовок туда не
+   * подставить) виджет сначала берёт подписанную ссылку GET /kp/file/link — она ведёт на открытый маршрут
+   * GET /kp/file?…&t=<подпись> (kpPublicRoutes), живёт 10 минут и привязана к аккаунту, черновику и виду файла.
+   */
+  api.get('/kp/file', async (req, reply) => {
+    const p = principal(req);
+    const q = fileQuery.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    return sendKpFile(deps, reply, p.accountId, q.data.draftId, q.data.kind);
+  });
+
+  api.get('/kp/file/link', async (req, reply) => {
+    const p = principal(req);
+    const q = fileQuery.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const draft = await repo.byId(p.accountId, q.data.draftId);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    const file = kpFileOf(deps.filesRoot, draft, q.data.kind);
+    if (!file) return reply.code(404).send({ error: 'no_file', message: `у черновика ${draft.id} нет файла ${q.data.kind.toUpperCase()} — соберите документ` });
+    const exp = Math.floor(Date.now() / 1000) + FILE_LINK_TTL_SEC;
+    const t = signFileLink(deps.env.TOKEN_ENCRYPTION_KEY, p.accountId, draft.id, q.data.kind, exp);
+    const url = new URL('/kp/file', deps.env.PUBLIC_URL);
+    url.searchParams.set('draftId', String(draft.id));
+    url.searchParams.set('kind', q.data.kind);
+    url.searchParams.set('t', t);
+    return { url: url.toString(), filename: file.name, expiresAt: new Date(exp * 1000).toISOString() };
   });
 
   /** Окно предпросмотра: что уйдёт клиенту и что мешает отправке. */
@@ -295,9 +329,10 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!draft) return reply.code(404).send({ error: 'not_found' });
     const { settings } = await deps.settings.get(p.accountId);
     const payload = draft.payload as unknown as KpPayload;
-    const file = draft.pdfPath ?? draft.docxPath;
+    const file = resolveKpPath(deps.filesRoot, draft.pdfPath ?? draft.docxPath);
     const fileBytes = file ? await stat(file).then((s) => s.size).catch(() => null) : null;
     const vars = { kpNo: draft.kpNo ?? '', clientName: payload.client?.org || payload.client?.fio || '' };
+    void file;
     const to = payload.client?.email ?? '';
     const noPrice = (payload.items ?? []).filter((l) => l.price === null).length;
     return {
@@ -325,7 +360,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!m.smtpHost || !m.username) return reply.code(409).send({ error: 'mail_off' });
     const password = await deps.secrets.get(p.accountId, 'smtp');
     if (!password) return reply.code(409).send({ error: 'no_password' });
-    const file = draft.pdfPath ?? draft.docxPath;
+    const file = resolveKpPath(deps.filesRoot, draft.pdfPath ?? draft.docxPath);
     const fileBytes = file ? await stat(file).then((s) => s.size).catch(() => null) : null;
     const blockers = sendBlockers({ draft, fileBytes, to: b.data.to, resendConfirmed: Boolean(b.data.resendConfirmed) });
     if (blockers.length || !file) return reply.code(409).send({ error: 'blocked', reasons: blockers });
@@ -358,56 +393,62 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   });
 }
 
-/** DOCX по шаблону и PDF через LibreOffice, сертификаты по фабрикам, файлы — в карточку сделки. */
-async function buildDocument(deps: Deps, p: WidgetPrincipal, draft: KpDraft, lines: KpLine[], template: string, constants: KpConstants, certsDir: string | null) {
-  const payload = draft.payload as unknown as KpPayload;
-  const kpNo = draft.kpNo ?? (await deps.kp.nextNumber(p.accountId));
-  const letterAt = payload.source?.letterAt ? new Date(payload.source.letterAt) : null;
-  const data = templateData({
-    kpNo,
-    date: new Date(),
-    basis: letterAt ? `запрос от ${letterAt.toLocaleDateString('ru-RU')}` : 'запрос клиента',
-    clientName: payload.client?.org || payload.client?.fio || '',
-    clientPhone: payload.client?.phone || '',
-    lines: lines.map((l) => ({ name: l.name, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
-    vatRate: constants.vatRate ?? 0,
-    priceNote: constants.priceNote ?? DEFAULT_PRICE_NOTE,
+/** Открытые маршруты файлов КП: ссылка с подписью из GET /widget/v1/kp/file/link. */
+export function kpPublicRoutes(app: FastifyInstance, deps: Deps) {
+  app.get('/kp/file', async (req, reply) => {
+    const q = fileQuery.extend({ t: z.string().min(1).max(200) }).safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const accountId = verifyFileLink(deps.env.TOKEN_ENCRYPTION_KEY, q.data.t, q.data.draftId, q.data.kind);
+    if (accountId === null) return reply.code(403).send({ error: 'bad_link', message: 'ссылка на файл устарела или испорчена — откройте карточку заново' });
+    return sendKpFile(deps, reply, accountId, q.data.draftId, q.data.kind);
   });
-  const outDir = join(deps.filesRoot, 'kp', String(p.accountId), String(draft.leadId));
-  const built = await buildKp(template, data, outDir, `KP-${kpNo.replace(/[^0-9A-Za-zА-Яа-я._-]+/g, '_')}`);
-  // Фабрики у опта берутся из названий позиций: каталога нет, сертификат подбирается по вхождению имени фабрики в файл.
-  const certs = await findCertificates(certsDir, lines.map((l) => l.name));
-  const attached = await attachToLead(deps, p.accountId, draft.leadId, [built.pdfPath ?? built.docxPath, ...certs]);
-  await deps.kp.setBuilt(draft.id, { docxPath: built.docxPath, pdfPath: built.pdfPath, kpNo });
-  await deps.journal.add({
-    accountId: p.accountId,
-    leadId: draft.leadId,
-    kind: 'kp_build',
-    summary:
-      `КП ${kpNo} собрано: позиций ${lines.length}` +
-      (built.pdfPath ? '' : ', PDF не собран') +
-      (attached.length ? `, в сделку ${attached.length}` : '') +
-      (built.priceNoteFallback ? '; в шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС' : ''),
-    details: { draftId: draft.id, certificates: certs.length, attached, pdfError: built.pdfError, priceNoteFallback: built.priceNoteFallback, userId: p.userId },
-  });
-  return { pdf: Boolean(built.pdfPath), attached };
 }
 
-/** Файлы — в карточку сделки: менеджер открывает их там же, где письмо. Сбой загрузки не ломает сборку. */
-async function attachToLead(deps: Deps, accountId: number, leadId: number, files: string[]): Promise<string[]> {
-  const amo = await deps.amoFor(accountId).catch(() => null);
-  if (!amo) return [];
-  const attached: string[] = [];
-  for (const f of files) {
-    const bytes = await readFile(f).catch(() => null);
-    if (!bytes) continue;
-    const mime = f.endsWith('.pdf') ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    await amo
-      .uploadFileToLead(leadId, { filename: basename(f), mime, bytes })
-      .then(() => attached.push(basename(f)))
-      .catch(() => undefined);
+const fileQuery = z.object({ draftId: z.coerce.number().int().positive(), kind: z.enum(['pdf', 'docx']) });
+const FILE_LINK_TTL_SEC = 10 * 60;
+
+/** Файл черновика браузеру: Content-Disposition attachment с именем в ASCII и полным в filename*. */
+async function sendKpFile(deps: Deps, reply: FastifyReply, accountId: number, draftId: number, kind: 'pdf' | 'docx') {
+  const draft = await deps.kp.byId(accountId, draftId);
+  if (!draft) return reply.code(404).send({ error: 'not_found' });
+  const file = kpFileOf(deps.filesRoot, draft, kind);
+  if (!file) return reply.code(404).send({ error: 'no_file', message: `у черновика ${draft.id} нет файла ${kind.toUpperCase()} — соберите документ` });
+  const bytes = await readFile(file.path).catch(() => null);
+  if (!bytes) return reply.code(410).send({ error: 'file_removed', message: `файл ${file.name} не найден на диске (${file.path})` });
+  return reply
+    .type(file.mime)
+    .header('content-disposition', `attachment; filename="${asciiFilename(file.name)}"; filename*=UTF-8''${encodeURIComponent(file.name)}`)
+    .header('content-length', String(bytes.length))
+    .header('cache-control', 'private, no-store')
+    .send(bytes);
+}
+
+const linkPayload = (accountId: number, draftId: number, kind: string, exp: number) => `${accountId}.${draftId}.${kind}.${exp}`;
+
+export function signFileLink(secret: string, accountId: number, draftId: number, kind: string, exp: number): string {
+  const body = linkPayload(accountId, draftId, kind, exp);
+  const mac = createHmac('sha256', secret).update(body).digest('base64url');
+  return Buffer.from(`${body}.${mac}`).toString('base64url');
+}
+
+/** Аккаунт из подписанной ссылки; null — подпись не сошлась, срок вышел или черновик/вид файла другие. */
+export function verifyFileLink(secret: string, token: string, draftId: number, kind: string, now = Date.now()): number | null {
+  let decoded: string;
+  try {
+    decoded = Buffer.from(token, 'base64url').toString('utf8');
+  } catch {
+    return null;
   }
-  return attached;
+  const m = /^(\d+)\.(\d+)\.(pdf|docx)\.(\d+)\.([A-Za-z0-9_-]+)$/.exec(decoded);
+  if (!m) return null;
+  const [, acc, dId, k, expS, mac] = m as unknown as [string, string, string, string, string, string];
+  if (Number(dId) !== draftId || k !== kind) return null;
+  if (Number(expS) * 1000 < now) return null;
+  const expected = createHmac('sha256', secret).update(linkPayload(Number(acc), Number(dId), k, Number(expS))).digest('base64url');
+  const a = Buffer.from(mac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  return Number(acc);
 }
 
 function view(d: KpDraft) {

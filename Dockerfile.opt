@@ -36,6 +36,8 @@ WORKDIR /app
 # LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП, Writer и Calc — старые .doc/.rtf/.xls из писем → DOCX/XLSX.
 RUN apk add --no-cache libredwg || true
 RUN apk add --no-cache libreoffice-writer libreoffice-calc ttf-dejavu font-noto || true
+# su-exec — сброс прав в entrypoint после chown томов (дефект 2б KP-DOWNLOAD).
+RUN apk add --no-cache su-exec
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data KB_MIGRATIONS_DIR=/app/kb-migrations KB_FILES_ROOT=/kb-files
 COPY --from=build /out/opt-api apps/opt-api
 COPY --from=build /out/opt-worker apps/opt-worker
@@ -44,7 +46,10 @@ COPY packages/opt/kp/migrations migrations
 COPY packages/opt/kb/migrations kb-migrations
 # Файлы опта: шаблон КП, собранные документы (том opt_data); файлы базы знаний — том opt-kb-files.
 RUN mkdir -p /data /kb-files && chown -R node:node /data /kb-files
-USER node
+# Контейнер стартует от root только ради chown томов, сам процесс node запускается от пользователя node (entrypoint.sh).
+COPY scripts/opt/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
 # Порт задаёт API_PORT из .env (на сервере 3001); EXPOSE — только справочно.
 EXPOSE 3001
 CMD ["node", "apps/opt-api/dist/server.js"]

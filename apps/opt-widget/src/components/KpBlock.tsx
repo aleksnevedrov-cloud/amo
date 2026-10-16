@@ -44,6 +44,17 @@ const dateTimeMsk = (iso: string) => {
 };
 const kb = (bytes: number) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`);
 
+/** Клик по ссылке скачивания: сервер отвечает Content-Disposition: attachment, браузер сохраняет файл. */
+export function openDownload(url: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noreferrer';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 /** Черновик, задание воркера и действия над ними; ответ сервера всегда заменяет локальное состояние. */
 function useKpDraft(api: KpApi, leadId: number) {
   const [draft, setDraft] = useState<KpDraftInfo | null>(null);
@@ -152,11 +163,11 @@ function useKpDraft(api: KpApi, leadId: number) {
     }
   };
 
-  return { draft, job, lines, dirty, busy, error, pending, act, edit, take, research, researching, findPrices };
+  return { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, findPrices };
 }
 
 export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
-  const { draft, job, lines, dirty, busy, error, pending, act, edit, take, research, researching, findPrices } = useKpDraft(api, leadId);
+  const { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, findPrices } = useKpDraft(api, leadId);
   const [preview, setPreview] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
 
@@ -164,6 +175,16 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const ready = lines.length > 0 && lines.every((l) => l.price !== null);
 
   const kpStatus = STATUS[draft?.status ?? 'draft'] ?? draft?.status ?? '';
+  // Скачивание файла КП (RFD-AI-AGENT-OPT-KP-DOWNLOAD): подписанная ссылка от API, по ней браузер получает файл как вложение.
+  const download = async (kind: 'pdf' | 'docx') => {
+    if (!draft) return;
+    try {
+      const { url, filename } = await api.fileLink(draft.id, kind);
+      openDownload(url, filename);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
 
   // Макет Figma «10 Агент опт — КП» (RFD-AI-AGENT-OPT-WIDGET-DESIGN): карточки с рамкой и радиусом 13 px на сером фоне,
   // блок в карточке сделки ~500 px. Шапку с логотипом рисует amoCRM (.opt-caption).
@@ -198,6 +219,20 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         <div className="opt-kp-head">
           <h3 className="opt-kp-title">Черновик КП</h3>
           <span className={`opt-kp-badge${draft.status === 'draft' || draft.status === 'built' || draft.status === 'sent' ? ' opt-kp-badge-green' : ''}`}>{kpStatus}</span>
+          {(draft.status === 'built' || draft.status === 'sent') && (draft.hasPdf || draft.hasDocx) && (
+            <span className="opt-kp-downloads">
+              {draft.hasPdf && (
+                <button type="button" className="opt-btn opt-btn-small" disabled={busy} onClick={() => void download('pdf')} title="Скачать собранный PDF">
+                  Скачать PDF
+                </button>
+              )}
+              {draft.hasDocx && (
+                <button type="button" className="opt-btn opt-btn-small" disabled={busy} onClick={() => void download('docx')} title="Скачать собранный DOCX">
+                  Скачать DOCX
+                </button>
+              )}
+            </span>
+          )}
         </div>
         <div className="opt-kp-sub">{draft.kpNo ?? 'Номер появится после сборки документа'}</div>
         <div className="opt-kp-sep" />

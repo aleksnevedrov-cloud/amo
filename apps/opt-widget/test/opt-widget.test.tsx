@@ -321,7 +321,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
   it('цена → сохранить → собрать документ → окно предпросмотра → отправка только по кнопке', async () => {
     let current = { ...draft };
     const sent: string[] = [];
-    const { self } = fakeSelf('lcard', {
+    const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
       'PUT /widget/v1/kp/draft/7': (data?: string) => {
         current = { ...current, items: JSON.parse(data ?? '{}').items };
@@ -331,6 +331,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
         current = { ...current, status: 'built', kpNo: 'КП-2026-1', hasDocx: true, hasPdf: true };
         return { draft: current, pdf: true, attached: ['KP-КП-2026-1.pdf'] };
       },
+      'GET /widget/v1/kp/file/link': () => ({ url: 'https://opt.test.ru/kp/file?draftId=7&kind=pdf&t=abc', filename: 'KP-КП-2026-1.pdf', expiresAt: '2026-10-16T10:10:00Z' }),
       'GET /widget/v1/kp/send/preview': { to: 'ivanov@romashka.ru', cc: '', subject: 'Коммерческое предложение КП-2026-1', text: 'Здравствуйте!', signature: 'Иван', attachment: { name: 'KP-КП-2026-1.pdf', bytes: 120_000 }, blockers: [], warnings: [], alreadySent: false },
       'POST /widget/v1/kp/send': (data?: string) => {
         sent.push(data ?? '');
@@ -351,6 +352,22 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.querySelector('.opt-kp-sub')?.textContent).toBe('КП-2026-1');
     expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Документ собран');
     expect(document.body.textContent).toContain('Документ собран (DOCX и PDF) — файлы в карточке сделки');
+    // Скачивание (KP-DOWNLOAD): кнопки рядом с бейджем, клик берёт подписанную ссылку и открывает её как вложение.
+    expect(button('Скачать PDF')).toBeDefined();
+    expect(button('Скачать DOCX')).toBeDefined();
+    const clicked: string[] = [];
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      clicked.push(`${this.getAttribute('download')} ← ${this.href}`);
+    };
+    try {
+      await click('Скачать PDF');
+      await flush();
+    } finally {
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+    expect(calls.some((c) => c.method === 'GET' && c.url.endsWith('/widget/v1/kp/file/link?draftId=7&kind=pdf'))).toBe(true);
+    expect(clicked).toEqual(['KP-КП-2026-1.pdf ← https://opt.test.ru/kp/file?draftId=7&kind=pdf&t=abc']);
     await click('Отправить клиенту');
     await flush();
     expect(document.body.textContent).toContain('Вложение: KP-КП-2026-1.pdf (117 КБ)');
