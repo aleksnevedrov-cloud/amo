@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KP-REBUILD-MAIL: пересборка не теряет письмо и черновик
 
-Дата: 16.10.2026. Ветка `claude/opt-kb`, отдельный коммит после 4a554e5 (KB-MULTIPRICE). Только сервер (`@opt/kp`);
+Дата: 16.10.2026. Ветка `claude/opt-kb`, коммит f9c5852 (после 4a554e5, KB-MULTIPRICE). Только сервер (`@opt/kp`);
 виджет 1.1.7 не менялся. Розница и ядро не менялись (`git diff -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 Файл «Задание-Коду-KP-REBUILD-MAIL.md» в сессию не попал (во вложениях и на диске его нет) — сделано по пересказу
