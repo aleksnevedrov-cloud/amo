@@ -1,5 +1,5 @@
 import { readKbSheetRows, type KbSheetRow } from './extract.ts';
-import { sizeOf } from './model-key.ts';
+import { sizeOf, sizesOf } from './model-key.ts';
 import type { NonstandardRules, PriceVat } from './prices.ts';
 
 /**
@@ -17,6 +17,9 @@ export interface ColumnMapping {
   height: number | null;
   factory: number | null;
   unit: number | null;
+  /** «Сокращение в названии» и «Назначение/Конструкция» — дополнительные ключи подбора (KB-PRICELIST, г). */
+  abbr: number | null;
+  description: number | null;
   /** Строка шапки (с 1); строки до неё включительно пропускаются. */
   headerRow: number | null;
 }
@@ -38,6 +41,8 @@ export interface PriceDraft {
   price: number;
   /** Раздел прайса (строка без цены над группой) — в примечание. */
   section: string | null;
+  abbr: string | null;
+  description: string | null;
 }
 
 export interface PriceListPreview {
@@ -48,6 +53,10 @@ export interface PriceListPreview {
   sample: PriceDraft[];
   total: number;
   skipped: number;
+  /** НДС по заголовку колонки цены: «с НДС» → included, «без НДС» → no_vat, иначе unknown. */
+  vatHint: PriceVat;
+  /** Файл распознан как прайс: шапка с колонками модели и цены и хотя бы одна позиция (автоимпорт, б). */
+  isPriceList: boolean;
 }
 
 const HEADER_SCAN_ROWS = 30;
@@ -59,7 +68,17 @@ const RX = {
   height: /высот/i,
   factory: /фабрик|производ|бренд|завод|поставщик/i,
   unit: /^ед|единиц|ед\.\s*изм/i,
+  abbr: /сокращ|аббрев|кратк|обознач/i,
+  description: /назнач|конструкц|описан|характерист/i,
 };
+
+/** НДС по заголовку колонки цены. */
+export function vatFromHeader(header: string | undefined): PriceVat {
+  const h = (header ?? '').toLowerCase();
+  if (/без\s*ндс/.test(h)) return 'no_vat';
+  if (/ндс/.test(h)) return 'included';
+  return 'unknown';
+}
 
 /** «3 450,00 ₽», «3450», «3.450» → 3450; текст без числа → null. Цены меньше 10 и больше 10 млн — не цена. */
 export function parsePrice(cell: string): number | null {
@@ -82,7 +101,7 @@ function detectHeader(rows: KbSheetRow[]): { row: KbSheetRow; score: number } | 
       if (RX.model.test(c)) score += 2;
       if (RX.price.test(c)) score += 2;
       if (RX.size.test(c) || RX.width.test(c) || RX.height.test(c)) score += 1;
-      if (RX.factory.test(c) || RX.unit.test(c)) score += 1;
+      if (RX.factory.test(c) || RX.unit.test(c) || RX.abbr.test(c) || RX.description.test(c)) score += 1;
     }
     if (score >= 4 && (!best || score > best.score)) best = { row: r, score };
   }
@@ -95,14 +114,17 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
   const find = (rx: RegExp, exclude: number[] = []) => header?.row.cells.findIndex((c, i) => rx.test(c) && !exclude.includes(i)) ?? -1;
   if (header) {
     const price = find(RX.price);
-    const model = find(RX.model, [price]);
-    const width = find(RX.width, [price, model]);
-    const height = find(RX.height, [price, model, width]);
-    const size = width >= 0 && height >= 0 ? -1 : find(RX.size, [price, model, width, height]);
-    const factory = find(RX.factory, [price, model, width, height, size]);
-    const unit = find(RX.unit, [price, model, width, height, size, factory]);
+    // «Сокращение в названии» содержит «назван» — ищется раньше модели, чтобы не занять её колонку.
+    const abbr = find(RX.abbr, [price]);
+    const description = find(RX.description, [price, abbr]);
+    const model = find(RX.model, [price, abbr, description]);
+    const width = find(RX.width, [price, model, abbr, description]);
+    const height = find(RX.height, [price, model, width, abbr, description]);
+    const size = width >= 0 && height >= 0 ? -1 : find(RX.size, [price, model, width, height, abbr, description]);
+    const factory = find(RX.factory, [price, model, width, height, size, abbr, description]);
+    const unit = find(RX.unit, [price, model, width, height, size, factory, abbr, description]);
     if (price >= 0 && model >= 0) {
-      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, headerRow: header.row.row }, headerFound: true };
+      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, abbr: abbr >= 0 ? abbr : null, description: description >= 0 ? description : null, headerRow: header.row.row }, headerFound: true };
     }
   }
   // Без шапки: статистика по колонкам первых 200 строк.
@@ -120,7 +142,7 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
   const price = argmax(stats.map((s) => s.prices));
   const model = argmax(stats.map((s, i) => (i === price ? -1 : s.texts)));
   const size = argmax(stats.map((s, i) => (i === price || i === model ? -1 : s.sizes)));
-  return { mapping: { sheet, model: model >= 0 ? model : 0, price: price >= 0 ? price : 1, size: size >= 0 && (stats[size]?.sizes ?? 0) > 0 ? size : null, width: null, height: null, factory: null, unit: null, headerRow: null }, headerFound: false };
+  return { mapping: { sheet, model: model >= 0 ? model : 0, price: price >= 0 ? price : 1, size: size >= 0 && (stats[size]?.sizes ?? 0) > 0 ? size : null, width: null, height: null, factory: null, unit: null, abbr: null, description: null, headerRow: null }, headerFound: false };
 }
 
 const argmax = (xs: number[]) => xs.reduce((best, v, i) => (v > (xs[best] ?? -Infinity) ? i : best), -1);
@@ -148,8 +170,12 @@ export function extractPrices(rows: KbSheetRow[], m: ColumnMapping): { drafts: P
     }
     const w = m.width !== null ? toMm(cell(m.width)) : null;
     const h = m.height !== null ? toMm(cell(m.height)) : null;
-    const size = w && h ? { widthMm: Math.min(w, h), heightMm: Math.max(w, h) } : sizeOf(cell(m.size)) ?? sizeOf(model);
-    drafts.push({ sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null, price, section });
+    // Несколько размеров в одной ячейке («1010×2100; 910×2100. Проход ≥800 мм…») — отдельная строка цены на каждый (KB-PRICELIST, в).
+    const sizes: ({ widthMm: number; heightMm: number } | null)[] = w && h ? [{ widthMm: Math.min(w, h), heightMm: Math.max(w, h) }] : [];
+    if (!sizes.length) sizes.push(...sizesOf(cell(m.size)));
+    if (!sizes.length) sizes.push(sizeOf(model));
+    const base = { sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', price, section, abbr: cell(m.abbr) || null, description: cell(m.description) || null };
+    for (const size of sizes) drafts.push({ ...base, widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null });
   }
   return { drafts, skipped };
 }
@@ -176,7 +202,8 @@ export async function previewPriceList(bytes: Uint8Array, given: Partial<ColumnM
   const auto = detectMapping(rows, sheet);
   const mapping: ColumnMapping = { ...auto.mapping, ...stripUndefined(given), sheet };
   const { drafts, skipped } = extractPrices(rows, mapping);
-  return { sheets, columns: columnsOf(rows, mapping), mapping, headerFound: auto.headerFound, sample: drafts.slice(0, 20), total: drafts.length, skipped };
+  const header = mapping.headerRow !== null ? rows.find((r) => r.sheet === (mapping.sheet ?? r.sheet) && r.row === mapping.headerRow) : null;
+  return { sheets, columns: columnsOf(rows, mapping), mapping, headerFound: auto.headerFound, sample: drafts.slice(0, 20), total: drafts.length, skipped, vatHint: vatFromHeader(header?.cells[mapping.price]), isPriceList: auto.headerFound && drafts.length > 0 };
 }
 
 const stripUndefined = <T extends object>(o: T): Partial<T> => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
@@ -204,5 +231,8 @@ export function draftsToPrices(drafts: PriceDraft[], d: ImportDefaults = {}) {
     origin: 'price_list' as const,
     nonstandard: d.nonstandard ?? {},
     note: [x.section ? `раздел: ${x.section}` : '', `лист «${x.sheet}», строка ${x.row}`].filter(Boolean).join('; '),
+    abbr: x.abbr,
+    description: x.description,
+    sourceRow: x.row,
   }));
 }

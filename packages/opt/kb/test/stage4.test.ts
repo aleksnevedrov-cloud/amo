@@ -18,7 +18,7 @@ describe('этап 4: известные названия без модели и
     prices = new KbPricesRepo(db);
     aliases = new KbAliasesRepo(db);
     const sourceId = await new KbRepo(db).createSource({ accountId: ACCOUNT, kind: 'file', title: 'прайс Текона.xlsx', original: 'прайс Текона.xlsx' });
-    await prices.replaceForSource(ACCOUNT, sourceId, [
+    await prices.replacePriceList(ACCOUNT, sourceId, [
       { model: 'ДПГ сота', factory: 'Текона', widthMm: 800, heightMm: 2000, price: 3450, origin: 'price_list', validAt: new Date('2026-10-01'), nonstandard: { heightPct: 15 }, url: null, note: 'лист «Прайс», строка 5' },
       { model: 'Турин', factory: 'Браво', price: 7900, origin: 'price_list', validAt: new Date('2026-10-01') },
     ]);

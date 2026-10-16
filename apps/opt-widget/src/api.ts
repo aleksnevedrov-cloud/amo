@@ -232,6 +232,8 @@ export interface KbSourceInfo {
   httpStatus: number | null;
   /** Состояние задания очереди kb-index; null — не в очереди. */
   job?: DraftJob;
+  /** Цен из этого источника в базе (прайс импортируется автоматически, KB-PRICELIST). */
+  prices?: number;
 }
 
 export interface KbUsageInfo {
@@ -312,6 +314,8 @@ export interface ColumnMappingInfo {
   factory: number | null;
   unit: number | null;
   headerRow: number | null;
+  abbr: number | null;
+  description: number | null;
 }
 
 export interface PriceListPreviewInfo {
@@ -319,9 +323,12 @@ export interface PriceListPreviewInfo {
   columns: { index: number; header: string; sample: string[] }[];
   mapping: ColumnMappingInfo;
   headerFound: boolean;
-  sample: { sheet: string; row: number; model: string; factory: string | null; unit: string; widthMm: number | null; heightMm: number | null; price: number; section: string | null }[];
+  sample: { sheet: string; row: number; model: string; factory: string | null; unit: string; widthMm: number | null; heightMm: number | null; price: number; section: string | null; abbr?: string | null; description?: string | null }[];
   total: number;
   skipped: number;
+  /** НДС по заголовку колонки цены и признак «файл распознан как прайс» (KB-PRICELIST). */
+  vatHint?: 'included' | 'no_vat' | 'unknown';
+  isPriceList?: boolean;
 }
 
 export interface PriceImportBody {
@@ -381,7 +388,7 @@ export class KpApi extends ApiClient {
 
   /** Цены и синонимы базы знаний (этап 3). */
   kbPricePreview = (sourceId: number, mapping?: Partial<ColumnMappingInfo>) => this.call<PriceListPreviewInfo>('GET', `/widget/v1/kb/sources/${sourceId}/prices/preview${mapping ? `?mapping=${encodeURIComponent(JSON.stringify(mapping))}` : ''}`);
-  kbPriceImport = (sourceId: number, body: PriceImportBody) => this.call<{ imported: number; skipped: number }>('POST', `/widget/v1/kb/sources/${sourceId}/prices/import`, body);
+  kbPriceImport = (sourceId: number, body: PriceImportBody) => this.call<{ imported: number; skipped: number; replaced: number }>('POST', `/widget/v1/kb/sources/${sourceId}/prices/import`, body);
   kbPrices = (q = '', limit = 200) => this.call<{ items: KbPriceInfo[]; total: number }>('GET', `/widget/v1/kb/prices?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
   kbAddPrice = (body: { model: string; factory?: string | null; widthMm?: number | null; heightMm?: number | null; price: number; vat?: KbPriceInfo['vat']; validAt?: string; origin?: KbPriceInfo['origin']; note?: string | null }) => this.call<{ price: KbPriceInfo }>('POST', '/widget/v1/kb/prices', body);
   kbRemovePrice = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/prices/${id}`);

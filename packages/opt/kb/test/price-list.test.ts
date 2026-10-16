@@ -47,9 +47,9 @@ describe('цены из xlsx-прайса', () => {
     expect(p.total).toBe(3);
     expect(p.skipped).toBe(1);
     expect(p.sample).toEqual([
-      { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные' },
-      { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные' },
-      { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон' },
+      { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные', abbr: null, description: null },
+      { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные', abbr: null, description: null },
+      { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон', abbr: null, description: null },
     ]);
     // Менеджер переназначил колонку модели на «№» — предпросмотр пересчитан по его сопоставлению.
     const manual = await previewPriceList(bytes, { model: 0 });
@@ -76,5 +76,35 @@ describe('цены из xlsx-прайса', () => {
     expect(p.mapping).toMatchObject({ model: 0, size: 1, price: 2, headerRow: null });
     expect(p.total).toBe(3);
     expect(p.sample[2]).toMatchObject({ model: 'Турин', widthMm: 700, heightMm: 2000, price: 7900 });
+  });
+
+  it('KB-PRICELIST: несколько размеров в одной ячейке → отдельные строки; колонки «Сокращение в названии» и «Назначение/Конструкция»; НДС по заголовку; признак прайса', async () => {
+    const bytes = await xlsx({
+      Прайс: [
+        ['Прайс ООО «Двери» от 10.10.2026'],
+        ['№', 'Сокращение в названии', 'Наименование', 'Назначение/Конструкция', 'Размер блока', 'Цена без НДС, руб.'],
+        [17, 'ДВ CPL', 'Дверь внутренняя CPL', 'Дверной блок деревянный внутренний глухой однопольный без порога', 'Блок Ш×В: 1010×2100; 910×2100. Проход ≥800 мм — подтвердить чертежом.', '23 900'],
+        [18, 'ДВ ПВХ', 'Дверь внутренняя ПВХ', 'Дверной блок деревянный внутренний остеклённый однопольный', '910×2100', 19900],
+        [19, 'ДН', 'Дверь наружная', 'Стальной блок', 'по чертежу', 45000],
+      ],
+    });
+    const p = await previewPriceList(bytes);
+    expect(p.headerFound).toBe(true);
+    expect(p.isPriceList).toBe(true);
+    expect(p.vatHint).toBe('no_vat');
+    expect(p.mapping).toMatchObject({ abbr: 1, model: 2, description: 3, size: 4, price: 5, headerRow: 2 });
+    expect(p.total).toBe(4);
+    expect(p.sample.map((x) => [x.row, x.model, x.widthMm, x.heightMm, x.price, x.abbr])).toEqual([
+      [3, 'Дверь внутренняя CPL', 1010, 2100, 23900, 'ДВ CPL'],
+      [3, 'Дверь внутренняя CPL', 910, 2100, 23900, 'ДВ CPL'],
+      [4, 'Дверь внутренняя ПВХ', 910, 2100, 19900, 'ДВ ПВХ'],
+      [5, 'Дверь наружная', null, null, 45000, 'ДН'],
+    ]);
+    expect(p.sample[0]?.description).toBe('Дверной блок деревянный внутренний глухой однопольный без порога');
+    const rows = draftsToPrices(p.sample, { vat: p.vatHint });
+    expect(rows[0]).toMatchObject({ abbr: 'ДВ CPL', description: 'Дверной блок деревянный внутренний глухой однопольный без порога', sourceRow: 3, vat: 'no_vat', note: 'лист «Прайс», строка 3' });
+    // Заявка клиента (без колонки цены) прайсом не считается — автоимпорта не будет.
+    const request = await previewPriceList(await xlsx({ Лист1: [['1 ЭТАЖ'], ['ДПГ сота 800×2000', 12], ['Добор', 3]] }));
+    expect(request.isPriceList).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { draftsToPrices, exportPricesXlsx, extractPrices, KbLimitError, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping } from '@opt/kb';
+import { exportPricesXlsx, KbLimitError, previewPriceList, pricesExportFilename, type ColumnMapping } from '@opt/kb';
 import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -25,6 +25,8 @@ const mappingSchema = z.object({
   height: z.number().int().min(0).nullable().optional(),
   factory: z.number().int().min(0).nullable().optional(),
   unit: z.number().int().min(0).nullable().optional(),
+  abbr: z.number().int().min(0).nullable().optional(),
+  description: z.number().int().min(0).nullable().optional(),
   headerRow: z.number().int().min(0).nullable().optional(),
 });
 const nonstandardSchema = z.object({ heightPct: z.number().min(0).max(300).optional(), heightOverMm: z.number().int().optional(), widthPct: z.number().min(0).max(300).optional(), widthOverMm: z.number().int().optional(), thicknessPct: z.number().min(0).max(300).optional(), thicknessOverMm: z.number().int().optional(), doubleLeafPct: z.number().min(0).max(300).optional(), areaScale: z.boolean().optional() }).strict();
@@ -64,9 +66,9 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   /** Список источников с состоянием задания очереди и занятым объёмом. */
   api.get('/kb/sources', async (req) => {
     const accountId = principal(req).accountId;
-    const [sources, usage] = await Promise.all([kb.repo.list(accountId), kb.repo.usage(accountId)]);
+    const [sources, usage, priceCounts] = await Promise.all([kb.repo.list(accountId), kb.repo.usage(accountId), kb.prices.countBySource(accountId)]);
     const jobs = await deps.kbQueue.states(accountId, sources.filter((s) => s.status === 'new').map((s) => s.id));
-    return { sources: sources.map((s) => ({ ...view(s), job: jobs[s.id] ?? null })), usage };
+    return { sources: sources.map((s) => ({ ...view(s), job: jobs[s.id] ?? null, prices: priceCounts.get(s.id) ?? 0 })), usage };
   });
 
   api.post('/kb/sources/text', async (req, reply) => {
@@ -94,7 +96,9 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       const id = await kb.addFile(p.accountId, { filename: b.data.filename, mime: b.data.mime ?? null, bytes, userId: p.userId });
       await deps.kbQueue.enqueue({ accountId: p.accountId, sourceId: id, userId: p.userId });
       await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: загружен файл «${b.data.filename}» (${Math.round(bytes.byteLength / 1024)} КБ)`, details: { sourceId: id, kind: 'file', userId: p.userId, audit: 'kb' } });
-      return reply.code(202).send({ source: view(await kb.repo.get(p.accountId, id)) });
+      // Если xlsx распознан как прайс, цены импортирует задание индексации (в тестах — тут же); виджет видит их число.
+      const prices = (await kb.prices.countBySource(p.accountId)).get(id) ?? 0;
+      return reply.code(202).send({ source: { ...view(await kb.repo.get(p.accountId, id)), prices } });
     } catch (err) {
       return fail(reply, err);
     }
@@ -205,7 +209,7 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     return previewPriceList(x.bytes, given);
   });
 
-  /** Импорт после подтверждения: прежние цены этого источника заменяются. */
+  /** Переимпорт после проверки или с другой разметкой: прайс — единый источник цен, прежний прайс аккаунта заменяется целиком (KB-PRICELIST, а). */
   api.post('/kb/sources/:id/prices/import', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
     const id = idOf(req);
@@ -213,15 +217,10 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     const b = importBody.safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body', issues: b.error.issues });
     const p = principal(req);
-    const x = await xlsxSource(p.accountId, id);
-    if (!x) return reply.code(404).send({ error: 'not_xlsx' });
-    const rows = await readKbSheetRows(x.bytes);
-    const preview = await previewPriceList(x.bytes, b.data.mapping as Partial<ColumnMapping>);
-    const { drafts, skipped } = extractPrices(rows, preview.mapping);
-    if (!drafts.length) return reply.code(422).send({ error: 'no_prices', message: 'По выбранным колонкам цен не найдено' });
-    const n = await kb.prices.replaceForSource(p.accountId, id, draftsToPrices(drafts, { factory: b.data.factory ?? null, validAt: b.data.validAt, vat: b.data.vat, nonstandard: b.data.nonstandard, confidence: b.data.confidence }).map((r) => ({ ...r, createdBy: p.userId })));
-    await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: из прайса «${x.source.title}» импортировано цен ${n}${skipped ? `, пропущено строк ${skipped}` : ''}`, details: { sourceId: id, imported: n, skipped, factory: b.data.factory ?? null, validAt: b.data.validAt ?? null, userId: p.userId, audit: 'kb_prices' } });
-    return { imported: n, skipped };
+    const r = await kb.importPriceList(p.accountId, id, { mapping: b.data.mapping as Partial<ColumnMapping>, factory: b.data.factory ?? null, validAt: b.data.validAt, vat: b.data.vat, nonstandard: b.data.nonstandard, confidence: b.data.confidence, userId: p.userId });
+    if (!r) return reply.code(404).send({ error: 'not_xlsx' });
+    if (!r.imported) return reply.code(422).send({ error: 'no_prices', message: 'По выбранным колонкам цен не найдено' });
+    return { imported: r.imported, skipped: r.skipped, replaced: r.replaced };
   });
 
   api.get('/kb/prices', async (req, reply) => {

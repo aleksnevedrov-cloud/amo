@@ -9,7 +9,9 @@ import { extractForKb, KB_FILE_EXTENSIONS, KB_MAX_FILE_BYTES, kbFormatOf } from 
 import { createUrlFetcher, type UrlFetcher } from './fetch-url.ts';
 import { htmlToKbText, sectionLinks } from './html.ts';
 import { parsePublicUrl } from './safe-url.ts';
+import { draftsToPrices, extractPrices, previewPriceList, type ColumnMapping, type ImportDefaults } from './price-list.ts';
 import { KbAliasesRepo, KbPricesRepo } from './prices.ts';
+import { readKbSheetRows } from './extract.ts';
 import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
 import { searchKb, type KbSearchResult } from './search.ts';
 
@@ -54,6 +56,24 @@ export interface KbIndexResult {
   textChars: number;
   ms: number;
   error: string | null;
+  /** Цены, импортированные автоматически из xlsx-прайса (KB-PRICELIST, б); null — файл не прайс. */
+  prices: number | null;
+}
+
+/** Импорт прайса (кнопка «Импортировать» или автоматически после индексации xlsx). */
+export interface PriceImportInput extends ImportDefaults {
+  mapping?: Partial<ColumnMapping>;
+  userId: number | null;
+  /** Автоимпорт после индексации: без подтверждения менеджера, НДС по заголовку колонки. */
+  auto?: boolean;
+}
+
+export interface PriceImportResult {
+  imported: number;
+  skipped: number;
+  /** Сколько цен прежнего прайса удалено (один прайс на аккаунт). */
+  replaced: number;
+  headerFound: boolean;
 }
 
 export interface KbCoreDeps {
@@ -85,6 +105,8 @@ export interface KbCore {
   addText(accountId: number, input: { title: string; content: string; userId: number | null }): Promise<number>;
   /** Файл из вкладки: проверка формата и лимитов, копия на томе, статус new. */
   addFile(accountId: number, input: { filename: string; mime: string | null; bytes: Uint8Array; userId: number | null }): Promise<number>;
+  /** Цены из xlsx-источника в kb_prices: прежний прайс аккаунта заменяется целиком; null — источник не xlsx. */
+  importPriceList(accountId: number, sourceId: number, input: PriceImportInput): Promise<PriceImportResult | null>;
   /**
    * Ссылка на страницу сайта или файл (pdf/xlsx по ссылке): проверка адреса, статус new; скачивание — в задании индексации.
    * Повторное добавление того же адреса — переиндексация существующего источника. crawl — обойти раздел (до 50 страниц).
@@ -107,6 +129,7 @@ const safeName = (name: string) => name.replace(/[^0-9A-Za-zА-Яа-яЁё._-]+/
 
 export function createKbCore(d: KbCoreDeps): KbCore {
   const repo = new KbRepo(d.db);
+  const prices = new KbPricesRepo(d.db);
   const fetchUrl = d.fetchUrl ?? createUrlFetcher();
   const sha = (data: Uint8Array | string) => createHash('sha256').update(data).digest('hex');
   const pathFor = (accountId: number, sourceId: number, name: string) => join(d.filesRoot, String(accountId), `${sourceId}-${safeName(name)}`);
@@ -127,7 +150,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
   const core: KbCore = {
     db: d.db,
     repo,
-    prices: new KbPricesRepo(d.db),
+    prices,
     aliases: new KbAliasesRepo(d.db),
     filesRoot: d.filesRoot,
     embedderFor: d.embedderFor,
@@ -183,10 +206,31 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       return { ...s, status: 'new', error: null };
     },
 
+    /** Удаление источника: его цены уходят вместе с ним (kb_prices.source_id ON DELETE CASCADE, KB-PRICELIST а), сирот нет. */
     async remove(accountId, sourceId) {
       const s = await repo.remove(accountId, sourceId);
       if (s?.filePath) await rm(s.filePath, { force: true }).catch(() => undefined);
       return s;
+    },
+
+    async importPriceList(accountId, sourceId, input) {
+      const source = await repo.get(accountId, sourceId);
+      if (!source?.filePath) return null;
+      if (!/\.(xlsx|xlsm)$/i.test(source.original ?? source.title) && !/spreadsheetml/i.test(source.mime ?? '')) return null;
+      const bytes = new Uint8Array(await readFile(source.filePath));
+      const preview = await previewPriceList(bytes, input.mapping ?? {});
+      if (input.auto && !preview.isPriceList) return null;
+      const { drafts, skipped } = extractPrices(await readKbSheetRows(bytes), preview.mapping);
+      if (!drafts.length) return { imported: 0, skipped, replaced: 0, headerFound: preview.headerFound };
+      const defaults: ImportDefaults = { factory: input.factory ?? null, validAt: input.validAt, vat: input.vat ?? preview.vatHint, nonstandard: input.nonstandard, confidence: input.confidence };
+      const r = await prices.replacePriceList(accountId, sourceId, draftsToPrices(drafts, defaults).map((x) => ({ ...x, createdBy: input.userId })));
+      await d.journal.add({
+        accountId,
+        kind: KB_INDEX_KIND,
+        summary: `База знаний: из прайса «${source.title}» импортировано цен ${r.imported}${input.auto ? ' автоматически' : ''}${r.replaced ? `, прежний прайс заменён (удалено ${r.replaced})` : ''}${skipped ? `, пропущено строк ${skipped}` : ''}`,
+        details: { sourceId, imported: r.imported, replaced: r.replaced, skipped, auto: Boolean(input.auto), factory: input.factory ?? null, validAt: input.validAt ?? null, vat: defaults.vat, mapping: preview.mapping, userId: input.userId, audit: 'kb_prices' },
+      });
+      return { imported: r.imported, skipped, replaced: r.replaced, headerFound: preview.headerFound };
     },
 
     async index(job, hooks = {}) {
@@ -205,7 +249,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
             await repo.markIndexed(sourceId, { chunks: source.chunks, embeddedChunks: source.embeddedChunks, sizeBytes: got.size });
             await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: «${source.title}» без изменений — фрагментов ${source.chunks}, следующая проверка через ${source.refreshDays ?? DEFAULT_URL_REFRESH_DAYS} дн.`, details: { sourceId, kind: 'url', unchanged: true, httpStatus: got.status, userId: job.userId } });
             if (source.crawl && crawlHtml) await crawl(source, crawlHtml, hooks);
-            return { sourceId, status: 'indexed', chunks: source.chunks, embeddedChunks: source.embeddedChunks, tokens: 0, usd: 0, textChars: 0, ms: Date.now() - t0, error: null };
+            return { sourceId, status: 'indexed', chunks: source.chunks, embeddedChunks: source.embeddedChunks, tokens: 0, usd: 0, textChars: 0, ms: Date.now() - t0, error: null, prices: null };
           }
           await repo.setFetchInfo(sourceId, { httpStatus: got.status, contentHash: got.hash, mime: got.mime });
           if (got.title && (source.title === source.original || !source.title)) await repo.setTitle(sourceId, got.title);
@@ -243,12 +287,22 @@ export function createKbCore(d: KbCoreDeps): KbCore {
           costRub: usd * rate,
         });
         if (source.crawl && crawlHtml) await crawl(source, crawlHtml, hooks);
-        return { sourceId, status: 'indexed', chunks: chunks.length, embeddedChunks: embedded, tokens, usd, textChars: text.length, ms, error: null };
+        // Загруженный xlsx с колонками модели и цены — прайс: цены импортируются сразу, без отдельного шага (KB-PRICELIST, б).
+        let pricesImported: number | null = null;
+        if (source.kind === 'file') {
+          try {
+            const imp = await this.importPriceList(accountId, sourceId, { userId: job.userId, auto: true });
+            pricesImported = imp ? imp.imported : null;
+          } catch (err) {
+            await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: «${source.title}» проиндексирован, но цены из прайса не импортированы — ${(err as Error).message}`, details: { sourceId, kind: source.kind, status: 'prices_error', userId: job.userId } }).catch(() => undefined);
+          }
+        }
+        return { sourceId, status: 'indexed', chunks: chunks.length, embeddedChunks: embedded, tokens, usd, textChars: text.length, ms, error: null, prices: pricesImported };
       } catch (err) {
         const message = (err as Error).message;
         await repo.markError(sourceId, message);
         await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: «${source.title}» не проиндексирован — ${message}`, details: { sourceId, kind: source.kind, status: 'error', userId: job.userId } }).catch(() => undefined);
-        return { sourceId, status: 'error', chunks: 0, embeddedChunks: 0, tokens: 0, usd: 0, textChars: 0, ms: Date.now() - t0, error: message };
+        return { sourceId, status: 'error', chunks: 0, embeddedChunks: 0, tokens: 0, usd: 0, textChars: 0, ms: Date.now() - t0, error: message, prices: null };
       }
     },
 

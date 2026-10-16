@@ -73,7 +73,17 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
         Агент использует базу при разборе заявок, подборе цен и ответах на вопросы покупателя. Файлы и тексты режутся на фрагменты до 1 500 символов; эмбеддинги считаются ключом OpenAI из вкладки «Модель».
       </div>
       {usage && <Usage usage={usage} />}
-      <AddFile busy={busy} onAdd={(f) => void run(async () => (await api.kbAddFile(f.name, f.type, await fileBase64(f)), `Файл «${f.name}» добавлен, индексируется`))} />
+      <AddFile
+        busy={busy}
+        onAdd={(f) =>
+          void run(async () => {
+            const r = await api.kbAddFile(f.name, f.type, await fileBase64(f));
+            // Прайс xlsx импортируется сразу (KB-PRICELIST, б): менеджеру не нужен отдельный шаг «Импортировать».
+            const prices = r.source?.prices ?? 0;
+            return prices ? `Файл «${f.name}» добавлен: это прайс, импортировано цен ${prices} (прежний прайс заменён)` : `Файл «${f.name}» добавлен, индексируется; если это прайс с колонками «модель» и «цена», цены импортируются автоматически`;
+          })
+        }
+      />
       <AddUrl busy={busy} onAdd={(url, days, crawl) => void run(async () => {
         const r = await api.kbAddUrl(url, days, crawl);
         return r.existed ? 'Ссылка уже была в базе — поставлена на переиндексацию' : `Ссылка добавлена, скачивается${crawl ? ', раздел будет обойдён (до 50 страниц)' : ''}`;
@@ -276,6 +286,7 @@ function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { 
             {src.kind === 'url' && !src.refreshDays ? ' · без обновления' : ''}
             {src.crawl ? ' · раздел' : ''}
             {src.parentId ? ' · страница раздела' : ''}
+            {src.prices ? ` · прайс: цен ${src.prices}` : ''}
           </div>
           {src.kind === 'url' && src.original && src.original !== src.title && <div style={{ ...s.small, ...s.muted, wordBreak: 'break-all' }}>{src.original}</div>}
           {src.error && <div style={s.error}>{src.error}</div>}

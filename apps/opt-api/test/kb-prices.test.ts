@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Заявка #30008823 (упрощённо): две модели, у ДПГ два размера. */
-const letterAnswer = JSON.stringify({
+const letter = {
   client: { org: 'ООО Стройоптпоставка', fio: '', email: 'stoptpostavka@yandex.ru', phone: '' },
   request_items: [
     { raw: 'Дверь ДПГ сота 800×2000 — 10 шт', name: 'ДПГ сота', width_mm: 800, height_mm: 2000, qty: 10 },
@@ -18,8 +18,8 @@ const letterAnswer = JSON.stringify({
     { raw: 'Дверь Турин 900×2100 — 1 шт', name: 'Турин', width_mm: 900, height_mm: 2100, qty: 1 },
   ],
   required_blocks: ['price'],
-  questions: [],
-});
+  questions: [] as string[],
+};
 const card = (model: string, w: number, h: number) => ({ kind: 'leaf', factory: 'Браво', model, collection: null, finish: 'экошпон', color: 'белый', glazing: null, heightMm: h, widthMm: w, leaves: 1, equipment: null, fireRating: null, standards: [] });
 const SRC = [{ url: 'https://dveri-a.ru/turin' }, { url: 'https://dveri-b.ru/turin' }, { url: 'https://bravo.ru/turin' }];
 const offer = (url: string, price: number) => ({ url, seller: new URL(url).host, title: 'Дверь Турин', price, currency: 'RUB', unit: 'piece', quantityInUnit: null, inStock: true, vatStated: 'included', vatRateStated: null, sourceKind: 'retail', includesDelivery: null, deliveryRub: null, factory: 'Браво', model: 'Турин', design: ['экошпон', 'белый'], standards: [], widthMm: 800, heightMm: 2000, kind: 'leaf', leaves: 1 });
@@ -38,7 +38,7 @@ function gateway() {
         const m = /Позиция: (.+)/.exec(String(req.messages[0]?.content ?? ''));
         const size = /(\d{3,4})×(\d{3,4})/.exec(String(req.messages[0]?.content ?? ''));
         text = JSON.stringify(card(m?.[1]?.trim() ?? 'x', Number(size?.[1] ?? 800), Number(size?.[2] ?? 2000)));
-      } else text = letterAnswer;
+      } else text = JSON.stringify(letter);
       const res: RoutedResponse = {
         text, toolCalls: [], stopReason: 'end', usage: { inputTokens: 500, outputTokens: 50, cachedInputTokens: 0, cacheWriteTokens: 0, ...(req.webSearch ? { webSearchCalls: 3 } : {}) },
         provider: route.primary.provider, model: route.primary.model, assistantMessage: { role: 'assistant', content: text }, latencyMs: 1, fallbackUsed: false, requested: route.primary, attempts: [], ...(req.webSearch ? { sources: SRC } : {}),
@@ -78,13 +78,21 @@ describe('база знаний опта: цены и синонимы → по�
     const bytes = await priceListXlsx();
     const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename: 'прайс Текона.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: bytes.toString('base64') } });
     priceSourceId = add.json().source.id;
-    expect(add.json().source.status).toBe('indexed');
+    // Файл распознан как прайс (шапка с моделью и ценой) — цены импортированы сразу при индексации (KB-PRICELIST, б): НДС по заголовку «с НДС».
+    expect(add.json().source).toMatchObject({ status: 'indexed', prices: 3 });
+    const auto = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json();
+    expect(auto.total).toBe(3);
+    expect(auto.items[0]).toMatchObject({ model: 'ДПГ сота', vat: 'included', origin: 'price_list', factory: null });
+    const idx = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kb_index', headers })).json().items as { summary: string }[];
+    expect(idx.some((j) => j.summary === 'База знаний: из прайса «прайс Текона.xlsx» импортировано цен 3 автоматически')).toBe(true);
     const pv = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kb/sources/${priceSourceId}/prices/preview`, headers })).json();
-    expect(pv).toMatchObject({ headerFound: true, mapping: { sheet: 'Прайс', model: 0, size: 1, price: 2, headerRow: 2 }, total: 3, skipped: 0 });
+    expect(pv).toMatchObject({ headerFound: true, isPriceList: true, vatHint: 'included', mapping: { sheet: 'Прайс', model: 0, size: 1, price: 2, abbr: null, description: null, headerRow: 2 }, total: 3, skipped: 0 });
     expect(pv.columns.map((c: { header: string }) => c.header)).toEqual(['Наименование', 'Размер', 'Цена с НДС, руб.']);
     expect(pv.sample[0]).toMatchObject({ model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные' });
+    // Переимпорт с фабрикой, датой и правилом нестандарта из панели «Цены из прайса»: прежний прайс (автоимпорт) заменён.
     const imp = await ctx.app.inject({ method: 'POST', url: `/widget/v1/kb/sources/${priceSourceId}/prices/import`, headers, payload: { mapping: pv.mapping, factory: 'Текона', validAt: '2026-10-01', vat: 'included', nonstandard: { heightPct: 15 } } });
-    expect(imp.json()).toEqual({ imported: 3, skipped: 0 });
+    expect(imp.json()).toEqual({ imported: 3, skipped: 0, replaced: 3 });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources.find((x: { id: number }) => x.id === priceSourceId).prices).toBe(3);
     const list = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json();
     expect(list.total).toBe(3);
     expect(list.items.map((p: { model: string; baseSize: string; price: number; factory: string; confidence: number; origin: string; sourceTitle: string }) => [p.model, p.baseSize, p.price, p.factory, p.confidence, p.origin, p.sourceTitle])).toEqual([
@@ -175,12 +183,12 @@ describe('база знаний опта: цены и синонимы → по�
     expect(saved.items[0]).toMatchObject({ price: 3300, priceSource: 'manager', priceLabel: 'изменено менеджером' });
     const prices = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=дпг', headers })).json();
     expect(prices.items.find((p: { origin: string }) => p.origin === 'manager')).toMatchObject({ model: 'ДПГ сота', baseSize: '800×2000', price: 3300, confidence: 90 });
-    // Новый черновик: ДПГ 800×2000 берёт цену менеджера (90 > 70).
+    // Новый черновик: ДПГ 800×2000 — строка прайса выше правки менеджера при том же размере (KB-PRICELIST, д: прайс › менеджер › веб).
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
     const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d2.id, requestIndexes: [0] } });
     const d3 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
-    expect(d3.items[0]).toMatchObject({ price: 3300, priceSource: 'kb', priceLabel: 'изменено менеджером' });
+    expect(d3.items[0]).toMatchObject({ price: 3450, priceSource: 'kb', priceLabel: expect.stringContaining('по базе: прайс Текона.xlsx') });
     // Дневной лимит $0,001: уже потрачено больше — веб-поиск не запускается, пометка в блок, запись kp_price_error.
     await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { webSearchDailyUsd: 0.001 } } });
     const before = g.searches();
@@ -190,11 +198,64 @@ describe('база знаний опта: цены и синонимы → по�
     expect(d4.needsManager.filter((n: { request_index: number }) => n.request_index === 3).map((n: { reason: string }) => n.reason)).toEqual(['цена не задана', expect.stringContaining('поиск цены: дневной лимит веб-поиска $0.001 исчерпан')]);
     const errors = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_ERROR_KIND}`, headers })).json().items;
     expect(errors[0].summary).toContain('дневной лимит веб-поиска $0.001 исчерпан');
-    // Удаление цены из базы и записи прайса целиком при удалении источника.
-    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/prices/${prices.items[0].id}`, headers })).json()).toEqual({ ok: true });
-    await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${priceSourceId}`, headers });
+    // Удаление цены из базы руками; удаление файла прайса удаляет все его цены (KB-PRICELIST, а), правки менеджера и веб-цены остаются.
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/prices/${prices.items.find((p: { origin: string }) => p.origin === 'price_list').id}`, headers })).json()).toEqual({ ok: true });
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${priceSourceId}`, headers })).json()).toEqual({ ok: true });
     const left = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json();
-    // Цены прайса удалённого источника остаются (source_id → NULL), кроме удалённой руками; плюс web и manager.
-    expect(left.items.every((p: { sourceTitle: string | null }) => p.sourceTitle === null)).toBe(true);
+    expect(left.items.map((p: { origin: string }) => p.origin).sort()).toEqual(['manager', 'web']);
+    expect(left.items.every((p: { sourceTitle: string | null; sourceId: number | null }) => p.sourceTitle === null)).toBe(true);
+  });
+
+  it('приёмка #30022107: прайс с «ДВ CPL», «Сокращение в названии», «Назначение/Конструкция» и двумя размерами в ячейке → три позиции по 23 900 ₽ «по базе: прайс», веб-вызовов 0; второй прайс заменяет первый', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Прайс');
+    for (const r of [
+      ['Прайс ООО «Двери» от 10.10.2026'],
+      ['№', 'Сокращение в названии', 'Наименование', 'Назначение/Конструкция', 'Размер блока', 'Цена без НДС, руб.'],
+      [17, 'ДВ CPL', 'Дверь внутренняя CPL', 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL', 'Блок Ш×В: 1010×2100; 910×2100. Проход ≥800 мм — подтвердить чертежом.', '23 900'],
+      [18, 'ДВ ПВХ', 'Дверь внутренняя ПВХ', 'Дверной блок деревянный внутренний остеклённый однопольный с порогом, покрытие ПВХ', '910×2100', 19900],
+    ]) ws.addRow(r);
+    const bytes = Buffer.from(await wb.xlsx.writeBuffer());
+    const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename: 'прайс ДВ.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: bytes.toString('base64') } });
+    expect(add.json().source).toMatchObject({ status: 'indexed', prices: 3 });
+    const list = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=cpl', headers })).json();
+    expect(list.items.filter((p: { origin: string }) => p.origin === 'price_list').map((p: { baseSize: string; price: number; vat: string; abbr: string; sourceRow: number }) => [p.baseSize, p.price, p.vat, p.abbr, p.sourceRow])).toEqual([['1010×2100', 23900, 'no_vat', 'ДВ CPL', 3], ['910×2100', 23900, 'no_vat', 'ДВ CPL', 3]]);
+    // Письмо клиента: названия из «Назначения», три позиции.
+    letter.request_items = [
+      { raw: 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL 1010×2100 — 1 шт', name: 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL', width_mm: 1010, height_mm: 2100, qty: 1 },
+      { raw: 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL 910×2100 — 2 шт', name: 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL', width_mm: 910, height_mm: 2100, qty: 2 },
+      { raw: 'Дверной блок деревянный глухой однопольный CPL без порога 910×2100 — 1 шт', name: 'Дверной блок деревянный глухой однопольный CPL без порога', width_mm: 910, height_mm: 2100, qty: 1 },
+    ];
+    await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { webSearchDailyUsd: 5 } } });
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d0.items).toHaveLength(3);
+    const before = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
+    expect(g.searches()).toBe(before);
+    const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d.items.map((l: { price: number; priceSource: string; priceLabel: string }) => [l.price, l.priceSource, l.priceLabel])).toEqual([
+      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
+      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
+      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
+    ]);
+    const notes = (d.needsManager as { request_index: number; reason: string }[]).map((n) => `${n.request_index}: ${n.reason}`);
+    expect(notes).toContain('0: цена из базы: найдено по прайсу: Дверь внутренняя CPL (строка 3), по назначению');
+    expect(notes.some((n) => /^2: цена из базы: найдено по прайсу: Дверь внутренняя CPL \(строка 3\), совпадение \d+ %$/.test(n))).toBe(true);
+    // Новый прайс заменяет прежний: загружаем файл с другой ценой — в базе только он.
+    const wb2 = new ExcelJS.Workbook();
+    const ws2 = wb2.addWorksheet('Прайс');
+    for (const r of [['Наименование', 'Размер', 'Цена с НДС'], ['ДВ CPL', '1010×2100', 24900]]) ws2.addRow(r);
+    const add2 = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename: 'прайс ДВ v2.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: Buffer.from(await wb2.xlsx.writeBuffer()).toString('base64') } });
+    expect(add2.json().source).toMatchObject({ status: 'indexed', prices: 1 });
+    const after = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json();
+    expect(after.items.filter((p: { origin: string }) => p.origin === 'price_list').map((p: { model: string; price: number; sourceTitle: string }) => [p.model, p.price, p.sourceTitle])).toEqual([['ДВ CPL', 24900, 'прайс ДВ v2.xlsx']]);
+    const sources = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { title: string; prices: number }[];
+    expect(sources.find((x) => x.title === 'прайс ДВ.xlsx')?.prices).toBe(0);
+    expect(sources.find((x) => x.title === 'прайс ДВ v2.xlsx')?.prices).toBe(1);
+    // Удаление файла прайса не падает и уносит его цены.
+    const src2 = (sources as unknown as { id: number; title: string }[]).find((x) => x.title === 'прайс ДВ v2.xlsx')!.id;
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${src2}`, headers })).json()).toEqual({ ok: true });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json().items.some((p: { origin: string }) => p.origin === 'price_list')).toBe(false);
   });
 });

@@ -52,7 +52,7 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
     try {
       const nonstandard = { ...(num(heightPct) !== undefined ? { heightPct: num(heightPct) } : {}), ...(num(widthPct) !== undefined ? { widthPct: num(widthPct) } : {}), ...(num(doubleLeafPct) !== undefined ? { doubleLeafPct: num(doubleLeafPct) } : {}) };
       const r = await api.kbPriceImport(src.id, { mapping: m, ...(factory.trim() ? { factory: factory.trim() } : {}), validAt, vat, nonstandard });
-      onDone(`Из прайса «${src.title}» импортировано цен: ${r.imported}${r.skipped ? `, пропущено строк ${r.skipped}` : ''}`);
+      onDone(`Из прайса «${src.title}» импортировано цен: ${r.imported}${r.replaced ? ` (прежний прайс заменён: удалено ${r.replaced})` : ''}${r.skipped ? `, пропущено строк ${r.skipped}` : ''}`);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -64,6 +64,7 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
       <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>
         {p.headerFound ? 'Шапка найдена, колонки подобраны по названиям' : 'Шапка не найдена — колонки подобраны по содержимому'} · позиций с ценой {p.total}
         {p.skipped ? ` · без цены ${p.skipped}` : ''}
+        {src.prices ? ` · в базе сейчас ${src.prices}` : ''} · импорт заменит прежний прайс целиком
       </div>
       <div style={{ ...s.row, marginBottom: 6 }}>
         {p.sheets.length > 1 && (
@@ -83,6 +84,8 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
         {col('height', 'Высота')}
         {col('factory', 'Фабрика')}
         {col('unit', 'Ед.')}
+        {col('abbr', 'Сокращение')}
+        {col('description', 'Назначение')}
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 6 }}>
         <tbody>

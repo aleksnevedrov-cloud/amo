@@ -1,6 +1,9 @@
-import type { Db } from '@core/db';
+import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
-import { leavesOf, modelKeyOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
+import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
+
+/** Куда писать: пул или клиент транзакции. */
+type Queryable = Pick<Db, 'query'>;
 
 /**
  * Структурные цены базы знаний (kb_prices) и синонимы (kb_aliases) — RFD-AI-AGENT-OPT-KB, этап 3.
@@ -56,6 +59,12 @@ export interface KbPrice {
   /** Подпись источника (kb_sources.title) и его вид — для подписи «по базе: прайс Текона 01.10.2026». */
   sourceTitle: string | null;
   sourceKind: 'file' | 'url' | 'text' | null;
+  /** Прайс (KB-PRICELIST, г): «Сокращение в названии», «Назначение/Конструкция», их ключи, слова подбора, строка прайса. */
+  abbr: string | null;
+  description: string | null;
+  altKeys: string[];
+  searchTokens: string[];
+  sourceRow: number | null;
 }
 
 export interface NewKbPrice {
@@ -75,6 +84,9 @@ export interface NewKbPrice {
   url?: string | null;
   note?: string | null;
   createdBy?: number | null;
+  abbr?: string | null;
+  description?: string | null;
+  sourceRow?: number | null;
 }
 
 export interface KbAlias {
@@ -94,35 +106,58 @@ export class KbPricesRepo {
   constructor(private readonly db: Db) {}
 
   /** Запись цены; одна запись на аккаунт + модель + размер + происхождение + источник — повтор обновляет. */
-  async upsert(p: NewKbPrice): Promise<number> {
+  upsert(p: NewKbPrice): Promise<number> {
+    return this.upsertWith(this.db, p);
+  }
+
+  private async upsertWith(q: Queryable, p: NewKbPrice): Promise<number> {
     const modelKey = modelKeyOf(p.model) || normalizeKey(p.model);
     const width = p.widthMm ?? null;
     const height = p.heightMm ?? null;
-    const { rows } = await this.db.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint
+    const abbr = p.abbr?.trim().slice(0, 300) || null;
+    const description = p.description?.trim().slice(0, 1000) || null;
+    // Ключи сокращения и назначения — дополнительные точные ключи подбора; слова — для подбора по словам (г).
+    const altKeys = [...new Set([abbr, description].map((t) => (t ? modelKeyOf(t) : '')).filter((k) => k && k !== modelKey))];
+    const searchTokens = searchTokensOf(p.model, abbr, description);
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null];
+    const { rows } = await q.query<{ id: string }>(
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
        RETURNING id`,
-      [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null],
+      params,
     );
     if (rows[0]) return Number(rows[0].id);
-    const upd = await this.db.query<{ id: string }>(
-      `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by), updated_at = now()
+    const upd = await q.query<{ id: string }>(
+      `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
         RETURNING id`,
-      [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null],
+      params,
     );
     return Number(upd.rows[0]?.id ?? 0);
   }
 
-  /** Импорт прайса из источника: прежние записи этого источника заменяются. */
-  async replaceForSource(accountId: number, sourceId: number, rows: Omit<NewKbPrice, 'accountId' | 'sourceId'>[]): Promise<number> {
-    await this.db.query('DELETE FROM kb_prices WHERE account_id = $1 AND source_id = $2', [accountId, sourceId]);
-    let n = 0;
-    for (const r of rows) {
-      if (await this.upsert({ ...r, accountId, sourceId })) n += 1;
-    }
-    return n;
+  /**
+   * Прайс — единый источник цен аккаунта (KB-PRICELIST, а): импорт заменяет цены прежнего прайса целиком, в одной
+   * транзакции (удалить все price_list аккаунта → вставить новые). Правки менеджера (manager), веб-цены (web) и закупки
+   * не трогаются. Возвращает число записанных цен и число удалённых прежних.
+   */
+  async replacePriceList(accountId: number, sourceId: number, rows: Omit<NewKbPrice, 'accountId' | 'sourceId'>[]): Promise<{ imported: number; replaced: number }> {
+    return withTransaction(this.db, async (c) => {
+      const del = await c.query(`DELETE FROM kb_prices WHERE account_id = $1 AND origin = 'price_list'`, [accountId]);
+      let imported = 0;
+      for (const r of rows) {
+        if (await this.upsertWith(c, { ...r, accountId, sourceId, origin: 'price_list' })) imported += 1;
+      }
+      return { imported, replaced: del.rowCount ?? 0 };
+    });
+  }
+
+  /** Сколько цен у каждого источника — для карточки источника («цен 12»). */
+  async countBySource(accountId: number): Promise<Map<number, number>> {
+    const { rows } = await this.db.query<{ source_id: string; n: number }>('SELECT source_id, count(*)::int AS n FROM kb_prices WHERE account_id = $1 AND source_id IS NOT NULL GROUP BY source_id', [accountId]);
+    return new Map(rows.map((r) => [Number(r.source_id), r.n]));
   }
 
   async byId(accountId: number, id: number): Promise<KbPrice | null> {
@@ -147,9 +182,9 @@ export class KbPricesRepo {
     const width = patch.widthMm === undefined ? cur.widthMm : patch.widthMm;
     const height = patch.heightMm === undefined ? cur.heightMm : patch.heightMm;
     await this.db.query(
-      `UPDATE kb_prices SET model = $3, model_key = $4, factory = $5, unit = $6, base_size = $7, width_mm = $8, height_mm = $9, price = $10, vat = $11, valid_at = $12, confidence = $13, nonstandard = $14::jsonb, url = $15, note = $16, updated_at = now()
+      `UPDATE kb_prices SET model = $3, model_key = $4, factory = $5, unit = $6, base_size = $7, width_mm = $8, height_mm = $9, price = $10, vat = $11, valid_at = $12, confidence = $13, nonstandard = $14::jsonb, url = $15, note = $16, search_tokens = $17::text[], updated_at = now()
         WHERE account_id = $1 AND id = $2`,
-      [accountId, id, model.trim().slice(0, 300), modelKeyOf(model) || normalizeKey(model), (patch.factory === undefined ? cur.factory : patch.factory)?.trim() || null, patch.unit ?? cur.unit, sizeLabel(width, height), width, height, patch.price ?? cur.price, patch.vat ?? cur.vat, patch.validAt ?? cur.validAt, patch.confidence ?? cur.confidence, JSON.stringify(patch.nonstandard ?? cur.nonstandard), patch.url === undefined ? cur.url : patch.url, patch.note === undefined ? cur.note : patch.note],
+      [accountId, id, model.trim().slice(0, 300), modelKeyOf(model) || normalizeKey(model), (patch.factory === undefined ? cur.factory : patch.factory)?.trim() || null, patch.unit ?? cur.unit, sizeLabel(width, height), width, height, patch.price ?? cur.price, patch.vat ?? cur.vat, patch.validAt ?? cur.validAt, patch.confidence ?? cur.confidence, JSON.stringify(patch.nonstandard ?? cur.nonstandard), patch.url === undefined ? cur.url : patch.url, patch.note === undefined ? cur.note : patch.note, searchTokensOf(model, cur.abbr, cur.description)],
     );
     return this.byId(accountId, id);
   }
@@ -165,20 +200,29 @@ export class KbPricesRepo {
     return rows.map(mapPrice);
   }
 
-  /** Кандидаты по ключам модели: точные, модель базы целиком внутри названия позиции («турин» в «браво турин белая эмаль»), похожие по триграммам (≥ 0.55). */
-  async candidates(accountId: number, keys: string[]): Promise<{ row: KbPrice; similarity: number }[]> {
+  /**
+   * Кандидаты по ключам модели: точные (ключ модели или ключи сокращения/назначения), модель базы целиком внутри названия
+   * позиции («турин» в «браво турин белая эмаль»), похожие по триграммам (≥ 0.55), а также записи, с которыми у позиции
+   * есть хотя бы два общих слова подбора (KB-PRICELIST, г) — их вес считает lookupPrice.
+   */
+  async candidates(accountId: number, keys: string[], tokens: string[] = []): Promise<{ row: KbPrice; similarity: number; overlap: number }[]> {
     const list = [...new Set(keys.filter(Boolean))];
     if (!list.length) return [];
     const sim = `GREATEST(${list.map((_, i) => `similarity(p.model_key, $${i + 2}::text)`).join(', ')})`;
     // Модель базы внутри названия позиции или название позиции внутри модели базы («турин» ↔ «браво турин»).
     const inside = list.map((_, i) => `(position(' ' || p.model_key || ' ' in ' ' || $${i + 2}::text || ' ') > 0 OR position(' ' || $${i + 2}::text || ' ' in ' ' || p.model_key || ' ') > 0)`).join(' OR ');
+    const keysParam = list.length + 2;
+    const tokensParam = list.length + 3;
+    // Коррелированная ссылка на p допустима в списке выборки подзапроса, но не в его FROM.
+    const overlap = `cardinality(ARRAY(SELECT unnest(p.search_tokens) INTERSECT SELECT unnest($${tokensParam}::text[])))`;
+    const minOverlap = tokens.length >= 2 ? 2 : 1;
     const { rows } = await this.db.query(
-      `${SELECT}, ${sim} AS sim
-        WHERE p.account_id = $1 AND (p.model_key = ANY($${list.length + 2}::text[]) OR ${inside} OR ${sim} >= 0.55)
-        ORDER BY sim DESC, p.confidence DESC, p.valid_at DESC LIMIT 50`,
-      [accountId, ...list, list],
+      `${SELECT}, ${sim} AS sim, ${overlap} AS overlap
+        WHERE p.account_id = $1 AND (p.model_key = ANY($${keysParam}::text[]) OR p.alt_keys && $${keysParam}::text[] OR ${inside} OR ${sim} >= 0.55 OR (cardinality($${tokensParam}::text[]) > 0 AND ${overlap} >= ${minOverlap}))
+        ORDER BY sim DESC, overlap DESC, p.confidence DESC, p.valid_at DESC LIMIT 60`,
+      [accountId, ...list, list, tokens],
     );
-    return rows.map((r) => ({ row: mapPrice(r), similarity: Number(r.sim ?? 0) }));
+    return rows.map((r) => ({ row: mapPrice(r), similarity: Number(r.sim ?? 0), overlap: Number(r.overlap ?? 0) }));
   }
 }
 
@@ -249,9 +293,11 @@ export interface PriceHit {
   price: number;
   /** exact — модель и размер совпали; rules — правила нестандарта; area — пересчёт по площади; base — размер в прайсе не указан. */
   basis: 'exact' | 'rules' | 'area' | 'base';
-  /** Совпадение модели: точное, по синониму, по вхождению слов, по похожести. */
-  match: 'exact' | 'alias' | 'tokens' | 'similar';
+  /** Совпадение модели: точное (ключ модели, сокращения или назначения), по синониму, по вхождению слов, по похожести, по общим словам (г). */
+  match: 'exact' | 'alias' | 'tokens' | 'similar' | 'words';
   similarity: number;
+  /** Доверие записи; при подборе по словам — снижено пропорционально совпадению. */
+  confidence: number;
   /** Срок актуальности вышел — цена ставится с пометкой «цена устарела». */
   stale: boolean;
   validityDays: number;
@@ -342,16 +388,19 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   if (!key) return null;
   const alias = await aliases.resolve(accountId, key);
   const keys = alias ? [key, ...alias.keys] : [key];
-  const found = await prices.candidates(accountId, keys);
+  const queryTokens = searchTokensOf(q.name, q.raw);
+  const found = await prices.candidates(accountId, keys, queryTokens);
   if (!found.length) return null;
   const size = { widthMm: q.widthMm ?? sizeOf(text)?.widthMm ?? null, heightMm: q.heightMm ?? sizeOf(text)?.heightMm ?? null };
   const leaves = q.leaves ?? leavesOf(text);
   const itemTokens = new Set(tokensOf(key));
+  const qSet = new Set(queryTokens);
   const scored = found
     .map(({ row, similarity }) => {
       let match: PriceHit['match'] | null = null;
-      if (row.modelKey === key) match = 'exact';
-      else if (alias && alias.keys.includes(row.modelKey)) match = 'alias';
+      let words = 0;
+      if (row.modelKey === key || row.altKeys.includes(key)) match = 'exact';
+      else if (alias && alias.keys.some((k) => k === row.modelKey || row.altKeys.includes(k))) match = 'alias';
       else {
         const t = tokensOf(row.modelKey);
         // Все слова модели из базы есть в позиции: «Турин» внутри «Браво Турин белая эмаль». Одно слово — только если это
@@ -365,29 +414,64 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
           const rowTokens = new Set(t);
           if (it.length && significant && it.every((x) => rowTokens.has(x))) match = 'tokens';
           else if (similarity >= 0.7) match = 'similar';
+          else {
+            // Подбор по словам (г): доля общих слов подбора (Жаккар) между позицией и записью прайса (модель + сокращение + назначение).
+            words = wordsScore(qSet, row.searchTokens);
+            if (words >= WORDS_MIN) match = 'words';
+          }
         }
       }
-      return match ? { row, similarity, match } : null;
+      return match ? { row, similarity, match, words } : null;
     })
-    .filter((x): x is { row: KbPrice; similarity: number; match: PriceHit['match'] } => x !== null);
+    .filter((x): x is { row: KbPrice; similarity: number; match: PriceHit['match']; words: number } => x !== null);
   if (!scored.length) return null;
-  // Среди совпавших по модели: точный размер › правила нестандарта › пересчёт по площади › базовая цена; затем доверие, близость площади, свежесть.
-  const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3 };
+  // Среди совпавших по модели: точный размер › правила нестандарта › пересчёт по площади › базовая цена; затем происхождение
+  // (прайс › закупка › правка менеджера › веб, KB-PRICELIST д: веб-цена не перебивает строку прайса, подходящую по модели и размеру),
+  // доверие, близость площади, свежесть.
+  const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4 };
   const BASIS_RANK: Record<PriceHit['basis'], number> = { exact: 0, rules: 1, area: 2, base: 3 };
   const area = size.widthMm && size.heightMm ? size.widthMm * size.heightMm : null;
   const closeness = (r: KbPrice) => (area && r.widthMm && r.heightMm ? Math.abs(Math.log((r.widthMm * r.heightMm) / area)) : 1);
   const ranked = scored
     .map((c) => ({ ...c, applied: applyRules(c.row, { ...q, ...size, leaves }) }))
-    .sort((a, b) => MATCH_RANK[a.match] - MATCH_RANK[b.match] || BASIS_RANK[a.applied.basis] - BASIS_RANK[b.applied.basis] || b.row.confidence - a.row.confidence || closeness(a.row) - closeness(b.row) || b.row.validAt.getTime() - a.row.validAt.getTime());
+    .sort(
+      (a, b) =>
+        MATCH_RANK[a.match] - MATCH_RANK[b.match] ||
+        BASIS_RANK[a.applied.basis] - BASIS_RANK[b.applied.basis] ||
+        ORIGIN_RANK[a.row.origin] - ORIGIN_RANK[b.row.origin] ||
+        b.words - a.words ||
+        b.row.confidence - a.row.confidence ||
+        closeness(a.row) - closeness(b.row) ||
+        b.row.validAt.getTime() - a.row.validAt.getTime(),
+    );
   const best = ranked[0] as (typeof ranked)[number];
   const applied = best.applied;
   const validityDays = validityDaysOf(best.row);
   const stale = now.getTime() - best.row.validAt.getTime() > validityDays * 86_400_000;
   const notes = [...applied.notes];
+  const where = best.row.sourceRow ? ` (строка ${best.row.sourceRow})` : '';
+  if (best.match === 'exact' && best.row.modelKey !== key) notes.push(`найдено по прайсу: ${best.row.model}${where}, по ${best.row.altKeys.includes(modelKeyOf(best.row.abbr ?? '')) && modelKeyOf(best.row.abbr ?? '') === key ? 'сокращению' : 'назначению'}`);
   if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
   if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
+  if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
   if (stale) notes.push(`цена устарела: актуальна на ${best.row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
-  return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.similarity, stale, validityDays, notes, label: priceLabelOf(best.row) };
+  const confidence = best.match === 'words' ? Math.round(best.row.confidence * best.words) : best.row.confidence;
+  return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label: priceLabelOf(best.row) };
+}
+
+/** Приоритет происхождения при равном совпадении модели и размера (KB-PRICELIST, д). */
+export const ORIGIN_RANK: Record<PriceOrigin, number> = { price_list: 0, purchase: 1, manager: 2, web: 3 };
+/** Минимальная доля общих слов для подбора по словам. */
+export const WORDS_MIN = 0.5;
+
+/** Доля общих слов (Жаккар) между словами позиции и словами записи прайса. */
+export function wordsScore(query: Set<string>, rowTokens: string[]): number {
+  if (!query.size || !rowTokens.length) return 0;
+  const r = new Set(rowTokens);
+  let common = 0;
+  for (const w of query) if (r.has(w)) common += 1;
+  const union = query.size + r.size - common;
+  return union ? common / union : 0;
 }
 
 /** Известное название из базы (этап 4): синоним → каноническое; иначе точная модель из kb_prices (с фабрикой). */
@@ -413,7 +497,7 @@ export async function knownModelNames(prices: KbPricesRepo, aliases: KbAliasesRe
       if (alias) hit = { name: alias.canonical, via: 'alias', factory: null };
       else {
         const rows = await prices.candidates(accountId, [key]);
-        const exact = rows.find((r) => r.row.modelKey === key)?.row;
+        const exact = rows.find((r) => r.row.modelKey === key || r.row.altKeys.includes(key))?.row;
         hit = exact ? { name: exact.model, via: 'price', factory: exact.factory } : null;
       }
       cache.set(key, hit);
@@ -449,6 +533,11 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     updatedAt: r.updated_at as Date,
     sourceTitle: (r.source_title ?? null) as string | null,
     sourceKind: (r.source_kind ?? null) as KbPrice['sourceKind'],
+    abbr: (r.abbr ?? null) as string | null,
+    description: (r.description ?? null) as string | null,
+    altKeys: Array.isArray(r.alt_keys) ? (r.alt_keys as string[]) : [],
+    searchTokens: Array.isArray(r.search_tokens) ? (r.search_tokens as string[]) : [],
+    sourceRow: r.source_row === null || r.source_row === undefined ? null : Number(r.source_row),
   };
 }
 

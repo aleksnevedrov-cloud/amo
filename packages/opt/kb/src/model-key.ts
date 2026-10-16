@@ -38,6 +38,34 @@ export function sizeOf(text: string): { widthMm: number; heightMm: number } | nu
   return null;
 }
 
+/**
+ * Все размеры из текста (RFD-AI-AGENT-OPT-KB-PRICELIST, в): «Блок Ш×В: 1010×2100; 910×2100. Проход ≥800 мм — подтвердить
+ * чертежом.» → [1010×2100, 910×2100]; пояснительный текст и одиночные числа не считаются; повторы убираются.
+ */
+export function sizesOf(text: string): { widthMm: number; heightMm: number }[] {
+  const out: { widthMm: number; heightMm: number }[] = [];
+  for (const m of text.matchAll(new RegExp(SIZE_RX.source, 'gi'))) {
+    const unit = (m[4] ?? '').toLowerCase();
+    const nums = [m[1], m[2], m[3]].filter((x): x is string => x !== undefined).map((x) => Number(x.replace(',', '.')));
+    const mm = nums.map((n) => (unit === 'м' || unit === 'm' || (!unit && n < 10) ? Math.round(n * 1000) : Math.round(n)));
+    const big = mm.filter((n) => n >= 100);
+    if (big.length < 2) continue;
+    const size = { widthMm: Math.min(big[0] as number, big[1] as number), heightMm: Math.max(big[0] as number, big[1] as number) };
+    if (!out.some((x) => x.widthMm === size.widthMm && x.heightMm === size.heightMm)) out.push(size);
+  }
+  return out;
+}
+
+/** Слова для подбора по словам: ключ модели плюс сокращение и назначение, без повторов и коротких слов (кроме артикулов с цифрой). */
+export function searchTokensOf(...texts: (string | null | undefined)[]): string[] {
+  const out = new Set<string>();
+  for (const t of texts) {
+    if (!t) continue;
+    for (const w of tokensOf(modelKeyOf(t))) if (w.length >= 3 || /\d/.test(w)) out.add(w);
+  }
+  return [...out];
+}
+
 /** Число створок: двупольная/двухпольная/двустворчатая — 2; однопольная — 1; не сказано — null. */
 export function leavesOf(text: string): number | null {
   const t = text.toLowerCase();
