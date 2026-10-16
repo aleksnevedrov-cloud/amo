@@ -13,6 +13,9 @@ await migrate(deps.db, process.env.MIGRATIONS_DIR ?? OPT_MIGRATIONS_DIR);
 await migrate(deps.kb.db, process.env.KB_MIGRATIONS_DIR ?? KB_MIGRATIONS_DIR);
 
 const app = await buildApp(deps);
+// KB-MATCH: у записей цен без признаков (до миграции 005) признаки извлекаются из модели, сокращения и назначения — один раз.
+const backfilled = await deps.kb.prices.backfillFeatures();
+if (backfilled) app.log.info({ rows: backfilled }, 'kb_prices: признаки заполнены у старых записей');
 await app.listen({ host: env.API_HOST, port: env.API_PORT });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

@@ -140,7 +140,7 @@ export interface MarketResearchResult {
 
 export interface MarketResearchInput {
   line: Pick<KpLine, 'name' | 'size' | 'qty' | 'price'>;
-  item: Pick<KpRequestItem, 'raw' | 'name' | 'width_mm' | 'height_mm'>;
+  item: Pick<KpRequestItem, 'raw' | 'name' | 'width_mm' | 'height_mm' | 'features'>;
   /** ГОСТ, ТУ и прочие требования заявки. */
   requirements: string[];
   /** Цена менеджера в строке — опорная для аналога, когда медианы по точной модели нет. */

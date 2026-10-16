@@ -5,7 +5,7 @@ import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import type { OptAiProvider } from '@opt/kp';
 import { KP_PRICE_ERROR_KIND, KP_PRICE_RESEARCH_KIND } from '@opt/kp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { LEAD_ID, setup, widgetToken } from './helpers.ts';
+import { ACCOUNT_ID, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Заявка #30008823 (упрощённо): две модели, у ДПГ два размера. */
 const letter = {
@@ -27,17 +27,20 @@ const offer = (url: string, price: number) => ({ url, seller: new URL(url).host,
 function gateway() {
   const requests: RoutedRequest[] = [];
   let searches = 0;
+  // Веб-предложения — по модели последней карточки позиции (чтобы не отвергались как «другая модель»), медиана web.price.
+  const web = { model: 'Турин', price: 8000 };
   const llm: LlmGateway = {
     async chat(req, route) {
       requests.push(req);
       let text: string;
       if (req.webSearch) {
         searches += 1;
-        text = JSON.stringify({ offers: [offer('https://dveri-a.ru/turin', 7800), offer('https://dveri-b.ru/turin', 8200), offer('https://bravo.ru/turin', 8000)] });
+        text = JSON.stringify({ offers: [{ ...offer('https://dveri-a.ru/turin', web.price - 200), model: web.model }, { ...offer('https://dveri-b.ru/turin', web.price + 200), model: web.model }, { ...offer('https://bravo.ru/turin', web.price), model: web.model }] });
       } else if (req.outputSchema?.name === 'item_card') {
         const m = /Позиция: (.+)/.exec(String(req.messages[0]?.content ?? ''));
         const size = /(\d{3,4})×(\d{3,4})/.exec(String(req.messages[0]?.content ?? ''));
-        text = JSON.stringify(card(m?.[1]?.trim() ?? 'x', Number(size?.[1] ?? 800), Number(size?.[2] ?? 2000)));
+        web.model = m?.[1]?.trim() ?? 'x';
+        text = JSON.stringify(card(web.model, Number(size?.[1] ?? 800), Number(size?.[2] ?? 2000)));
       } else text = JSON.stringify(letter);
       const res: RoutedResponse = {
         text, toolCalls: [], stopReason: 'end', usage: { inputTokens: 500, outputTokens: 50, cachedInputTokens: 0, cacheWriteTokens: 0, ...(req.webSearch ? { webSearchCalls: 3 } : {}) },
@@ -49,7 +52,7 @@ function gateway() {
     provider: async () => null,
   };
   const ai: OptAiProvider = async () => ({ llm, source: 'account', providers: ['openai'], keySources: { openai: 'account' } });
-  return { ai, requests, searches: () => searches };
+  return { ai, requests, searches: () => searches, web };
 }
 
 async function priceListXlsx(): Promise<Buffer> {
@@ -129,7 +132,8 @@ describe('база знаний опта: цены и синонимы → по�
     expect(g.searches()).toBe(1);
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     const lines = d.items as { request_index: number; price: number | null; priceSource: string; priceLabel: string; priceStale: boolean; kbPriceId: number | null; market: { median: number } | null }[];
-    expect(lines[0]).toMatchObject({ price: 3450, priceSource: 'kb', priceStale: false, priceLabel: `по базе: прайс Текона.xlsx (${new Date('2026-10-01T00:00:00Z').toLocaleDateString('ru-RU')})` });
+    // KB-MATCH: ключ модели совпал и признаки (полотно, глухое) подошли → подпись «по прайсу: … (строка N)».
+    expect(lines[0]).toMatchObject({ price: 3450, priceSource: 'kb', priceStale: false, priceLabel: 'по прайсу: ДПГ сота (строка 4)' });
     expect(lines[0]?.kbPriceId).toBeGreaterThan(0);
     expect(lines[1]).toMatchObject({ price: 3650, priceSource: 'kb' });
     // Синоним → ДПГ сота 700×2000: точного размера нет, правило нестандарта по высоте не сработало (высота та же) → пересчёт по площади от 800×2000.
@@ -188,7 +192,7 @@ describe('база знаний опта: цены и синонимы → по�
     const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d2.id, requestIndexes: [0] } });
     const d3 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
-    expect(d3.items[0]).toMatchObject({ price: 3450, priceSource: 'kb', priceLabel: expect.stringContaining('по базе: прайс Текона.xlsx') });
+    expect(d3.items[0]).toMatchObject({ price: 3450, priceSource: 'kb', priceLabel: 'по прайсу: ДПГ сота (строка 4)' });
     // Дневной лимит $0,001: уже потрачено больше — веб-поиск не запускается, пометка в блок, запись kp_price_error.
     await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { webSearchDailyUsd: 0.001 } } });
     const before = g.searches();
@@ -204,6 +208,94 @@ describe('база знаний опта: цены и синонимы → по�
     const left = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices', headers })).json();
     expect(left.items.map((p: { origin: string }) => p.origin).sort()).toEqual(['manager', 'web']);
     expect(left.items.every((p: { sourceTitle: string | null; sourceId: number | null }) => p.sourceTitle === null)).toBe(true);
+  });
+
+  it('приёмка KB-MATCH (#30022107): веб-записи «модель = текст письма» остаются, но прайс с колонками признаков даёт три позиции по 23 900 ₽ «по прайсу: ДВ CPL (строка N)», веб-вызовов 0; «ДПГ + УПД, сота» → 8 800; алюминиевая дверь → веб; веб-цена вне диапазона прайса отброшена', async () => {
+    const LETTER = 'Дверной блок деревянный внутренний глухой однопольный без порога распашной с доводчиком, внутренним механическим замком, облицовка CPL светлосерый';
+    // Старые веб-цены по тем же позициям (как на проде до KB-MATCH): модель — текст письма, ключ совпадает дословно.
+    const webA = await ctx.deps.kb.prices.upsert({ accountId: ACCOUNT_ID, model: `${LETTER} 1010×2100`, widthMm: 1010, heightMm: 2100, price: 5683, origin: 'web' });
+    const webB = await ctx.deps.kb.prices.upsert({ accountId: ACCOUNT_ID, model: `${LETTER} 910×2100`, widthMm: 910, heightMm: 2100, price: 5120, origin: 'web' });
+    // Прайс с колонками признаков: «Модель», «Сокращение», «Г/О», «Покрытие», «Материал», «Конструкция», «Назначение», «Огнестойкость».
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Прайс');
+    for (const r of [
+      ['Прайс ООО «Двери» от 10.10.2026'],
+      ['№', 'Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Материал', 'Конструкция', 'Назначение', 'Огнестойкость', 'Размер блока', 'Цена без НДС, руб.'],
+      [3, 'ДПГ сота', 'ДПГ', 'Г', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '800×2000', 8800],
+      [4, 'ДПО сота', 'ДПО', 'О', 'ламинат', 'МДФ', 'полотно однопольное', 'внутренняя', 'нет', '800×2000', 9900],
+      [17, 'ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', 'дерево', 'полнозаполненная, однопольная, распашная, без порога', 'внутренняя, общественные помещения', 'нет', 'Блок Ш×В: 1010×2100; 910×2100', '23 900'],
+      [18, 'ДВ ПВХ', 'ДВ 1Рп О', 'О', 'ПВХ', 'дерево', 'однопольная, распашная, с порогом', 'внутренняя', 'нет', '910×2100', 19900],
+    ]) ws.addRow(r);
+    const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename: 'прайс 475.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') } });
+    expect(add.json().source).toMatchObject({ status: 'indexed', prices: 5 });
+    const list = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=100', headers })).json();
+    expect(list.items.filter((p: { origin: string }) => p.origin === 'price_list').map((p: { model: string; baseSize: string; featureKey: string; sourceRow: number }) => [p.model, p.baseSize, p.featureKey, p.sourceRow])).toEqual([
+      ['ДВ CPL', '1010×2100', 'block|wood|solid|cpl|*', 5],
+      ['ДВ CPL', '910×2100', 'block|wood|solid|cpl|*', 5],
+      ['ДВ ПВХ', '910×2100', 'block|wood|glazed|pvc|*', 6],
+      ['ДПГ сота', '800×2000', 'leaf|wood|solid|laminate|*', 3],
+      ['ДПО сота', '800×2000', 'leaf|wood|glazed|laminate|*', 4],
+    ]);
+    // «Собрать заново» → «Найти цены»: три позиции письма (как в сделке #30022107), модель разбора называет признаки явно.
+    const features = { type: 'block', material: 'wood', glazing: 'solid', leaves: 1, threshold: 'without', opening: 'swing', coating: 'cpl', fire: null, closer: true, lock: true };
+    letter.request_items = [
+      { raw: `${LETTER} 1010×2100 — 1 шт`, name: LETTER, width_mm: 1010, height_mm: 2100, qty: 1, features } as (typeof letter.request_items)[number],
+      { raw: `${LETTER} 910×2100 — 2 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 2, features } as (typeof letter.request_items)[number],
+      { raw: `${LETTER} 910×2100 — 1 шт`, name: LETTER, width_mm: 910, height_mm: 2100, qty: 1 },
+    ];
+    await ctx.app.inject({ method: 'PUT', url: '/widget/v1/kp/settings', headers, payload: { constants: { webSearchDailyUsd: 5 } } });
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d0.items).toHaveLength(3);
+    const before = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
+    expect(g.searches()).toBe(before);
+    const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d.items.map((l: { price: number; priceSource: string; priceLabel: string }) => [l.price, l.priceSource, l.priceLabel])).toEqual([
+      [23900, 'kb', 'по прайсу: ДВ CPL (строка 5)'],
+      [23900, 'kb', 'по прайсу: ДВ CPL (строка 5)'],
+      [23900, 'kb', 'по прайсу: ДВ CPL (строка 5)'],
+    ]);
+    const notes = (d.needsManager as { request_index: number; reason: string }[]).map((n) => `${n.request_index}: ${n.reason}`);
+    for (const i of [0, 1, 2]) expect(notes).toContain(`${i}: цена из базы: по прайсу: ДВ CPL (строка 5) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, распашной, CPL`);
+    const journal = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items as { summary: string; details: { draftId: number; match?: string; webSearchCalls?: number } }[];
+    const mine = journal.filter((j) => j.details.draftId === d0.id);
+    expect(mine).toHaveLength(3);
+    expect(mine.every((j) => j.summary.includes('веб-поиск не вызывался') && j.details.webSearchCalls === 0 && j.details.match === 'features')).toBe(true);
+    // Ничего не удалено: старые веб-записи на месте, просто не используются.
+    expect((await ctx.deps.kb.prices.byId(ACCOUNT_ID, webA))?.price).toBe(5683);
+    expect((await ctx.deps.kb.prices.byId(ACCOUNT_ID, webB))?.price).toBe(5120);
+    // Заявка «ДПГ + УПД, сота 2000×800» → строка прайса ДПГ 8 800; алюминиевая дверь → в прайсе нет → веб (один вызов).
+    g.web.price = 15_000;
+    letter.request_items = [
+      { raw: 'ДПГ + УПД, сота 2000×800 — 5 шт', name: 'ДПГ + УПД, сота', width_mm: 800, height_mm: 2000, qty: 5 },
+      { raw: 'Дверь алюминиевая остеклённая 800×2000 — 1 шт', name: 'Дверь алюминиевая остеклённая', width_mm: 800, height_mm: 2000, qty: 1 },
+    ];
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const e0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: e0.id } });
+    expect(g.searches()).toBe(before + 1);
+    const e = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(e.items[0]).toMatchObject({ price: 8800, priceSource: 'kb', priceLabel: 'по прайсу: ДПГ сота (строка 3)' });
+    expect(e.items[1]).toMatchObject({ price: 15_000, priceSource: 'research' });
+    expect(e.items[1].priceLabel).toMatch(/^по рынку \(/);
+    // Веб-результат записан с признаками (алюминиевая, остеклённая), а не просто текстом письма.
+    const alu = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=алюмин', headers })).json().items as { origin: string; features: { material: string; glazing: string }; featureKey: string }[];
+    expect(alu.filter((p) => p.origin === 'web')).toMatchObject([{ features: { material: 'aluminium', glazing: 'glazed' }, featureKey: '*|aluminium|glazed|*|*' }]);
+    // Реалистичность: «Дверь CPL белая» — по признакам к строке прайса не подходит (только покрытие), но группа CPL в прайсе есть
+    // (медиана 23 900); веб даёт 8 000 (< 40 %) → цена отброшена, в базу не записана, в журнале kp_price_error.
+    g.web.price = 8000;
+    letter.request_items = [{ raw: 'Дверь CPL белая 800×2000 — 1 шт', name: 'Дверь CPL белая', width_mm: 800, height_mm: 2000, qty: 1 }];
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const f0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: f0.id } });
+    expect(g.searches()).toBe(before + 2);
+    const f = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(f.items[0]).toMatchObject({ price: null });
+    expect((f.needsManager as { reason: string }[]).map((n) => n.reason)).toContain('поиск цены: веб-цена 8\u00a0000 ₽ отброшена: вне диапазона прайса (медиана прайса по группе 23\u00a0900 ₽, допустимо 40–300 %); добавьте цену в базу знаний или введите руками');
+    const errors = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_ERROR_KIND}`, headers })).json().items as { summary: string; details: { reason?: string; webMedian?: number; priceListMedian?: number } }[];
+    expect(errors[0]).toMatchObject({ summary: 'Цена не найдена: Дверь CPL белая, 800×2000 мм — веб-цена 8\u00a0000 ₽ отброшена: вне диапазона прайса (медиана по группе 23\u00a0900 ₽)', details: { reason: 'web_price_unrealistic', webMedian: 8000, priceListMedian: 23900 } });
+    expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=белая', headers })).json().items).toEqual([]);
   });
 
   it('приёмка #30022107: прайс с «ДВ CPL», «Сокращение в названии», «Назначение/Конструкция» и двумя размерами в ячейке → три позиции по 23 900 ₽ «по базе: прайс», веб-вызовов 0; второй прайс заменяет первый', async () => {
@@ -235,13 +327,12 @@ describe('база знаний опта: цены и синонимы → по�
     expect(g.searches()).toBe(before);
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(d.items.map((l: { price: number; priceSource: string; priceLabel: string }) => [l.price, l.priceSource, l.priceLabel])).toEqual([
-      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
-      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
-      [23900, 'kb', 'по базе: прайс ДВ.xlsx (' + new Date().toLocaleDateString('ru-RU') + ')'],
+      [23900, 'kb', 'по прайсу: Дверь внутренняя CPL (строка 3)'],
+      [23900, 'kb', 'по прайсу: Дверь внутренняя CPL (строка 3)'],
+      [23900, 'kb', 'по прайсу: Дверь внутренняя CPL (строка 3)'],
     ]);
     const notes = (d.needsManager as { request_index: number; reason: string }[]).map((n) => `${n.request_index}: ${n.reason}`);
-    expect(notes).toContain('0: цена из базы: найдено по прайсу: Дверь внутренняя CPL (строка 3), по назначению');
-    expect(notes.some((n) => /^2: цена из базы: найдено по прайсу: Дверь внутренняя CPL \(строка 3\), совпадение \d+ %$/.test(n))).toBe(true);
+    for (const i of [0, 1, 2]) expect(notes).toContain(`${i}: цена из базы: по прайсу: Дверь внутренняя CPL (строка 3) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, CPL`);
     // Новый прайс заменяет прежний: загружаем файл с другой ценой — в базе только он.
     const wb2 = new ExcelJS.Workbook();
     const ws2 = wb2.addWorksheet('Прайс');

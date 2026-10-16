@@ -4,6 +4,7 @@ export * from './embeddings.ts';
 export * from './env.ts';
 export * from './export.ts';
 export * from './extract.ts';
+export * from './features.ts';
 export * from './fetch-url.ts';
 export * from './html.ts';
 export * from './migrations.ts';

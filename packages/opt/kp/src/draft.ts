@@ -3,6 +3,7 @@ import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
+import { featuresFromModel, type DoorFeatures } from '@opt/kb';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -20,6 +21,8 @@ export interface KpRequestItem {
   qty: number;
   /** service — работы (врезка, монтаж, доставка): без размера, без поиска цен, в блоке после товаров (XLSX-2, п. 3). */
   kind?: 'product' | 'service';
+  /** Признаки двери, названные в письме явно (KB-MATCH): дополняют извлечённые кодом из текста позиции при подборе по прайсу. */
+  features?: Partial<DoorFeatures> | null;
 }
 
 /** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
@@ -188,7 +191,8 @@ const BLOCKS = ['price', 'certificates', 'specs', 'dims_weight', 'vat', 'deliver
 const PROMPT = `Вы разбираете входящее письмо с запросом коммерческого предложения в магазин дверей.
 Верните ТОЛЬКО JSON, без пояснений и без Markdown, по схеме:
 {"client":{"org":"","fio":"","email":"","phone":""},
- "request_items":[{"raw":"","name":"","width_mm":null,"height_mm":null,"qty":1}],
+ "request_items":[{"raw":"","name":"","width_mm":null,"height_mm":null,"qty":1,
+   "features":{"type":null,"material":null,"glazing":null,"leaves":null,"threshold":null,"opening":null,"coating":null,"fire":null,"closer":null,"lock":null}}],
  "required_blocks":[],
  "questions":[]}
 
@@ -197,6 +201,11 @@ const PROMPT = `Вы разбираете входящее письмо с за�
 - name — что просят, своими словами клиента, без выдуманных моделей и артикулов.
 - Размеры в миллиметрах: 2100*900 — это height_mm 2100, width_mm 900. Размера нет — null.
 - qty — целое число, по умолчанию 1.
+- features — признаки двери, только те, что в письме названы прямо (иначе null): type — "block" (дверной блок) или "leaf" (полотно);
+  material — "wood", "steel", "aluminium", "plastic"; glazing — "solid" (глухая) или "glazed" (остеклённая); leaves — 1 или 2;
+  threshold — "with" или "without" (без порога); opening — "swing" (распашная) или "sliding"; coating — "cpl", "pvc", "enamel",
+  "veneer", "ecoveneer", "laminate", "hpl", "melamine"; fire — "EI30", "EI60", "EI90" или "yes" (противопожарная без предела);
+  closer — true, если упомянут доводчик; lock — true, если упомянут замок.
 - Цены, артикулы, названия моделей и сроки НЕ указывать.
 - required_blocks — только из списка: ${BLOCKS.join(', ')}.
 - questions — чего не хватает, чтобы посчитать.
@@ -511,7 +520,8 @@ export function parseDraft(text: string): ParsedDraft {
     request_items: arr(raw.request_items)
       .map((x) => {
         const o = x as Record<string, unknown>;
-        return { raw: str(o.raw).slice(0, 500), name: str(o.name).slice(0, 300), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)) };
+        const features = featuresFromModel(o.features);
+        return { raw: str(o.raw).slice(0, 500), name: str(o.name).slice(0, 300), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), ...(features ? { features } : {}) };
       })
       .filter((x) => x.raw || x.name)
       .slice(0, 50),

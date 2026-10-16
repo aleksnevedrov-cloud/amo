@@ -1,5 +1,6 @@
 import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
+import { describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
 /** Куда писать: пул или клиент транзакции. */
@@ -65,6 +66,9 @@ export interface KbPrice {
   altKeys: string[];
   searchTokens: string[];
   sourceRow: number | null;
+  /** Признаки двери (KB-MATCH): из колонок прайса или текста; ключ группы по обязательным признакам. */
+  features: DoorFeatures | null;
+  featureKey: string | null;
 }
 
 export interface NewKbPrice {
@@ -87,6 +91,8 @@ export interface NewKbPrice {
   abbr?: string | null;
   description?: string | null;
   sourceRow?: number | null;
+  /** Явные признаки (из колонок прайса или разбора письма); из текста модели/сокращения/назначения извлекаются всегда. */
+  features?: Partial<DoorFeatures> | null;
 }
 
 export interface KbAlias {
@@ -119,10 +125,12 @@ export class KbPricesRepo {
     // Ключи сокращения и назначения — дополнительные точные ключи подбора; слова — для подбора по словам (г).
     const altKeys = [...new Set([abbr, description].map((t) => (t ? modelKeyOf(t) : '')).filter((k) => k && k !== modelKey))];
     const searchTokens = searchTokensOf(p.model, abbr, description);
-    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null];
+    // Признаки (KB-MATCH): из текста модели, сокращения и назначения, явные значения сверху.
+    const features = mergeFeatures(featuresOf([p.model, abbr, description].filter(Boolean).join(' | ')), p.features);
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features)];
     const { rows } = await q.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
        RETURNING id`,
       params,
@@ -130,7 +138,7 @@ export class KbPricesRepo {
     if (rows[0]) return Number(rows[0].id);
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
-               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), updated_at = now()
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
         RETURNING id`,
       params,
@@ -152,6 +160,22 @@ export class KbPricesRepo {
       }
       return { imported, replaced: del.rowCount ?? 0 };
     });
+  }
+
+  /** Все записи происхождения (прайс для подбора по признакам и медианы группы). */
+  async listByOrigin(accountId: number, origin: PriceOrigin): Promise<KbPrice[]> {
+    const { rows } = await this.db.query(`${SELECT} WHERE p.account_id = $1 AND p.origin = $2 ORDER BY p.id`, [accountId, origin]);
+    return rows.map(mapPrice);
+  }
+
+  /** Старые записи без признаков (до KB-MATCH): признаки из текста модели, сокращения и назначения — один раз при старте. */
+  async backfillFeatures(): Promise<number> {
+    const { rows } = await this.db.query<{ id: string; model: string; abbr: string | null; description: string | null }>('SELECT id, model, abbr, description FROM kb_prices WHERE features IS NULL');
+    for (const r of rows) {
+      const f = featuresOf([r.model, r.abbr, r.description].filter(Boolean).join(' | '));
+      await this.db.query('UPDATE kb_prices SET features = $2::jsonb, feature_key = $3 WHERE id = $1', [Number(r.id), JSON.stringify(f), featureKeyOf(f)]);
+    }
+    return rows.length;
   }
 
   /** Сколько цен у каждого источника — для карточки источника («цен 12»). */
@@ -285,6 +309,8 @@ export interface PriceQuery {
   heightMm?: number | null;
   leaves?: number | null;
   thicknessMm?: number | null;
+  /** Признаки позиции от модели разбора письма (KB-MATCH); из текста извлекаются всегда, явные — сверху. */
+  features?: Partial<DoorFeatures> | null;
 }
 
 export interface PriceHit {
@@ -293,9 +319,11 @@ export interface PriceHit {
   price: number;
   /** exact — модель и размер совпали; rules — правила нестандарта; area — пересчёт по площади; base — размер в прайсе не указан. */
   basis: 'exact' | 'rules' | 'area' | 'base';
-  /** Совпадение модели: точное (ключ модели, сокращения или назначения), по синониму, по вхождению слов, по похожести, по общим словам (г). */
-  match: 'exact' | 'alias' | 'tokens' | 'similar' | 'words';
+  /** Совпадение: по признакам (KB-MATCH), точное (ключ модели, сокращения или назначения), по синониму, по вхождению слов, по похожести, по общим словам. */
+  match: 'features' | 'exact' | 'alias' | 'tokens' | 'similar' | 'words';
   similarity: number;
+  /** Подбор по признакам: что совпало и признаки позиции. */
+  features?: { matched: FeatureKey[]; query: DoorFeatures } | null;
   /** Доверие записи; при подборе по словам — снижено пропорционально совпадению. */
   confidence: number;
   /** Срок актуальности вышел — цена ставится с пометкой «цена устарела». */
@@ -378,67 +406,103 @@ function applyLeaves(price: number, rules: NonstandardRules, q: PriceQuery, note
   return price;
 }
 
+/** Признаки строки базы: сохранённые или извлечённые из текста модели, сокращения и назначения (старые записи). */
+export function rowFeatures(row: Pick<KbPrice, 'features' | 'model' | 'abbr' | 'description'>): DoorFeatures {
+  return row.features ?? featuresOf([row.model, row.abbr, row.description].filter(Boolean).join(' | '));
+}
+
+type Candidate = { row: KbPrice; match: PriceHit['match']; similarity: number; words: number; features: FeatureMatch | null };
+
+/** Совпадение строки базы с позицией по ключам модели (как до KB-MATCH): точное, синоним, слова, похожесть, общие слова. */
+function keyMatch(row: KbPrice, key: string, alias: { keys: string[] } | null, itemTokens: Set<string>, qSet: Set<string>, similarity: number): { match: PriceHit['match']; words: number } | null {
+  if (!key) return null;
+  if (row.modelKey === key || row.altKeys.includes(key)) return { match: 'exact', words: 0 };
+  if (alias && alias.keys.some((k) => k === row.modelKey || row.altKeys.includes(k))) return { match: 'alias', words: 0 };
+  const t = tokensOf(row.modelKey);
+  // Все слова модели из базы есть в позиции: «Турин» внутри «Браво Турин белая эмаль». Одно слово — только если это
+  // не цвет/отделка и оно длиннее трёх букв (или артикул с цифрой).
+  const single = t.length === 1 && (/\d/.test(t[0] ?? '') || ((t[0]?.length ?? 0) >= 4 && !FINISH_WORDS.has(t[0] ?? '')));
+  if (t.length && t.every((x) => itemTokens.has(x)) && (t.length >= 2 || single)) return { match: 'tokens', words: 0 };
+  // Обратное вхождение: короткое название позиции («турин») целиком внутри модели базы («браво турин»).
+  const it = [...itemTokens];
+  const significant = it.length === 1 ? /\d/.test(it[0] ?? '') || ((it[0]?.length ?? 0) >= 4 && !FINISH_WORDS.has(it[0] ?? '')) : it.length >= 2;
+  const rowTokens = new Set(t);
+  if (it.length && significant && it.every((x) => rowTokens.has(x))) return { match: 'tokens', words: 0 };
+  if (similarity >= 0.7) return { match: 'similar', words: 0 };
+  // Подбор по словам: доля общих слов подбора (Жаккар) между позицией и записью прайса (модель + сокращение + назначение).
+  const words = wordsScore(qSet, row.searchTokens);
+  return words >= WORDS_MIN ? { match: 'words', words } : null;
+}
+
 /**
- * Подбор цены из базы для позиции: ключ модели (с учётом синонимов) → кандидаты → совпадение модели
- * (точное › синоним › слова › похожесть) → предпочтение точного размера, затем доверие и свежесть.
+ * Подбор цены из базы для позиции (KB-MATCH):
+ *  1. строки прайса по признакам (тип, материал, глухая/остеклённая, створки, порог, открывание, покрытие,
+ *     огнестойкость, доводчик, замок): обязательные не расходятся, совпало не меньше двух;
+ *  2. остальные совпадения по ключам модели (точное, синоним, слова, похожесть, общие слова) для всех происхождений;
+ *     при известных признаках строка с расхождением по обязательному признаку отвергается;
+ *  3. порядок источников: прайс → закупка → правка менеджера → веб: веб-запись никогда не перебивает подходящую
+ *     строку прайса; веб-цены вне 40–300 % медианы прайса по группе признаков отбрасываются;
+ *  4. внутри источника: подходит по признакам › точный ключ или синоним › балл признаков › остальные совпадения
+ *     (слова › похожесть › общие слова) › размер (точный › правила нестандарта › площадь › базовая) › доверие ›
+ *     близость площади › свежесть.
  */
 export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, q: PriceQuery, now = new Date()): Promise<PriceHit | null> {
   const text = `${q.name} ${q.raw ?? ''}`;
   const key = modelKeyOf(q.name) || modelKeyOf(text);
-  if (!key) return null;
-  const alias = await aliases.resolve(accountId, key);
-  const keys = alias ? [key, ...alias.keys] : [key];
-  const queryTokens = searchTokensOf(q.name, q.raw);
-  const found = await prices.candidates(accountId, keys, queryTokens);
-  if (!found.length) return null;
+  const qf = mergeFeatures(featuresOf(text), q.features);
   const size = { widthMm: q.widthMm ?? sizeOf(text)?.widthMm ?? null, heightMm: q.heightMm ?? sizeOf(text)?.heightMm ?? null };
-  const leaves = q.leaves ?? leavesOf(text);
+  const leaves = q.leaves ?? qf.leaves ?? leavesOf(text);
+  const alias = key ? await aliases.resolve(accountId, key) : null;
+  const keys = key ? (alias ? [key, ...alias.keys] : [key]) : [];
+  const queryTokens = searchTokensOf(q.name, q.raw);
+  const found = keys.length ? await prices.candidates(accountId, keys, queryTokens) : [];
+  const priceList = await prices.listByOrigin(accountId, 'price_list');
+  const cands: Candidate[] = [];
+  const seen = new Set<number>();
   const itemTokens = new Set(tokensOf(key));
   const qSet = new Set(queryTokens);
-  const scored = found
-    .map(({ row, similarity }) => {
-      let match: PriceHit['match'] | null = null;
-      let words = 0;
-      if (row.modelKey === key || row.altKeys.includes(key)) match = 'exact';
-      else if (alias && alias.keys.some((k) => k === row.modelKey || row.altKeys.includes(k))) match = 'alias';
-      else {
-        const t = tokensOf(row.modelKey);
-        // Все слова модели из базы есть в позиции: «Турин» внутри «Браво Турин белая эмаль». Одно слово — только если это
-        // не цвет/отделка и оно длиннее трёх букв (или артикул с цифрой).
-        const single = t.length === 1 && (/\d/.test(t[0] ?? '') || ((t[0]?.length ?? 0) >= 4 && !FINISH_WORDS.has(t[0] ?? '')));
-        if (t.length && t.every((x) => itemTokens.has(x)) && (t.length >= 2 || single)) match = 'tokens';
-        else {
-          // Обратное вхождение: короткое название позиции («турин») целиком внутри модели базы («браво турин»).
-          const it = [...itemTokens];
-          const significant = it.length === 1 ? /\d/.test(it[0] ?? '') || ((it[0]?.length ?? 0) >= 4 && !FINISH_WORDS.has(it[0] ?? '')) : it.length >= 2;
-          const rowTokens = new Set(t);
-          if (it.length && significant && it.every((x) => rowTokens.has(x))) match = 'tokens';
-          else if (similarity >= 0.7) match = 'similar';
-          else {
-            // Подбор по словам (г): доля общих слов подбора (Жаккар) между позицией и записью прайса (модель + сокращение + назначение).
-            words = wordsScore(qSet, row.searchTokens);
-            if (words >= WORDS_MIN) match = 'words';
-          }
-        }
-      }
-      return match ? { row, similarity, match, words } : null;
-    })
-    .filter((x): x is { row: KbPrice; similarity: number; match: PriceHit['match']; words: number } => x !== null);
-  if (!scored.length) return null;
-  // Среди совпавших по модели: точный размер › правила нестандарта › пересчёт по площади › базовая цена; затем происхождение
-  // (прайс › закупка › правка менеджера › веб, KB-PRICELIST д: веб-цена не перебивает строку прайса, подходящую по модели и размеру),
-  // доверие, близость площади, свежесть.
-  const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4 };
+  const byId = new Map(found.map((f) => [f.row.id, f]));
+  // Строки прайса: совпадение по признакам; если строка нашлась и по ключу модели — ключ остаётся видом совпадения,
+  // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
+  if (hasFeatures(qf)) {
+    for (const row of priceList) {
+      const fm = matchFeatures(qf, rowFeatures(row));
+      if (!fm.ok) continue;
+      const f = byId.get(row.id);
+      const m = f ? keyMatch(row, key, alias, itemTokens, qSet, f.similarity) : null;
+      cands.push({ row, match: m?.match ?? 'features', similarity: f?.similarity ?? 0, words: m?.words ?? 0, features: fm });
+      seen.add(row.id);
+    }
+  }
+  for (const { row, similarity } of found) {
+    if (seen.has(row.id)) continue;
+    const m = keyMatch(row, key, alias, itemTokens, qSet, similarity);
+    if (!m) continue;
+    const rf = rowFeatures(row);
+    if (hasFeatures(qf) && hasFeatures(rf) && matchFeatures(qf, rf).conflict) continue;
+    cands.push({ row, match: m.match, similarity, words: m.words, features: null });
+    seen.add(row.id);
+  }
+  if (!cands.length) return null;
+  // Порядок источников; веб-цены сверяются с медианой прайса по группе признаков позиции.
+  const median = priceListMedian(priceList, featureKeyOf(qf));
+  const realistic = (c: Candidate) => c.row.origin !== 'web' || webPriceRealistic(c.row.price, median);
+  const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => cands.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
+  if (!group) return null;
+  const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4, features: 5 };
   const BASIS_RANK: Record<PriceHit['basis'], number> = { exact: 0, rules: 1, area: 2, base: 3 };
   const area = size.widthMm && size.heightMm ? size.widthMm * size.heightMm : null;
   const closeness = (r: KbPrice) => (area && r.widthMm && r.heightMm ? Math.abs(Math.log((r.widthMm * r.heightMm) / area)) : 1);
-  const ranked = scored
+  const strongKey = (c: Candidate) => (c.match === 'exact' || c.match === 'alias' ? 0 : 1);
+  const ranked = group
     .map((c) => ({ ...c, applied: applyRules(c.row, { ...q, ...size, leaves }) }))
     .sort(
       (a, b) =>
+        Number(Boolean(b.features)) - Number(Boolean(a.features)) ||
+        strongKey(a) - strongKey(b) ||
+        (b.features?.score ?? 0) - (a.features?.score ?? 0) ||
         MATCH_RANK[a.match] - MATCH_RANK[b.match] ||
         BASIS_RANK[a.applied.basis] - BASIS_RANK[b.applied.basis] ||
-        ORIGIN_RANK[a.row.origin] - ORIGIN_RANK[b.row.origin] ||
         b.words - a.words ||
         b.row.confidence - a.row.confidence ||
         closeness(a.row) - closeness(b.row) ||
@@ -450,13 +514,20 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const stale = now.getTime() - best.row.validAt.getTime() > validityDays * 86_400_000;
   const notes = [...applied.notes];
   const where = best.row.sourceRow ? ` (строка ${best.row.sourceRow})` : '';
-  if (best.match === 'exact' && best.row.modelKey !== key) notes.push(`найдено по прайсу: ${best.row.model}${where}, по ${best.row.altKeys.includes(modelKeyOf(best.row.abbr ?? '')) && modelKeyOf(best.row.abbr ?? '') === key ? 'сокращению' : 'назначению'}`);
-  if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
-  if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
-  if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
+  let label = priceLabelOf(best.row);
+  if (best.features) {
+    // Строка прайса подошла по признакам: подпись «по прайсу: ДВ CPL (строка 17)» и пометка, что именно совпало.
+    label = `по прайсу: ${best.row.model}${where}`;
+    notes.push(`по прайсу: ${best.row.model}${where} — совпали: ${describeFeatures(qf, best.features.matched)}`);
+  } else {
+    if (best.match === 'exact' && best.row.modelKey !== key) notes.push(`найдено по прайсу: ${best.row.model}${where}, по ${modelKeyOf(best.row.abbr ?? '') === key ? 'сокращению' : 'назначению'}`);
+    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
+    if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
+    if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
+  }
   if (stale) notes.push(`цена устарела: актуальна на ${best.row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
   const confidence = best.match === 'words' ? Math.round(best.row.confidence * best.words) : best.row.confidence;
-  return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label: priceLabelOf(best.row) };
+  return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null };
 }
 
 /** Приоритет происхождения при равном совпадении модели и размера (KB-PRICELIST, д). */
@@ -538,6 +609,8 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     altKeys: Array.isArray(r.alt_keys) ? (r.alt_keys as string[]) : [],
     searchTokens: Array.isArray(r.search_tokens) ? (r.search_tokens as string[]) : [],
     sourceRow: r.source_row === null || r.source_row === undefined ? null : Number(r.source_row),
+    features: (r.features ?? null) as DoorFeatures | null,
+    featureKey: (r.feature_key ?? null) as string | null,
   };
 }
 

@@ -6,7 +6,7 @@ import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
 
 const ACCOUNT = 555;
-const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, ...over });
+const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, ...over });
 
 describe('ключ модели и правила нестандарта', () => {
   it('ключ без размера, количества и общих слов; размер и створки из текста', () => {
@@ -89,16 +89,17 @@ describe('kb_prices и kb_aliases на БД', () => {
   it('подбор: точный размер › доверие; правила нестандарта; синоним; похожая модель; устаревшая цена; чужой аккаунт', async () => {
     // ДПГ сота 800×2000: прайсовая 3500.
     const exact = await lookupPrice(prices, aliases, ACCOUNT, { name: 'Дверь ДПГ сота 800×2000 мм', widthMm: 800, heightMm: 2000 }, new Date('2026-10-15'));
-    expect(exact).toMatchObject({ price: 3500, basis: 'exact', match: 'exact', stale: false, label: expect.stringContaining('по базе: прайс Текона 01.10.2026.xlsx') });
+    // KB-MATCH: ключ совпал и признаки подошли (полотно, глухое) → подпись «по прайсу: …», пометка о совпавших признаках.
+    expect(exact).toMatchObject({ price: 3500, basis: 'exact', match: 'exact', stale: false, label: 'по прайсу: ДПГ сота', notes: ['по прайсу: ДПГ сота — совпали: полотно, глухой'] });
     // ДПО сота 800×2000: прайс (4100) выше ручной правки менеджера (4050) при том же размере (KB-PRICELIST, д: прайс › менеджер › веб).
-    expect(await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПО сота', widthMm: 800, heightMm: 2000 })).toMatchObject({ price: 4100, label: expect.stringContaining('по базе') });
+    expect(await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПО сота', widthMm: 800, heightMm: 2000 })).toMatchObject({ price: 4100, label: 'по прайсу: ДПО сота', row: { origin: 'price_list' } });
     // Без строки прайса на этот размер и модель — правка менеджера; веб-цена ниже обеих.
     await prices.upsert({ accountId: ACCOUNT, model: 'Тоскана', widthMm: 800, heightMm: 2000, price: 9000, origin: 'web' });
     await prices.upsert({ accountId: ACCOUNT, model: 'Тоскана', widthMm: 800, heightMm: 2000, price: 8700, origin: 'manager', createdBy: 7 });
     expect(await lookupPrice(prices, aliases, ACCOUNT, { name: 'Тоскана', widthMm: 800, heightMm: 2000 })).toMatchObject({ price: 8700, label: 'изменено менеджером' });
     // Нестандарт по высоте: ближайшая запись с правилом (900×2000 с heightPct 15) → 3650 × 1,15; размер в тексте.
     const tall = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПГ сота 900×2300' });
-    expect(tall).toMatchObject({ basis: 'rules', price: 4197.5, notes: ['нестандарт по высоте 2300 мм: +15 %'] });
+    expect(tall).toMatchObject({ basis: 'rules', price: 4197.5, notes: ['нестандарт по высоте 2300 мм: +15 %', 'по прайсу: ДПГ сота — совпали: полотно, глухой'] });
     // Другой размер без правил → площадь.
     const area = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПО сота', widthMm: 600, heightMm: 2000 });
     expect(area?.basis).toBe('area');
@@ -112,7 +113,7 @@ describe('kb_prices и kb_aliases на БД', () => {
     expect(tokens).toMatchObject({ match: 'tokens', price: 8100, notes: [expect.stringContaining('похожая модель в базе: Турин')] });
     // Устарела: прайс 01.10.2026 через 100 дней.
     const old = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 }, new Date('2027-01-20'));
-    expect(old).toMatchObject({ stale: true, validityDays: 90, notes: [expect.stringContaining('цена устарела')] });
+    expect(old).toMatchObject({ stale: true, validityDays: 90, notes: expect.arrayContaining([expect.stringContaining('цена устарела')]) });
     expect(await lookupPrice(prices, aliases, ACCOUNT, { name: 'Добор телескопический 100 мм' })).toBeNull();
     expect(await lookupPrice(prices, aliases, 1, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 })).toBeNull();
     expect(await aliases.remove(ACCOUNT, (await aliases.list(ACCOUNT))[0]!.id)).toBe(true);
@@ -176,17 +177,101 @@ describe('прайс — единый источник цен (RFD-AI-AGENT-OPT-
     ]);
     // Название из письма клиента совпадает с «Назначение/Конструкция» дословно → точное совпадение по дополнительному ключу.
     const byDescription = await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL', widthMm: 1010, heightMm: 2100 }, new Date('2026-10-16'));
-    expect(byDescription).toMatchObject({ price: 23_900, basis: 'exact', match: 'exact', confidence: 70, notes: ['найдено по прайсу: ДВ CPL (строка 17), по назначению'] });
+    expect(byDescription).toMatchObject({ price: 23_900, basis: 'exact', match: 'exact', confidence: 70, label: 'по прайсу: ДВ CPL (строка 17)', notes: ['по прайсу: ДВ CPL (строка 17) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, CPL'] });
     // Другая формулировка — подбор по словам: совпадение ≥ 50 %, доверие снижено, подпись со строкой прайса.
     const byWords = await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный внутренний глухой однопольный CPL без порога 910×2100', widthMm: 910, heightMm: 2100 }, new Date('2026-10-16'));
     expect(byWords).toMatchObject({ price: 23_900, basis: 'exact', match: 'words', row: { model: 'ДВ CPL', widthMm: 910 } });
     expect(byWords?.similarity).toBeGreaterThanOrEqual(0.5);
     expect(byWords?.confidence).toBeLessThan(70);
-    expect(byWords?.notes.at(-1)).toMatch(/^найдено по прайсу: ДВ CPL \(строка 17\), совпадение \d+ %$/);
+    expect(byWords?.notes.at(-1)).toBe('по прайсу: ДВ CPL (строка 17) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, CPL');
     // Мало общих слов — не подбирается.
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок стальной наружный', widthMm: 910, heightMm: 2100 })).toBeNull();
     // Веб-цена на ту же модель и размер не перебивает строку прайса.
     await prices.upsert({ accountId: ACC, model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 21_000, origin: 'web', validAt: new Date('2026-10-15') });
-    expect(await lookupPrice(prices, aliases, ACC, { name: 'ДВ CPL', widthMm: 1010, heightMm: 2100 }, new Date('2026-10-16'))).toMatchObject({ price: 23_900, label: expect.stringContaining('по базе: прайс ДВ.xlsx') });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'ДВ CPL', widthMm: 1010, heightMm: 2100 }, new Date('2026-10-16'))).toMatchObject({ price: 23_900, row: { origin: 'price_list' }, label: 'по прайсу: ДВ CPL (строка 17)' });
+  });
+});
+
+describe('подбор по смыслу: прайс в приоритете, веб не перебивает (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
+  const ACC = 777;
+  let db: Db;
+  let drop: () => Promise<void>;
+  let prices: KbPricesRepo;
+  let aliases: KbAliasesRepo;
+  let repo: KbRepo;
+  beforeAll(async () => {
+    ({ db, drop } = await freshKbDb());
+    prices = new KbPricesRepo(db);
+    aliases = new KbAliasesRepo(db);
+    repo = new KbRepo(db);
+  });
+  afterAll(() => drop());
+
+  const LETTER = 'Дверной блок деревянный внутренний глухой однопольный без порога распашной с доводчиком, внутренним механическим замком, облицовка CPL светлосерый';
+
+  it('строка прайса «ДВ CPL» подбирается по признакам к тексту письма; старые веб-записи «модель = текст письма» не перебивают; признаки хранятся у записи', async () => {
+    // Веб-цены, записанные до KB-MATCH: модель — текст письма как есть, точное совпадение ключа.
+    const webA = await prices.upsert({ accountId: ACC, model: `${LETTER} 1010×2100`, widthMm: 1010, heightMm: 2100, price: 5683, origin: 'web', validAt: new Date('2026-10-15') });
+    const webB = await prices.upsert({ accountId: ACC, model: `${LETTER} 910×2100`, widthMm: 910, heightMm: 2100, price: 5120, origin: 'web', validAt: new Date('2026-10-15') });
+    // У веб-записей признаки извлечены из текста модели (как сделает backfillFeatures для старых строк).
+    expect((await prices.byId(ACC, webA))?.features).toMatchObject({ type: 'block', material: 'wood', glazing: 'solid', coating: 'cpl', closer: true, lock: true });
+    expect((await prices.byId(ACC, webB))?.featureKey).toBe('block|wood|solid|cpl|*');
+    // Без прайса — веб-цена (медианы прайса нет, диапазон не проверяется).
+    expect(await lookupPrice(prices, aliases, ACC, { name: LETTER, widthMm: 1010, heightMm: 2100 }, new Date('2026-10-16'))).toMatchObject({ price: 5683, row: { origin: 'web' } });
+    // Прайс с колонками признаков: «ДВ CPL», строка 17.
+    const src = await repo.createSource({ accountId: ACC, kind: 'file', title: 'прайс ДВ.xlsx', original: 'прайс ДВ.xlsx' });
+    const cpl = { material: 'wood' as const, glazing: 'solid' as const, coating: 'cpl' as const, type: 'block' as const, leaves: 1 as const, threshold: 'without' as const, opening: 'swing' as const };
+    await prices.replacePriceList(ACC, src, [
+      { model: 'ДВ CPL', widthMm: 1010, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', description: 'внутренняя, общественные помещения', sourceRow: 17, validAt: new Date('2026-10-10'), features: cpl },
+      { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', description: 'внутренняя, общественные помещения', sourceRow: 17, validAt: new Date('2026-10-10'), features: cpl },
+      { model: 'ДВ ПВХ', widthMm: 910, heightMm: 2100, price: 19_900, origin: 'price_list', abbr: 'ДВ 1Рп О', sourceRow: 18, validAt: new Date('2026-10-10'), features: { ...cpl, glazing: 'glazed', coating: 'pvc' } },
+      { model: 'ДПГ сота', widthMm: 800, heightMm: 2000, price: 8800, origin: 'price_list', sourceRow: 3, validAt: new Date('2026-10-10') },
+      { model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 9900, origin: 'price_list', sourceRow: 4, validAt: new Date('2026-10-10') },
+    ]);
+    expect((await prices.listByOrigin(ACC, 'price_list')).map((r) => [r.model, r.featureKey])).toEqual([
+      ['ДВ CPL', 'block|wood|solid|cpl|*'],
+      ['ДВ CPL', 'block|wood|solid|cpl|*'],
+      ['ДВ ПВХ', 'block|wood|glazed|pvc|*'],
+      ['ДПГ сота', 'leaf|*|solid|*|*'],
+      ['ДПО сота', 'leaf|*|glazed|*|*'],
+    ]);
+    // Текст письма → «ДВ CPL» по признакам, обе ширины; веб-запись с точным ключом не перебивает.
+    for (const [w, h] of [[1010, 2100], [910, 2100]] as const) {
+      const hit = await lookupPrice(prices, aliases, ACC, { name: LETTER, raw: `${LETTER} ${w}×${h}`, widthMm: w, heightMm: h }, new Date('2026-10-16'));
+      expect(hit).toMatchObject({ price: 23_900, basis: 'exact', match: 'features', confidence: 70, label: 'по прайсу: ДВ CPL (строка 17)', row: { origin: 'price_list', widthMm: w }, features: { matched: ['type', 'material', 'glazing', 'leaves', 'threshold', 'opening', 'coating'] } });
+      expect(hit?.notes).toEqual(['по прайсу: ДВ CPL (строка 17) — совпали: дверной блок, деревянный, глухой, однопольный, без порога, распашной, CPL']);
+    }
+    // Явные признаки от модели разбора письма дополняют текст: «дверь внутренняя» + material/glazing/coating → та же строка.
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверь внутренняя однопольная', widthMm: 910, heightMm: 2100, features: { type: 'block', material: 'wood', glazing: 'solid', coating: 'cpl' } }, new Date('2026-10-16'))).toMatchObject({ price: 23_900, match: 'features', row: { model: 'ДВ CPL' } });
+    // «ДПГ + УПД, сота 2000×800» → ДПГ сота 8 800 (полотно глухое; ДПО отвергнуто по Г/О).
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'ДПГ + УПД, сота 2000×800' }, new Date('2026-10-16'))).toMatchObject({ price: 8800, row: { model: 'ДПГ сота' }, label: 'по прайсу: ДПГ сота (строка 3)', notes: ['по прайсу: ДПГ сота (строка 3) — совпали: полотно, глухой'] });
+    // Алюминиевая дверь: материал расходится со всеми строками прайса, веб-записей нет → null (дальше — веб-поиск).
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверь алюминиевая остеклённая с порогом', widthMm: 900, heightMm: 2100 }, new Date('2026-10-16'))).toBeNull();
+    // Остеклённая с CPL: покрытие совпало, Г/О с «ДВ CPL» расходится, с «ДВ ПВХ» расходится покрытие → null.
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный остеклённый CPL', widthMm: 910, heightMm: 2100 }, new Date('2026-10-16'))).toBeNull();
+  });
+
+  it('веб-цена вне 40–300 % медианы прайса по группе признаков отбрасывается при подборе; правка менеджера выше веб, но ниже прайса', async () => {
+    // Группа «стальная противопожарная EI60» есть в прайсе только одним размером; на другой размер — веб-записи.
+    const src = await repo.createSource({ accountId: ACC, kind: 'file', title: 'прайс ДН.xlsx', original: 'прайс ДН.xlsx' });
+    await prices.replacePriceList(ACC, src, [
+      { model: 'ДПМ EI60', widthMm: 900, heightMm: 2100, price: 40_000, origin: 'price_list', description: 'дверь противопожарная металлическая EI60 глухая', sourceRow: 5, validAt: new Date('2026-10-10') },
+      { model: 'ДПМ EI60 2Рп', widthMm: 1300, heightMm: 2100, price: 60_000, origin: 'price_list', description: 'дверь противопожарная металлическая EI60 глухая двупольная', sourceRow: 6, validAt: new Date('2026-10-10') },
+    ]);
+    await prices.upsert({ accountId: ACC, model: 'Дверь противопожарная металлическая EI60 глухая 1000×2100', widthMm: 1000, heightMm: 2100, price: 7000, origin: 'web', validAt: new Date('2026-10-15') });
+    // Медиана группы steel|solid|EI60 — 50 000; веб 7 000 < 40 % → не кандидат; остаётся прайс по площади.
+    const byPriceList = await lookupPrice(prices, aliases, ACC, { name: 'Дверь противопожарная металлическая EI60 глухая', widthMm: 1000, heightMm: 2100 }, new Date('2026-10-16'));
+    expect(byPriceList).toMatchObject({ row: { origin: 'price_list', model: 'ДПМ EI60' }, basis: 'area' });
+    // Правка менеджера на этот размер: прайс на этот размер есть только по площади, но прайс всё равно выше правки.
+    await prices.upsert({ accountId: ACC, model: 'Дверь противопожарная металлическая EI60 глухая', widthMm: 1000, heightMm: 2100, price: 45_000, origin: 'manager', createdBy: 7 });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверь противопожарная металлическая EI60 глухая', widthMm: 1000, heightMm: 2100 }, new Date('2026-10-16'))).toMatchObject({ row: { origin: 'price_list' } });
+    // Группа, которой в прайсе нет (пластик): веб-запись берётся без проверки диапазона.
+    await prices.upsert({ accountId: ACC, model: 'Дверь пластиковая остеклённая', widthMm: 900, heightMm: 2100, price: 12_000, origin: 'web', validAt: new Date('2026-10-15') });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Дверь пластиковая остеклённая', widthMm: 900, heightMm: 2100 }, new Date('2026-10-16'))).toMatchObject({ price: 12_000, row: { origin: 'web' } });
+    // backfillFeatures: запись без признаков получает их из модели.
+    await db.query('UPDATE kb_prices SET features = NULL, feature_key = NULL WHERE account_id = $1 AND origin = $2', [ACC, 'web']);
+    expect(await prices.backfillFeatures()).toBe(4);
+    expect((await prices.listByOrigin(ACC, 'web')).map((r) => r.featureKey)).toEqual(['block|wood|solid|cpl|*', 'block|wood|solid|cpl|*', '*|steel|solid|*|EI60', '*|plastic|glazed|*|*']);
+    expect(await prices.backfillFeatures()).toBe(0);
   });
 });

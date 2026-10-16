@@ -1,4 +1,5 @@
 import { readKbSheetRows, type KbSheetRow } from './extract.ts';
+import { featuresFromColumns, featuresOf, mergeFeatures, type DoorFeatures } from './features.ts';
 import { sizeOf, sizesOf } from './model-key.ts';
 import type { NonstandardRules, PriceVat } from './prices.ts';
 
@@ -20,6 +21,13 @@ export interface ColumnMapping {
   /** «Сокращение в названии» и «Назначение/Конструкция» — дополнительные ключи подбора (KB-PRICELIST, г). */
   abbr: number | null;
   description: number | null;
+  /** Колонки признаков (KB-MATCH): «Г/О», «Покрытие», «Материал», «Конструкция», «Назначение», «Огнестойкость». */
+  go?: number | null;
+  coating?: number | null;
+  material?: number | null;
+  construction?: number | null;
+  purpose?: number | null;
+  fire?: number | null;
   /** Строка шапки (с 1); строки до неё включительно пропускаются. */
   headerRow: number | null;
 }
@@ -43,6 +51,8 @@ export interface PriceDraft {
   section: string | null;
   abbr: string | null;
   description: string | null;
+  /** Признаки двери из колонок и текста строки (KB-MATCH). */
+  features: DoorFeatures;
 }
 
 export interface PriceListPreview {
@@ -70,6 +80,12 @@ const RX = {
   unit: /^ед|единиц|ед\.\s*изм/i,
   abbr: /сокращ|аббрев|кратк|обознач/i,
   description: /назнач|конструкц|описан|характерист/i,
+  go: /^г\s*\/\s*о$|^г\/о|глух.*остекл|остекл.*глух/i,
+  coating: /покрыт|отделк|облицов/i,
+  material: /материал/i,
+  construction: /конструкц/i,
+  purpose: /назнач/i,
+  fire: /огнест|предел огн|\bei\b/i,
 };
 
 /** НДС по заголовку колонки цены. */
@@ -123,8 +139,16 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
     const size = width >= 0 && height >= 0 ? -1 : find(RX.size, [price, model, width, height, abbr, description]);
     const factory = find(RX.factory, [price, model, width, height, size, abbr, description]);
     const unit = find(RX.unit, [price, model, width, height, size, factory, abbr, description]);
+    const taken = [price, model, width, height, size, factory, unit, abbr, description];
+    const go = find(RX.go, taken);
+    const coating = find(RX.coating, [...taken, go]);
+    const material = find(RX.material, [...taken, go, coating]);
+    const construction = find(RX.construction, [...taken, go, coating, material]);
+    const purpose = find(RX.purpose, [...taken, go, coating, material, construction]);
+    const fire = find(RX.fire, [...taken, go, coating, material, construction, purpose]);
+    const opt = (i: number) => (i >= 0 ? i : null);
     if (price >= 0 && model >= 0) {
-      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, abbr: abbr >= 0 ? abbr : null, description: description >= 0 ? description : null, headerRow: header.row.row }, headerFound: true };
+      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, abbr: abbr >= 0 ? abbr : null, description: description >= 0 ? description : null, go: opt(go), coating: opt(coating), material: opt(material), construction: opt(construction), purpose: opt(purpose), fire: opt(fire), headerRow: header.row.row }, headerFound: true };
     }
   }
   // Без шапки: статистика по колонкам первых 200 строк.
@@ -174,7 +198,11 @@ export function extractPrices(rows: KbSheetRow[], m: ColumnMapping): { drafts: P
     const sizes: ({ widthMm: number; heightMm: number } | null)[] = w && h ? [{ widthMm: Math.min(w, h), heightMm: Math.max(w, h) }] : [];
     if (!sizes.length) sizes.push(...sizesOf(cell(m.size)));
     if (!sizes.length) sizes.push(sizeOf(model));
-    const base = { sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', price, section, abbr: cell(m.abbr) || null, description: cell(m.description) || null };
+    const abbr = cell(m.abbr) || null;
+    const description = cell(m.description) || null;
+    // Признаки: текст модели, сокращения и назначения плюс отдельные колонки признаков (их значения главнее).
+    const features = mergeFeatures(featuresOf([model, abbr, description, cell(m.construction ?? null), cell(m.purpose ?? null)].filter(Boolean).join(' | ')), featuresFromColumns({ go: cell(m.go ?? null), coating: cell(m.coating ?? null), material: cell(m.material ?? null), construction: cell(m.construction ?? null), purpose: cell(m.purpose ?? null), fire: cell(m.fire ?? null) }));
+    const base = { sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', price, section, abbr, description, features };
     for (const size of sizes) drafts.push({ ...base, widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null });
   }
   return { drafts, skipped };
@@ -234,5 +262,6 @@ export function draftsToPrices(drafts: PriceDraft[], d: ImportDefaults = {}) {
     abbr: x.abbr,
     description: x.description,
     sourceRow: x.row,
+    features: x.features,
   }));
 }

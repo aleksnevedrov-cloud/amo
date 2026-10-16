@@ -46,7 +46,9 @@ describe('цены из xlsx-прайса', () => {
     expect(p.columns.map((c) => c.header)).toEqual(['№', 'Наименование', 'Размер, мм', 'Ед.', 'Цена, руб. с НДС']);
     expect(p.total).toBe(3);
     expect(p.skipped).toBe(1);
-    expect(p.sample).toEqual([
+    // KB-MATCH: у каждой строки — признаки, извлечённые из модели (ДПГ → полотно глухое, ДПО → остеклённое, «Турин» — ничего).
+    expect(p.sample.map((x) => x.features)).toMatchObject([{ type: 'leaf', glazing: 'solid' }, { type: 'leaf', glazing: 'glazed' }, { type: null, glazing: null, coating: null }]);
+    expect(p.sample.map(({ features: _f, ...rest }) => rest)).toEqual([
       { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные', abbr: null, description: null },
       { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные', abbr: null, description: null },
       { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон', abbr: null, description: null },

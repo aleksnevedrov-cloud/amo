@@ -52,6 +52,10 @@ describe('черновик: разбор ответа модели и позиц
     expect(p.required_blocks).toEqual(['price']);
     expect(p.questions).toEqual(['Цвет?']);
     expect(parseDraft('не json').request_items).toEqual([]);
+    // KB-MATCH: признаки двери от модели — только названные (словами или кодами), пустые/неизвестные отбрасываются, без признаков поля нет.
+    const f = parseDraft('{"request_items":[{"raw":"Дверной блок деревянный глухой CPL 1010×2100","name":"дверной блок","width_mm":1010,"height_mm":2100,"qty":1,"features":{"type":"block","material":"деревянный","glazing":"solid","leaves":null,"threshold":"без порога","opening":"","coating":"CPL","fire":null,"closer":true,"lock":"нет"}},{"raw":"Добор","name":"добор","qty":2,"features":{"type":null}}]}');
+    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'дверной блок', width_mm: 1010, height_mm: 2100, qty: 1, features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
+    expect(f.request_items[1]).toEqual({ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 });
   });
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
