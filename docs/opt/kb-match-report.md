@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KB-MATCH: подбор цены по смыслу, прайс в приоритете, без ручной чистки
 
-Дата: 16.10.2026. Ветка `claude/opt-kb`, отдельный коммит после 06d538d (KB-PRICES-UI). Только сервер (`@opt/kb`,
+Дата: 16.10.2026. Ветка `claude/opt-kb`, коммит 79a3972 (после 06d538d, KB-PRICES-UI). Только сервер (`@opt/kb`,
 `@opt/kp`, `apps/opt-api`); виджет 1.1.5 не менялся. Розница и ядро не менялись
 (`git diff -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
