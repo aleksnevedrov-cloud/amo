@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KP-LAYOUT: строка КП в три части
 
-Дата: 17.10.2026. Ветка `claude/opt-kb`, отдельный коммит после 85cfcbc (KP-REBUILD-MAIL). Сервер (`@opt/kp`) и виджет 1.1.8.
+Дата: 17.10.2026. Ветка `claude/opt-kb`, коммит 2a8288f (после 85cfcbc, KP-REBUILD-MAIL). Сервер (`@opt/kp`) и виджет 1.1.8.
 Розница и ядро не менялись (`git diff -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 **Файл «Задание-Коду-KP-LAYOUT.md» в сессию не попал** — из пересказа известны только «пять дефектов PDF» и предлагаемый
