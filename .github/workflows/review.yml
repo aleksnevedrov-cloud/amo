@@ -21,7 +21,7 @@ jobs:
         run: |
           files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
           level=low
-          if echo "$files" | grep -Eq '^(packages/(amo/src/(oauth|token-service|salesbot|disposable-token)\.ts|shared/src/(crypto|pii|env)\.ts|db/migrations/|db/src/(tokens|settings)\.ts|agent/src/(factcheck|prompt)\.ts)|apps/api/src/routes/|\.github/|Dockerfile$|docker-compose\.yml$|scripts/check-secrets\.mjs$|package\.json$|pnpm-lock\.yaml$)'; then
+          if echo "$files" | grep -Eq '^(packages/(amo/src/(oauth|token-service|salesbot|disposable-token)\.ts|shared/src/(crypto|pii|env)\.ts|db/migrations/|db/src/(tokens|settings)\.ts|agent/src/(factcheck|prompt)\.ts)|apps/api/src/routes/|\.github/|Dockerfile$|docker-compose\.yml$|scripts/check-secrets\.mjs$|pnpm-lock\.yaml$|(CLAUDE|REVIEW)\.md$)|(^|/)package\.json$'; then
             level=critical
           elif echo "$files" | grep -Eq '^(packages|apps)/.*/src/'; then
             level=medium

@@ -16,5 +16,7 @@
 /Dockerfile @aleksnevedrov-cloud
 /docker-compose.yml @aleksnevedrov-cloud
 /scripts/check-secrets.mjs @aleksnevedrov-cloud
-/package.json @aleksnevedrov-cloud
+package.json @aleksnevedrov-cloud
+/CLAUDE.md @aleksnevedrov-cloud
+/REVIEW.md @aleksnevedrov-cloud
 /pnpm-lock.yaml @aleksnevedrov-cloud
