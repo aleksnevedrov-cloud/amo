@@ -2,8 +2,8 @@ import { access, readFile, stat } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
-import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, templateData } from './build.ts';
-import { kpLineParts, type KpLine, type KpPayload } from './draft.ts';
+import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, SERVICE_NOTE, templateData } from './build.ts';
+import { isServiceLine, kpLineParts, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
 import type { KpDraft, KpRepo } from './repo.ts';
 
@@ -78,8 +78,11 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     throw new KpBuildError('no_template', `шаблон КП: ${describeFsError(err, template)}`);
   }
   const payload = draft.payload as unknown as KpPayload;
-  const lines = (payload.items ?? []).filter((l): l is KpLine & { price: number } => l.price !== null);
-  if (!lines.length) throw new KpBuildError('no_priced_lines', 'ни у одной позиции нет цены');
+  // KB-COMPONENTS, п. 5: работы (монтаж, врезка, доставка) в таблицу и итог не входят — под таблицей фраза о расчёте после замера.
+  const goods = (payload.items ?? []).filter((l) => !isServiceLine(l));
+  const hasServices = (payload.items ?? []).length > goods.length;
+  const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null);
+  if (!lines.length) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');
 
   const kpNo = draft.kpNo ?? (await d.kp.nextNumber(accountId, input.now));
   const letterAt = payload.source?.letterAt ? new Date(payload.source.letterAt) : null;
@@ -94,6 +97,7 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     lines: lines.map((l) => ({ ...kpLineParts(l, payload.request_items?.[l.request_index] ?? null), size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
     vatRate: s.constants.vatRate ?? 0,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
+    serviceNote: hasServices ? SERVICE_NOTE : '',
   });
   const outRel = kpLeadDirRel(accountId, draft.leadId);
   const outDir = resolveKpPath(d.filesRoot, outRel);
@@ -132,8 +136,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (built.layoutFallback ? '; в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием' : '') +
       (built.currencyStripped.length ? `; в шаблоне знак ₽ стоит после ${built.currencyStripped.map((t) => `{{${t}}}`).join(', ')} — из значений убран` : '') +
       (built.pageBreaksRemoved ? `; разрывов страницы после таблицы убрано: ${built.pageBreaksRemoved}` : '') +
+      (hasServices ? `; работ вне таблицы: ${(payload.items ?? []).length - goods.length}${built.serviceNoteFallback ? ' (в шаблоне нет {{service_note}} — фраза под фразой о ценах)' : ''}` : '') +
       `; ${(ms / 1000).toFixed(1)} с`,
-    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, userId: input.userId, ms },
+    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, services: (payload.items ?? []).length - goods.length, serviceNoteFallback: built.serviceNoteFallback, userId: input.userId, ms },
   });
   return { draft: fresh, kpNo, pdf: Boolean(built.pdfPath), pdfError: built.pdfError ?? null, files, certificates: certs, attached, priceNoteFallback: built.priceNoteFallback, ms };
 }

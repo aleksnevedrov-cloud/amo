@@ -1,5 +1,6 @@
 import { readKbSheetRows, type KbSheetRow } from './extract.ts';
 import { featuresFromColumns, featuresOf, mergeFeatures, type DoorFeatures } from './features.ts';
+import { componentColumnKind, type ComponentKind, type PositionCategory } from './category.ts';
 import { sizeOf, sizesOf } from './model-key.ts';
 import type { NonstandardRules, PriceVat } from './prices.ts';
 
@@ -25,6 +26,8 @@ export interface ColumnMapping {
   go?: number | null;
   coating?: number | null;
   equipment?: number | null;
+  /** Колонки цен комплектующих к модели двери (KB-COMPONENTS): «Коробка, руб.», «Наличник», «Добор», «Порог». */
+  components?: Partial<Record<ComponentKind, number>> | null;
   material?: number | null;
   construction?: number | null;
   purpose?: number | null;
@@ -57,6 +60,10 @@ export interface PriceDraft {
   /** Текст колонок «Покрытие» и «Комплектация» (KP-NAME). */
   coating: string | null;
   equipment: string | null;
+  /** KB-COMPONENTS: категория строки; у комплектующего из колонки прайса дверей — вид и модель двери, к которой оно относится. */
+  category: PositionCategory | null;
+  componentKind: ComponentKind | null;
+  doorModel: string | null;
 }
 
 export interface PriceListPreview {
@@ -160,9 +167,15 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
     const purpose = find(RX.purpose, [...taken, go, coating, material, construction]);
     const fire = find(RX.fire, [...taken, go, coating, material, construction, purpose]);
     const equipment = find(RX.equipment, [...taken, go, coating, material, construction, purpose, fire]);
+    // Колонки комплектующих («Коробка, руб.» …) — цены комплектующих к модели двери.
+    const components: Partial<Record<ComponentKind, number>> = {};
+    header.row.cells.forEach((c, i) => {
+      const kind = componentColumnKind(c);
+      if (kind && components[kind] === undefined && i !== price && i !== model) components[kind] = i;
+    });
     const opt = (i: number) => (i >= 0 ? i : null);
     if (price >= 0 && model >= 0) {
-      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, abbr: abbr >= 0 ? abbr : null, description: description >= 0 ? description : null, go: opt(go), coating: opt(coating), material: opt(material), construction: opt(construction), purpose: opt(purpose), fire: opt(fire), equipment: opt(equipment), headerRow: header.row.row }, headerFound: true };
+      return { mapping: { sheet, model, price, size: size >= 0 ? size : null, width: width >= 0 ? width : null, height: height >= 0 ? height : null, factory: factory >= 0 ? factory : null, unit: unit >= 0 ? unit : null, abbr: abbr >= 0 ? abbr : null, description: description >= 0 ? description : null, go: opt(go), coating: opt(coating), material: opt(material), construction: opt(construction), purpose: opt(purpose), fire: opt(fire), equipment: opt(equipment), components: Object.keys(components).length ? components : null, headerRow: header.row.row }, headerFound: true };
     }
   }
   // Без шапки: статистика по колонкам первых 200 строк.
@@ -216,8 +229,18 @@ export function extractPrices(rows: KbSheetRow[], m: ColumnMapping): { drafts: P
     const description = cell(m.description) || null;
     // Признаки: текст модели, сокращения и назначения плюс отдельные колонки признаков (их значения главнее).
     const features = mergeFeatures(featuresOf([model, abbr, description, cell(m.construction ?? null), cell(m.purpose ?? null)].filter(Boolean).join(' | ')), featuresFromColumns({ go: cell(m.go ?? null), coating: cell(m.coating ?? null), material: cell(m.material ?? null), construction: cell(m.construction ?? null), purpose: cell(m.purpose ?? null), fire: cell(m.fire ?? null) }));
-    const base = { sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', price, section, abbr, description, features, coating: cell(m.coating ?? null) || null, equipment: cell(m.equipment ?? null) || null };
+    const coatingText = cell(m.coating ?? null) || null;
+    const base = { sheet: r.sheet, row: r.row, model: model.slice(0, 300), factory: cell(m.factory) || null, unit: cell(m.unit) || 'шт', price, section, abbr, description, features, coating: coatingText, equipment: cell(m.equipment ?? null) || null, category: null, componentKind: null, doorModel: null };
     for (const size of sizes) drafts.push({ ...base, widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null });
+    // Комплектующие к модели (KB-COMPONENTS, п. 3): отдельные строки «Коробка (ДВ CPL)» с покрытием и признаками двери, без размера;
+    // одна строка на модель — повторы по размерам двери схлопываются.
+    for (const [kind, col] of Object.entries(m.components ?? {}) as [ComponentKind, number][]) {
+      const cprice = parsePrice(cell(col));
+      if (cprice === null || cprice <= 0) continue;
+      const cmodel = `${kind.charAt(0).toUpperCase()}${kind.slice(1)} (${model.slice(0, 200)})`;
+      if (drafts.some((d) => d.category === 'component' && d.model === cmodel && d.price === cprice)) continue;
+      drafts.push({ ...base, model: cmodel, price: cprice, widthMm: null, heightMm: null, equipment: null, description: `комплектующее к ${model.slice(0, 200)}`, category: 'component', componentKind: kind, doorModel: model.slice(0, 300) });
+    }
   }
   return { drafts, skipped };
 }
@@ -251,6 +274,8 @@ export async function previewPriceList(bytes: Uint8Array, given: Partial<ColumnM
 const stripUndefined = <T extends object>(o: T): Partial<T> => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
 
 export interface ImportDefaults {
+  /** Категория строк без ключевых слов в названии (KB-COMPONENTS): для прайса фурнитуры — hardware. */
+  category?: PositionCategory | null;
   factory?: string | null;
   validAt?: Date;
   vat?: PriceVat;
@@ -279,5 +304,7 @@ export function draftsToPrices(drafts: PriceDraft[], d: ImportDefaults = {}) {
     features: x.features,
     coating: x.coating,
     equipment: x.equipment,
+    category: x.category ?? d.category ?? null,
+    componentKind: x.componentKind,
   }));
 }

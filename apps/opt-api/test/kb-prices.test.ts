@@ -139,7 +139,7 @@ describe('база знаний опта: цены и синонимы → по�
     expect(d0.items).toHaveLength(5);
     expect(g.searches()).toBe(0);
     const r = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } });
-    expect(r.json()).toEqual({ queued: [0, 1, 2, 3, 4] });
+    expect(r.json()).toMatchObject({ queued: [0, 1, 2, 3, 4] });
     // Веб-поиск — только по «Турин», и только один раз: вторая позиция той же модели — из кэша по модели с пересчётом по площади.
     expect(g.searches()).toBe(1);
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
@@ -335,7 +335,7 @@ describe('база знаний опта: цены и синонимы → по�
     expect(g.searches()).toBe(before + 2);
     const f = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(f.items[0]).toMatchObject({ price: null });
-    expect((f.needsManager as { reason: string }[]).map((n) => n.reason)).toContain('поиск цены: веб-цена 8\u00a0000 ₽ отброшена: вне диапазона прайса (медиана прайса по группе 23\u00a0900 ₽, допустимо 40–300 %); добавьте цену в базу знаний или введите руками');
+    expect((f.needsManager as { reason: string }[]).map((n) => n.reason)).toContain('поиск цены: веб-цена 8\u00a0000 ₽ отброшена: вне диапазона прайса (медиана прайса по группе «двери» 23\u00a0900 ₽, допустимо 40–300 %); добавьте цену в базу знаний или введите руками');
     const errors = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_ERROR_KIND}`, headers })).json().items as { summary: string; details: { reason?: string; webMedian?: number; priceListMedian?: number } }[];
     expect(errors[0]).toMatchObject({ summary: 'Цена не найдена: Дверь CPL белая, 800×2000 мм — веб-цена 8\u00a0000 ₽ отброшена: вне диапазона прайса (медиана по группе 23\u00a0900 ₽)', details: { reason: 'web_price_unrealistic', webMedian: 8000, priceListMedian: 23900 } });
     expect((await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?q=белая', headers })).json().items).toEqual([]);
@@ -479,5 +479,82 @@ describe('база знаний опта: цены и синонимы → по�
     const fresh = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(fresh.id).toBeGreaterThan(before.id);
     expect(fresh.items).toHaveLength(1);
+  });
+
+  it('KB-COMPONENTS: колонки комплектующих → строки комплектующих; прайс фурнитуры; категории позиций; одно нажатие «Найти цены» ставит все позиции без цены порциями по 20; работы без цены, вне таблицы и итога, с фразой под таблицей', async () => {
+    const upload = async (filename: string, rows: unknown[][]) => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Прайс');
+      for (const r of rows) ws.addRow(r);
+      return (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') } })).json().source as { id: number; prices: number; priceTitle: string; priceImport: { updated: boolean; was: number; imported: number } };
+    };
+    // Прайс межкомнатных с колонками комплектующих — тот же ключ, что у прежнего файла межкомнатных: заменяет только его.
+    const inner = await upload('Прайс_межкомнатные_двери_ГОСТ — обновил 17102026.xlsx', [
+      ['Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Материал', 'Размер блока', 'Цена, руб.', 'Коробка, руб.', 'Наличник, руб.', 'Добор, руб.', 'Порог, руб.'],
+      ['ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', 'дерево', '1010×2100; 910×2100', 23_900, 3500, 1200, 900, 700],
+      ['ДПГ сота', 'ДПГ', 'Г', 'ламинат', 'МДФ', '800×2000', 8800, 2100, 600, 500, 400],
+      ['Аква 01 ПГ', 'ПГ', 'Г', 'ПВХ', 'МДФ', '600×2000', 7900, 1900, 550, 450, ''],
+    ]);
+    // 4 двери (ДВ CPL двумя размерами) + 4 + 4 + 3 комплектующих = 15 строк; прайс «Межкомнатные» обновлён (было 54).
+    expect(inner).toMatchObject({ prices: 15, priceTitle: 'Межкомнатные', priceImport: { updated: true, was: 54, imported: 15 } });
+    const hw = await upload('Прайс_фурнитура.xlsx', [['Наименование', 'Артикул/размер', 'Цена'], ['Ручка Palladium Luna', 'A-1', 1450], ['Замок врезной межкомнатный', 'ЗВ-4', 980], ['Петля универсальная', '100×70', 190]]);
+    expect(hw).toMatchObject({ prices: 3, priceTitle: 'Фурнитура' });
+    const kb = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { model: string; origin: string; category: string; componentKind: string | null; price: number }[];
+    const byCat = (c: string) => kb.filter((p) => p.origin === 'price_list' && p.category === c).map((p) => p.model).sort();
+    expect(byCat('door')).toEqual(['Аква 01 ПГ', 'ДВ CPL', 'ДВ CPL', 'ДПГ сота']);
+    expect(byCat('component')).toEqual(['Добор (Аква 01 ПГ)', 'Добор (ДВ CPL)', 'Добор (ДПГ сота)', 'Коробка (Аква 01 ПГ)', 'Коробка (ДВ CPL)', 'Коробка (ДПГ сота)', 'Наличник (Аква 01 ПГ)', 'Наличник (ДВ CPL)', 'Наличник (ДПГ сота)', 'Порог (ДВ CPL)', 'Порог (ДПГ сота)']);
+    expect(byCat('hardware')).toEqual(['Замок врезной межкомнатный', 'Петля универсальная', 'Ручка Palladium Luna']);
+    // Заявка на 36 позиций (больше прежнего лимита 30): 30 дверей, добор, коробка, ручка, замок, дверь «Аква … /врезка замка…», монтаж.
+    const DOOR = 'Дверной блок деревянный внутренний глухой однопольный без порога CPL светло-серый';
+    letter.request_items = [
+      ...Array.from({ length: 30 }, (_, i) => ({ raw: `${DOOR} 910×2100 — 1 шт (поз. ${i + 1})`, name: DOOR, width_mm: 910, height_mm: 2100, qty: 1 })),
+      { raw: 'Добор телескопический, МДФ, 300×2150 — 4 шт', name: 'Добор телескопический, МДФ', width_mm: 300, height_mm: 2150, qty: 4 },
+      { raw: 'Коробка дверная CPL — 2 шт', name: 'Коробка дверная CPL', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Ручка Palladium Luna — 2 шт', name: 'Ручка Palladium Luna', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Замок врезной межкомнатный — 2 шт', name: 'Замок врезной межкомнатный', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Аква 01 ПГ + УПД 600*2000*40 мм окут Белый ПВХ/врезка замка под цилиндр кл/зв/Правая (Дб-9) — 1 шт', name: 'Аква 01 ПГ + УПД окут Белый ПВХ/врезка замка под цилиндр кл/зв/Правая (Дб-9)', width_mm: 600, height_mm: 2000, qty: 1 },
+      { raw: 'Монтаж дверного блока — 36 шт', name: 'Монтаж дверного блока', width_mm: null, height_mm: null, qty: 36 },
+    ] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d0.items).toHaveLength(36);
+    expect(d0.items.map((l: { category: string }) => l.category).filter((c: string) => c !== 'door')).toEqual(['component', 'component', 'hardware', 'hardware', 'service']);
+    expect(d0.items.at(-1)).toMatchObject({ name: 'Монтаж дверного блока', kind: 'service', category: 'service', size: '' });
+    // Одно нажатие: все 35 позиций без цены (кроме работы) поставлены порциями по 20, веб не вызывался.
+    const searches = g.searches();
+    const run = (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } })).json();
+    expect(run).toMatchObject({ total: 35, batches: 2 });
+    expect(run.queued).toHaveLength(35);
+    expect(g.searches()).toBe(searches);
+    const notes = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=note', headers })).json().items as { summary: string }[];
+    expect(notes.some((n) => n.summary === 'Поиск цен: поставлено позиций 35 порциями по 20 (2)')).toBe(true);
+    const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const items = d.items as { name: string; price: number | null; priceLabel: string | null; category: string }[];
+    expect(items.slice(0, 30).every((l) => l.price === 23_900 && l.priceLabel === 'по прайсу: ДВ CPL (строка 2)')).toBe(true);
+    // Добор без указания двери: строка комплектующего своего вида из прайса (не веб), коробка CPL — к ДВ CPL.
+    expect(items[30]).toMatchObject({ category: 'component' });
+    expect(items[30]?.priceLabel).toMatch(/^по прайсу: Добор \(/);
+    expect([500, 900, 450]).toContain(items[30]?.price);
+    expect(items[31]).toMatchObject({ price: 3500, priceLabel: 'по прайсу: Коробка (ДВ CPL) (строка 2)' });
+    expect(items[32]).toMatchObject({ price: 1450, category: 'hardware' });
+    expect(items[33]).toMatchObject({ price: 980, category: 'hardware' });
+    // «Аква … /врезка замка …» — дверь, а не работа: цена из прайса межкомнатных.
+    expect(items[34]).toMatchObject({ price: 7900, category: 'door' });
+    expect(items[34]?.priceLabel).toMatch(/^по базе: Прайс_межкомнатные_двери_ГОСТ/);
+    expect(items[35]).toMatchObject({ price: null, category: 'service' });
+    // Документ собирается без цены у работы; работа вне таблицы и итога; под таблицей фраза о замере.
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
+    const built = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } });
+    expect(built.json()).toMatchObject({ draft: { status: 'built', hasDocx: true } });
+    const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d0.id);
+    const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<w:br\s*\/>/g, '\n').replace(/<[^>]+>/g, '');
+    expect(text).not.toContain('Монтаж дверного блока');
+    expect(text).toContain('41 позиция');
+    const expectedTotal = 30 * 23_900 + (items[30]!.price as number) * 4 + 3500 * 2 + 1450 * 2 + 980 * 2 + 7900;
+    expect(text).toContain(`итого ${expectedTotal.toLocaleString('ru-RU').replace(/\u00a0/g, ' ')} ₽`);
+    expect(text).toContain('Стоимость монтажных работ рассчитывается после замера дверных проёмов.');
+    const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string; details: { services: number } }[];
+    expect(log[0]?.summary).toContain('работ вне таблицы: 1');
+    expect(log[0]?.details.services).toBe(1);
   });
 });

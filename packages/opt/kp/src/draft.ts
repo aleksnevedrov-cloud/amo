@@ -3,7 +3,7 @@ import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
-import { colorOf, featuresFromModel, featuresOf, mergeFeatures, type DoorFeatures } from '@opt/kb';
+import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, type DoorFeatures, type PositionCategory } from '@opt/kb';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -21,6 +21,8 @@ export interface KpRequestItem {
   qty: number;
   /** service — работы (врезка, монтаж, доставка): без размера, без поиска цен, в блоке после товаров (XLSX-2, п. 3). */
   kind?: 'product' | 'service';
+  /** Категория позиции (KB-COMPONENTS): дверь / комплектующее / фурнитура / работы; по тексту названия и строки. */
+  category?: PositionCategory;
   /** Признаки двери, названные в письме явно (KB-MATCH): дополняют извлечённые кодом из текста позиции при подборе по прайсу. */
   features?: Partial<DoorFeatures> | null;
 }
@@ -59,6 +61,8 @@ export interface KpLine {
   coefficient?: number;
   /** Работы и услуги идут после товаров; нет поля — товар. */
   kind?: 'product' | 'service';
+  /** Категория позиции (KB-COMPONENTS); нет поля — дверь. Работы в таблицу КП и итог не входят. */
+  category?: PositionCategory;
   /** Модель и покрытие строки прайса, по которой взята цена («ДВ CPL 0,2 мм») — в наименование КП после названия клиента (KP-NAME, п. 2). */
   priceModel?: string | null;
   /** Комплектация из строки прайса — отдельной строкой под позицией в КП. */
@@ -240,7 +244,9 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
   // Работы и услуги — после товаров (XLSX-2, п. 3), внутри групп порядок как в файле; одинаковые названия не склеиваются (п. 4).
   const fromDocs = files.parsed.flatMap((f) => f.positions).map(positionToRequest);
-  const requestItems = fromDocs.length ? [...fromDocs.filter((it) => it.kind !== 'service'), ...fromDocs.filter((it) => it.kind === 'service')] : (letter?.parsed.request_items ?? []);
+  const fromLetter = letter?.parsed.request_items ?? [];
+  const all = fromDocs.length ? fromDocs : fromLetter;
+  const requestItems = [...all.filter((it) => it.kind !== 'service'), ...all.filter((it) => it.kind === 'service')];
   const items = requestItems.map(toLine);
   const needs = items.map((l) => ({ request_index: l.request_index, reason: NO_PRICE }));
   if (!requestItems.length) {
@@ -531,7 +537,10 @@ export function parseDraft(text: string): ParsedDraft {
         const o = x as Record<string, unknown>;
         const features = featuresFromModel(o.features);
         const raw = tidyName(str(o.raw)).slice(0, 500);
-        return { raw, name: fullItemName(raw, str(o.name)).slice(0, 500), width_mm: num(o.width_mm), height_mm: num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), ...(features ? { features } : {}) };
+        const name = fullItemName(raw, str(o.name)).slice(0, 500);
+        // KB-COMPONENTS: категория по тексту; работы — kind service (без размера и поиска цены).
+        const category = categoryOf(`${name} | ${raw}`);
+        return { raw, name, width_mm: category === 'service' ? null : num(o.width_mm), height_mm: category === 'service' ? null : num(o.height_mm), qty: Math.max(1, Math.round(num(o.qty) ?? 1)), category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(features ? { features } : {}) };
       })
       .filter((x) => x.raw || x.name)
       .slice(0, 50),
@@ -581,6 +590,10 @@ export function fullItemName(raw: string, name: string): string {
   return tidyName(common * 2 >= nameWords.length ? cleaned : name);
 }
 
+/** Категория строки черновика: поле или по тексту (старые черновики без поля). */
+export const lineCategory = (l: Pick<KpLine, 'name' | 'kind' | 'category'>): PositionCategory => l.category ?? (l.kind === 'service' ? 'service' : categoryOf(l.name));
+export const isServiceLine = (l: Pick<KpLine, 'name' | 'kind' | 'category'>): boolean => lineCategory(l) === 'service';
+
 /** Наименование строки в КП одной строкой: название клиента плюс модель и покрытие из прайса (KP-NAME, п. 2). */
 export function kpLineName(l: Pick<KpLine, 'name' | 'priceModel'>): string {
   return l.priceModel ? `${l.name} — по прайсу: ${l.priceModel}` : l.name;
@@ -625,7 +638,8 @@ export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'equipment'>
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */
 export function positionToRequest(p: OptPosition): KpRequestItem {
-  const service = p.kind === 'service';
+  const category = p.kind === 'service' ? 'service' : categoryOf(`${p.name} | ${p.marking ?? ''}`);
+  const service = category === 'service';
   const size = !service && p.width_mm && p.height_mm ? `${p.width_mm}×${p.height_mm}` : '';
   // Дробное количество («24,5» наличников, «2,5» доборов) сохраняется как в файле (XLSX-2): суммы по группам должны сходиться с заявкой.
   const qty = p.qty && p.qty > 0 ? Math.round(p.qty * 100) / 100 : 1;
@@ -635,12 +649,14 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     width_mm: service ? null : p.width_mm,
     height_mm: service ? null : p.height_mm,
     qty,
+    category,
     ...(service ? { kind: 'service' as const } : {}),
   };
 }
 
 function toLine(it: KpRequestItem, i: number): KpLine {
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, ...(it.kind === 'service' ? { kind: 'service' as const } : {}) };
+  const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}) };
 }
 
 /** Размер в строке позиции — ширина × высота (RFD-AI-AGENT-OPT-MAIL-READ-6, п. 3). */

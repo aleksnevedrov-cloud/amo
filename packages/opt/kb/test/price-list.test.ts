@@ -48,7 +48,7 @@ describe('цены из xlsx-прайса', () => {
     expect(p.skipped).toBe(1);
     // KB-MATCH: у каждой строки — признаки, извлечённые из модели (ДПГ → полотно глухое, ДПО → остеклённое, «Турин» — ничего).
     expect(p.sample.map((x) => x.features)).toMatchObject([{ type: 'leaf', glazing: 'solid' }, { type: 'leaf', glazing: 'glazed' }, { type: null, glazing: null, coating: null }]);
-    expect(p.sample.map(({ features: _f, ...rest }) => rest)).toEqual([
+    expect(p.sample.map(({ features: _f, category: _c, componentKind: _k, doorModel: _d, ...rest }) => rest)).toEqual([
       { sheet: 'Прайс', row: 5, model: 'ДПГ сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 3450, section: 'Ламинированные', abbr: null, description: null, coating: null, equipment: null },
       { sheet: 'Прайс', row: 6, model: 'ДПО сота', factory: null, unit: 'шт', widthMm: 800, heightMm: 2000, price: 4100, section: 'Ламинированные', abbr: null, description: null, coating: null, equipment: null },
       { sheet: 'Прайс', row: 9, model: 'Турин', factory: null, unit: 'шт', widthMm: 700, heightMm: 2000, price: 7900, section: 'Экошпон', abbr: null, description: null, coating: null, equipment: null },
@@ -121,13 +121,32 @@ describe('цены из xlsx-прайса', () => {
     // Комплектующие раньше цены двери.
     const before = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Размер блока', 'Коробка, руб.', 'Наличник, руб.', 'Добор, руб.', 'Порог, руб.', 'Цена, руб.'], [...row, 3500, 1200, 900, 700, 23900]] }));
     expect(before.mapping).toMatchObject({ model: 0, abbr: 1, go: 2, coating: 3, size: 4, price: 9 });
-    expect(before.sample.map((x) => [x.model, x.widthMm, x.price, x.features.glazing, x.features.coating, x.features.threshold])).toEqual([['ДВ CPL', 910, 23900, 'solid', 'cpl', 'without']]);
+    expect(before.sample.slice(0, 1).map((x) => [x.model, x.widthMm, x.price, x.features.glazing, x.features.coating, x.features.threshold])).toEqual([['ДВ CPL', 910, 23900, 'solid', 'cpl', 'without']]);
     // Комплектующие после цены двери; «Стоимость с НДС» вместо «Цена».
     const after = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Размер блока', 'Стоимость с НДС', 'Коробка', 'Наличник', 'Добор', 'Порог'], ['ДПГ сота', '800×2000', 8800, 2100, 600, 500, 400]] }));
     expect(after.mapping).toMatchObject({ model: 0, size: 1, price: 2 });
     expect(after.vatHint).toBe('included');
-    expect(after.sample.map((x) => [x.model, x.price, x.features.threshold])).toEqual([['ДПГ сота', 8800, null]]);
-    // Колонки комплектующих ни во что не попадают: ни в цену, ни в признаки, ни в модель.
-    expect(Object.values(after.mapping).filter((v) => typeof v === 'number')).not.toContain(6);
+    expect(after.sample.map((x) => [x.model, x.price, x.features.threshold])).toEqual([['ДПГ сота', 8800, null], ['Коробка (ДПГ сота)', 2100, null], ['Наличник (ДПГ сота)', 600, null], ['Добор (ДПГ сота)', 500, null], ['Порог (ДПГ сота)', 400, null]]);
+    // Колонки комплектующих ни во что не попадают: ни в цену, ни в признаки, ни в модель двери…
+    expect([after.mapping.model, after.mapping.size, after.mapping.price, after.mapping.go, after.mapping.coating, after.mapping.material, after.mapping.fire, after.mapping.equipment]).not.toContain(6);
+    // …а становятся отдельными строками комплектующих к модели (KB-COMPONENTS, п. 3): без размера, с покрытием и признаками двери.
+    expect(before.mapping.components).toEqual({ коробка: 5, наличник: 6, добор: 7, порог: 8 });
+    expect(before.total).toBe(5);
+    expect(before.sample.slice(1).map((x) => [x.model, x.price, x.category, x.componentKind, x.doorModel, x.widthMm, x.coating, x.features.coating, x.description])).toEqual([
+      ['Коробка (ДВ CPL)', 3500, 'component', 'коробка', 'ДВ CPL', null, 'CPL 0,2 мм', 'cpl', 'комплектующее к ДВ CPL'],
+      ['Наличник (ДВ CPL)', 1200, 'component', 'наличник', 'ДВ CPL', null, 'CPL 0,2 мм', 'cpl', 'комплектующее к ДВ CPL'],
+      ['Добор (ДВ CPL)', 900, 'component', 'добор', 'ДВ CPL', null, 'CPL 0,2 мм', 'cpl', 'комплектующее к ДВ CPL'],
+      ['Порог (ДВ CPL)', 700, 'component', 'порог', 'ДВ CPL', null, 'CPL 0,2 мм', 'cpl', 'комплектующее к ДВ CPL'],
+    ]);
+    expect(before.sample[0]).toMatchObject({ category: null, componentKind: null });
+    // Два размера одной двери — комплектующие не дублируются; пустая ячейка комплектующего строки не даёт.
+    const two = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Размер блока', 'Цена', 'Коробка', 'Добор'], ['ДВ CPL', '1010×2100; 910×2100', 23900, 3500, ''], ['ДВ ПВХ', '910×2100', 19900, 3100, 850]] }));
+    expect(two.sample.map((x) => [x.model, x.price])).toEqual([['ДВ CPL', 23900], ['ДВ CPL', 23900], ['Коробка (ДВ CPL)', 3500], ['ДВ ПВХ', 19900], ['Коробка (ДВ ПВХ)', 3100], ['Добор (ДВ ПВХ)', 850]]);
+    // В базу: категория из строки, у дверей — по умолчанию файла; прайс фурнитуры — hardware для строк без ключевых слов.
+    const rows = draftsToPrices(two.sample, { category: 'door' });
+    expect(rows.map((r) => [r.model, r.category, r.componentKind])).toEqual([['ДВ CPL', 'door', null], ['ДВ CPL', 'door', null], ['Коробка (ДВ CPL)', 'component', 'коробка'], ['ДВ ПВХ', 'door', null], ['Коробка (ДВ ПВХ)', 'component', 'коробка'], ['Добор (ДВ ПВХ)', 'component', 'добор']]);
+    const hw = await previewPriceList(await xlsx({ Прайс: [['Наименование', 'Артикул/размер', 'Цена'], ['Ручка Palladium Luna', 'A-1 / 140 мм', 1450], ['Palladium Cosmo', 'A-7', 1650], ['Петля универсальная', '100×70', 190]] }));
+    expect(hw.mapping).toMatchObject({ model: 0, size: 1, price: 2 });
+    expect(draftsToPrices(hw.sample, { category: 'hardware' }).map((r) => [r.model, r.category, r.widthMm])).toEqual([['Ручка Palladium Luna', 'hardware', null], ['Palladium Cosmo', 'hardware', null], ['Петля универсальная', 'hardware', null]]);
   });
 });

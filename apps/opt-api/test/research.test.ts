@@ -78,7 +78,7 @@ describe('поиск цен из черновика: кнопка «Найти �
   it('POST «по всем»: 202 с позициями без цены; цена предложения записана с коэффициентом производителя, пометки заменили «цена не задана», журнал со стоимостью', async () => {
     const r = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } });
     expect(r.statusCode).toBe(202);
-    expect(r.json()).toEqual({ queued: [0, 1] });
+    expect(r.json()).toMatchObject({ queued: [0, 1], total: 2, batches: 1 });
     expect(g.searches()).toBe(2);
     const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     // Медиана четырёх (80 000 без указания НДС принято как конечная цена, 5.1) = 85 000 × коэффициент производителя 0,9 = 76 500,00.
@@ -104,8 +104,8 @@ describe('поиск цен из черновика: кнопка «Найти �
   });
 
   it('повтор «по всем» ничего не ставит (у всех цена); явная позиция берётся из кэша без вызовов; force ищет заново', async () => {
-    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toEqual({ queued: [], reason: 'у всех позиций уже есть цена' });
-    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } })).json()).toEqual({ queued: [0] });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toMatchObject({ queued: [], reason: 'у всех позиций уже есть цена' });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } })).json()).toMatchObject({ queued: [0] });
     expect(g.searches()).toBe(2);
     // Результат первого поиска уже в базе знаний (доверие 40): явная позиция берётся оттуда, веб-поиск не вызывается.
     const cached = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items[0];
@@ -122,7 +122,7 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect(saved.items[0]).toMatchObject({ price: 70_000, priceSource: 'manager', market: { median: 85_000 } });
     expect(saved.items[1].priceSource).toBe('research');
     // «По всем» — позицию с ценой не трогает вовсе.
-    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toEqual({ queued: [], reason: 'у всех позиций уже есть цена' });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId } })).json()).toMatchObject({ queued: [], reason: 'у всех позиций уже есть цена' });
     // Явный список — это «Заменить». Ручная цена уже легла в базу знаний (доверие 90, RFD-AI-AGENT-OPT-KB): без force
     // она возвращается из базы с подписью «изменено менеджером»; «искать заново» (force) идёт мимо базы — цена поиска.
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [0] } });

@@ -227,7 +227,13 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await flush();
     expect(JSON.parse(posts[0]!)).toEqual({ draftId: 7, requestIndexes: 'all', force: false });
     expect(text()).toContain('идёт поиск цены…');
-    expect(button('Ищу цены…')?.disabled).toBe(true);
+    // KB-COMPONENTS, п. 6: на кнопке прогресс «обработано / поставлено».
+    const searching = [...document.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Ищу цены…'));
+    expect(searching?.disabled).toBe(true);
+    expect(searching?.textContent).toBe('Ищу цены… 0 / 1');
+    // Работа: пометка «по замеру», поле цены с подсказкой «по замеру», без кнопки поиска.
+    expect(document.querySelector('.opt-kp-tile-service .opt-kp-service-note')?.textContent).toContain('работы — по замеру');
+    expect((document.querySelector('.opt-kp-tile-service input[placeholder="по замеру"]') as HTMLInputElement | null)?.value).toBe('');
     // Воркер закончил: цена легла в черновик, следующий опрос приносит результат и перечитывает черновик.
     stage = 'done';
     current = { ...current, items: [{ ...current.items[0]!, price: 108_900, priceSource: 'analog', coefficient: 1, market: { median: 108_900, min: 107_800, max: 110_000, count: 2, unit: 'piece', researchId: 9, researchedAt: '2026-10-14T08:06:00Z' } }], needsManager: [{ request_index: 0, reason: 'ограничение расчёта: 2 источника' }, { request_index: 0, reason: 'аналог, пересчёт по площади с 1000×2700' }] } as unknown as typeof current;
@@ -239,6 +245,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect((document.querySelector('input[placeholder="Нет цены"]') as HTMLInputElement).value).toBe('108900');
     expect(text()).toContain('Цена · по аналогу');
     expect(text()).not.toContain('Винчелли');
+    // Работа без цены не мешает сборке и не входит в итог (108 900 × 2 шт).
+    expect(button('Собрать документ')?.disabled).toBe(false);
+    expect(text().replace(/\u00a0/g, ' ')).toContain('Итого1 197 900 ₽');
     await click('найдено 2 источника · 14.10.2026 11:06 · Источники ›');
     expect(text().replace(/\u00a0/g, ' ')).toContain('Диапазон 107 800 ₽ – 110 000 ₽, медиана 108 900 ₽ за шт');
     const rows = [...document.querySelectorAll('.opt-kp-offer')].map((el) => [el.classList.contains('opt-muted'), el.textContent?.replace(/\u00a0/g, ' ')]);

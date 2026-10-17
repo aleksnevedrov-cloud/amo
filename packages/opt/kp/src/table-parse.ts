@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { detectCategory } from '@opt/kb';
 import type { WidgetSettings } from '@core/db';
 import { analyzeDocument, cleanPersonalData, type DocumentData, type Position } from '@core/docs';
 import { costOfUsage, LlmError, LlmUnavailableError, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
@@ -29,7 +30,7 @@ export type OptPosition = Position & { kind?: 'product' | 'service' };
 export type OptDocumentData = Omit<DocumentData, 'positions'> & { positions: OptPosition[] };
 
 /** Строка-работа по первому слову (RFD-AI-AGENT-OPT-XLSX-2, п. 3). */
-export const isService = (name: string): boolean => /^\s*(врезка|монтаж|демонтаж|установка|разгрузка|погрузка|доставка|подъ[её]м|сборка)(?![а-яё])/i.test(name);
+export const isService = (name: string): boolean => /^\s*(врезка|монтаж|демонтаж|установка|разгрузка|погрузка|доставка|подъ[её]м|сборка)(?![а-яё])/i.test(name) || detectCategory(name) === 'service';
 
 /**
  * Размер из названия (п. 2): «850*2020*40 мм» → 850×2020, толщина 40 в примечание; «300*10*2150 мм» → ширина 300,

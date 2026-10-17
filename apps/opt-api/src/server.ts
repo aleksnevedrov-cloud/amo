@@ -19,6 +19,9 @@ if (backfilled) app.log.info({ rows: backfilled }, 'kb_prices: признаки 
 // KB-MULTIPRICE: у прайсов, загруженных до миграции 007, ключ прайса — из имени файла (один раз).
 const keyed = await deps.kb.repo.backfillPriceKeys(priceListKeyOf);
 if (keyed) app.log.info({ rows: keyed }, 'kb_sources: ключи прайсов заполнены у старых файлов');
+// KB-COMPONENTS: категория записей (дверь / комплектующее / фурнитура / работы) по тексту модели у записей до миграции 008.
+const categorized = await deps.kb.prices.backfillCategories();
+if (categorized) app.log.info({ rows: categorized }, 'kb_prices: категории уточнены у старых записей');
 await app.listen({ host: env.API_HOST, port: env.API_PORT });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

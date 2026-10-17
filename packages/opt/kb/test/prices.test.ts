@@ -1,12 +1,13 @@
 import type { Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { leavesOf, modelKeyOf, sizeOf } from '../src/model-key.ts';
-import { applyRules, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, type KbPrice } from '../src/prices.ts';
+import { applyRules, categoryMedian, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, type KbPrice } from '../src/prices.ts';
+import { EMPTY_FEATURES, featuresOf } from '../src/features.ts';
 import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
 
 const ACCOUNT = 555;
-const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, ...over });
+const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, category: 'door', componentKind: null, ...over });
 
 describe('ключ модели и правила нестандарта', () => {
   it('ключ без размера, количества и общих слов; размер и створки из текста', () => {
@@ -350,5 +351,70 @@ describe('несколько прайсов, замена по файлу (RFD-A
     await prices.replacePriceList(ACC, a, [{ model: 'ДПО сота', widthMm: 800, heightMm: 2000, price: 9000, origin: 'price_list', validAt: new Date('2026-10-01') }]);
     const single = await lookupPrice(prices, aliases, ACC, { name: 'ДПО сота', widthMm: 800, heightMm: 2000 }, new Date('2026-10-16'));
     expect(single?.notes.some((n) => n.startsWith('найдено в'))).toBe(false);
+  });
+});
+
+describe('категории: комплектующие, фурнитура, работы (RFD-AI-AGENT-OPT-KB-COMPONENTS)', () => {
+  const ACC = 999;
+  let db: Db;
+  let drop: () => Promise<void>;
+  let prices: KbPricesRepo;
+  let aliases: KbAliasesRepo;
+  let repo: KbRepo;
+  beforeAll(async () => {
+    ({ db, drop } = await freshKbDb());
+    prices = new KbPricesRepo(db);
+    aliases = new KbAliasesRepo(db);
+    repo = new KbRepo(db);
+  });
+  afterAll(() => drop());
+
+  it('подбор внутри категории: дверь не берёт строки комплектующих, добор берёт «Добор (…)» своего вида, фурнитура — из прайса фурнитуры, работы — без подбора; медиана по категории', async () => {
+    const doors = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_межкомнатные_двери_ГОСТ.xlsx', original: 'Прайс_межкомнатные_двери_ГОСТ.xlsx' });
+    await repo.setPriceInfo(doors, 'прайс межкомнатные двери гост', null);
+    const cpl = { material: 'wood' as const, coating: 'cpl' as const, glazing: 'solid' as const, type: 'block' as const };
+    await prices.replacePriceList(ACC, doors, [
+      { model: 'ДВ CPL', widthMm: 910, heightMm: 2100, price: 23_900, origin: 'price_list', abbr: 'ДВ 1Рп Г ПрБ', features: cpl, coating: 'CPL 0,2 мм' },
+      { model: 'ДВ ПВХ', widthMm: 910, heightMm: 2100, price: 19_900, origin: 'price_list', features: { ...cpl, coating: 'pvc' }, coating: 'ПВХ' },
+      { model: 'Добор (ДВ CPL)', price: 900, origin: 'price_list', category: 'component', componentKind: 'добор', features: cpl, coating: 'CPL 0,2 мм', description: 'комплектующее к ДВ CPL' },
+      { model: 'Добор (ДВ ПВХ)', price: 850, origin: 'price_list', category: 'component', componentKind: 'добор', features: { ...cpl, coating: 'pvc' }, coating: 'ПВХ', description: 'комплектующее к ДВ ПВХ' },
+      { model: 'Коробка (ДВ CPL)', price: 3500, origin: 'price_list', category: 'component', componentKind: 'коробка', features: cpl, coating: 'CPL 0,2 мм' },
+    ]);
+    const hw = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_фурнитура.xlsx', original: 'Прайс_фурнитура.xlsx' });
+    await repo.setPriceInfo(hw, 'прайс фурнитура', null);
+    await prices.replacePriceList(ACC, hw, [
+      { model: 'Ручка Palladium Luna', price: 1450, origin: 'price_list', category: 'hardware' },
+      { model: 'Petля универсальная 100×70'.replace('Pet', 'Пет'), price: 190, origin: 'price_list', category: 'hardware' },
+      { model: 'Замок врезной межкомнатный', price: 980, origin: 'price_list', category: 'hardware' },
+    ]);
+    expect((await prices.listByOrigin(ACC, 'price_list')).map((p) => [p.model, p.category, p.componentKind])).toEqual(expect.arrayContaining([['ДВ CPL', 'door', null], ['Добор (ДВ CPL)', 'component', 'добор'], ['Коробка (ДВ CPL)', 'component', 'коробка'], ['Ручка Palladium Luna', 'hardware', null], ['Замок врезной межкомнатный', 'hardware', null]]));
+    // Дверь: строки комплектующих («Добор (ДВ CPL)» содержит те же слова) в кандидаты не попадают.
+    const door = await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный глухой CPL', widthMm: 910, heightMm: 2100 }, new Date('2026-10-17'));
+    expect(door).toMatchObject({ price: 23_900, row: { model: 'ДВ CPL', category: 'door' } });
+    // Добор без указания двери: своего вида, по признакам (МДФ → дерево совпало) — самая дешёвая из равных строк с пометкой.
+    const dobor = await lookupPrice(prices, aliases, ACC, { name: 'Добор телескопический, МДФ, 300×2150' }, new Date('2026-10-17'));
+    expect(dobor).toMatchObject({ price: 850, basis: 'base', match: 'features', row: { model: 'Добор (ДВ ПВХ)', category: 'component' } });
+    expect(dobor?.notes).toEqual(['в прайсе нет размера — базовая цена', 'комплектующее по прайсу: Добор (ДВ ПВХ) — совпали: деревянный']);
+    // Добор с покрытием CPL — строка к ДВ CPL; коробка — своя строка; порога в прайсе нет → null.
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Добор CPL 200 мм' }, new Date('2026-10-17'))).toMatchObject({ price: 900, row: { model: 'Добор (ДВ CPL)' } });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Коробка дверная CPL' }, new Date('2026-10-17'))).toMatchObject({ price: 3500, row: { model: 'Коробка (ДВ CPL)' } });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Порог дубовый' }, new Date('2026-10-17'))).toBeNull();
+    // Фурнитура: по ключу/словам среди строк фурнитуры; дверные строки не мешают; работы — null.
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Ручка Palladium Luna' }, new Date('2026-10-17'))).toMatchObject({ price: 1450, row: { category: 'hardware' } });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Замок врезной' }, new Date('2026-10-17'))).toMatchObject({ price: 980 });
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Монтаж дверного блока' }, new Date('2026-10-17'))).toBeNull();
+    // Медиана по категории: добор — 875 (900 и 850), дверь CPL — 23 900, фурнитура «ручка» — 1450, «порог» и «петля такой-то» без группы — null.
+    const rows = await prices.listByOrigin(ACC, 'price_list');
+    expect(categoryMedian(rows, { category: 'component', features: featuresOf('Добор телескопический'), componentKind: 'добор', tokens: ['добор', 'телескопический'] })).toBe(875);
+    expect(categoryMedian(rows, { category: 'door', features: featuresOf('Дверной блок деревянный глухой CPL'), componentKind: null, tokens: [] })).toBe(23_900);
+    expect(categoryMedian(rows, { category: 'component', features: EMPTY_FEATURES, componentKind: 'порог', tokens: ['порог'] })).toBeNull();
+    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['ручка', 'дверная'] })).toBe(1450);
+    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['доводчик'] })).toBeNull();
+    // backfillCategories: веб-запись «Добор …» со старой категорией door → component.
+    const web = await prices.upsert({ accountId: ACC, model: 'Добор телескопический МДФ', widthMm: 300, heightMm: 2150, price: 2013, origin: 'web' });
+    await db.query("UPDATE kb_prices SET category = 'door', component_kind = NULL WHERE id = $1", [web]);
+    expect(await prices.backfillCategories()).toBe(1);
+    expect((await prices.byId(ACC, web))).toMatchObject({ category: 'component', componentKind: 'добор' });
+    expect(await prices.backfillCategories()).toBe(0);
   });
 });

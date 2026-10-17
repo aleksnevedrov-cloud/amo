@@ -11,6 +11,7 @@ import { htmlToKbText, sectionLinks } from './html.ts';
 import { parsePublicUrl } from './safe-url.ts';
 import { draftsToPrices, extractPrices, previewPriceList, type ColumnMapping, type ImportDefaults } from './price-list.ts';
 import { priceListKeyOf, priceListTitleOf } from './price-key.ts';
+import { defaultCategoryOfPriceKey } from './category.ts';
 import { KbAliasesRepo, KbPricesRepo } from './prices.ts';
 import { readKbSheetRows } from './extract.ts';
 import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
@@ -235,7 +236,8 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       const priceKey = priceListKeyOf(source.original ?? source.title);
       const priceTitle = priceListTitleOf(priceKey);
       if (!drafts.length) return { imported: 0, skipped, replaced: 0, headerFound: preview.headerFound, priceKey, priceTitle, updated: false, was: 0, removed: 0, added: 0 };
-      const defaults: ImportDefaults = { factory: input.factory ?? null, validAt: input.validAt, vat: input.vat ?? preview.vatHint, nonstandard: input.nonstandard, confidence: input.confidence };
+      // KB-COMPONENTS: строки без ключевых слов получают категорию по имени файла («Прайс_фурнитура…» → фурнитура).
+      const defaults: ImportDefaults = { factory: input.factory ?? null, validAt: input.validAt, vat: input.vat ?? preview.vatHint, nonstandard: input.nonstandard, confidence: input.confidence, category: defaultCategoryOfPriceKey(priceKey) };
       const sameKey = await repo.byPriceKey(accountId, priceKey, sourceId);
       const r = await prices.replacePriceList(accountId, sourceId, draftsToPrices(drafts, defaults).map((x) => ({ ...x, createdBy: input.userId })), sameKey.map((x) => x.id));
       const updated = sameKey.length > 0 || (source.priceKey === priceKey && r.was > 0);

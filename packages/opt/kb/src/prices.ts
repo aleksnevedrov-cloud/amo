@@ -1,6 +1,7 @@
 import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
 import { priceListTitleOf } from './price-key.ts';
+import { categoryOf, componentKindOf, type ComponentKind, type PositionCategory } from './category.ts';
 import { colorOf, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
@@ -76,6 +77,9 @@ export interface KbPrice {
   /** Ключ и короткое название прайса-файла (KB-MULTIPRICE): «прайс межкомнатные двери гост» / «Межкомнатные»; у веб-цен и правок — null. */
   priceKey: string | null;
   priceTitle: string | null;
+  /** Категория записи (KB-COMPONENTS): дверь / комплектующее / фурнитура / работы; componentKind — вид комплектующего. */
+  category: PositionCategory;
+  componentKind: ComponentKind | null;
 }
 
 export interface NewKbPrice {
@@ -102,6 +106,9 @@ export interface NewKbPrice {
   features?: Partial<DoorFeatures> | null;
   coating?: string | null;
   equipment?: string | null;
+  /** Категория записи; не задана — по тексту модели (без ключевых слов — дверь). */
+  category?: PositionCategory | null;
+  componentKind?: ComponentKind | null;
 }
 
 export interface KbAlias {
@@ -136,10 +143,13 @@ export class KbPricesRepo {
     const searchTokens = searchTokensOf(p.model, abbr, description);
     // Признаки (KB-MATCH): из текста модели, сокращения и назначения, явные значения сверху.
     const features = mergeFeatures(featuresOf([p.model, abbr, description].filter(Boolean).join(' | ')), p.features);
-    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null];
+    // Категория (KB-COMPONENTS): явная или по тексту модели; вид комплектующего — по модели.
+    const category: PositionCategory = p.category ?? categoryOf([p.model, abbr].filter(Boolean).join(' '));
+    const componentKind = p.componentKind ?? (category === 'component' ? componentKindOf(p.model) : null);
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null, category, componentKind];
     const { rows } = await q.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
        RETURNING id`,
       params,
@@ -147,7 +157,7 @@ export class KbPricesRepo {
     if (rows[0]) return Number(rows[0].id);
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
-               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), updated_at = now()
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = $28::text, component_kind = $29::text, updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
         RETURNING id`,
       params,
@@ -199,6 +209,19 @@ export class KbPricesRepo {
       await this.db.query('UPDATE kb_prices SET features = $2::jsonb, feature_key = $3 WHERE id = $1', [Number(r.id), JSON.stringify(f), featureKeyOf(f)]);
     }
     return rows.length;
+  }
+
+  /** Категория у записей, импортированных до KB-COMPONENTS: по тексту модели (веб-«Добор…» → комплектующее); один раз при старте. */
+  async backfillCategories(): Promise<number> {
+    const { rows } = await this.db.query<{ id: string; model: string; abbr: string | null; category: string }>('SELECT id, model, abbr, category FROM kb_prices');
+    let n = 0;
+    for (const r of rows) {
+      const cat = categoryOf([r.model, r.abbr].filter(Boolean).join(' '));
+      if (cat === r.category) continue;
+      await this.db.query('UPDATE kb_prices SET category = $2, component_kind = $3 WHERE id = $1', [Number(r.id), cat, cat === 'component' ? componentKindOf(r.model) : null]);
+      n += 1;
+    }
+    return n;
   }
 
   /** Сколько цен у каждого источника — для карточки источника («цен 12»). */
@@ -334,6 +357,8 @@ export interface PriceQuery {
   thicknessMm?: number | null;
   /** Признаки позиции от модели разбора письма (KB-MATCH); из текста извлекаются всегда, явные — сверху. */
   features?: Partial<DoorFeatures> | null;
+  /** Категория позиции (KB-COMPONENTS); не задана — по тексту. Подбор идёт только среди записей своей категории. */
+  category?: PositionCategory | null;
 }
 
 export interface PriceHit {
@@ -473,13 +498,18 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const text = `${q.name} ${q.raw ?? ''}`;
   const key = modelKeyOf(q.name) || modelKeyOf(text);
   const qf = mergeFeatures(featuresOf(text), q.features);
+  // KB-COMPONENTS: работы цены не ищут; остальные — только среди записей своей категории (комплектующие — своего вида).
+  const category: PositionCategory = q.category ?? categoryOf(text);
+  if (category === 'service') return null;
+  const componentKind = category === 'component' ? componentKindOf(text) : null;
+  const sameCategory = (row: KbPrice) => row.category === category && (category !== 'component' || !componentKind || !row.componentKind || row.componentKind === componentKind);
   const size = { widthMm: q.widthMm ?? sizeOf(text)?.widthMm ?? null, heightMm: q.heightMm ?? sizeOf(text)?.heightMm ?? null };
   const leaves = q.leaves ?? qf.leaves ?? leavesOf(text);
   const alias = key ? await aliases.resolve(accountId, key) : null;
   const keys = key ? (alias ? [key, ...alias.keys] : [key]) : [];
   const queryTokens = searchTokensOf(q.name, q.raw);
-  const found = keys.length ? await prices.candidates(accountId, keys, queryTokens) : [];
-  const priceList = await prices.listByOrigin(accountId, 'price_list');
+  const found = (keys.length ? await prices.candidates(accountId, keys, queryTokens) : []).filter((f) => sameCategory(f.row));
+  const priceList = (await prices.listByOrigin(accountId, 'price_list')).filter(sameCategory);
   const cands: Candidate[] = [];
   const seen = new Set<number>();
   const itemTokens = new Set(tokensOf(key));
@@ -487,10 +517,12 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const byId = new Map(found.map((f) => [f.row.id, f]));
   // Строки прайса: совпадение по признакам; если строка нашлась и по ключу модели — ключ остаётся видом совпадения,
   // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
-  if (hasFeatures(qf)) {
+  if (hasFeatures(qf) || category === 'component') {
     for (const row of priceList) {
       const fm = matchFeatures(qf, rowFeatures(row));
-      if (!fm.ok) continue;
+      // Комплектующее того же вида (добор, коробка…) подходит и без общих признаков двери: лишь бы обязательные не расходились.
+      const ok = category === 'component' ? fm.conflict === null && Boolean(componentKind) && row.componentKind === componentKind : fm.ok;
+      if (!ok) continue;
       const f = byId.get(row.id);
       const m = f ? keyMatch(row, key, alias, itemTokens, qSet, f.similarity) : null;
       cands.push({ row, match: m?.match ?? 'features', similarity: f?.similarity ?? 0, words: m?.words ?? 0, features: fm });
@@ -507,8 +539,8 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     seen.add(row.id);
   }
   if (!cands.length) return null;
-  // Порядок источников; веб-цены сверяются с медианой прайса по группе признаков позиции.
-  const median = priceListMedian(priceList, featureKeyOf(qf));
+  // Порядок источников; веб-цены сверяются с медианой прайса по группе позиции (KB-COMPONENTS: внутри категории).
+  const median = categoryMedian(priceList, { category, features: qf, componentKind, tokens: queryTokens });
   const realistic = (c: Candidate) => c.row.origin !== 'web' || webPriceRealistic(c.row.price, median);
   const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => cands.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
   if (!group) return null;
@@ -529,6 +561,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
         b.words - a.words ||
         b.row.confidence - a.row.confidence ||
         closeness(a.row) - closeness(b.row) ||
+        (category === 'component' ? a.row.price - b.row.price : 0) ||
         b.row.validAt.getTime() - a.row.validAt.getTime(),
     );
   let best = ranked[0] as (typeof ranked)[number];
@@ -556,7 +589,11 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const notes = [...applied.notes];
   const where = best.row.sourceRow ? ` (строка ${best.row.sourceRow})` : '';
   let label = priceLabelOf(best.row);
-  if (best.features) {
+  if (best.features && category === 'component') {
+    // Комплектующее из колонки прайса дверей: к какой модели двери относится цена, менеджер видит в пометке.
+    label = `по прайсу: ${best.row.model}${where}`;
+    notes.push(`комплектующее по прайсу: ${best.row.model}${where}${best.features.matched.length ? ` — совпали: ${describeFeatures(qf, best.features.matched)}` : ' — модель двери в заявке не указана, взята самая дешёвая строка'}`);
+  } else if (best.features) {
     // Строка прайса подошла по признакам: подпись «по прайсу: ДВ CPL (строка 17)» и пометка, что именно совпало.
     label = `по прайсу: ${best.row.model}${where}`;
     notes.push(`по прайсу: ${best.row.model}${where} — совпали: ${describeFeatures(qf, best.features.matched)}`);
@@ -575,6 +612,26 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   if (stale) notes.push(`цена устарела: актуальна на ${best.row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
   const confidence = best.match === 'words' ? Math.round(best.row.confidence * best.words) : best.row.confidence;
   return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null };
+}
+
+/**
+ * Медиана прайса для фильтра реалистичности веб-цены (KB-COMPONENTS, п. 2): двери — по совместимой группе признаков среди
+ * дверей; комплектующие — по строкам того же вида (добор, коробка…); фурнитура — по строкам, у которых общее первое слово
+ * («ручка», «петля»). Группы нет — null, фильтр не применяется.
+ */
+export function categoryMedian(rows: Pick<KbPrice, 'category' | 'componentKind' | 'featureKey' | 'price' | 'modelKey'>[], q: { category: PositionCategory; features: DoorFeatures; componentKind: ComponentKind | null; tokens: string[] }): number | null {
+  const same = rows.filter((r) => r.category === q.category);
+  if (q.category === 'door') return priceListMedian(same, featureKeyOf(q.features));
+  let group: number[] = [];
+  if (q.category === 'component') group = same.filter((r) => q.componentKind && r.componentKind === q.componentKind).map((r) => r.price);
+  if (q.category === 'hardware') {
+    const head = q.tokens[0];
+    group = head ? same.filter((r) => r.modelKey.split(' ')[0] === head).map((r) => r.price) : [];
+  }
+  if (!group.length) return null;
+  const sorted = [...group].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? (sorted[mid] as number) : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2;
 }
 
 /** Текст строки базы содержит цвет из письма (без регистра, «светло-серый» = «светло серый»). */
@@ -668,6 +725,8 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     equipment: (r.equipment ?? null) as string | null,
     priceKey: (r.price_key ?? null) as string | null,
     priceTitle: r.price_key ? priceListTitleOf(String(r.price_key)) : null,
+    category: ((r.category as string | undefined) ?? 'door') as PositionCategory,
+    componentKind: (r.component_kind ?? null) as ComponentKind | null,
   };
 }
 

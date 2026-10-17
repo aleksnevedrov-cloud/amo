@@ -1,7 +1,7 @@
 import type { JournalKind } from '@core/db';
-import { featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceListMedian, priceModelOf, WEB_BAND, webPriceRealistic, type PriceHit } from '@opt/kb';
+import { categoryMedian, componentKindOf, featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceModelOf, searchTokensOf, WEB_BAND, webPriceRealistic, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
-import { NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
+import { lineCategory, NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
 import { cleanName, VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { manufacturerCoefficient, offerPrice, type OfferPrice } from './offer-price.ts';
 import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
@@ -30,6 +30,9 @@ export interface ResearchJob {
   force?: boolean;
   /** Заменить цену, введённую менеджером руками; без флага такая цена не трогается. */
   replace?: boolean;
+  /** Порция и число порций при постановке всех позиций (KB-COMPONENTS, п. 6) — для журнала и логов. */
+  batch?: number;
+  batches?: number;
 }
 
 export const researchJobId = (accountId: number, draftId: number, requestIndex: number) => `research-${accountId}-${draftId}-${requestIndex}`;
@@ -37,6 +40,9 @@ export const researchJobId = (accountId: number, draftId: number, requestIndex: 
 /** Типы событий журнала опта по ценам; в общий JournalKind (packages/core) не добавляются — ядро не меняем. */
 export const KP_PRICE_RESEARCH_KIND = 'kp_price_research' as JournalKind;
 export const KP_PRICE_ERROR_KIND = 'kp_price_error' as JournalKind;
+/** Порция позиций за одну постановку «Найти цены» (KB-COMPONENTS, п. 6): все позиции без цены ставятся порциями по 20 подряд. */
+export const RESEARCH_BATCH = 20;
+const CATEGORY_LABEL: Record<string, string> = { door: 'двери', component: 'комплектующие', hardware: 'фурнитура', service: 'работы' };
 
 export class DraftLockedError extends Error {
   override name = 'DraftLockedError';
@@ -64,7 +70,7 @@ export function researchInputOf(payload: Partial<KpPayload>, line: KpLine): Mark
 export function researchablePositions(payload: Partial<KpPayload>, which: number[] | 'all', max = DEFAULT_MAX_POSITIONS_PER_RUN): number[] {
   const items = payload.items ?? [];
   // Работы и услуги (kind = service) в поиск цен не отправляются ни «все», ни по номеру (XLSX-2, п. 3).
-  const goods = items.filter((l) => l.kind !== 'service');
+  const goods = items.filter((l) => !(l.kind === 'service' || lineCategory(l) === 'service'));
   const idx = which === 'all' ? goods.filter((l) => l.price === null).map((l) => l.request_index) : which.filter((i) => goods.some((l) => l.request_index === i));
   return [...new Set(idx)].slice(0, Math.max(1, max));
 }
@@ -90,7 +96,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     //    force («искать заново» / «искать в интернете») идёт мимо базы и кэша.
     if (!job.force && !constants.skipKnowledgeBase) {
       // KB-MATCH: подбор по признакам (тип, материал, Г/О, покрытие, огнестойкость, створки, порог, …) — прайс в приоритете, веб не перебивает.
-      const hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null });
+      const hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category: lineCategory(line) });
       if (hit) {
         const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
         await core.journal.add({
@@ -129,10 +135,13 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     //    признаков — цена отбрасывается, в базу не пишется, менеджеру — пометка и запись в журнале.
     const queryFeatures = mergeFeatures(featuresOf(`${input.item.name || line.name} | ${input.item.raw}`), input.item.features ?? null);
     const priceListRows = await core.kb.prices.listByOrigin(accountId, 'price_list').catch(() => []);
-    const groupMedian = priceListMedian(priceListRows, featureKeyOf(queryFeatures));
+    // KB-COMPONENTS, п. 2: медиана — по категории позиции (двери по группе признаков, комплектующие своего вида, фурнитура по
+    // первому слову); у категории без прайсовой группы фильтр не применяется.
+    const category = lineCategory(line);
+    const groupMedian = categoryMedian(priceListRows, { category, features: queryFeatures, componentKind: componentKindOf(`${input.item.name || line.name} ${input.item.raw}`), tokens: searchTokensOf(input.item.name || line.name, input.item.raw) });
     if (r.result.status === 'ok' && r.result.stats && !webPriceRealistic(r.result.stats.median, groupMedian)) {
       const webPrice = r.result.stats.median;
-      const message = `веб-цена ${webPrice.toLocaleString('ru-RU')} ₽ отброшена: вне диапазона прайса (медиана прайса по группе ${(groupMedian as number).toLocaleString('ru-RU')} ₽, допустимо ${WEB_BAND.min * 100}–${WEB_BAND.max * 100} %); добавьте цену в базу знаний или введите руками`;
+      const message = `веб-цена ${webPrice.toLocaleString('ru-RU')} ₽ отброшена: вне диапазона прайса (медиана прайса по группе «${CATEGORY_LABEL[category]}» ${(groupMedian as number).toLocaleString('ru-RU')} ₽, допустимо ${WEB_BAND.min * 100}–${WEB_BAND.max * 100} %); добавьте цену в базу знаний или введите руками`;
       const failed: CachedResearch = { ...r, result: { ...r.result, status: 'failed', error: message, stats: null } };
       await applyResearchToDraft(core, accountId, draftId, requestIndex, offerPrice(failed.result), failed, Boolean(job.replace));
       const costRub = r.result.cost.usd * settings.billing.usdRubRate;
@@ -141,7 +150,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
         leadId: draft.leadId,
         kind: KP_PRICE_ERROR_KIND,
         summary: `Цена не найдена: ${lineLabel} — веб-цена ${webPrice.toLocaleString('ru-RU')} ₽ отброшена: вне диапазона прайса (медиана по группе ${(groupMedian as number).toLocaleString('ru-RU')} ₽)`,
-        details: { draftId, requestIndex, researchId: r.researchId, status: 'failed', cached: r.cached, reason: 'web_price_unrealistic', webMedian: webPrice, priceListMedian: groupMedian, band: WEB_BAND, featureKey: featureKeyOf(queryFeatures), sources: r.result.stats.count, webSearchCalls: r.result.webSearchCalls, costUsd: r.result.cost.usd, costRub, provider: r.result.provider, model: r.result.model, userId: job.userId },
+        details: { draftId, requestIndex, researchId: r.researchId, status: 'failed', cached: r.cached, reason: 'web_price_unrealistic', webMedian: webPrice, priceListMedian: groupMedian, band: WEB_BAND, featureKey: featureKeyOf(queryFeatures), category, sources: r.result.stats.count, webSearchCalls: r.result.webSearchCalls, costUsd: r.result.cost.usd, costRub, provider: r.result.provider, model: r.result.model, userId: job.userId },
         inputTokens: r.result.cost.inputTokens,
         outputTokens: r.result.cost.outputTokens,
         costUsd: r.result.cost.usd,
@@ -158,7 +167,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
       const accepted = r.result.offers.find((o) => o.accepted);
       await core.kb.prices
         // Модель — как названа в заявке (так её ищет следующая заявка), фабрика — из карточки, признаки — из текста и разбора письма.
-        .upsert({ accountId, model: cleanName(input.item.name || line.name), factory: card?.factory ?? null, widthMm: card?.widthMm ?? size.widthMm, heightMm: card?.heightMm ?? size.heightMm, price: r.result.stats.median, origin: 'web', vat: 'included', url: accepted?.offer.url ?? null, note: `медиана ${r.result.stats.count} источников, запрос: ${r.result.query}`.slice(0, 500), createdBy: job.userId, features: queryFeatures })
+        .upsert({ accountId, model: cleanName(input.item.name || line.name), factory: card?.factory ?? null, widthMm: card?.widthMm ?? size.widthMm, heightMm: card?.heightMm ?? size.heightMm, price: r.result.stats.median, origin: 'web', vat: 'included', url: accepted?.offer.url ?? null, note: `медиана ${r.result.stats.count} источников, запрос: ${r.result.query}`.slice(0, 500), createdBy: job.userId, features: queryFeatures, category })
         .catch(() => undefined);
     }
     const costRub = r.result.cost.usd * settings.billing.usdRubRate;

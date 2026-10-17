@@ -24,6 +24,9 @@ const POLL_MS = 3000;
 const MARKET_STALE_DAYS = 30;
 
 /** Подпись источника цены в плитке: с сервера (база знаний, рынок, менеджер) либо по старому полю priceSource. */
+/** Работы (монтаж, врезка, доставка): по категории или старому kind — в итог не входят, цена не требуется (KB-COMPONENTS). */
+export const isServiceLine = (l: Pick<KpDraftLine, 'kind' | 'category'>): boolean => l.category === 'service' || l.kind === 'service';
+
 function priceSourceLabel(l: KpDraftLine): string {
   if (l.priceLabel) return l.priceLabel;
   return l.priceSource === 'manager' ? 'изменено менеджером' : l.priceSource === 'analog' ? 'по аналогу' : l.priceSource === 'research' ? 'по рынку' : l.priceSource === 'kb' ? 'по базе' : '';
@@ -123,6 +126,8 @@ function useKpDraft(api: KpApi, leadId: number) {
   // Поиск цен (RFD-AI-AGENT-OPT-PRICE, этап 6): состояние по позициям, опрос раз в 3 с, пока есть queued / running.
   const [research, setResearch] = useState<ResearchState | null>(null);
   const wasPending = useRef(false);
+  // Прогресс «32 / 136» за одно нажатие «Найти цены» (KB-COMPONENTS, п. 6): сколько поставлено и сколько ещё в очереди/работе.
+  const [runTotal, setRunTotal] = useState(0);
   const draftId = draft?.id ?? null;
   const loadResearch = useCallback(async () => {
     if (!draftId) return;
@@ -136,6 +141,7 @@ function useKpDraft(api: KpApi, leadId: number) {
       if (!r.pending && wasPending.current) {
         wasPending.current = false;
         await refresh();
+        setRunTotal(0);
       } else wasPending.current = r.pending;
     } catch (err) {
       if (alive.current) setError(errorMessage(err));
@@ -146,6 +152,8 @@ function useKpDraft(api: KpApi, leadId: number) {
     void loadResearch();
   }, [loadResearch]);
   const researching = research?.pending ?? false;
+  const inWork = research?.positions?.filter((p) => p.job?.state === 'queued' || p.job?.state === 'running').length ?? 0;
+  const progress = runTotal > 0 && researching ? `${Math.max(0, runTotal - inWork)} / ${runTotal}` : null;
   useEffect(() => {
     if (!researching) return;
     const t = setInterval(() => void loadResearch(), POLL_MS);
@@ -161,6 +169,7 @@ function useKpDraft(api: KpApi, leadId: number) {
       if (!r.queued.length && r.reason) setError(r.reason);
       // Задание поставлено: первый же опрос без queued/running означает «завершилось» — черновик перечитывается сразу.
       if (r.queued.length) wasPending.current = true;
+      setRunTotal(r.queued.length);
       await loadResearch();
     } catch (err) {
       if (alive.current) setError(errorMessage(err));
@@ -169,16 +178,18 @@ function useKpDraft(api: KpApi, leadId: number) {
     }
   };
 
-  return { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, findPrices };
+  return { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, progress, findPrices };
 }
 
 export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
-  const { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, findPrices } = useKpDraft(api, leadId);
+  const { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, progress, findPrices } = useKpDraft(api, leadId);
   const [preview, setPreview] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
 
-  const total = lines.reduce((sum, l) => sum + (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100)), 0);
-  const ready = lines.length > 0 && lines.every((l) => l.price !== null);
+  // Работы в итог не входят и цены для сборки не требуют (KB-COMPONENTS, п. 5).
+  const goods = lines.filter((l) => !isServiceLine(l));
+  const total = goods.reduce((sum, l) => sum + (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100)), 0);
+  const ready = goods.length > 0 && goods.every((l) => l.price !== null);
 
   const kpStatus = STATUS[draft?.status ?? 'draft'] ?? draft?.status ?? '';
   // Скачивание файла КП (RFD-AI-AGENT-OPT-KP-DOWNLOAD): подписанная ссылка от API, по ней браузер получает файл как вложение.
@@ -263,7 +274,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
             {draft.status === 'draft' && (
               <div className="opt-actions">
                 <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending || researching || dirty} title={dirty ? 'Сначала сохраните правки' : 'Найти рыночные цены по позициям без цены; позиции с ценой не трогаются'} onClick={() => void findPrices('all')}>
-                  {researching ? 'Ищу цены…' : 'Найти цены'}
+                  {researching ? `Ищу цены…${progress ? ` ${progress}` : ''}` : 'Найти цены'}
                 </button>
               </div>
             )}
@@ -480,7 +491,7 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
       {lines.map((l, i) => {
         const why = reasons(l.request_index);
         const pos = research?.positions?.find((p) => p.requestIndex === l.request_index) ?? null;
-        const service = l.kind === 'service';
+        const service = isServiceLine(l);
         // Работы и услуги идут после товаров: заголовок перед первой из них (XLSX-2, п. 3).
         const firstService = service && !lines.slice(0, i).some((x) => x.kind === 'service');
         return (
@@ -490,7 +501,8 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
             {l.equipment && <div className="opt-kp-sub opt-kp-tile-equipment">Комплектация: {l.equipment}</div>}
             {l.priceModel && <div className="opt-kp-sub opt-kp-tile-model">Обозначение по прайсу: {l.priceModel}{l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? ` (${l.priceAbbr})` : ''}</div>}
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
-            {why.length > 0 && <div className="opt-kp-sub">{why.join('; ')}</div>}
+            {service && <div className="opt-kp-sub opt-kp-service-note">работы — по замеру: в таблицу и итог КП не входят, под таблицей фраза о расчёте после замера</div>}
+            {why.length > 0 && <div className="opt-kp-sub">{why.filter((w) => !(service && w === 'цена не задана')).join('; ')}</div>}
             {!service && <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />}
             <div className="opt-kp-fields">
               <label className="opt-kp-field">
@@ -502,7 +514,7 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
                   Цена{priceSourceLabel(l) ? ` · ${priceSourceLabel(l)}` : ''}
                   {priceIsStale(l) && <span className="opt-kp-stale"> · цена устарела</span>}
                 </span>
-                <input type="number" min={0} value={l.price ?? ''} placeholder="Нет цены" onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
+                <input type="number" min={0} value={l.price ?? ''} placeholder={service ? 'по замеру' : 'Нет цены'} onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-discount">
                 <span className="opt-kp-label">Скидка</span>
@@ -628,6 +640,6 @@ function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend
 function KpNote({ draft, ready }: { draft: KpDraftInfo; ready: boolean }) {
   if (draft.status === 'sent') return <>Отправлено{draft.sentAt ? ` ${date(draft.sentAt)}` : ''}. Повторная отправка — через «Отправить клиенту» с подтверждением.</>;
   if (draft.status === 'built') return <>Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки. Проверьте документ и отправьте клиенту.</>;
-  if (!ready && draft.items.length > 0) return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя. Сборка документа включится, когда у каждой позиции будет цена.</>;
+  if (!ready && draft.items.length > 0) return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя. Сборка документа включится, когда у каждой позиции (кроме работ) будет цена.</>;
   return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.</>;
 }

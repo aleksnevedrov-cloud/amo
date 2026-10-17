@@ -36,6 +36,8 @@ export interface KpBuildInput {
   vatRate: number;
   /** Фраза о ценах; пустая строка — без фразы. */
   priceNote: string;
+  /** В заявке есть работы (монтаж, врезка, доставка): под таблицей — фраза о расчёте после замера; плейсхолдер {{service_note}}. */
+  serviceNote?: string;
 }
 
 /**
@@ -43,6 +45,8 @@ export interface KpBuildInput {
  * Редактируется в настройках КП (константа priceNote), в шаблоне — плейсхолдер {{price_note}} под итогом.
  */
 export const DEFAULT_PRICE_NOTE = 'Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.';
+/** Работы в таблицу и итог КП не входят (KB-COMPONENTS, п. 5): под таблицей — эта фраза, если в заявке есть хоть одна работа. */
+export const SERVICE_NOTE = 'Стоимость монтажных работ рассчитывается после замера дверных проёмов.';
 
 export interface KpTemplateData {
   kp_number: string;
@@ -56,6 +60,8 @@ export interface KpTemplateData {
   grand_total: string;
   total_qty: string;
   price_note: string;
+  /** Фраза о работах по замеру; пустая строка — работ в заявке нет. */
+  service_note: string;
 }
 
 const run = promisify(execFile);
@@ -147,6 +153,7 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     grand_total: money(total),
     total_qty: `${qty} ${plural(qty, 'позиция', 'позиции', 'позиций')}`,
     price_note: input.priceNote.trim(),
+    service_note: (input.serviceNote ?? '').trim(),
   };
 }
 
@@ -157,6 +164,19 @@ export function templateData(input: KpBuildInput): KpTemplateData {
 export function withPriceNoteFallback(hasTag: boolean, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
   if (hasTag || !data.price_note) return { data, fallback: false };
   return { data: { ...data, vat_phrase: `${data.vat_phrase}\n${data.price_note}` }, fallback: true };
+}
+
+/**
+ * Шаблон без {{service_note}}: фраза о работах добавляется строкой под первым из имеющихся тегов — фраза о ценах, строка НДС,
+ * сумма прописью, плашка «N позиций» (у шаблона заказчика есть {{vat_phrase}}).
+ */
+export function withServiceNoteFallback(tags: { serviceNote: boolean; priceNote: boolean; vatPhrase?: boolean; totalInWords?: boolean; totalQty?: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  if (tags.serviceNote || !data.service_note) return { data, fallback: false };
+  const add = (v: string) => (v ? `${v}\n${data.service_note}` : data.service_note);
+  if (tags.priceNote && data.price_note) return { data: { ...data, price_note: add(data.price_note) }, fallback: true };
+  if (tags.vatPhrase ?? true) return { data: { ...data, vat_phrase: add(data.vat_phrase) }, fallback: true };
+  if (tags.totalInWords) return { data: { ...data, total_in_words: add(data.total_in_words) }, fallback: true };
+  return { data: { ...data, total_qty: add(data.total_qty) }, fallback: true };
 }
 
 /**
@@ -220,6 +240,8 @@ export interface KpBuildResult {
   currencyStripped: MoneyTag[];
   /** Сколько явных разрывов страницы после таблицы убрано. */
   pageBreaksRemoved: number;
+  /** В шаблоне нет {{service_note}} — фраза о работах добавлена под фразу о ценах. */
+  serviceNoteFallback: boolean;
 }
 
 /**
@@ -241,7 +263,8 @@ export async function buildKp(
   });
   const text = doc.getFullText();
   const { data: withNote, fallback } = withPriceNoteFallback(text.includes('price_note'), data);
-  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withNote);
+  const { data: withService, fallback: serviceNoteFallback } = withServiceNoteFallback({ serviceNote: text.includes('service_note'), priceNote: text.includes('price_note'), vatPhrase: text.includes('vat_phrase'), totalInWords: text.includes('total_in_words'), totalQty: text.includes('total_qty') }, withNote);
+  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withService);
   const currencyStripped = currencyTagsInTemplate(text);
   doc.render(withCurrencyFallback(currencyStripped, laidOut));
   await mkdir(outDir, { recursive: true });
@@ -265,9 +288,9 @@ export async function buildKp(
       { timeout: 120_000 },
     );
     await access(pdfPath);
-    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved };
+    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved, serviceNoteFallback };
   } catch (err) {
-    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved };
+    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved, serviceNoteFallback };
   }
 }
 

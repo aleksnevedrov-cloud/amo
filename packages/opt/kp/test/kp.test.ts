@@ -1,8 +1,8 @@
 import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback, currencyTagsInTemplate, withCurrencyFallback, dropPageBreaksAfterTable } from '../src/build.ts';
-import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineName, kpLineParts, kpShortName, tidyName } from '../src/draft.ts';
+import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback, currencyTagsInTemplate, withCurrencyFallback, dropPageBreaksAfterTable, SERVICE_NOTE, withServiceNoteFallback } from '../src/build.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, isServiceLine, kpLineName, kpLineParts, kpShortName, lineCategory, tidyName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
 
@@ -50,15 +50,15 @@ describe('черновик: разбор ответа модели и позиц
   it('обёртка ```json и мусор вокруг объекта допускаются, лишнее отсекается', () => {
     const p = parseDraft('Вот JSON:\n```json\n{"client":{"org":" ООО Ромашка ","fio":"","email":"a@b.ru","phone":""},"request_items":[{"raw":"Дверь 2100*900 — 3 шт","name":"дверь белая","width_mm":"900","height_mm":2100,"qty":"3"},{"raw":"","name":""}],"required_blocks":["price","foo"],"questions":["Цвет?",""]}\n```');
     expect(p.client).toEqual({ org: 'ООО Ромашка', fio: '', email: 'a@b.ru', phone: '' });
-    expect(p.request_items).toEqual([{ raw: 'Дверь 2100*900 — 3 шт', name: 'дверь белая', width_mm: 900, height_mm: 2100, qty: 3 }]);
+    expect(p.request_items).toEqual([{ raw: 'Дверь 2100*900 — 3 шт', name: 'дверь белая', width_mm: 900, height_mm: 2100, qty: 3, category: 'door' }]);
     expect(p.required_blocks).toEqual(['price']);
     expect(p.questions).toEqual(['Цвет?']);
     expect(parseDraft('не json').request_items).toEqual([]);
     // KB-MATCH: признаки двери от модели — только названные (словами или кодами), пустые/неизвестные отбрасываются, без признаков поля нет.
     const f = parseDraft('{"request_items":[{"raw":"Дверной блок деревянный глухой CPL 1010×2100","name":"дверной блок","width_mm":1010,"height_mm":2100,"qty":1,"features":{"type":"block","material":"деревянный","glazing":"solid","leaves":null,"threshold":"без порога","opening":"","coating":"CPL","fire":null,"closer":true,"lock":"нет"}},{"raw":"Добор","name":"добор","qty":2,"features":{"type":null}}]}');
     // KP-NAME: короткое название модели заменено строкой письма без размера.
-    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'Дверной блок деревянный глухой CPL', width_mm: 1010, height_mm: 2100, qty: 1, features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
-    expect(f.request_items[1]).toEqual({ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 });
+    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'Дверной блок деревянный глухой CPL', width_mm: 1010, height_mm: 2100, qty: 1, category: 'door', features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
+    expect(f.request_items[1]).toEqual({ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2, category: 'component' });
   });
 
   it('KP-NAME: полное наименование как у клиента — сокращение модели заменяется строкой письма без размера и количества; наименование КП с моделью прайса', () => {
@@ -108,6 +108,19 @@ describe('черновик: разбор ответа модели и позиц
     expect(cut.removed).toBe(2);
     expect(cut.xml).toBe('<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:tbl><w:tr><w:tc><w:p>x</w:p></w:tc></w:tr></w:tbl><w:p><w:pPr></w:pPr><w:r><w:t>3 позиции</w:t></w:r></w:p><w:p><w:r></w:r></w:p>');
     expect(dropPageBreaksAfterTable('<w:p/>')).toEqual({ xml: '<w:p/>', removed: 0 });
+    // KB-COMPONENTS, п. 5: фраза о работах — свой тег или строкой под фразой о ценах / НДС / плашкой.
+    const withSvc = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'Дверь', size: '', qty: 1, price: 100, discount: 0 }], vatRate: 0, priceNote: 'Цены ориентировочные.', serviceNote: SERVICE_NOTE });
+    expect(withSvc.service_note).toBe(SERVICE_NOTE);
+    expect(withServiceNoteFallback({ serviceNote: true, priceNote: true }, withSvc)).toEqual({ data: withSvc, fallback: false });
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: true }, withSvc).data.price_note).toBe(`Цены ориентировочные.\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false, vatPhrase: true }, withSvc).data.vat_phrase).toBe(`НДС не облагается\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false, vatPhrase: false, totalInWords: false, totalQty: true }, withSvc).data.total_qty).toBe(`1 позиция\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false }, { ...withSvc, service_note: '' })).toEqual({ data: { ...withSvc, service_note: '' }, fallback: false });
+    // Категория строки черновика: поле, старый kind или текст.
+    expect(isServiceLine({ name: 'Монтаж', kind: 'service' })).toBe(true);
+    expect(isServiceLine({ name: 'Доставка по Москве' })).toBe(true);
+    expect(isServiceLine({ name: 'Аква 01 ПГ + УПД окут Белый ПВХ/врезка замка под цилиндр', category: 'door' })).toBe(false);
+    expect(lineCategory({ name: 'Добор телескопический' })).toBe('component');
     // KP-REBUILD-MAIL, п. 3: пометка «(h)» из спецификации клиента не попадает в название и строку.
     expect(tidyName('Дверь ДПГ 2100 (h) × 900 , белая')).toBe('Дверь ДПГ 2100 × 900, белая');
     expect(tidyName('Полотно 2000(H)х800')).toBe('Полотно 2000 х800');
@@ -117,10 +130,10 @@ describe('черновик: разбор ответа модели и позиц
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
     const r = positionToRequest({ name: 'Дверь противопожарная', marking: 'ДПС 01 EI30', width_mm: 900, height_mm: 2100, qty: 3, unit: 'компл.', price_rub: 25_000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: null });
-    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3 });
-    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1 });
+    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3, category: 'door' });
+    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1, category: 'component' });
     // XLSX-2: работы — без размера и с признаком service; дробное количество из заявки сохраняется.
-    expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, kind: 'service' });
+    expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, category: 'service', kind: 'service' });
     expect(positionToRequest(position('Наличник ТЕЛЕСКОП', 70, 2150, 24.5))).toMatchObject({ raw: 'Наличник ТЕЛЕСКОП 70×2150 24.5 шт', qty: 24.5 });
   });
 
@@ -222,8 +235,8 @@ describe('черновик КП опта: источник — карточка 
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 89835, route, pricing: {} }, { amo, analyze });
     expect(amo.downloaded).toEqual(['Двери (3).docx', 'кривой.xlsx']);
     expect(r.payload.items).toEqual([
-      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0 },
-      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0 },
+      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0, category: 'door' },
+      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0, category: 'component' },
     ]);
     expect(r.payload.needs_manager).toEqual([{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }]);
     // Письмо прочитано моделью ради реквизитов и блоков; позиции из письма не используются, когда есть спецификация.

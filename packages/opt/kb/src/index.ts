@@ -6,6 +6,7 @@ export * from './export.ts';
 export * from './extract.ts';
 export * from './features.ts';
 export * from './price-key.ts';
+export * from './category.ts';
 export * from './fetch-url.ts';
 export * from './html.ts';
 export * from './migrations.ts';

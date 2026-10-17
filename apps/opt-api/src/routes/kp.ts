@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { sizeOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -228,11 +228,17 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!draft) return reply.code(404).send({ error: 'not_found' });
     if (draft.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
     if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
-    const { constants } = await repo.getSettings(p.accountId);
-    const positions = researchablePositions(draft.payload as unknown as Partial<KpPayload>, b.data.requestIndexes, constants.maxPositionsPerRun ?? DEFAULT_MAX_POSITIONS_PER_RUN);
+    // KB-COMPONENTS, п. 6: «Найти цены» по всем — все позиции без цены за одно нажатие, в очередь порциями по 20 подряд
+    // (лимит maxPositionsPerRun остаётся для автопоиска при сборке); работы не ставятся.
+    const positions = researchablePositions(draft.payload as unknown as Partial<KpPayload>, b.data.requestIndexes, b.data.requestIndexes === 'all' ? Number.MAX_SAFE_INTEGER : 200);
     if (!positions.length) return reply.code(202).send({ queued: [], reason: b.data.requestIndexes === 'all' ? 'у всех позиций уже есть цена' : 'позиции не найдены' });
-    await deps.researchQueue.enqueue(positions.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: b.data.force, replace: b.data.requestIndexes !== 'all' })));
-    return reply.code(202).send({ queued: positions });
+    const batches: number[][] = [];
+    for (let i = 0; i < positions.length; i += RESEARCH_BATCH) batches.push(positions.slice(i, i + RESEARCH_BATCH));
+    for (const [n, batch] of batches.entries()) {
+      await deps.researchQueue.enqueue(batch.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: b.data.force, replace: b.data.requestIndexes !== 'all', batch: n + 1, batches: batches.length })));
+    }
+    if (positions.length > RESEARCH_BATCH) await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'note', summary: `Поиск цен: поставлено позиций ${positions.length} порциями по ${RESEARCH_BATCH} (${batches.length})`, details: { draftId: draft.id, positions: positions.length, batches: batches.length, userId: p.userId } });
+    return reply.code(202).send({ queued: positions, total: positions.length, batches: batches.length });
   });
 
   /** Состояние поиска по позициям черновика: задание (queued / running / failed) и последняя запись kp_price_research. */
