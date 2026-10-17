@@ -1,0 +1,22 @@
+# Критические пути (см. REVIEW.md) — обязательное ревью владельца.
+/packages/amo/src/oauth.ts @aleksnevedrov-cloud
+/packages/amo/src/token-service.ts @aleksnevedrov-cloud
+/packages/amo/src/salesbot.ts @aleksnevedrov-cloud
+/packages/amo/src/disposable-token.ts @aleksnevedrov-cloud
+/packages/shared/src/crypto.ts @aleksnevedrov-cloud
+/packages/shared/src/pii.ts @aleksnevedrov-cloud
+/packages/shared/src/env.ts @aleksnevedrov-cloud
+/packages/db/migrations/ @aleksnevedrov-cloud
+/packages/db/src/tokens.ts @aleksnevedrov-cloud
+/packages/db/src/settings.ts @aleksnevedrov-cloud
+/packages/agent/src/factcheck.ts @aleksnevedrov-cloud
+/packages/agent/src/prompt.ts @aleksnevedrov-cloud
+/apps/api/src/routes/ @aleksnevedrov-cloud
+/.github/ @aleksnevedrov-cloud
+/Dockerfile @aleksnevedrov-cloud
+/docker-compose.yml @aleksnevedrov-cloud
+/scripts/check-secrets.mjs @aleksnevedrov-cloud
+package.json @aleksnevedrov-cloud
+/CLAUDE.md @aleksnevedrov-cloud
+/REVIEW.md @aleksnevedrov-cloud
+/pnpm-lock.yaml @aleksnevedrov-cloud

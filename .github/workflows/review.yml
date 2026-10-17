@@ -1,0 +1,57 @@
+name: Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    outputs:
+      level: ${{ steps.classify.outputs.level }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        run: |
+          files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          level=low
+          if echo "$files" | grep -Eq '^(packages/(amo/src/(oauth|token-service|salesbot|disposable-token)\.ts|shared/src/(crypto|pii|env)\.ts|db/migrations/|db/src/(tokens|settings)\.ts|agent/src/(factcheck|prompt)\.ts)|apps/api/src/routes/|\.github/|Dockerfile$|docker-compose\.yml$|scripts/check-secrets\.mjs$|pnpm-lock\.yaml$|(CLAUDE|REVIEW)\.md$)|(^|/)package\.json$'; then
+            level=critical
+          elif echo "$files" | grep -Eq '^(packages|apps)/.*/src/'; then
+            level=medium
+          fi
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+          echo "Уровень риска: $level"
+      - name: Метка риска
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "risk:${{ steps.classify.outputs.level }}" --force >/dev/null 2>&1 || true
+          gh pr edit ${{ github.event.pull_request.number }} \
+            --remove-label "risk:low" --remove-label "risk:medium" --remove-label "risk:critical" >/dev/null 2>&1 || true
+          gh pr edit ${{ github.event.pull_request.number }} --add-label "risk:${{ steps.classify.outputs.level }}"
+
+  claude-review:
+    needs: risk
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Проведи ревью этого PR по правилам из REVIEW.md и CLAUDE.md.
+            Уровень риска: ${{ needs.risk.outputs.level }}.
+            Используй формат замечаний из REVIEW.md. Если уровень critical — в конце напиши:
+            «Требуется ревью человека (владельца репозитория)». Не одобряй PR.
