@@ -110,7 +110,7 @@ describe('kb_prices и kb_aliases на БД', () => {
     expect(viaAlias).toMatchObject({ price: 3500, match: 'alias', notes: ['по синониму: ДПГ сота'] });
     // Похожая модель по словам: «Турин» внутри длинного названия.
     const tokens = await lookupPrice(prices, aliases, ACCOUNT, { name: 'Дверь Браво Турин белая эмаль', widthMm: 800, heightMm: 2000 });
-    expect(tokens).toMatchObject({ match: 'tokens', price: 8100, notes: [expect.stringContaining('похожая модель в базе: Турин')] });
+    expect(tokens).toMatchObject({ match: 'tokens', price: 8100, notes: expect.arrayContaining([expect.stringContaining('похожая модель в базе: Турин'), 'цвет уточнить: в письме «белый», в строке прайса Турин цвет не указан']) });
     // Устарела: прайс 01.10.2026 через 100 дней.
     const old = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 }, new Date('2027-01-20'));
     expect(old).toMatchObject({ stale: true, validityDays: 90, notes: expect.arrayContaining([expect.stringContaining('цена устарела')]) });

@@ -164,11 +164,46 @@ export function withPriceNoteFallback(hasTag: boolean, data: KpTemplateData): { 
  */
 export function withLayoutFallback(tags: { equipment: boolean; designation: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
   const items = data.items.map((it) => {
-    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение: ${it.designation}` : ''].filter(Boolean);
+    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение заказчика: ${it.designation}` : ''].filter(Boolean);
     return extra.length ? { ...it, name: [it.name, ...extra].join('\n') } : it;
   });
   const fallback = items.some((it, i) => it.name !== data.items[i]?.name);
   return { data: { ...data, items }, fallback };
+}
+
+/** Теги денег, после которых шаблон сам ставит знак рубля: «{{grand_total}} ₽» давало «71 700 ₽ ₽» (KP-LAYOUT, дефект 4). */
+export const MONEY_TAGS = ['grand_total', 'price', 'sum'] as const;
+export type MoneyTag = (typeof MONEY_TAGS)[number];
+
+export function currencyTagsInTemplate(text: string): MoneyTag[] {
+  return MONEY_TAGS.filter((t) => new RegExp(`\\{\\{\\s*${t}\\s*\\}\\}\\s*(₽|руб\\.?|р\\.)`, 'iu').test(text));
+}
+
+/** Из значений тегов, за которыми в шаблоне уже стоит ₽, знак убирается — в документе он остаётся один. */
+export function withCurrencyFallback(tags: MoneyTag[], data: KpTemplateData): KpTemplateData {
+  if (!tags.length) return data;
+  const strip = (v: string) => v.replace(/\s*₽$/u, '');
+  return {
+    ...data,
+    grand_total: tags.includes('grand_total') ? strip(data.grand_total) : data.grand_total,
+    items: data.items.map((it) => ({ ...it, price: tags.includes('price') ? strip(it.price) : it.price, sum: tags.includes('sum') ? strip(it.sum) : it.sum })),
+  };
+}
+
+/**
+ * Разрывы страницы после таблицы позиций (KP-LAYOUT, дефект 5): плашка «N позиций» и примечание уезжали на почти пустой
+ * второй лист. Явные разрывы (<w:br w:type="page"/>, pageBreakBefore) после последней таблицы убираются; разрывы до неё
+ * и внутри не трогаются.
+ */
+export function dropPageBreaksAfterTable(xml: string): { xml: string; removed: number } {
+  const at = xml.lastIndexOf('</w:tbl>');
+  if (at < 0) return { xml, removed: 0 };
+  const head = xml.slice(0, at);
+  let tail = xml.slice(at);
+  let removed = 0;
+  tail = tail.replace(/<w:br\s+w:type="page"\s*\/>/g, () => (removed += 1, ''));
+  tail = tail.replace(/<w:pageBreakBefore(\s+w:val="(true|1|on)")?\s*\/>/g, () => (removed += 1, ''));
+  return { xml: head + tail, removed };
 }
 
 export interface KpBuildResult {
@@ -178,8 +213,12 @@ export interface KpBuildResult {
   certificates: string[];
   /** В шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС. */
   priceNoteFallback: boolean;
-  /** В шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием. */
+  /** В шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием. */
   layoutFallback: boolean;
+  /** Теги, после которых шаблон сам ставит ₽ — из их значений знак убран. */
+  currencyStripped: MoneyTag[];
+  /** Сколько явных разрывов страницы после таблицы убрано. */
+  pageBreaksRemoved: number;
 }
 
 /**
@@ -201,11 +240,20 @@ export async function buildKp(
   });
   const text = doc.getFullText();
   const { data: withNote, fallback } = withPriceNoteFallback(text.includes('price_note'), data);
-  const { data: rendered, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withNote);
-  doc.render(rendered);
+  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withNote);
+  const currencyStripped = currencyTagsInTemplate(text);
+  doc.render(withCurrencyFallback(currencyStripped, laidOut));
   await mkdir(outDir, { recursive: true });
   const docxPath = join(outDir, `${baseName}.docx`);
-  await writeFile(docxPath, doc.getZip().generate({ type: 'nodebuffer' }) as Buffer);
+  const out = doc.getZip();
+  const body = out.file('word/document.xml')?.asText();
+  let pageBreaksRemoved = 0;
+  if (body) {
+    const fixed = dropPageBreaksAfterTable(body);
+    pageBreaksRemoved = fixed.removed;
+    if (fixed.removed) out.file('word/document.xml', fixed.xml);
+  }
+  await writeFile(docxPath, out.generate({ type: 'nodebuffer' }) as Buffer);
 
   const pdfPath = join(outDir, `${baseName}.pdf`);
   try {
@@ -216,9 +264,9 @@ export async function buildKp(
       { timeout: 120_000 },
     );
     await access(pdfPath);
-    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback };
+    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved };
   } catch (err) {
-    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback };
+    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved };
   }
 }
 

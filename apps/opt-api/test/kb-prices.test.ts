@@ -62,7 +62,8 @@ function templateDocx(): string {
   const zip = new PizZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{#items}}{{n}}. {{name}} — {{sum}}; {{/items}}итого {{grand_total}}</w:t></w:r></w:p></w:body></w:document>');
+  // Как у заказчика (KP-LAYOUT): строки в таблице, после неё разрыв страницы, «{{grand_total}} ₽» со своим знаком рубля.
+  zip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>{{#items}}{{n}}. {{name}} — {{sum}}; {{/items}}</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>{{total_qty}}; итого {{grand_total}} ₽</w:t></w:r></w:p></w:body></w:document>');
   return zip.generate({ type: 'base64' });
 }
 
@@ -284,12 +285,21 @@ describe('база знаний опта: цены и синонимы → по�
     const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d0.id);
     const xml = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
     const text = xml.replace(/<w:br\s*\/>/g, '\n').replace(/<[^>]+>/g, '');
-    // KP-LAYOUT: в шаблоне нет {{equipment}} / {{designation}} — части строкой под названием: название / комплектация / обозначение.
-    const row = `${LETTER}\nКомплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик\nОбозначение: ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ) — 23 900 ₽`;
-    expect(text).toContain(`1. ${row}; 2. ${row}; 3. ${row}; итого 71 700 ₽`);
+    // KP-LAYOUT: ячейка в три уровня — короткое название по прайсу (без «по прайсу»), комплектация, обозначение заказчика (его строка);
+    // в шаблоне без {{equipment}} / {{designation}} — строками под названием. Итог один раз с ₽, разрыв страницы перед плашкой убран.
+    const row = (w: number) => `Дверной блок ДВ CPL 0,2 мм, глухой, светло-серый\nКомплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик\nОбозначение заказчика: ${LETTER} ${w}×2100 — 1 шт — 23 900 ₽`;
+    expect(text).toContain(`1. ${row(1010)}; 2. ${row(910)}; 3. ${row(910)}; `);
+    expect(text).toContain('3 позиции; итого 71 700 ₽');
+    expect(text).not.toContain('₽ ₽');
+    expect(text).not.toContain('по прайсу');
     expect(xml).toContain('<w:br/>');
-    const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string }[];
-    expect(log[0]?.summary).toContain('в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием');
+    expect(xml).not.toContain('w:type="page"');
+    expect(xml).not.toContain('pageBreakBefore');
+    const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string; details: { currencyStripped: string[]; pageBreaksRemoved: number } }[];
+    expect(log[0]?.summary).toContain('в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием');
+    expect(log[0]?.summary).toContain('в шаблоне знак ₽ стоит после {{grand_total}} — из значений убран');
+    expect(log[0]?.summary).toContain('разрывов страницы после таблицы убрано: 2');
+    expect(log[0]?.details).toMatchObject({ currencyStripped: ['grand_total'], pageBreaksRemoved: 2 });
     expect(d.items.map((l: { priceAbbr: string | null }) => l.priceAbbr)).toEqual(['ДВ 1Рп Г ПрБ', 'ДВ 1Рп Г ПрБ', 'ДВ 1Рп Г ПрБ']);
     const journal = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items as { summary: string; details: { draftId: number; match?: string; webSearchCalls?: number } }[];
     const mine = journal.filter((j) => j.details.draftId === d0.id);

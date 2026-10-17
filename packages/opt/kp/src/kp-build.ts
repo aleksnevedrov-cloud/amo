@@ -89,9 +89,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     basis: letterAt ? `запрос от ${letterAt.toLocaleDateString('ru-RU')}` : 'запрос клиента',
     clientName: payload.client?.org || payload.client?.fio || '',
     clientPhone: payload.client?.phone || '',
-    // KP-LAYOUT: строка в три части — название как у клиента / комплектация / обозначение по прайсу; в шаблоне без
-    // {{equipment}} и {{designation}} вторая и третья части идут строками под названием.
-    lines: lines.map((l) => ({ ...kpLineParts(l), size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
+    // KP-LAYOUT: ячейка в три уровня — короткое название по прайсу / комплектация / обозначение заказчика (его строка
+    // запроса); в шаблоне без {{equipment}} и {{designation}} второй и третий уровни идут строками под названием.
+    lines: lines.map((l) => ({ ...kpLineParts(l, payload.request_items?.[l.request_index] ?? null), size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
     vatRate: s.constants.vatRate ?? 0,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
   });
@@ -129,9 +129,11 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (built.pdfPath ? '' : `; PDF не собран${built.pdfError ? ` (${built.pdfError})` : ''}`) +
       (attached.length ? `; в сделку: ${attached.join(', ')}` : '; в сделку не приложено') +
       (built.priceNoteFallback ? '; в шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС' : '') +
-      (built.layoutFallback ? '; в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием' : '') +
+      (built.layoutFallback ? '; в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием' : '') +
+      (built.currencyStripped.length ? `; в шаблоне знак ₽ стоит после ${built.currencyStripped.map((t) => `{{${t}}}`).join(', ')} — из значений убран` : '') +
+      (built.pageBreaksRemoved ? `; разрывов страницы после таблицы убрано: ${built.pageBreaksRemoved}` : '') +
       `; ${(ms / 1000).toFixed(1)} с`,
-    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, userId: input.userId, ms },
+    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, userId: input.userId, ms },
   });
   return { draft: fresh, kpNo, pdf: Boolean(built.pdfPath), pdfError: built.pdfError ?? null, files, certificates: certs, attached, priceNoteFallback: built.priceNoteFallback, ms };
 }

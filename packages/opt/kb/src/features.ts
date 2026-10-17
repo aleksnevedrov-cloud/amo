@@ -239,8 +239,10 @@ export function colorOf(text: string | null | undefined): string | null {
   const explicit = /цвет[а-я]*\s*[-—:]?\s*([а-яa-z-]+(?:\s[а-яa-z-]+)?)/.exec(t);
   for (const c of COLORS) {
     const key = c.replace(/ё/g, 'е');
-    // «светло-серый», «светло серый» и «светлосерый» — один цвет.
-    const rx = new RegExp(`(^|[^а-яa-z])${key.replace(/[-\s]/g, '[-\\s]?')}(?![а-яa-z])`);
+    // «светло-серый», «светло серый» и «светлосерый» — один цвет; прилагательные — в любом роде и падеже («серая», «серого»).
+    const adjective = /(ый|ий|ой)$/.test(key);
+    const stem = (adjective ? key.replace(/(ый|ий|ой)$/, '') : key).replace(/[-\s]/g, '[-\\s]?');
+    const rx = new RegExp(`(^|[^а-яa-z])${stem}${adjective ? '(ый|ий|ой|ая|яя|ое|ее|ые|ие|ого|его|ому|ему|ым|им|ей|ую|юю|ом|ем)' : ''}(?![а-яa-z])`);
     if (rx.test(t)) return c.replace(/ (серый)$/, '-$1');
   }
   if (explicit && explicit[1] && !/^(не|по|как|в|и|или)$/.test(explicit[1])) return explicit[1].trim();

@@ -3,7 +3,7 @@ import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
-import { featuresFromModel, type DoorFeatures } from '@opt/kb';
+import { colorOf, featuresFromModel, featuresOf, mergeFeatures, type DoorFeatures } from '@opt/kb';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -586,18 +586,41 @@ export function kpLineName(l: Pick<KpLine, 'name' | 'priceModel'>): string {
   return l.priceModel ? `${l.name} — по прайсу: ${l.priceModel}` : l.name;
 }
 
-/** Обозначение по нашему прайсу: «ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)»; без строки прайса — пусто. */
-export function kpLineDesignation(l: Pick<KpLine, 'priceModel' | 'priceAbbr'>): string {
-  if (!l.priceModel) return l.priceAbbr ?? '';
-  return l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? `${l.priceModel} (${l.priceAbbr})` : l.priceModel;
+/**
+ * Короткое название позиции для клиентского КП (KP-LAYOUT, п. 2): модель и покрытие из прайса плюс ключевые признаки —
+ * «Дверной блок ДВ CPL 0,2 мм, глухой, светло-серый». Без строки прайса — название клиента как есть. Служебные слова
+ * («по прайсу», источник цены) в клиентский документ не попадают.
+ */
+export function kpShortName(l: Pick<KpLine, 'name' | 'priceModel'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): string {
+  if (!l.priceModel) return l.name;
+  const text = `${item?.name ?? l.name} | ${item?.raw ?? ''}`;
+  const f = mergeFeatures(featuresOf(text), item?.features ?? null);
+  // Род прилагательных: блок — мужской, полотно — средний, неизвестно — «дверь», женский.
+  const g = f.type === 'block' ? 0 : f.type === 'leaf' ? 1 : 2;
+  const head = ['Дверной блок', 'Полотно', 'Дверь'][g] as string;
+  const words: string[] = [];
+  if (f.glazing) words.push((f.glazing === 'solid' ? ['глухой', 'глухое', 'глухая'] : ['остеклённый', 'остеклённое', 'остеклённая'])[g] as string);
+  if (f.leaves === 2) words.push(['двупольный', 'двупольное', 'двупольная'][g] as string);
+  if (f.fire) words.push(f.fire === 'yes' ? 'противопожарный' : f.fire);
+  const color = colorOf(text);
+  if (color) words.push(color);
+  // Модель уже начинается с типа («Дверной блок …») — не дублируем.
+  const model = l.priceModel.trim();
+  const lead = model.toLowerCase().replace(/\s+/g, " ").startsWith(head.toLowerCase()) ? model : `${head} ${model}`;
+  return [lead, ...words].join(', ');
 }
 
 /**
- * Строка КП в три части (KP-LAYOUT): название как у клиента / комплектация из прайса / обозначение по нашему прайсу.
- * Шаблон с плейсхолдерами {{equipment}} и {{designation}} раскладывает их по своим абзацам; без них они идут строками под названием.
+ * Ячейка «Наименование» в три уровня (KP-LAYOUT, п. 2): name — короткое название по прайсу (жирным в шаблоне);
+ * equipment — комплектация из прайса; designation — обозначение заказчика: исходная строка из его запроса (мелким серым),
+ * чтобы клиент узнал свою позицию. Шаблон с плейсхолдерами {{equipment}} и {{designation}} раскладывает их по своим
+ * абзацам; без них они идут строками под названием.
  */
-export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'priceAbbr' | 'equipment'>): { name: string; equipment: string; designation: string } {
-  return { name: l.name, equipment: l.equipment ?? '', designation: kpLineDesignation(l) };
+export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'equipment'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): { name: string; equipment: string; designation: string } {
+  const name = kpShortName(l, item);
+  // Без строки прайса первый уровень и есть строка клиента — третий уровень не нужен.
+  const original = l.priceModel ? tidyName(item?.raw || item?.name || l.name) : '';
+  return { name, equipment: l.equipment ?? '', designation: original && original !== name ? original : '' };
 }
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */

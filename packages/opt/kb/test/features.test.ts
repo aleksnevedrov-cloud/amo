@@ -80,6 +80,8 @@ describe('признаки двери (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
     expect(colorOf('эмаль белый матовый')).toBe('белый матовый');
     expect(colorOf('эмаль RAL 7035, глухая')).toBe('RAL 7035');
     expect(colorOf('цвет: капучино')).toBe('капучино');
+    expect(colorOf('дверь серая двупольная')).toBe('серый');
+    expect(colorOf('полотно белого цвета')).toBe('белый');
     expect(colorOf('Дверной блок деревянный глухой')).toBeNull();
     expect(priceModelOf({ model: 'ДВ CPL', coating: 'CPL 0,2 мм' })).toBe('ДВ CPL 0,2 мм');
     expect(priceModelOf({ model: 'ДВ CPL', coating: 'cpl' })).toBe('ДВ CPL');
