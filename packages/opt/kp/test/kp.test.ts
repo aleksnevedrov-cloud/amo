@@ -25,6 +25,8 @@ describe('сборка КП: значения для шаблона', () => {
     // Разделитель тысяч в ru-RU — неразрывный пробел.
     const plain = (v: string) => v.replace(/\u00a0/g, ' ');
     expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '0 ₽']]);
+    // KP-LAYOUT: размер в документе с пробелами вокруг × — перенос в узкой колонке по пробелу, а не посреди числа.
+    expect(data.items[0]?.size).toBe('2000 × 800 мм');
     expect(plain(data.grand_total)).toBe('18 000 ₽');
     expect(data.total_qty).toBe('4 позиции');
     expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 3 245,90 ₽');

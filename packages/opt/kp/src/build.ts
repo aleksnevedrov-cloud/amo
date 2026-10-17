@@ -122,7 +122,8 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     name: l.name || '—',
     equipment: l.equipment ?? '',
     designation: l.designation ?? '',
-    size: l.size || '—',
+    // «1010 × 2100 мм» с пробелами вокруг ×: в узкой колонке шаблона (2,1 см) перенос идёт по пробелу, а не посреди числа («1010×210|0»).
+    size: l.size ? l.size.replace(/(\d)\s*[×x]\s*(\d)/g, '$1 × $2') : '—',
     qty: `${l.qty.toLocaleString('ru-RU')} шт`,
     price: l.price === null ? '—' : money(l.price),
     sum: money(lineSum(l)),
