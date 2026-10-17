@@ -115,4 +115,19 @@ describe('цены из xlsx-прайса', () => {
     const request = await previewPriceList(await xlsx({ Лист1: [['1 ЭТАЖ'], ['ДПГ сота 800×2000', 12], ['Добор', 3]] }));
     expect(request.isPriceList).toBe(false);
   });
+
+  it('колонки комплектующих «Коробка / Наличник / Добор / Порог, руб.» не меняют цену двери: ценой считается «Цена», где бы она ни стояла', async () => {
+    const row = ['ДВ CPL', 'ДВ 1Рп Г ПрБ', 'Г', 'CPL 0,2 мм', '910×2100'];
+    // Комплектующие раньше цены двери.
+    const before = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Сокращение', 'Г/О', 'Покрытие', 'Размер блока', 'Коробка, руб.', 'Наличник, руб.', 'Добор, руб.', 'Порог, руб.', 'Цена, руб.'], [...row, 3500, 1200, 900, 700, 23900]] }));
+    expect(before.mapping).toMatchObject({ model: 0, abbr: 1, go: 2, coating: 3, size: 4, price: 9 });
+    expect(before.sample.map((x) => [x.model, x.widthMm, x.price, x.features.glazing, x.features.coating, x.features.threshold])).toEqual([['ДВ CPL', 910, 23900, 'solid', 'cpl', 'without']]);
+    // Комплектующие после цены двери; «Стоимость с НДС» вместо «Цена».
+    const after = await previewPriceList(await xlsx({ Прайс: [['Модель', 'Размер блока', 'Стоимость с НДС', 'Коробка', 'Наличник', 'Добор', 'Порог'], ['ДПГ сота', '800×2000', 8800, 2100, 600, 500, 400]] }));
+    expect(after.mapping).toMatchObject({ model: 0, size: 1, price: 2 });
+    expect(after.vatHint).toBe('included');
+    expect(after.sample.map((x) => [x.model, x.price, x.features.threshold])).toEqual([['ДПГ сота', 8800, null]]);
+    // Колонки комплектующих ни во что не попадают: ни в цену, ни в признаки, ни в модель.
+    expect(Object.values(after.mapping).filter((v) => typeof v === 'number')).not.toContain(6);
+  });
 });

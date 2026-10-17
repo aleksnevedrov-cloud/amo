@@ -74,6 +74,9 @@ export interface PriceListPreview {
 }
 
 const HEADER_SCAN_ROWS = 30;
+/** Колонки комплектующих и работ рядом с ценой двери: в цену двери не идут и колонкой цены не считаются. */
+export const ACCESSORY_RX = /коробк|наличник|добор|порог|фурнитур|петл|замк|ручк|доводчик|уплотнит|монтаж|доставк|врезк|откос/i;
+
 const RX = {
   model: /наимен|назван|модель|артикул|номенкл|товар|позиц|издели/i,
   price: /цена|стоим|руб|₽|price/i,
@@ -134,7 +137,10 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
   const header = detectHeader(scoped);
   const find = (rx: RegExp, exclude: number[] = []) => header?.row.cells.findIndex((c, i) => rx.test(c) && !exclude.includes(i)) ?? -1;
   if (header) {
-    const price = find(RX.price);
+    // Колонка цены двери: «Цена» / «Стоимость» важнее голого «руб.»; колонки комплектующих («Коробка, руб.», «Наличник», «Добор»,
+    // «Порог») ценой двери не считаются, даже если стоят раньше — иначе ценой ДВ CPL становилась цена коробки.
+    const priceCandidates = header.row.cells.map((c, i) => ({ c, i })).filter(({ c }) => RX.price.test(c) && !ACCESSORY_RX.test(c));
+    const price = (priceCandidates.find(({ c }) => /цена|стоим|price/i.test(c)) ?? priceCandidates[0])?.i ?? -1;
     // «Сокращение в названии» содержит «назван» — ищется раньше модели, чтобы не занять её колонку.
     const abbr = find(RX.abbr, [price]);
     const description = find(RX.description, [price, abbr]);
@@ -144,7 +150,9 @@ export function detectMapping(rows: KbSheetRow[], sheet: string | null = null): 
     const size = width >= 0 && height >= 0 ? -1 : find(RX.size, [price, model, width, height, abbr, description]);
     const factory = find(RX.factory, [price, model, width, height, size, abbr, description]);
     const unit = find(RX.unit, [price, model, width, height, size, factory, abbr, description]);
-    const taken = [price, model, width, height, size, factory, unit, abbr, description];
+    // Колонки комплектующих («Порог, руб.» и т. п.) не участвуют и в поиске колонок признаков.
+    const accessories = header.row.cells.map((c, i) => (ACCESSORY_RX.test(c) ? i : -1)).filter((i) => i >= 0);
+    const taken = [price, model, width, height, size, factory, unit, abbr, description, ...accessories];
     const go = find(RX.go, taken);
     const coating = find(RX.coating, [...taken, go]);
     const material = find(RX.material, [...taken, go, coating]);
