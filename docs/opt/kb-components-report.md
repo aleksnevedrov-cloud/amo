@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KB-COMPONENTS: комплектующие, фурнитура, работы в КП
 
-Дата: 17.10.2026. Ветка `claude/opt-kb`, отдельный коммит после eeb9cb2. Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
+Дата: 17.10.2026. Ветка `claude/opt-kb`, коммит b94526c (после eeb9cb2). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
 виджет 1.2.0. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 Пример заказчика: сделка 89813 (#30008823), черновик 57 — 136 позиций, с ценой 23, без цены 113.
