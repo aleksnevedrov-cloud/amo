@@ -260,6 +260,45 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(text()).toContain('Цена · изменено менеджером');
   });
 
+  it('KP-WIDGET-REFRESH: поиск завершился мгновенно (цены из базы) — после POST research виджет перечитывает черновик и показывает цены без F5; правки во время поиска сбрасываются', async () => {
+    const item = (i: number, price: number | null) => ({ request_index: i, page_id: null, name: `Дверной блок ${i + 1}`, size: '910×2100 мм', qty: 1, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'kb' as const, priceLabel: 'по прайсу: ДВ CPL (строка 5)', priceStale: false, kbPriceId: 5 } : {}) });
+    let current = { ...draft, id: 54, items: [item(0, null), item(1, null), item(2, null)], needsManager: [0, 1, 2].map((i) => ({ request_index: i, reason: 'цена не задана' })) };
+    const calls: string[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => {
+        calls.push('draft');
+        return { draft: current, job: null };
+      },
+      // Задания из базы знаний выполняются мгновенно: к первому опросу ни queued, ни running уже нет.
+      'GET /widget/v1/kp/research': () => {
+        calls.push('research');
+        return { draftId: 54, pending: false, positions: [0, 1, 2].map((i) => ({ requestIndex: i, job: null, research: null })) };
+      },
+      'POST /widget/v1/kp/research': () => {
+        calls.push('post');
+        current = { ...current, items: [item(0, 23_900), item(1, 23_900), item(2, 23_900)], needsManager: [] };
+        return { queued: [0, 1, 2] };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    const text = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
+    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="Нет цены"]')].map((i) => i.value)).toEqual(['', '', '']);
+    expect(button('Собрать документ')?.disabled).toBe(true);
+    calls.length = 0;
+    await click('Найти цены');
+    await flush();
+    await act(async () => new Promise((r) => setTimeout(r, 30)));
+    // POST → один GET research (поиск уже завершён) → GET draft: цены на месте, итог и кнопка сборки доступны без F5.
+    expect(calls).toEqual(['post', 'research', 'draft']);
+    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="Нет цены"]')].map((i) => i.value)).toEqual(['23900', '23900', '23900']);
+    expect(text()).toContain('Цена · по прайсу: ДВ CPL (строка 5)');
+    expect(text()).toContain('Итого71 700 ₽');
+    expect(button('Собрать документ')?.disabled).toBe(false);
+    expect(button('Найти цены')?.disabled).toBe(false);
+  });
+
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {
     const kbDraft = { ...draft, items: [
       { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' },

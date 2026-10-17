@@ -130,13 +130,17 @@ function useKpDraft(api: KpApi, leadId: number) {
       const r = await api.researchState(draftId);
       if (!alive.current) return;
       setResearch(r);
-      // Поиск закончился — цены легли в черновик: перечитываем его, не трогая несохранённые правки менеджера.
-      if (!r.pending && wasPending.current && !dirty) await refresh();
-      wasPending.current = r.pending;
+      // Поиск закончился — цены легли в черновик: перечитываем его (KP-WIDGET-REFRESH). wasPending ставится и при постановке
+      // задания, поэтому мгновенно завершённый поиск (все цены из базы) тоже перечитывает черновик; правки, сделанные во
+      // время поиска, перекрываются свежим черновиком (dirty сбрасывается).
+      if (!r.pending && wasPending.current) {
+        wasPending.current = false;
+        await refresh();
+      } else wasPending.current = r.pending;
     } catch (err) {
       if (alive.current) setError(errorMessage(err));
     }
-  }, [api, draftId, refresh, dirty]);
+  }, [api, draftId, refresh]);
   useEffect(() => {
     setResearch(null);
     void loadResearch();
@@ -155,6 +159,8 @@ function useKpDraft(api: KpApi, leadId: number) {
       const r = await api.research(draftId, which, force);
       if (!alive.current) return;
       if (!r.queued.length && r.reason) setError(r.reason);
+      // Задание поставлено: первый же опрос без queued/running означает «завершилось» — черновик перечитывается сразу.
+      if (r.queued.length) wasPending.current = true;
       await loadResearch();
     } catch (err) {
       if (alive.current) setError(errorMessage(err));
