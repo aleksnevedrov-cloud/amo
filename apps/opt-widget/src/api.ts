@@ -60,6 +60,8 @@ export interface KpDraftLine {
   /** Модель и покрытие строки прайса («ДВ CPL 0,2 мм») и комплектация — показываются под полным названием (KP-NAME). */
   priceModel?: string | null;
   equipment?: string | null;
+  /** Сокращение по ГОСТ из строки прайса — в строку «обозначение» (KP-LAYOUT). */
+  priceAbbr?: string | null;
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */

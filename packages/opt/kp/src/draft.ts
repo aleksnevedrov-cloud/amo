@@ -63,6 +63,8 @@ export interface KpLine {
   priceModel?: string | null;
   /** Комплектация из строки прайса — отдельной строкой под позицией в КП. */
   equipment?: string | null;
+  /** Сокращение по ГОСТ из строки прайса («ДВ 1Рп Г ПрБ») — в строку «Обозначение» КП (KP-LAYOUT). */
+  priceAbbr?: string | null;
 }
 
 export interface KpPayload {
@@ -579,9 +581,23 @@ export function fullItemName(raw: string, name: string): string {
   return tidyName(common * 2 >= nameWords.length ? cleaned : name);
 }
 
-/** Наименование строки в КП: название клиента плюс модель и покрытие из прайса (KP-NAME, п. 2). */
+/** Наименование строки в КП одной строкой: название клиента плюс модель и покрытие из прайса (KP-NAME, п. 2). */
 export function kpLineName(l: Pick<KpLine, 'name' | 'priceModel'>): string {
   return l.priceModel ? `${l.name} — по прайсу: ${l.priceModel}` : l.name;
+}
+
+/** Обозначение по нашему прайсу: «ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)»; без строки прайса — пусто. */
+export function kpLineDesignation(l: Pick<KpLine, 'priceModel' | 'priceAbbr'>): string {
+  if (!l.priceModel) return l.priceAbbr ?? '';
+  return l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? `${l.priceModel} (${l.priceAbbr})` : l.priceModel;
+}
+
+/**
+ * Строка КП в три части (KP-LAYOUT): название как у клиента / комплектация из прайса / обозначение по нашему прайсу.
+ * Шаблон с плейсхолдерами {{equipment}} и {{designation}} раскладывает их по своим абзацам; без них они идут строками под названием.
+ */
+export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'priceAbbr' | 'equipment'>): { name: string; equipment: string; designation: string } {
+  return { name: l.name, equipment: l.equipment ?? '', designation: kpLineDesignation(l) };
 }
 
 /** Позиция разобранной спецификации → позиция запроса (цена из документа клиента не берётся: это не наша цена). */

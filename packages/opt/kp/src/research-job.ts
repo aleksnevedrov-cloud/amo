@@ -214,6 +214,7 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       // KP-NAME: модель и покрытие строки прайса — в наименование КП, комплектация — строкой под позицией; у веб-записей и правок — нет.
       next.priceModel = hit.row.origin === 'price_list' ? priceModelOf(hit.row) : null;
       next.equipment = hit.row.origin === 'price_list' ? hit.row.equipment : null;
+      next.priceAbbr = hit.row.origin === 'price_list' ? hit.row.abbr : null;
     }
     items[i] = next;
     const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
@@ -251,6 +252,7 @@ export async function applyResearchToDraft(core: OptCore, accountId: number, dra
       next.kbPriceId = null;
       next.priceModel = null;
       next.equipment = null;
+      next.priceAbbr = null;
     }
     items[i] = next;
     const notes = price.notes;

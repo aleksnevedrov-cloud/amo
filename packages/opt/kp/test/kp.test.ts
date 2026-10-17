@@ -1,8 +1,8 @@
 import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineName, tidyName } from '../src/draft.ts';
+import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback } from '../src/build.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, kpLineDesignation, kpLineName, kpLineParts, tidyName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
 
@@ -74,6 +74,20 @@ describe('черновик: разбор ответа модели и позиц
     expect(p.request_items[0]?.name).toBe(full);
     expect(kpLineName({ name: full, priceModel: 'ДВ CPL 0,2 мм' })).toBe(`${full} — по прайсу: ДВ CPL 0,2 мм`);
     expect(kpLineName({ name: full, priceModel: null })).toBe(full);
+    // KP-LAYOUT: строка в три части — название / комплектация / обозначение по прайсу (модель с покрытием и сокращение по ГОСТ).
+    expect(kpLineParts({ name: full, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли' })).toEqual({ name: full, equipment: 'коробка, 3 петли', designation: 'ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)' });
+    expect(kpLineDesignation({ priceModel: 'ДПГ сота ламинат', priceAbbr: 'ДПГ' })).toBe('ДПГ сота ламинат');
+    expect(kpLineDesignation({ priceModel: null, priceAbbr: null })).toBe('');
+    expect(kpLineParts({ name: 'Врезка замка', priceModel: null, priceAbbr: null, equipment: null })).toEqual({ name: 'Врезка замка', equipment: '', designation: '' });
+    // Шаблон без {{equipment}} / {{designation}}: части идут строками под названием; с ними — название остаётся чистым.
+    const data = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'Дверь', size: '', qty: 1, price: 100, discount: 0, equipment: 'коробка', designation: 'ДВ CPL' }, { name: 'Добор', size: '', qty: 1, price: 10, discount: 0 }], vatRate: 0, priceNote: '' });
+    expect(data.items.map((i) => [i.name, i.equipment, i.designation])).toEqual([['Дверь', 'коробка', 'ДВ CPL'], ['Добор', '', '']]);
+    const legacy = withLayoutFallback({ equipment: false, designation: false }, data);
+    expect(legacy.fallback).toBe(true);
+    expect(legacy.data.items.map((i) => i.name)).toEqual(['Дверь\nКомплектация: коробка\nОбозначение: ДВ CPL', 'Добор']);
+    const half = withLayoutFallback({ equipment: true, designation: false }, data);
+    expect(half.data.items[0]?.name).toBe('Дверь\nОбозначение: ДВ CPL');
+    expect(withLayoutFallback({ equipment: true, designation: true }, data)).toEqual({ data, fallback: false });
     // KP-REBUILD-MAIL, п. 3: пометка «(h)» из спецификации клиента не попадает в название и строку.
     expect(tidyName('Дверь ДПГ 2100 (h) × 900 , белая')).toBe('Дверь ДПГ 2100 × 900, белая');
     expect(tidyName('Полотно 2000(H)х800')).toBe('Полотно 2000 х800');

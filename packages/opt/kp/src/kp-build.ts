@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, templateData } from './build.ts';
-import { kpLineName, type KpLine, type KpPayload } from './draft.ts';
+import { kpLineParts, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
 import type { KpDraft, KpRepo } from './repo.ts';
 
@@ -89,8 +89,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     basis: letterAt ? `запрос от ${letterAt.toLocaleDateString('ru-RU')}` : 'запрос клиента',
     clientName: payload.client?.org || payload.client?.fio || '',
     clientPhone: payload.client?.phone || '',
-    // KP-NAME: наименование = название клиента + «по прайсу: модель покрытие»; комплектация — строкой под позицией (перенос в ячейке).
-    lines: lines.map((l) => ({ name: `${kpLineName(l)}${l.equipment ? `\nКомплектация: ${l.equipment}` : ''}`, size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
+    // KP-LAYOUT: строка в три части — название как у клиента / комплектация / обозначение по прайсу; в шаблоне без
+    // {{equipment}} и {{designation}} вторая и третья части идут строками под названием.
+    lines: lines.map((l) => ({ ...kpLineParts(l), size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
     vatRate: s.constants.vatRate ?? 0,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
   });
@@ -128,8 +129,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (built.pdfPath ? '' : `; PDF не собран${built.pdfError ? ` (${built.pdfError})` : ''}`) +
       (attached.length ? `; в сделку: ${attached.join(', ')}` : '; в сделку не приложено') +
       (built.priceNoteFallback ? '; в шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС' : '') +
+      (built.layoutFallback ? '; в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием' : '') +
       `; ${(ms / 1000).toFixed(1)} с`,
-    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, userId: input.userId, ms },
+    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, userId: input.userId, ms },
   });
   return { draft: fresh, kpNo, pdf: Boolean(built.pdfPath), pdfError: built.pdfError ?? null, files, certificates: certs, attached, priceNoteFallback: built.priceNoteFallback, ms };
 }

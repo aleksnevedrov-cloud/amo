@@ -284,9 +284,13 @@ describe('база знаний опта: цены и синонимы → по�
     const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d0.id);
     const xml = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ');
     const text = xml.replace(/<w:br\s*\/>/g, '\n').replace(/<[^>]+>/g, '');
-    const row = `${LETTER} — по прайсу: ДВ CPL 0,2 мм\nКомплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик — 23 900 ₽`;
+    // KP-LAYOUT: в шаблоне нет {{equipment}} / {{designation}} — части строкой под названием: название / комплектация / обозначение.
+    const row = `${LETTER}\nКомплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик\nОбозначение: ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ) — 23 900 ₽`;
     expect(text).toContain(`1. ${row}; 2. ${row}; 3. ${row}; итого 71 700 ₽`);
     expect(xml).toContain('<w:br/>');
+    const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string }[];
+    expect(log[0]?.summary).toContain('в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием');
+    expect(d.items.map((l: { priceAbbr: string | null }) => l.priceAbbr)).toEqual(['ДВ 1Рп Г ПрБ', 'ДВ 1Рп Г ПрБ', 'ДВ 1Рп Г ПрБ']);
     const journal = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_RESEARCH_KIND}`, headers })).json().items as { summary: string; details: { draftId: number; match?: string; webSearchCalls?: number } }[];
     const mine = journal.filter((j) => j.details.draftId === d0.id);
     expect(mine).toHaveLength(3);

@@ -20,6 +20,9 @@ export interface KpBuildLine {
   qty: number;
   price: number | null;
   discount: number;
+  /** KP-LAYOUT: комплектация и обозначение по прайсу — свои плейсхолдеры {{equipment}} и {{designation}} в строке таблицы. */
+  equipment?: string;
+  designation?: string;
 }
 
 export interface KpBuildInput {
@@ -47,7 +50,7 @@ export interface KpTemplateData {
   order_basis: string;
   client_name: string;
   client_phone: string;
-  items: { n: number; name: string; size: string; qty: string; price: string; sum: string }[];
+  items: { n: number; name: string; size: string; qty: string; price: string; sum: string; equipment: string; designation: string }[];
   total_in_words: string;
   vat_phrase: string;
   grand_total: string;
@@ -117,6 +120,8 @@ export function templateData(input: KpBuildInput): KpTemplateData {
   const items = input.lines.map((l, i) => ({
     n: i + 1,
     name: l.name || '—',
+    equipment: l.equipment ?? '',
+    designation: l.designation ?? '',
     size: l.size || '—',
     qty: `${l.qty.toLocaleString('ru-RU')} шт`,
     price: l.price === null ? '—' : money(l.price),
@@ -153,6 +158,19 @@ export function withPriceNoteFallback(hasTag: boolean, data: KpTemplateData): { 
   return { data: { ...data, vat_phrase: `${data.vat_phrase}\n${data.price_note}` }, fallback: true };
 }
 
+/**
+ * Строка в три части (KP-LAYOUT): если в шаблоне нет плейсхолдеров {{equipment}} / {{designation}}, комплектация и
+ * обозначение идут строками под названием в {{name}} («Комплектация: …», «Обозначение: …»), чтобы не потеряться.
+ */
+export function withLayoutFallback(tags: { equipment: boolean; designation: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  const items = data.items.map((it) => {
+    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение: ${it.designation}` : ''].filter(Boolean);
+    return extra.length ? { ...it, name: [it.name, ...extra].join('\n') } : it;
+  });
+  const fallback = items.some((it, i) => it.name !== data.items[i]?.name);
+  return { data: { ...data, items }, fallback };
+}
+
 export interface KpBuildResult {
   docxPath: string;
   pdfPath: string | null;
@@ -160,6 +178,8 @@ export interface KpBuildResult {
   certificates: string[];
   /** В шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС. */
   priceNoteFallback: boolean;
+  /** В шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение добавлены строками под названием. */
+  layoutFallback: boolean;
 }
 
 /**
@@ -179,7 +199,9 @@ export async function buildKp(
     linebreaks: true,
     nullGetter: () => '',
   });
-  const { data: rendered, fallback } = withPriceNoteFallback(doc.getFullText().includes('price_note'), data);
+  const text = doc.getFullText();
+  const { data: withNote, fallback } = withPriceNoteFallback(text.includes('price_note'), data);
+  const { data: rendered, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withNote);
   doc.render(rendered);
   await mkdir(outDir, { recursive: true });
   const docxPath = join(outDir, `${baseName}.docx`);
@@ -194,9 +216,9 @@ export async function buildKp(
       { timeout: 120_000 },
     );
     await access(pdfPath);
-    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback };
+    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback };
   } catch (err) {
-    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback };
+    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback };
   }
 }
 
