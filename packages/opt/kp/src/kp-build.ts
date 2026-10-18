@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, SERVICE_NOTE, templateData } from './build.ts';
-import { isServiceLine, kpLineParts, type KpLine, type KpPayload } from './draft.ts';
+import { isServiceLine, kpLineParts, lineCategory, tidyName, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
 import type { KpDraft, KpRepo } from './repo.ts';
 
@@ -81,8 +81,21 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   // KB-COMPONENTS, п. 5: работы (монтаж, врезка, доставка) в таблицу и итог не входят — под таблицей фраза о расчёте после замера.
   const goods = (payload.items ?? []).filter((l) => !isServiceLine(l));
   const hasServices = (payload.items ?? []).length > goods.length;
-  const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null);
-  if (!lines.length) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');
+  // KB-PRICE-SHEETS: «входит в цену блока» — не строка таблицы, а примечание под ближайшей дверью выше; «в прайсе цены нет» —
+  // строка с «уточнить у менеджера» вместо цены, в итог не входит.
+  const included = goods.filter((l) => l.priceOutcome === 'included');
+  const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null && l.priceOutcome !== 'included').concat(goods.filter((l) => l.price === null && l.priceOutcome === 'not_priced') as (KpLine & { price: number })[]).sort((a, b) => a.request_index - b.request_index);
+  if (!lines.some((l) => l.price !== null)) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');
+  const notesOf = (l: KpLine): string[] => {
+    const own = l.quoteNotes ?? [];
+    if (lineCategory(l) !== 'door') return own;
+    // Позиции группы этой двери (до следующей двери) со статусом «входит»: в цену блока — одной строкой; в комплект фурнитуры — своей.
+    const group = included.filter((c) => c.request_index > l.request_index && !lines.some((d) => lineCategory(d) === 'door' && d.request_index > l.request_index && d.request_index < c.request_index));
+    const inBlock = group.filter((c) => !c.includedIn || c.includedIn === l.productId).map((c) => tidyName(c.name));
+    const sets = new Map<string, string[]>();
+    for (const c of group) if (c.includedIn && c.includedIn !== l.productId) sets.set(c.includedIn, [...(sets.get(c.includedIn) ?? []), tidyName(c.name)]);
+    return [...own, ...(inBlock.length ? [`В цену блока входит: ${inBlock.join(', ')}`] : []), ...[...sets].map(([set, names]) => `В составе комплекта «${set}»: ${names.join(', ')}`)];
+  };
 
   const kpNo = draft.kpNo ?? (await d.kp.nextNumber(accountId, input.now));
   const letterAt = payload.source?.letterAt ? new Date(payload.source.letterAt) : null;
@@ -94,7 +107,7 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     clientPhone: payload.client?.phone || '',
     // KP-LAYOUT: ячейка в три уровня — короткое название по прайсу / комплектация / обозначение заказчика (его строка
     // запроса); в шаблоне без {{equipment}} и {{designation}} второй и третий уровни идут строками под названием.
-    lines: lines.map((l) => ({ ...kpLineParts(l, payload.request_items?.[l.request_index] ?? null), size: l.size, qty: l.qty, price: l.price, discount: l.discount })),
+    lines: lines.map((l) => ({ ...kpLineParts(l, payload.request_items?.[l.request_index] ?? null), size: l.size, qty: l.qty, price: l.price, discount: l.discount, priceText: l.price === null ? 'уточнить у менеджера' : undefined, notes: notesOf(l) })),
     vatRate: s.constants.vatRate ?? 0,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
     serviceNote: hasServices ? SERVICE_NOTE : '',
@@ -137,6 +150,8 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (built.currencyStripped.length ? `; в шаблоне знак ₽ стоит после ${built.currencyStripped.map((t) => `{{${t}}}`).join(', ')} — из значений убран` : '') +
       (built.pageBreaksRemoved ? `; разрывов страницы после таблицы убрано: ${built.pageBreaksRemoved}` : '') +
       (hasServices ? `; работ вне таблицы: ${(payload.items ?? []).length - goods.length}${built.serviceNoteFallback ? ' (в шаблоне нет {{service_note}} — фраза под фразой о ценах)' : ''}` : '') +
+      (included.length ? `; входит в цену блока (под дверью, не в таблице): ${included.length}` : '') +
+      (lines.some((l) => l.price === null) ? `; без цены в прайсе («уточнить у менеджера», не в итоге): ${lines.filter((l) => l.price === null).length}` : '') +
       `; ${(ms / 1000).toFixed(1)} с`,
     details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, services: (payload.items ?? []).length - goods.length, serviceNoteFallback: built.serviceNoteFallback, userId: input.userId, ms },
   });

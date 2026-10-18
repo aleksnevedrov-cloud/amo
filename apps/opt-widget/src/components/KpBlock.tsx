@@ -502,6 +502,10 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
             {l.priceModel && <div className="opt-kp-sub opt-kp-tile-model">Обозначение по прайсу: {l.priceModel}{l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? ` (${l.priceAbbr})` : ''}</div>}
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
             {service && <div className="opt-kp-sub opt-kp-service-note">работы — по замеру: в таблицу и итог КП не входят, под таблицей фраза о расчёте после замера</div>}
+            {l.priceOutcome === 'included' && <div className="opt-kp-sub opt-kp-outcome">входит в цену блока{l.includedIn ? ` (${l.includedIn})` : ''}: отдельной строкой в таблицу и итог КП не идёт, пишется под дверью</div>}
+            {l.priceOutcome === 'not_priced' && <div className="opt-kp-sub opt-kp-outcome opt-kp-stale">в прайсе цены нет — уточнить у менеджера (в КП строка без цены, в итог не входит)</div>}
+            {l.priceOutcome === 'estimate' && <div className="opt-kp-sub opt-kp-outcome">сметная цена — для сметы, уточнить у менеджера</div>}
+            {l.quoteNotes && l.quoteNotes.length > 0 && <div className="opt-kp-sub opt-kp-quote-notes">Примечание в КП: {l.quoteNotes.join(' ')}</div>}
             {why.length > 0 && <div className="opt-kp-sub">{why.filter((w) => !(service && w === 'цена не задана')).join('; ')}</div>}
             {!service && <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />}
             <div className="opt-kp-fields">

@@ -64,6 +64,17 @@ export interface KpDraftLine {
   equipment?: string | null;
   /** Сокращение по ГОСТ из строки прайса — в строку «обозначение» (KP-LAYOUT). */
   priceAbbr?: string | null;
+  /**
+   * KB-PRICE-SHEETS: included — входит в цену блока двери (в таблицу и итог КП не идёт); not_priced — в прайсе цены нет
+   * («уточнить у менеджера», не 0 ₽); estimate — сметная цена.
+   */
+  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate';
+  /** Примечания под позицией в КП (вкладка «Подбор», нестандарт). */
+  quoteNotes?: string[];
+  /** ID товара прайса двери (INT-013) — контекст для комплектующих и фурнитуры ниже. */
+  productId?: string | null;
+  /** priceOutcome = included: ID двери или название комплекта, в который входит позиция. */
+  includedIn?: string | null;
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */
@@ -244,7 +255,23 @@ export interface KbSourceInfo {
   /** KB-MULTIPRICE: ключ прайса, короткое название и итог последнего импорта. */
   priceKey?: string | null;
   priceTitle?: string | null;
-  priceImport?: { title: string; updated: boolean; was: number; imported: number; removed: number; added: number; at: string } | null;
+  priceImport?: { title: string; updated: boolean; was: number; imported: number; removed: number; added: number; at: string; book?: KbBookCounts | null; error?: string | null } | null;
+  /** KB-PRICE-SHEETS: счётчики многолистового прайса для карточки файла; null — старый одностраничный прайс или не прайс. */
+  counts?: { doors: number; components: number; hardware: number; sizes: number; aliases: number; comments: number; dictionary: number } | null;
+}
+
+/** Итог импорта многолистового прайса (KB-PRICE-SHEETS): по вкладкам. */
+export interface KbBookCounts {
+  doors: number;
+  components: number;
+  hardware: number;
+  hardwareUnpriced: number;
+  estimates: number;
+  sizes: number;
+  aliases: number;
+  comments: number;
+  dictionary: number;
+  skipped: string[];
 }
 
 export interface KbUsageInfo {

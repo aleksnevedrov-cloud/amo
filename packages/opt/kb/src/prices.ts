@@ -2,6 +2,8 @@ import { withTransaction, type Db } from '@core/db';
 import { normalizeKey } from './chunk.ts';
 import { priceListTitleOf } from './price-key.ts';
 import { categoryOf, componentKindOf, type ComponentKind, type PositionCategory } from './category.ts';
+import type { BookDictionaryEntry, BookRule, BookSize, ComponentStatus, ProductCard, ProductStatus, Family, UnitBasis } from './price-book.ts';
+import { nonstandardBySizes } from './book-pricing.ts';
 import { colorOf, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
@@ -80,6 +82,16 @@ export interface KbPrice {
   /** Категория записи (KB-COMPONENTS): дверь / комплектующее / фурнитура / работы; componentKind — вид комплектующего. */
   category: PositionCategory;
   componentKind: ComponentKind | null;
+  /** Карточка товара из многолистового прайса (KB-PRICE-SHEETS): ID товара / тарифа, статус, сметная цена, семейство, статусы компонентов, карточка. */
+  productId: string | null;
+  tariffId: string | null;
+  status: ProductStatus;
+  estimate: boolean;
+  family: Family | null;
+  /** Фурнитура: для каких ID товаров; пусто — для всех. */
+  appliesTo: string[];
+  componentStatus: Partial<Record<ComponentKind, ComponentStatus>> | null;
+  card: ProductCard | null;
 }
 
 export interface NewKbPrice {
@@ -109,6 +121,45 @@ export interface NewKbPrice {
   /** Категория записи; не задана — по тексту модели (без ключевых слов — дверь). */
   category?: PositionCategory | null;
   componentKind?: ComponentKind | null;
+  productId?: string | null;
+  tariffId?: string | null;
+  status?: ProductStatus | null;
+  estimate?: boolean | null;
+  family?: Family | null;
+  appliesTo?: string[] | null;
+  componentStatus?: Partial<Record<ComponentKind, ComponentStatus>> | null;
+  card?: ProductCard | null;
+}
+
+export interface KbSize {
+  id: number;
+  productId: string;
+  sizeId: string | null;
+  widthMm: number;
+  heightMm: number;
+  basis: string | null;
+  leafWidthsMm: number[] | null;
+}
+
+export interface KbDictionaryEntry {
+  id: number;
+  sheet: string;
+  term: string;
+  termKey: string;
+  meaning: string | null;
+  context: string | null;
+  rule: string | null;
+  sourceId: number;
+}
+
+export interface BookCounts {
+  doors: number;
+  components: number;
+  hardware: number;
+  sizes: number;
+  aliases: number;
+  comments: number;
+  dictionary: number;
 }
 
 export interface KbAlias {
@@ -120,6 +171,8 @@ export interface KbAlias {
   canonicalKey: string;
   sourceId: number | null;
   createdAt: Date;
+  /** ID товара из многолистового прайса (KB-PRICE-SHEETS); у ручных синонимов — null. */
+  productId: string | null;
 }
 
 const SELECT = `SELECT p.*, s.title AS source_title, s.kind AS source_kind, s.price_key AS price_key FROM kb_prices p LEFT JOIN kb_sources s ON s.id = p.source_id`;
@@ -146,10 +199,10 @@ export class KbPricesRepo {
     // Категория (KB-COMPONENTS): явная или по тексту модели; вид комплектующего — по модели.
     const category: PositionCategory = p.category ?? categoryOf([p.model, abbr].filter(Boolean).join(' '));
     const componentKind = p.componentKind ?? (category === 'component' ? componentKindOf(p.model) : null);
-    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null, category, componentKind];
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null, category, componentKind, p.productId ?? null, p.tariffId ?? null, p.status ?? 'active', Boolean(p.estimate), p.family ?? null, p.appliesTo ?? [], p.componentStatus ? JSON.stringify(p.componentStatus) : null, p.card ? JSON.stringify(p.card) : null];
     const { rows } = await q.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind, product_id, tariff_id, status, estimate, family, applies_to, component_status, card)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text, $30::text, $31::text, $32::text, $33::boolean, $34::text, $35::text[], $36::jsonb, $37::jsonb
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
        RETURNING id`,
       params,
@@ -157,7 +210,7 @@ export class KbPricesRepo {
     if (rows[0]) return Number(rows[0].id);
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
-               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = $28::text, component_kind = $29::text, updated_at = now()
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = $28::text, component_kind = $29::text, product_id = $30::text, tariff_id = $31::text, status = $32::text, estimate = $33::boolean, family = $34::text, applies_to = $35::text[], component_status = $36::jsonb, card = $37::jsonb, updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
         RETURNING id`,
       params,
@@ -195,9 +248,118 @@ export class KbPricesRepo {
     });
   }
 
+  /**
+   * Импорт многолистового прайса (KB-PRICE-SHEETS): одной транзакцией заменяются все данные файлов с тем же ключом —
+   * цены, размеры, правила нестандарта, словарь, синонимы товаров. Ошибка на любом шаге откатывает всё: старые данные остаются.
+   */
+  async replacePriceBook(
+    accountId: number,
+    sourceId: number,
+    priceKey: string,
+    data: { rows: Omit<NewKbPrice, 'accountId' | 'sourceId'>[]; sizes: BookSize[]; rule: BookRule | null; dictionary: BookDictionaryEntry[]; aliases: { productId: string; canonical: string; alias: string }[] },
+    replaceSourceIds: number[] = [],
+    createdBy: number | null = null,
+  ): Promise<{ imported: number; replaced: number; was: number; removed: number; added: number; sizes: number; aliases: number; dictionary: number }> {
+    return withTransaction(this.db, async (c) => {
+      const ids = [...new Set([sourceId, ...replaceSourceIds])];
+      const key = (r: { model_key: string; width_mm: number | null; height_mm: number | null }) => `${r.model_key}|${r.width_mm ?? ''}|${r.height_mm ?? ''}`;
+      const old = await c.query<{ model_key: string; width_mm: number | null; height_mm: number | null }>(`SELECT model_key, width_mm, height_mm FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = ANY($2::bigint[])`, [accountId, ids]);
+      const del = await c.query(`DELETE FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = ANY($2::bigint[])`, [accountId, ids]);
+      await c.query('DELETE FROM kb_sizes WHERE account_id = $1 AND source_id = ANY($2::bigint[])', [accountId, ids]);
+      await c.query('DELETE FROM kb_rules WHERE account_id = $1 AND (source_id = ANY($2::bigint[]) OR price_key = $3)', [accountId, ids, priceKey]);
+      await c.query('DELETE FROM kb_dictionary WHERE account_id = $1 AND source_id = ANY($2::bigint[])', [accountId, ids]);
+      await c.query('DELETE FROM kb_aliases WHERE account_id = $1 AND source_id = ANY($2::bigint[])', [accountId, ids]);
+      let imported = 0;
+      for (const r of data.rows) {
+        if (await this.upsertWith(c, { ...r, accountId, sourceId, origin: 'price_list', createdBy: r.createdBy ?? createdBy })) imported += 1;
+      }
+      for (const z of data.sizes) {
+        await c.query('INSERT INTO kb_sizes (account_id, source_id, product_id, size_id, width_mm, height_mm, basis, leaf_widths_mm) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)', [accountId, sourceId, z.productId, z.sizeId, z.widthMm, z.heightMm, z.basis, z.leafWidthsMm ? JSON.stringify(z.leafWidthsMm) : null]);
+      }
+      if (data.rule) {
+        await c.query('INSERT INTO kb_rules (account_id, source_id, price_key, large_threshold_percent, regular_surcharge_percent, large_surcharge_percent, applies_to, production_note) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [accountId, sourceId, priceKey, data.rule.largeThresholdPercent, data.rule.regularSurchargePercent, data.rule.largeSurchargePercent, data.rule.appliesTo, data.rule.productionNote]);
+      }
+      for (const d of data.dictionary) {
+        await c.query('INSERT INTO kb_dictionary (account_id, source_id, sheet, term, term_key, meaning, context, rule) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [accountId, sourceId, d.sheet, d.term.slice(0, 300), modelKeyOf(d.term) || normalizeKey(d.term), d.meaning, d.context, d.rule]);
+      }
+      let aliases = 0;
+      for (const a of data.aliases) {
+        const aliasKey = modelKeyOf(a.alias) || normalizeKey(a.alias);
+        const canonicalKey = modelKeyOf(a.canonical) || normalizeKey(a.canonical);
+        if (!aliasKey || !canonicalKey || aliasKey === canonicalKey) continue;
+        await c.query(
+          `INSERT INTO kb_aliases (account_id, alias, alias_key, canonical, canonical_key, source_id, created_by, product_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (account_id, alias_key) DO UPDATE SET alias = EXCLUDED.alias, canonical = EXCLUDED.canonical, canonical_key = EXCLUDED.canonical_key, source_id = EXCLUDED.source_id, product_id = EXCLUDED.product_id`,
+          [accountId, a.alias.trim().slice(0, 300), aliasKey, a.canonical.trim().slice(0, 300), canonicalKey, sourceId, createdBy, a.productId],
+        );
+        aliases += 1;
+      }
+      const fresh = await c.query<{ model_key: string; width_mm: number | null; height_mm: number | null }>(`SELECT model_key, width_mm, height_mm FROM kb_prices WHERE account_id = $1 AND origin = 'price_list' AND source_id = $2`, [accountId, sourceId]);
+      const oldKeys = new Set(old.rows.map(key));
+      const newKeys = new Set(fresh.rows.map(key));
+      let removed = 0;
+      for (const k of oldKeys) if (!newKeys.has(k)) removed += 1;
+      let added = 0;
+      for (const k of newKeys) if (!oldKeys.has(k)) added += 1;
+      return { imported, replaced: del.rowCount ?? 0, was: old.rowCount ?? 0, removed, added, sizes: data.sizes.length, aliases, dictionary: data.dictionary.length };
+    });
+  }
+
+  /** Сетка размеров товара (вкладка «Размеры»). */
+  async sizesOfProduct(accountId: number, productId: string): Promise<KbSize[]> {
+    const { rows } = await this.db.query('SELECT * FROM kb_sizes WHERE account_id = $1 AND product_id = $2 ORDER BY width_mm, height_mm', [accountId, productId]);
+    return rows.map((r) => ({ id: Number(r.id), productId: String(r.product_id), sizeId: (r.size_id ?? null) as string | null, widthMm: Number(r.width_mm), heightMm: Number(r.height_mm), basis: (r.basis ?? null) as string | null, leafWidthsMm: (r.leaf_widths_mm ?? null) as number[] | null }));
+  }
+
+  /** Правило нестандарта прайса (по ключу файла); нет — значения по умолчанию из задания (30 / 30 / 100 %). */
+  async ruleOf(accountId: number, priceKey: string | null): Promise<BookRule> {
+    const dflt: BookRule = { largeThresholdPercent: 30, regularSurchargePercent: 30, largeSurchargePercent: 100, appliesTo: 'base', productionNote: null };
+    if (!priceKey) return dflt;
+    const { rows } = await this.db.query('SELECT * FROM kb_rules WHERE account_id = $1 AND price_key = $2 LIMIT 1', [accountId, priceKey]);
+    const r = rows[0];
+    return r ? { largeThresholdPercent: Number(r.large_threshold_percent), regularSurchargePercent: Number(r.regular_surcharge_percent), largeSurchargePercent: Number(r.large_surcharge_percent), appliesTo: String(r.applies_to), productionNote: (r.production_note ?? null) as string | null } : dflt;
+  }
+
+  /** Словарь агента (Словарь, Сокращения, ГОСТы, Типоразмеры). */
+  async dictionary(accountId: number): Promise<KbDictionaryEntry[]> {
+    const { rows } = await this.db.query('SELECT * FROM kb_dictionary WHERE account_id = $1 ORDER BY sheet, id', [accountId]);
+    return rows.map((r) => ({ id: Number(r.id), sheet: String(r.sheet), term: String(r.term), termKey: String(r.term_key), meaning: (r.meaning ?? null) as string | null, context: (r.context ?? null) as string | null, rule: (r.rule ?? null) as string | null, sourceId: Number(r.source_id) }));
+  }
+
+  /** Счётчики файла для карточки источника: цены дверей / комплектующих / фурнитуры / размеров / синонимов / комментариев. */
+  async bookCountsBySource(accountId: number): Promise<Map<number, BookCounts>> {
+    const out = new Map<number, BookCounts>();
+    const get = (id: number): BookCounts => {
+      const cur = out.get(id);
+      if (cur) return cur;
+      const fresh: BookCounts = { doors: 0, components: 0, hardware: 0, sizes: 0, aliases: 0, comments: 0, dictionary: 0 };
+      out.set(id, fresh);
+      return fresh;
+    };
+    const p = await this.db.query<{ source_id: string; category: string; n: number; c: number }>(`SELECT source_id, category, count(*)::int AS n, count(*) FILTER (WHERE card->>'comment' IS NOT NULL)::int AS c FROM kb_prices WHERE account_id = $1 AND source_id IS NOT NULL GROUP BY source_id, category`, [accountId]);
+    for (const r of p.rows) {
+      const x = get(Number(r.source_id));
+      if (r.category === 'door') x.doors += r.n;
+      else if (r.category === 'component') x.components += r.n;
+      else if (r.category === 'hardware') x.hardware += r.n;
+      x.comments += r.c;
+    }
+    for (const [table, field] of [['kb_sizes', 'sizes'], ['kb_aliases', 'aliases'], ['kb_dictionary', 'dictionary']] as const) {
+      const q = await this.db.query<{ source_id: string; n: number }>(`SELECT source_id, count(*)::int AS n FROM ${table} WHERE account_id = $1 AND source_id IS NOT NULL GROUP BY source_id`, [accountId]);
+      for (const r of q.rows) get(Number(r.source_id))[field] += r.n;
+    }
+    return out;
+  }
+
   /** Все записи происхождения (прайс для подбора по признакам и медианы группы). */
   async listByOrigin(accountId: number, origin: PriceOrigin): Promise<KbPrice[]> {
     const { rows } = await this.db.query(`${SELECT} WHERE p.account_id = $1 AND p.origin = $2 ORDER BY p.id`, [accountId, origin]);
+    return rows.map(mapPrice);
+  }
+
+  /** Строки двери по ID товара многолистового прайса (KB-PRICE-SHEETS): контекст модели для комплектующих и фурнитуры. */
+  async doorsByProductId(accountId: number, productId: string): Promise<KbPrice[]> {
+    const { rows } = await this.db.query(`${SELECT} WHERE p.account_id = $1 AND p.product_id = $2 AND p.category = 'door' ORDER BY p.valid_at DESC, p.id`, [accountId, productId]);
     return rows.map(mapPrice);
   }
 
@@ -359,6 +521,15 @@ export interface PriceQuery {
   features?: Partial<DoorFeatures> | null;
   /** Категория позиции (KB-COMPONENTS); не задана — по тексту. Подбор идёт только среди записей своей категории. */
   category?: PositionCategory | null;
+  /**
+   * KB-PRICE-SHEETS: ID товара двери, к которой относится комплектующее или фурнитура (ближайшая дверь заявки выше):
+   * статусы «включена» / «нет цены» берутся из карточки этой двери, комплектующие — её строки, фурнитура — по «Для моделей».
+   */
+  doorProductId?: string | null;
+  /** Смета: допускаются позиции со статусом inactive / estimate_only и при подборе по признакам (иначе — только по точному ключу или синониму). */
+  estimate?: boolean;
+  /** Основание размера в заявке (проём / полотно / блок / пара); расходится с прайсом — пересчёта нет, вопрос менеджеру. */
+  sizeBasis?: UnitBasis | null;
 }
 
 export interface PriceHit {
@@ -380,6 +551,15 @@ export interface PriceHit {
   notes: string[];
   /** Подпись для плитки: «по базе: прайс Текона (01.10.2026)», «по закупке», «по рынку (кэш 05.10.2026)», «изменено менеджером». */
   label: string;
+  /**
+   * KB-PRICE-SHEETS: priced — своя цена; included — входит в цену блока двери (price 0, в таблицу КП отдельной суммой не идёт);
+   * not_priced — в прайсе цены нет («уточнить у менеджера», не 0 ₽); estimate — сметная цена или позиция только для сметы.
+   */
+  outcome?: 'priced' | 'included' | 'not_priced' | 'estimate';
+  /** Примечания к КП из вкладки «Подбор» — под позицией в документе. */
+  quoteNotes?: string[];
+  /** outcome = included: ID двери, в цену блока которой входит позиция (или название комплекта — ставит вызывающий). */
+  includedIn?: string | null;
 }
 
 export function validityDaysOf(row: Pick<KbPrice, 'origin' | 'sourceKind'>): number {
@@ -499,13 +679,27 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const key = modelKeyOf(q.name) || modelKeyOf(text);
   const qf = mergeFeatures(featuresOf(text), q.features);
   // KB-COMPONENTS: работы цены не ищут; остальные — только среди записей своей категории (комплектующие — своего вида).
-  const category: PositionCategory = q.category ?? categoryOf(text);
+  let category: PositionCategory = q.category ?? categoryOf(text);
   if (category === 'service') return null;
+  const alias = key ? await aliases.resolve(accountId, key) : null;
+  // KB-PRICE-SHEETS: синоним или точный ключ из прайса ведёт в другую категорию (вкладка «Дополнения»: «Фрамуга» — фурнитура,
+  // а по словам позиция считалась дверью) — категория позиции берётся из найденной строки.
+  if (category === 'door' && key) {
+    const exact = (await prices.candidates(accountId, alias ? [key, ...alias.keys] : [key], [])).filter((f) => f.row.modelKey === key || f.row.altKeys.includes(key) || (alias?.keys ?? []).some((k) => k === f.row.modelKey || f.row.altKeys.includes(k)));
+    const other = exact.find((f) => f.row.category === 'hardware') ?? exact[0];
+    if (other && !exact.some((f) => f.row.category === 'door')) category = other.row.category;
+  }
   const componentKind = category === 'component' ? componentKindOf(text) : null;
   const sameCategory = (row: KbPrice) => row.category === category && (category !== 'component' || !componentKind || !row.componentKind || row.componentKind === componentKind);
   const size = { widthMm: q.widthMm ?? sizeOf(text)?.widthMm ?? null, heightMm: q.heightMm ?? sizeOf(text)?.heightMm ?? null };
   const leaves = q.leaves ?? qf.leaves ?? leavesOf(text);
-  const alias = key ? await aliases.resolve(accountId, key) : null;
+  // KB-PRICE-SHEETS: дверь-контекст для комплектующего / фурнитуры — статусы из карточки двери решают до подбора.
+  const door = q.doorProductId && category !== 'door' ? ((await prices.doorsByProductId(accountId, q.doorProductId))[0] ?? null) : null;
+  if (door && category === 'component' && componentKind) {
+    const st = door.componentStatus?.[componentKind] ?? null;
+    if (st === 'included') return doorOutcome(door, 'included', [`${componentKind} входит в цену блока ${door.model}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`], now);
+    if (st === 'not_priced') return doorOutcome(door, 'not_priced', [`уточнить у менеджера: ${componentKind} к ${door.model} в прайсе без цены`], now);
+  }
   const keys = key ? (alias ? [key, ...alias.keys] : [key]) : [];
   const queryTokens = searchTokensOf(q.name, q.raw);
   const found = (keys.length ? await prices.candidates(accountId, keys, queryTokens) : []).filter((f) => sameCategory(f.row));
@@ -515,44 +709,89 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const itemTokens = new Set(tokensOf(key));
   const qSet = new Set(queryTokens);
   const byId = new Map(found.map((f) => [f.row.id, f]));
+  // Статусы прайса: inactive / estimate_only — только в смете или когда позиция названа прямо (точный ключ или синоним);
+  // фурнитура без цены (price 0) остаётся видимой — менеджер увидит «уточнить», а не веб-цену.
+  const allowed = (row: KbPrice, match: PriceHit['match'] | null) => row.status === 'active' || Boolean(q.estimate) || (row.category === 'hardware' && row.price === 0) || match === 'exact' || match === 'alias';
+  // Фурнитура «Для моделей»: при известной двери — только подходящая ей; без двери — любая, с пометкой.
+  const forDoor = (row: KbPrice) => !(row.category === 'hardware' && row.appliesTo.length && q.doorProductId && !row.appliesTo.includes(q.doorProductId));
   // Строки прайса: совпадение по признакам; если строка нашлась и по ключу модели — ключ остаётся видом совпадения,
   // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
   if (hasFeatures(qf) || category === 'component') {
     for (const row of priceList) {
+      if (!forDoor(row)) continue;
       const fm = matchFeatures(qf, rowFeatures(row));
       // Комплектующее того же вида (добор, коробка…) подходит и без общих признаков двери: лишь бы обязательные не расходились.
       const ok = category === 'component' ? fm.conflict === null && Boolean(componentKind) && row.componentKind === componentKind : fm.ok;
       if (!ok) continue;
       const f = byId.get(row.id);
       const m = f ? keyMatch(row, key, alias, itemTokens, qSet, f.similarity) : null;
+      if (!allowed(row, m?.match ?? null)) continue;
       cands.push({ row, match: m?.match ?? 'features', similarity: f?.similarity ?? 0, words: m?.words ?? 0, features: fm });
       seen.add(row.id);
     }
   }
   for (const { row, similarity } of found) {
-    if (seen.has(row.id)) continue;
+    if (seen.has(row.id) || !forDoor(row)) continue;
     const m = keyMatch(row, key, alias, itemTokens, qSet, similarity);
-    if (!m) continue;
+    if (!m || !allowed(row, m.match)) continue;
     const rf = rowFeatures(row);
-    if (hasFeatures(qf) && hasFeatures(rf) && matchFeatures(qf, rf).conflict) continue;
+    // Точный ключ или синоним — модель названа прямо, расхождение признаков её не отвергает (KB-PRICE-SHEETS: «ДПГ сота с коробкой» = INT-008).
+    if (m.match !== 'exact' && m.match !== 'alias' && hasFeatures(qf) && hasFeatures(rf) && matchFeatures(qf, rf).conflict) continue;
     cands.push({ row, match: m.match, similarity, words: m.words, features: null });
     seen.add(row.id);
   }
   if (!cands.length) return null;
+  // Комплектующее к известной двери: строки её модели («Коробка (ДВ CPL)») в приоритете перед остальными (п. 6 задания).
+  const own = door && category === 'component' ? cands.filter((c) => c.row.productId === door.productId) : [];
+  const pool = own.length ? own : cands;
   // Порядок источников; веб-цены сверяются с медианой прайса по группе позиции (KB-COMPONENTS: внутри категории).
   const median = categoryMedian(priceList, { category, features: qf, componentKind, tokens: queryTokens });
   const realistic = (c: Candidate) => c.row.origin !== 'web' || webPriceRealistic(c.row.price, median);
-  const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => cands.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
+  const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => pool.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
   if (!group) return null;
   const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4, features: 5 };
   const BASIS_RANK: Record<PriceHit['basis'], number> = { exact: 0, rules: 1, area: 2, base: 3 };
   const area = size.widthMm && size.heightMm ? size.widthMm * size.heightMm : null;
   const closeness = (r: KbPrice) => (area && r.widthMm && r.heightMm ? Math.abs(Math.log((r.widthMm * r.heightMm) / area)) : 1);
   const strongKey = (c: Candidate) => (c.match === 'exact' || c.match === 'alias' ? 0 : 1);
+  // Модель прайса названа в заявке целиком («ДПГ сота с коробкой» = INT-008): такая строка выше подбора по признакам.
+  const namedModel = (c: Candidate) => (c.row.origin === 'price_list' && c.match === 'exact' && c.row.modelKey === key ? 0 : 1);
+  // Цена строки по размеру: строки многолистового прайса — по сетке размеров модели и правилу файла; прочие — по правилам записи.
+  const sizesCache = new Map<string, Promise<KbSize[]>>();
+  const rulesCache = new Map<string, Promise<BookRule>>();
+  const appliedOf = async (row: KbPrice): Promise<{ price: number; basis: PriceHit['basis']; notes: string[] }> => {
+    if (!row.productId || row.category !== 'door') {
+      const r = applyRules(row, { ...q, ...size, leaves });
+      // Фурнитура и комплектующие без размера — обычное дело, пометка «размер не указан» нужна только дверям.
+      return row.category === 'door' ? r : { ...r, notes: r.notes.filter((n) => n !== 'размер позиции не указан — базовая цена') };
+    }
+    const pid = row.productId;
+    let sizesP = sizesCache.get(pid);
+    if (!sizesP) sizesCache.set(pid, (sizesP = prices.sizesOfProduct(accountId, pid)));
+    const sizes = await sizesP;
+    const rk = row.priceKey ?? '';
+    let ruleP = rulesCache.get(rk);
+    if (!ruleP) rulesCache.set(rk, (ruleP = prices.ruleOf(accountId, row.priceKey)));
+    const rule = await ruleP;
+    const card = row.card;
+    const notes: string[] = [];
+    if (size.widthMm !== null && size.heightMm !== null && sizes.length) {
+      if (q.sizeBasis && card?.sizeBasis && q.sizeBasis !== card.sizeBasis) {
+        notes.push(`размер в заявке по ${BASIS_NAME[q.sizeBasis]}, в прайсе по ${BASIS_NAME[card.sizeBasis]} — пересчёт не делается, уточнить у менеджера`);
+        return { price: row.price, basis: 'base', notes };
+      }
+      if (!card?.sizeBasis) notes.push('основание размера в прайсе не указано (проём / полотно / блок) — уточнить у менеджера');
+    }
+    const ns = nonstandardBySizes(sizes, size, rule, card?.geometry ?? null, Boolean(rowFeatures(row).fire || qf.fire));
+    return { price: round2(row.price * ns.factor), basis: ns.basis, notes: [...notes, ...ns.notes] };
+  };
+  const applied = new Map<number, Awaited<ReturnType<typeof appliedOf>>>();
+  for (const c of group) applied.set(c.row.id, await appliedOf(c.row));
   const ranked = group
-    .map((c) => ({ ...c, applied: applyRules(c.row, { ...q, ...size, leaves }) }))
+    .map((c) => ({ ...c, applied: applied.get(c.row.id) as Awaited<ReturnType<typeof appliedOf>> }))
     .sort(
       (a, b) =>
+        namedModel(a) - namedModel(b) ||
         Number(Boolean(b.features)) - Number(Boolean(a.features)) ||
         strongKey(a) - strongKey(b) ||
         (b.features?.score ?? 0) - (a.features?.score ?? 0) ||
@@ -569,7 +808,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const twoLists: string[] = [];
   if (best.row.origin === 'price_list') {
     const same = (c: (typeof ranked)[number]) =>
-      Boolean(c.features) === Boolean(best.features) && strongKey(c) === strongKey(best) && (c.features?.score ?? 0) === (best.features?.score ?? 0) && MATCH_RANK[c.match] === MATCH_RANK[best.match] && BASIS_RANK[c.applied.basis] === BASIS_RANK[best.applied.basis];
+      namedModel(c) === namedModel(best) && Boolean(c.features) === Boolean(best.features) && strongKey(c) === strongKey(best) && (c.features?.score ?? 0) === (best.features?.score ?? 0) && MATCH_RANK[c.match] === MATCH_RANK[best.match] && BASIS_RANK[c.applied.basis] === BASIS_RANK[best.applied.basis];
     const ties = ranked.filter((c) => c.row.origin === 'price_list' && same(c));
     const bySource = new Map<number, (typeof ranked)[number]>();
     for (const c of ties) {
@@ -580,23 +819,27 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (bySource.size >= 2) {
       const lists = [...bySource.values()].sort((a, b) => b.row.validAt.getTime() - a.row.validAt.getTime() || b.row.updatedAt.getTime() - a.row.updatedAt.getTime());
       best = lists[0] as (typeof ranked)[number];
-      twoLists.push(...lists.map((c) => `«${c.row.priceTitle || c.row.sourceTitle || c.row.model}» (${c.row.validAt.toLocaleDateString('ru-RU')})`));
+      // KB-PRICE-SHEETS: один тариф фурнитуры в двух файлах (цены сверены при импорте) — не «два прайса», а та же строка.
+      const sameTariff = lists.every((c) => c.row.tariffId && c.row.tariffId === lists[0]?.row.tariffId);
+      if (!sameTariff) twoLists.push(...lists.map((c) => `«${c.row.priceTitle || c.row.sourceTitle || c.row.model}» (${c.row.validAt.toLocaleDateString('ru-RU')})`));
     }
   }
-  const applied = best.applied;
+  const bestApplied = best.applied;
   const validityDays = validityDaysOf(best.row);
   const stale = now.getTime() - best.row.validAt.getTime() > validityDays * 86_400_000;
-  const notes = [...applied.notes];
+  const notes = [...bestApplied.notes];
   const where = best.row.sourceRow ? ` (строка ${best.row.sourceRow})` : '';
   let label = priceLabelOf(best.row);
   if (best.features && category === 'component') {
     // Комплектующее из колонки прайса дверей: к какой модели двери относится цена, менеджер видит в пометке.
     label = `по прайсу: ${best.row.model}${where}`;
-    notes.push(`комплектующее по прайсу: ${best.row.model}${where}${best.features.matched.length ? ` — совпали: ${describeFeatures(qf, best.features.matched)}` : ' — модель двери в заявке не указана, взята самая дешёвая строка'}`);
+    const ctx = own.length ? ` — по модели двери заявки ${door?.model ?? ''}` : best.features.matched.length ? ` — совпали: ${describeFeatures(qf, best.features.matched)}` : ' — модель двери в заявке не указана, взята самая дешёвая строка';
+    notes.push(`комплектующее по прайсу: ${best.row.model}${where}${ctx}`);
   } else if (best.features) {
     // Строка прайса подошла по признакам: подпись «по прайсу: ДВ CPL (строка 17)» и пометка, что именно совпало.
     label = `по прайсу: ${best.row.model}${where}`;
     notes.push(`по прайсу: ${best.row.model}${where} — совпали: ${describeFeatures(qf, best.features.matched)}`);
+    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
   } else {
     if (best.match === 'exact' && best.row.modelKey !== key) notes.push(`найдено по прайсу: ${best.row.model}${where}, по ${modelKeyOf(best.row.abbr ?? '') === key ? 'сокращению' : 'назначению'}`);
     if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
@@ -611,7 +854,47 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   }
   if (stale) notes.push(`цена устарела: актуальна на ${best.row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
   const confidence = best.match === 'words' ? Math.round(best.row.confidence * best.words) : best.row.confidence;
-  return { row: best.row, price: applied.price, basis: applied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null };
+  // KB-PRICE-SHEETS: исход строки — своя цена / входит в блок / без цены / смета; примечания к КП из карточки.
+  let outcome: NonNullable<PriceHit['outcome']> = 'priced';
+  let price = bestApplied.price;
+  let includedIn: string | null = null;
+  if (best.row.category === 'hardware' && door && hardwareIncluded(best.row, door)) {
+    outcome = 'included';
+    price = 0;
+    includedIn = door.productId ?? door.model;
+    notes.push(`${best.row.model} входит в цену блока ${door.model}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`);
+  } else if (best.row.category === 'hardware' && best.row.price === 0 && best.row.tariffId) {
+    outcome = 'not_priced';
+    notes.push(`уточнить у менеджера: цены на ${best.row.model} (${best.row.tariffId}) в прайсе нет${best.row.card?.clarify ? ` — ${best.row.card.clarify}` : ''}`);
+  } else if (best.row.estimate || best.row.status !== 'active') {
+    outcome = 'estimate';
+    if (best.row.estimate) notes.push(`сметная цена${best.row.card?.estimateFormula ? `: ${best.row.card.estimateFormula}` : ''} — для сметы, уточнить у менеджера`);
+    if (best.row.status === 'inactive') notes.push(`позиция ${best.row.productId ?? best.row.model} неактивна в прайсе — только для сметы, уточнить у менеджера`);
+    else if (best.row.status === 'estimate_only' && !best.row.estimate) notes.push(`позиция ${best.row.productId ?? best.row.model} в прайсе только для сметы — уточнить у менеджера`);
+  }
+  if (best.row.category === 'hardware' && best.row.appliesTo.length && !q.doorProductId) notes.push(`фурнитура для моделей ${best.row.appliesTo.join(', ')} — модель двери в заявке не определена`);
+  if (best.row.card?.clarify && outcome === 'priced') notes.push(`уточнить: ${best.row.card.clarify}`);
+  const quoteNotes = best.row.card?.quoteNotes ?? [];
+  return { row: best.row, price, basis: bestApplied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null, outcome, quoteNotes, includedIn };
+}
+
+const BASIS_NAME: Record<UnitBasis, string> = { leaf: 'полотну', block: 'блоку', leaf_pair: 'паре полотен', opening: 'проёму' };
+
+/** Исход «входит в блок» / «без цены» по карточке двери: строка двери, цена 0, подпись прайса двери. */
+function doorOutcome(door: KbPrice, outcome: 'included' | 'not_priced', notes: string[], now: Date): PriceHit {
+  const validityDays = validityDaysOf(door);
+  const where = door.sourceRow ? ` (строка ${door.sourceRow})` : '';
+  return { row: door, price: 0, basis: 'base', match: 'exact', similarity: 1, confidence: door.confidence, stale: now.getTime() - door.validAt.getTime() > validityDays * 86_400_000, validityDays, notes, label: `по прайсу: ${door.model}${where}`, features: null, outcome, quoteNotes: [], includedIn: outcome === 'included' ? door.productId ?? door.model : null };
+}
+
+/** Фурнитура уже в базе двери: тариф или название упомянуты в «Входит в базу» / комментарии / комплектации двери (ALU-005 — фрамуга, MET-012 — вентиляция). */
+export function hardwareIncluded(hw: Pick<KbPrice, 'tariffId' | 'model' | 'modelKey'>, door: Pick<KbPrice, 'card' | 'equipment'>): boolean {
+  const hay = normalizeKey([door.card?.baseIncludes, door.card?.comment, door.equipment, ...(door.card?.includes ? [door.card.includes] : [])].filter(Boolean).join(' | '));
+  if (!hay) return false;
+  if (hw.tariffId && hay.includes(normalizeKey(hw.tariffId))) return true;
+  const head = tokensOf(hw.modelKey).filter((t) => t.length >= 4 && !FINISH_WORDS.has(t));
+  // Все значимые слова названия («фрамуга», «вентиляционная решётка») есть в тексте базы двери — с усечением окончаний.
+  return head.length > 0 && head.every((t) => hay.includes(t.slice(0, Math.max(4, t.length - 2))));
 }
 
 /**
@@ -727,9 +1010,17 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     priceTitle: r.price_key ? priceListTitleOf(String(r.price_key)) : null,
     category: ((r.category as string | undefined) ?? 'door') as PositionCategory,
     componentKind: (r.component_kind ?? null) as ComponentKind | null,
+    productId: (r.product_id ?? null) as string | null,
+    tariffId: (r.tariff_id ?? null) as string | null,
+    status: ((r.status as string | undefined) ?? 'active') as ProductStatus,
+    estimate: Boolean(r.estimate),
+    family: (r.family ?? null) as Family | null,
+    appliesTo: Array.isArray(r.applies_to) ? (r.applies_to as string[]) : [],
+    componentStatus: (r.component_status ?? null) as KbPrice['componentStatus'],
+    card: (r.card ?? null) as ProductCard | null,
   };
 }
 
 function mapAlias(r: Record<string, unknown>): KbAlias {
-  return { id: Number(r.id), accountId: Number(r.account_id), alias: String(r.alias ?? ''), aliasKey: String(r.alias_key ?? ''), canonical: String(r.canonical ?? ''), canonicalKey: String(r.canonical_key ?? ''), sourceId: r.source_id === null || r.source_id === undefined ? null : Number(r.source_id), createdAt: r.created_at as Date };
+  return { id: Number(r.id), accountId: Number(r.account_id), alias: String(r.alias ?? ''), aliasKey: String(r.alias_key ?? ''), canonical: String(r.canonical ?? ''), canonicalKey: String(r.canonical_key ?? ''), sourceId: r.source_id === null || r.source_id === undefined ? null : Number(r.source_id), createdAt: r.created_at as Date, productId: (r.product_id ?? null) as string | null };
 }

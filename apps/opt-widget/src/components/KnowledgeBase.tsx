@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage, Field, s } from '@core/widget-core';
-import type { KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
+import type { KbBookCounts, KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
 import { KbAnswer } from './KbAnswer.tsx';
 import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
 
@@ -11,6 +11,11 @@ import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPr
  * обход раздела до 50 страниц. Цены и синонимы (этап 3): «Цены из прайса» у xlsx-источника, разделы «Цены» и «Синонимы».
  * Выгрузка цен в xlsx — этап 4.
  */
+/** Строка итога импорта многолистового прайса (KB-PRICE-SHEETS) для сообщения после загрузки. */
+function bookSummary(b: KbBookCounts): string {
+  return `дверей ${b.doors}${b.estimates ? ` (сметных ${b.estimates})` : ''}, комплектующих ${b.components}, фурнитуры ${b.hardware}${b.hardwareUnpriced ? ` (без цены ${b.hardwareUnpriced})` : ''}, размеров ${b.sizes}, синонимов ${b.aliases}, комментариев ${b.comments}${b.dictionary ? `, словарь ${b.dictionary}` : ''}${b.skipped.length ? `; пропущено ${b.skipped.length} (см. журнал)` : ''}`;
+}
+
 const ACCEPT = '.pdf,.docx,.xlsx,.xlsm,.csv,.txt,.md,.jpg,.jpeg,.png,.webp';
 const POLL_MS = 3000;
 const KIND_LABEL: Record<KbSourceInfo['kind'], string> = { file: 'файл', url: 'ссылка', text: 'текст' };
@@ -82,6 +87,9 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
             // Прайс xlsx импортируется сразу (KB-PRICELIST, б): менеджеру не нужен отдельный шаг «Импортировать».
             const prices = r.source?.prices ?? 0;
             const imp = r.source?.priceImport ?? null;
+            // KB-PRICE-SHEETS: многолистовой прайс — счётчики по вкладкам; ошибка на вкладке — импорт отменён, прежние данные прайса на месте.
+            if (imp?.error) return `Файл «${f.name}» добавлен, но прайс «${imp.title}» не импортирован: ${imp.error}; прежние данные прайса сохранены`;
+            if (imp?.book) return `Файл «${f.name}» добавлен: прайс «${imp.title}»${imp.updated ? ' обновлён' : ''}: ${bookSummary(imp.book)}`;
             // KB-MULTIPRICE: файл с тем же ключом прайса обновляет только свой прайс; другой ключ — новый прайс рядом.
             if (imp && imp.updated) return `Файл «${f.name}» добавлен: прайс «${imp.title}» обновлён: было ${imp.was}, стало ${imp.imported}; удалено ${imp.removed}, добавлено ${imp.added}`;
             return prices ? `Файл «${f.name}» добавлен: это прайс${imp ? ` «${imp.title}»` : ''}, импортировано цен ${prices}` : `Файл «${f.name}» добавлен, индексируется; если это прайс с колонками «модель» и «цена», цены импортируются автоматически`;
@@ -291,9 +299,19 @@ function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { 
             {src.kind === 'url' && !src.refreshDays ? ' · без обновления' : ''}
             {src.crawl ? ' · раздел' : ''}
             {src.parentId ? ' · страница раздела' : ''}
-            {src.prices ? ` · прайс${src.priceTitle ? ` «${src.priceTitle}»` : ''}: цен ${src.prices}` : ''}
-            {src.priceImport?.updated ? ` · обновлён: было ${src.priceImport.was}, стало ${src.priceImport.imported}; удалено ${src.priceImport.removed}, добавлено ${src.priceImport.added}` : ''}
+            {src.prices && !src.counts ? ` · прайс${src.priceTitle ? ` «${src.priceTitle}»` : ''}: цен ${src.prices}` : ''}
+            {src.priceImport?.updated && !src.counts ? ` · обновлён: было ${src.priceImport.was}, стало ${src.priceImport.imported}; удалено ${src.priceImport.removed}, добавлено ${src.priceImport.added}` : ''}
           </div>
+          {src.counts && (
+            <div style={{ ...s.small, ...s.muted }} className="opt-kb-book-counts">
+              прайс{src.priceTitle ? ` «${src.priceTitle}»` : ''}: дверей {src.counts.doors} · комплектующих {src.counts.components} · фурнитуры {src.counts.hardware}
+              {src.priceImport?.book?.hardwareUnpriced ? ` (без цены ${src.priceImport.book.hardwareUnpriced})` : ''} · размеров {src.counts.sizes} · синонимов {src.counts.aliases} · комментариев {src.counts.comments}
+              {src.counts.dictionary ? ` · словарь ${src.counts.dictionary}` : ''}
+              {src.priceImport?.book?.estimates ? ` · сметных ${src.priceImport.book.estimates}` : ''}
+              {src.priceImport?.updated ? ' · обновлён' : ''}
+            </div>
+          )}
+          {src.priceImport?.error && <div style={s.error}>прайс не импортирован: {src.priceImport.error}; прежние данные прайса сохранены</div>}
           {src.kind === 'url' && src.original && src.original !== src.title && <div style={{ ...s.small, ...s.muted, wordBreak: 'break-all' }}>{src.original}</div>}
           {src.error && <div style={s.error}>{src.error}</div>}
         </div>

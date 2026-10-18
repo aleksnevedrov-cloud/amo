@@ -96,17 +96,27 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     //    force («искать заново» / «искать в интернете») идёт мимо базы и кэша.
     if (!job.force && !constants.skipKnowledgeBase) {
       // KB-MATCH: подбор по признакам (тип, материал, Г/О, покрытие, огнестойкость, створки, порог, …) — прайс в приоритете, веб не перебивает.
-      const hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category: lineCategory(line) });
+      // KB-PRICE-SHEETS: комплектующее / фурнитура ищутся в контексте ближайшей двери заявки выше (её ID товара в прайсе).
+      const category = lineCategory(line);
+      const doorProductId = category === 'component' || category === 'hardware' ? await doorContextOf(core, accountId, payload, line) : null;
+      let hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category, doorProductId });
+      // Комплект фурнитуры (OPT-025 = 2×OPT-029 + 2×OPT-030 + OPT-031): входящие тарифы, названные в заявке отдельно, не удваиваются.
+      if (hit && category === 'hardware' && hit.outcome === 'priced' && hit.row.tariffId) {
+        const set = await hardwareSetOf(core, accountId, payload, line, hit.row.tariffId, doorProductId);
+        if (set) hit = { ...hit, price: 0, outcome: 'included', includedIn: set, notes: [...hit.notes, `${hit.row.model} (${hit.row.tariffId}) входит в комплект «${set}» той же позиции — отдельно не считается`] };
+      }
       if (hit) {
         const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
+        const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.outcome === 'not_priced' ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
         await core.journal.add({
           accountId,
           leadId: draft.leadId,
           kind: KP_PRICE_RESEARCH_KIND,
-          summary: `Цена по позиции «${lineLabel}»: ${hit.price.toLocaleString('ru-RU')} ₽ из базы знаний (${hit.label}), веб-поиск не вызывался${hit.stale ? ' — цена устарела' : ''}${applied.keptManagerPrice ? ' — цена менеджера сохранена' : ''}`,
-          details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
+          summary: `Цена по позиции «${lineLabel}»: ${priceText} из базы знаний (${hit.label}), веб-поиск не вызывался${hit.stale ? ' — цена устарела' : ''}${applied.keptManagerPrice ? ' — цена менеджера сохранена' : ''}`,
+          details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, outcome: hit.outcome ?? 'priced', doorProductId, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
         });
-        return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : hit.price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
+        const price = hit.outcome === 'not_priced' ? null : hit.price;
+        return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
       }
     }
     // 2. Дневной лимит веб-поиска в $: достигнут — цена не ищется, пометка в блок и запись в журнал.
@@ -213,22 +223,34 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
     const line = items[i] as KpLine;
     const keptManagerPrice = line.priceSource === 'manager' && line.price !== null && !replace;
     const next: KpLine = { ...line };
+    const outcome = hit.outcome ?? 'priced';
     if (!keptManagerPrice) {
-      next.price = hit.price;
+      // KB-PRICE-SHEETS: «в прайсе цены нет» — цена остаётся пустой (не 0 ₽), «входит в блок» — 0 без строки в таблице КП.
+      next.price = outcome === 'not_priced' ? null : hit.price;
       next.priceSource = 'kb';
       next.priceLabel = hit.label;
       next.priceStale = hit.stale;
       next.kbPriceId = hit.row.id;
+      next.priceOutcome = outcome;
+      next.productId = hit.row.category === 'door' ? hit.row.productId : null;
+      next.includedIn = outcome === 'included' ? hit.includedIn ?? null : null;
+      // Синоним прайса увёл позицию в другую категорию («Фрамуга» — фурнитура): плитка и таблица КП следуют за строкой базы.
+      if (hit.row.category !== 'service' && hit.row.category !== (next.category ?? 'door') && outcome !== 'included' && outcome !== 'not_priced') next.category = hit.row.category;
       delete next.coefficient;
       // KP-NAME: модель и покрытие строки прайса — в наименование КП, комплектация — строкой под позицией; у веб-записей и правок — нет.
-      next.priceModel = hit.row.origin === 'price_list' ? priceModelOf(hit.row) : null;
-      next.equipment = hit.row.origin === 'price_list' ? hit.row.equipment : null;
-      next.priceAbbr = hit.row.origin === 'price_list' ? hit.row.abbr : null;
+      const own = hit.row.origin === 'price_list' && (outcome === 'priced' || outcome === 'estimate');
+      next.priceModel = own ? priceModelOf(hit.row) : null;
+      next.equipment = own ? hit.row.equipment : null;
+      next.priceAbbr = own ? hit.row.abbr : null;
+      // Примечания под позицией в КП: вкладка «Подбор», фразы нестандарта (эталон, производство, огнестойкость).
+      const production = hit.notes.filter((n) => /подлежат уточнению на производстве|огнестойкость исполнения|^нестандарт /.test(n));
+      next.quoteNotes = [...(hit.quoteNotes ?? []), ...production];
+      if (!next.quoteNotes.length) delete next.quoteNotes;
     }
     items[i] = next;
     const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
-    if (next.price === null) needs.push({ request_index: requestIndex, reason: NO_PRICE });
-    for (const n of hit.notes) needs.push({ request_index: requestIndex, reason: n.startsWith('цена устарела') || n.startsWith('цвет уточнить') ? n : `цена из базы: ${n}` });
+    if (next.price === null && outcome !== 'not_priced') needs.push({ request_index: requestIndex, reason: NO_PRICE });
+    for (const n of hit.notes) needs.push({ request_index: requestIndex, reason: n.startsWith('цена устарела') || n.startsWith('цвет уточнить') || n.startsWith('уточнить у менеджера') ? n : `цена из базы: ${n}` });
     const ok = await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items, needs_manager: needs } as unknown as Record<string, unknown>);
     if (ok) return { keptManagerPrice };
   }
@@ -273,4 +295,47 @@ export async function applyResearchToDraft(core: OptCore, accountId: number, dra
     if (ok) return { keptManagerPrice };
   }
   throw new Error(`черновик ${draftId} меняется параллельно — цена позиции ${requestIndex} не записана`);
+}
+
+/**
+ * KB-PRICE-SHEETS: дверь-контекст для комплектующего / фурнитуры — ближайшая дверь заявки выше по номеру позиции.
+ * У неё уже есть ID товара (цена из прайса поставлена) — берётся он; иначе дверь подбирается по базе здесь же, без записи
+ * в черновик (позиции считаются параллельно, порядок не гарантирован).
+ */
+export async function doorContextOf(core: OptCore, accountId: number, payload: Partial<KpPayload>, line: KpLine): Promise<string | null> {
+  const doors = (payload.items ?? []).filter((l) => l.request_index < line.request_index && lineCategory(l) === 'door').sort((a, b) => b.request_index - a.request_index);
+  const door = doors[0];
+  if (!door) return null;
+  if (door.productId) return door.productId;
+  if (door.kbPriceId) {
+    const row = await core.kb.prices.byId(accountId, door.kbPriceId);
+    if (row?.productId) return row.productId;
+  }
+  const input = researchInputOf(payload, door);
+  const size = sizeOfInput(input);
+  const hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || door.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category: 'door' });
+  return hit?.row.productId ?? null;
+}
+
+/**
+ * Другая фурнитура той же двери (между этой дверью и следующей), в состав которой входит тариф позиции («Включено»
+ * комплекта называет его ID): возвращает название комплекта или null.
+ */
+export async function hardwareSetOf(core: OptCore, accountId: number, payload: Partial<KpPayload>, line: KpLine, tariffId: string, doorProductId: string | null): Promise<string | null> {
+  const items = [...(payload.items ?? [])].sort((a, b) => a.request_index - b.request_index);
+  const me = items.findIndex((l) => l.request_index === line.request_index);
+  if (me < 0) return null;
+  let from = me;
+  while (from > 0 && lineCategory(items[from - 1] as KpLine) !== 'door') from -= 1;
+  let to = me;
+  while (to + 1 < items.length && lineCategory(items[to + 1] as KpLine) !== 'door') to += 1;
+  const id = tariffId.toLowerCase();
+  for (const other of items.slice(from, to + 1)) {
+    if (other.request_index === line.request_index || lineCategory(other) !== 'hardware') continue;
+    const row = other.kbPriceId ? await core.kb.prices.byId(accountId, other.kbPriceId) : null;
+    const hit = row ? null : await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: other.name, widthMm: null, heightMm: null, category: 'hardware', doorProductId });
+    const set = row ?? hit?.row ?? null;
+    if (set && set.tariffId && set.tariffId !== tariffId && (set.card?.includes ?? '').toLowerCase().includes(id)) return set.model;
+  }
+  return null;
 }

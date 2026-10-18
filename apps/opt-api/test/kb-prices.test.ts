@@ -7,6 +7,7 @@ import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import type { OptAiProvider } from '@opt/kp';
 import { KP_PRICE_ERROR_KIND, KP_PRICE_RESEARCH_KIND, resolveKpPath } from '@opt/kp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { bookXlsx, interiorBook, metalBook } from '../../../packages/opt/kb/test/fixtures/price-book.ts';
 import { ACCOUNT_ID, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Заявка #30008823 (упрощённо): две модели, у ДПГ два размера. */
@@ -556,5 +557,137 @@ describe('база знаний опта: цены и синонимы → по�
     const log = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string; details: { services: number } }[];
     expect(log[0]?.summary).toContain('работ вне таблицы: 1');
     expect(log[0]?.details.services).toBe(1);
+  });
+  it('KB-PRICE-SHEETS: два многолистовых прайса — счётчики карточки, 90025 по синониму INT-013 → 3 × 23 900, нестандарт по сетке (+30 % / +100 % / ровно 30 %), комплектующие и фурнитура по модели двери, INT-008 — смета, расхождение тарифа отменяет импорт, удаление и перезаливка', async () => {
+    type Src = { id: number; prices: number; priceKey: string; priceTitle: string; counts: Record<string, number> | null; priceImport: { updated: boolean; was: number; imported: number; error?: string; book?: Record<string, unknown> } };
+    const upload = async (filename: string, sheets: Record<string, unknown[][]>) =>
+      (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: (await bookXlsx(sheets)).toString('base64') } })).json().source as Src;
+    // Межкомнатные: тот же ключ, что у прежнего файла межкомнатных (15 строк) — заменяет его целиком.
+    const inner = await upload('Прайс_межкомнатные_двери_ГОСТ.xlsx', interiorBook());
+    expect(inner).toMatchObject({ priceTitle: 'Межкомнатные', prices: 30 + 86 + 31, counts: { doors: 30, components: 86, hardware: 31, sizes: 150, comments: 30 }, priceImport: { updated: true, was: 15, imported: 147, book: { doors: 30, components: 86, hardware: 31, hardwareUnpriced: 9, estimates: 1, sizes: 150, comments: 30, dictionary: 12 } } });
+    expect(inner.counts!.aliases).toBeGreaterThanOrEqual(60);
+    const metal = await upload('Прайс_металлические_двери_ГОСТ.xlsx', metalBook());
+    expect(metal).toMatchObject({ priceTitle: 'Металлические', prices: 20 + 31, counts: { doors: 20, components: 0, hardware: 31, sizes: 100, comments: 20 }, priceImport: { book: { doors: 20, hardware: 31, hardwareUnpriced: 9, estimates: 0 } } });
+    const journal = async (kind: string) => (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${kind}`, headers })).json().items as { summary: string; details: Record<string, unknown> }[];
+    expect((await journal('kb_index')).some((j) => j.summary.startsWith('База знаний: прайс «Межкомнатные» (30 ID): цен дверей 30 (сметных 1), комплектующих 86, фурнитуры 31 (без цены 9), размеров 150, синонимов'))).toBe(true);
+    // Расхождение цены тарифа между файлами: импорт отменяется целиком, прежние данные металлических на месте, в журнале лист / колонка.
+    const bad = await upload('Прайс_металлические_двери_ГОСТ v2.xlsx', metalBook({ extrasShift: 100 }));
+    expect(bad.priceImport.error).toContain('вкладка «Дополнения»: цена тарифа OPT-001 расходится с уже загруженным прайсом «Межкомнатные»');
+    expect(bad.prices).toBe(0);
+    const sources = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as Src[];
+    expect(sources.find((x) => x.id === metal.id)?.prices).toBe(51);
+    expect((await journal('kb_index')).some((j) => j.summary.includes('не импортирован — вкладка «Дополнения»: цена тарифа OPT-001') && j.summary.endsWith('прежние данные прайса сохранены'))).toBe(true);
+    await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${bad.id}`, headers });
+    // Один тариф в двух файлах — в базе две строки, при подборе берётся одна без пометки «найдено в двух прайсах».
+    const kbAll = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { origin: string; category: string; tariffId: string | null; productId: string | null; status: string; price: number }[];
+    expect(kbAll.filter((p) => p.tariffId === 'OPT-001')).toHaveLength(2);
+    expect(kbAll.filter((p) => p.category === 'door' && p.origin === 'price_list')).toHaveLength(50);
+
+    // Заявка 90025: три двери по синониму INT-013 (точный размер сетки — 0 %), нестандарт, комплектующие и фурнитура по модели двери.
+    const DOOR = 'Дверной блок деревянный внутренний глухой однопольный без порога, покрытие CPL';
+    letter.request_items = [
+      { raw: 'ДВ CPL / ДВ 1Рп Г ПрБ 900×2000 — 3 шт', name: 'ДВ CPL / ДВ 1Рп Г ПрБ', width_mm: 900, height_mm: 2000, qty: 3 },
+      { raw: 'Коробка — 3 шт', name: 'Коробка', width_mm: null, height_mm: null, qty: 3 },
+      { raw: 'Добор 150 мм — 3 шт', name: 'Добор 150 мм', width_mm: null, height_mm: null, qty: 3 },
+      { raw: 'Порог — 3 шт', name: 'Порог', width_mm: null, height_mm: null, qty: 3 },
+      { raw: `${DOOR} 899×2000 — 1 шт`, name: DOOR, width_mm: 899, height_mm: 2000, qty: 1 },
+      { raw: `${DOOR} 1171×2000 — 1 шт`, name: DOOR, width_mm: 1171, height_mm: 2000, qty: 1 },
+      { raw: `${DOOR} 900×2601 — 1 шт`, name: DOOR, width_mm: 900, height_mm: 2601, qty: 1 },
+      { raw: 'ДА Профиль с фрамугой 1950×2375 — 1 шт', name: 'ДА Профиль с фрамугой', width_mm: 1950, height_mm: 2375, qty: 1 },
+      { raw: 'Фрамуга — 1 шт', name: 'Фрамуга', width_mm: null, height_mm: null, qty: 1 },
+      { raw: 'Доводчик — 1 шт', name: 'Доводчик', width_mm: null, height_mm: null, qty: 1 },
+      { raw: 'MET-012 960×2050 — 2 шт', name: 'MET-012', width_mm: 960, height_mm: 2050, qty: 2 },
+      { raw: 'Вентиляционная решётка — 2 шт', name: 'Вентиляционная решётка', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Замок Punto — 2 шт', name: 'Замок Punto', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Комплект петель и крепежа — 2 шт', name: 'Комплект петель и крепежа', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Петля накладная — 4 шт', name: 'Петля накладная', width_mm: null, height_mm: null, qty: 4 },
+      { raw: 'Глазок — 2 шт', name: 'Глазок', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'ДПГ сота с коробкой 800×2000 — 1 шт', name: 'ДПГ сота с коробкой', width_mm: 800, height_mm: 2000, qty: 1 },
+      { raw: 'Монтаж дверного блока — 10 шт', name: 'Монтаж дверного блока', width_mm: null, height_mm: null, qty: 10 },
+    ] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d0.items).toHaveLength(18);
+    const searches = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
+    const d = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const items = d.items as { name: string; price: number | null; priceLabel: string | null; category: string; priceOutcome?: string; productId?: string | null; quoteNotes?: string[]; priceModel?: string | null; priceSource?: string }[];
+    expect(items.filter((l) => l.category !== 'service' && l.priceSource !== 'kb').map((l) => [l.name, l.category, l.price, l.priceLabel])).toEqual([]);
+    expect(g.searches()).toBe(searches);
+    const needs = (d.needsManager as { request_index: number; reason: string }[]).reduce<Record<number, string[]>>((m, n) => ({ ...m, [n.request_index]: [...(m[n.request_index] ?? []), n.reason] }), {});
+    // 1. 90025: синоним INT-013, точный размер сетки — 23 900 без надбавки; примечание из «Подбора» под позицией.
+    expect(items[0]).toMatchObject({ price: 23_900, category: 'door', productId: 'INT-013', priceOutcome: 'priced', priceModel: 'ДВ CPL 0,2 мм', quoteNotes: ['Цвет полотна по каталогу CPL.'] });
+    expect(needs[0]).toEqual(['цена из базы: по прайсу: ДВ CPL (строка 16) — совпали: дверной блок, глухой, однопольный, без порога, распашной, CPL', 'цена из базы: по синониму: ДВ CPL']);
+    expect(kbAll.find((p) => p.productId === 'INT-013' && p.category === 'door')).toBeTruthy();
+    // 2. Комплектующие по модели двери заявки: коробка 3 160 (строка INT-013), добор — в прайсе без цены → «уточнить у менеджера», не 0; порог — входит в блок.
+    expect(items[1]).toMatchObject({ price: 3160, category: 'component', priceLabel: 'по прайсу: Коробка (ДВ CPL) (строка 16)', priceOutcome: 'priced' });
+    expect(items[2]).toMatchObject({ price: null, category: 'component', priceOutcome: 'not_priced' });
+    expect(needs[2]).toEqual(['уточнить у менеджера: добор к ДВ CPL в прайсе без цены']);
+    expect(items[3]).toMatchObject({ price: 0, priceOutcome: 'included' });
+    expect(needs[3]).toEqual(['цена из базы: порог входит в цену блока ДВ CPL (в базу входит: полотно, коробка)']);
+    // 3. Нестандарт по сетке: 899 при эталоне 900 → +30 %; 1171 → +100 %; 2601 → +100 %; фраза о производстве — под позицией в КП.
+    expect(items[4]).toMatchObject({ price: 31_070, productId: 'INT-013' });
+    expect(needs[4]).toContain('цена из базы: нестандарт 899×2000 при эталоне 900×2000: +30 % к базе');
+    expect(items[4]?.quoteNotes).toEqual(['Цвет полотна по каталогу CPL.', 'нестандарт 899×2000 при эталоне 900×2000: +30 % к базе', 'Нестандартные позиции подлежат уточнению на производстве.']);
+    expect(items[5]).toMatchObject({ price: 47_800 });
+    expect(needs[5]).toContain('цена из базы: нестандарт 1171×2000 при эталоне 900×2000: +100 % к базе (превышение больше 30 %)');
+    expect(items[6]).toMatchObject({ price: 47_800 });
+    // 4. ALU-005 1950×2375 при эталоне 1500×2700: ширина ровно +30 % — остаётся 30 % (54 000 → 70 200); фрамуга и доводчик по модели.
+    expect(items[7]).toMatchObject({ price: 70_200, productId: 'ALU-005' });
+    expect(needs[7]).toEqual(['цена из базы: нестандарт 1950×2375 при эталоне 1500×2700: +30 % к базе', 'цена из базы: Нестандартные позиции подлежат уточнению на производстве.']);
+    expect(items[8]).toMatchObject({ price: 0, priceOutcome: 'included', category: 'hardware' });
+    expect(needs[8]?.[0]).toMatch(/^цена из базы: Фрамуга входит в цену блока ДА Профиль с фрамугой/);
+    expect(items[9]).toMatchObject({ price: 3900, priceOutcome: 'priced', category: 'hardware' });
+    // 5. MET-012 (№ 9 листа 1): точный размер; вентиляционная решётка входит в базу; замок Punto — для MET; комплект петель — петли внутри не удваиваются; глазок — без цены.
+    expect(items[10]).toMatchObject({ price: 32_000 + 9 * 400, productId: 'MET-012', priceOutcome: 'priced' });
+    expect(items[11]).toMatchObject({ price: 0, priceOutcome: 'included' });
+    expect(items[12]).toMatchObject({ price: 4200, priceOutcome: 'priced' });
+    expect(items[13]).toMatchObject({ price: 4100, priceOutcome: 'priced' });
+    expect(items[14]).toMatchObject({ price: 0, priceOutcome: 'included' });
+    expect(needs[14]).toContain('цена из базы: Петля накладная (OPT-029) входит в комплект «Комплект петель и крепежа» той же позиции — отдельно не считается');
+    expect(items[15]).toMatchObject({ price: null, priceOutcome: 'not_priced' });
+    expect(needs[15]?.[0]).toMatch(/^уточнить у менеджера: цены на Глазок \(OPT-012\) в прайсе нет/);
+    // 6. INT-008 — только смета: 11 960 по правилу из комментария, пометка «сметная цена».
+    expect(items[16]).toMatchObject({ price: 11_960, productId: 'INT-008', priceOutcome: 'estimate' });
+    expect(needs[16]).toEqual(['цена из базы: сметная цена: Сметная позиция: полотно INT-005 8 800 + коробка 3 160 = 11 960 — для сметы, уточнить у менеджера']);
+    expect(items[17]).toMatchObject({ price: null, category: 'service' });
+    // Документ: «входит в блок» — не строка таблицы, а примечание под дверью; «без цены» — строка с «уточнить у менеджера»; итог без них.
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
+    const built = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } });
+    expect(built.json()).toMatchObject({ draft: { status: 'built', hasDocx: true } });
+    const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d0.id);
+    const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<w:br\s*\/>/g, '\n').replace(/<[^>]+>/g, '');
+    const total = 3 * 23_900 + 3 * 3160 + 31_070 + 47_800 + 47_800 + 70_200 + 3900 + 2 * 35_600 + 2 * 4200 + 2 * 4100 + 11_960;
+    expect(text).toContain(`итого ${total.toLocaleString('ru-RU').replace(/\u00a0/g, ' ')} ₽`);
+    expect(text).toContain('В цену блока входит: Порог');
+    expect(text).toContain('В цену блока входит: Фрамуга');
+    expect(text).toContain('Нестандартные позиции подлежат уточнению на производстве.');
+    // Шаблон теста печатает только {{sum}}: у строки без цены сумма «—»; в шаблоне заказчика в колонке цены — «уточнить у менеджера».
+    expect(text).toContain('3. Добор 150 мм — —;');
+    expect(text).toContain('12. Глазок — —;');
+    expect(text).toContain('В цену блока входит: Вентиляционная решётка');
+    expect(text).toContain('В составе комплекта «Комплект петель и крепежа»: Петля накладная');
+    expect(text).toContain('2. Коробка (ДВ CPL) CPL 0,2 мм');
+    expect(text).toContain('10. Замок Punto');
+    expect(text).not.toContain('Дверь Доводчик');
+    expect((text.match(/71 700/g) ?? []).length).toBe(1);
+    const log = await journal('kp_build');
+    expect(log[0]?.summary).toContain('входит в цену блока (под дверью, не в таблице): 4');
+    expect(log[0]?.summary).toContain('без цены в прайсе («уточнить у менеджера», не в итоге): 2');
+    // Неактивные ALU-003/004 и сметная ALU-007 при подборе по признакам не берутся.
+    expect(kbAll.filter((p) => p.status === 'inactive').map((p) => p.productId).sort()).toEqual(['ALU-003', 'ALU-004']);
+    // Удаление файла межкомнатных уносит только его данные (двери, размеры, синонимы, словарь); металлические на месте; перезаливка восстанавливает всё.
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${inner.id}`, headers })).json()).toEqual({ ok: true });
+    const afterDel = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { category: string; origin: string; productId: string | null }[];
+    expect(afterDel.filter((p) => p.origin === 'price_list' && p.category === 'door').map((p) => p.productId?.slice(0, 3))).not.toContain('INT');
+    expect(afterDel.filter((p) => p.origin === 'price_list' && p.category === 'door')).toHaveLength(20);
+    const again = await upload('Прайс_межкомнатные_двери_ГОСТ.xlsx', interiorBook());
+    expect(again).toMatchObject({ prices: 147, counts: { doors: 30, sizes: 150 }, priceImport: { was: 0, imported: 147 } });
+    letter.request_items = [{ raw: 'ДВ CPL / ДВ 1Рп Г ПрБ 900×2000 — 3 шт', name: 'ДВ CPL / ДВ 1Рп Г ПрБ', width_mm: 900, height_mm: 2000, qty: 3 }] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d2.id } });
+    const d3 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d3.items[0]).toMatchObject({ price: 23_900, productId: 'INT-013' });
   });
 });

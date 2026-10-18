@@ -11,10 +11,12 @@ import { htmlToKbText, sectionLinks } from './html.ts';
 import { parsePublicUrl } from './safe-url.ts';
 import { draftsToPrices, extractPrices, previewPriceList, type ColumnMapping, type ImportDefaults } from './price-list.ts';
 import { priceListKeyOf, priceListTitleOf } from './price-key.ts';
-import { defaultCategoryOfPriceKey } from './category.ts';
+import { defaultCategoryOfPriceKey, type ComponentKind } from './category.ts';
+import { isPriceBook, parsePriceBook, type BookProduct, type PriceBook } from './price-book.ts';
+import { featuresFromColumns, featuresOf, mergeFeatures } from './features.ts';
 import { KbAliasesRepo, KbPricesRepo } from './prices.ts';
 import { readKbSheetRows } from './extract.ts';
-import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource } from './repo.ts';
+import { KB_LIMIT_BYTES, KB_LIMIT_CHUNKS, KbRepo, type KbSource, type PriceImportSummary } from './repo.ts';
 import { searchKb, type KbSearchResult } from './search.ts';
 
 /**
@@ -85,6 +87,9 @@ export interface PriceImportResult {
   was: number;
   removed: number;
   added: number;
+  /** Многолистовой прайс: счётчики по вкладкам; error — импорт отменён (старые данные сохранены). */
+  book?: PriceImportSummary['book'];
+  error?: string;
 }
 
 export interface KbCoreDeps {
@@ -229,6 +234,9 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       if (!source?.filePath) return null;
       if (!/\.(xlsx|xlsm)$/i.test(source.original ?? source.title) && !/spreadsheetml/i.test(source.mime ?? '')) return null;
       const bytes = new Uint8Array(await readFile(source.filePath));
+      const allRows = await readKbSheetRows(bytes);
+      // KB-PRICE-SHEETS: файл с вкладкой «ID» — многолистовой прайс, все вкладки одной транзакцией.
+      if (isPriceBook(allRows)) return importPriceBook(accountId, sourceId, source, parsePriceBook(allRows), input);
       const preview = await previewPriceList(bytes, input.mapping ?? {});
       if (input.auto && !preview.isPriceList) return null;
       const { drafts, skipped } = extractPrices(await readKbSheetRows(bytes), preview.mapping);
@@ -356,6 +364,83 @@ export function createKbCore(d: KbCoreDeps): KbCore {
   };
 
   /** Текст источника: заметка — как есть; файл и файл по ссылке — извлечение с OCR аккаунта; страница — текст уже сохранён при скачивании. */
+  /**
+   * Многолистовой прайс (KB-PRICE-SHEETS): карточки товаров по ID, компоненты по статусам, фурнитура по ID тарифа (сверка цен
+   * с другими файлами), размеры, правило нестандарта, словарь, синонимы — одной транзакцией; ошибка на любой вкладке —
+   * старые данные остаются, причина в журнале (лист, строка, колонка).
+   */
+  async function importPriceBook(accountId: number, sourceId: number, source: KbSource, book: PriceBook, input: PriceImportInput): Promise<PriceImportResult> {
+    const priceKey = priceListKeyOf(source.original ?? source.title);
+    const priceTitle = priceListTitleOf(priceKey);
+    const empty: PriceImportResult = { imported: 0, skipped: book.skipped.length, replaced: 0, headerFound: true, priceKey, priceTitle, updated: false, was: 0, removed: 0, added: 0 };
+    const fail = async (reason: string, errors: PriceBook['errors']) => {
+      await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: прайс «${priceTitle}» («${source.title}») не импортирован — ${reason}; прежние данные прайса сохранены`, details: { sourceId, priceKey, status: 'book_error', errors, skipped: book.skipped, userId: input.userId, audit: 'kb_prices' } });
+      // Причина — в карточку источника (виджет показывает «не импортирован: …»), строк у источника нет.
+      await repo.setPriceInfo(sourceId, priceKey, { title: priceTitle, updated: false, was: 0, imported: 0, removed: 0, added: 0, at: new Date().toISOString(), book: null, error: reason });
+      return { ...empty, error: reason };
+    };
+    if (book.errors.length) {
+      const e = book.errors[0] as PriceBook['errors'][number];
+      return fail(`${e.sheet}${e.row ? `, строка ${e.row}` : ''}${e.column ? `, колонка «${e.column}»` : ''}: ${e.message}${book.errors.length > 1 ? ` (и ещё ${book.errors.length - 1})` : ''}`, book.errors);
+    }
+    const sameKey = await repo.byPriceKey(accountId, priceKey, sourceId);
+    const replaceIds = sameKey.map((x) => x.id);
+    // Фурнитура: один тариф на аккаунт — расхождение цены с другим файлом (не того же ключа) — ошибка импорта.
+    const foreign = (await prices.listByOrigin(accountId, 'price_list')).filter((r) => r.tariffId && r.sourceId !== sourceId && !replaceIds.includes(r.sourceId ?? -1));
+    const conflicts = book.hardware.filter((h) => foreign.some((r) => r.tariffId === h.tariffId && (r.price !== (h.price ?? 0) || (h.price === null) !== (r.price === 0)))).map((h) => h.tariffId);
+    if (conflicts.length) return fail(`вкладка «Дополнения»: цена тарифа ${conflicts.join(', ')} расходится с уже загруженным прайсом «${foreign.find((r) => conflicts.includes(r.tariffId ?? ''))?.priceTitle ?? ''}»`, conflicts.map((id) => ({ sheet: 'Дополнения', row: null, column: 'Цена', message: `тариф ${id}: цена расходится с другим файлом` })));
+    const vat = input.vat ?? 'unknown';
+    const validAt = input.validAt ?? new Date();
+    const rows: Parameters<KbPricesRepo['replacePriceBook']>[3]['rows'] = [];
+    const sizesByProduct = new Map<string, { widthMm: number; heightMm: number }[]>();
+    for (const z of book.sizes) sizesByProduct.set(z.productId, [...(sizesByProduct.get(z.productId) ?? []), { widthMm: z.widthMm, heightMm: z.heightMm }]);
+    const doorFeatures = (p: BookProduct) => mergeFeatures(featuresOf([p.model, p.abbr, p.typeText, p.equipment].filter(Boolean).join(' | ')), featuresFromColumns({ go: p.card.fill === 'solid' ? 'Г' : p.card.fill === 'glazed' ? 'О' : p.typeText, coating: p.coating, material: p.material, fire: p.fire }));
+    let components = 0;
+    let estimates = 0;
+    for (const p of book.products) {
+      const f = doorFeatures(p);
+      const leaves = p.card.leafCount === 2 || p.card.geometry === 'pair' || p.card.geometry === 'overall_pair' || p.card.geometry === 'each_leaf' ? 2 : p.card.leafCount === 1 ? 1 : f.leaves;
+      const features = { ...f, leaves: leaves ?? null, fire: p.fire && /ei\s?-?\s?\d{2}/i.test(p.fire) ? f.fire : f.fire };
+      const sizes = sizesByProduct.get(p.productId ?? '') ?? [];
+      const family = p.family ?? (features.material === 'steel' ? 'steel' : features.material === 'aluminium' ? 'aluminium' : 'interior');
+      const componentStatus: Partial<Record<ComponentKind, 'priced' | 'included' | 'not_priced'>> = {};
+      for (const [kind, c] of Object.entries(p.components) as [ComponentKind, { status: 'priced' | 'included' | 'not_priced'; price: number | null }][]) componentStatus[kind] = c.status;
+      const base = { factory: input.factory ?? null, unit: 'шт', vat, validAt, confidence: input.confidence, origin: 'price_list' as const, nonstandard: {}, abbr: p.abbr, description: [p.typeText, p.fire].filter(Boolean).join('; ') || null, sourceRow: p.row, features, coating: p.coating, equipment: p.equipment, productId: p.productId, status: p.status, estimate: p.estimate, family: family as BookProduct['family'], componentStatus, card: p.card, note: `лист 1, строка ${p.row}${p.estimate ? '; сметная цена' : ''}` };
+      if (p.estimate) estimates += 1;
+      // Дверь: одна строка на ID товара без размера — размеры живут в kb_sizes, нестандарт считается по сетке модели (book-pricing).
+      rows.push({ ...base, model: p.model, price: p.price as number, widthMm: null, heightMm: null, category: 'door', note: `${base.note}${sizes.length ? `; размеров в сетке: ${sizes.length}` : ''}` });
+      // Компоненты со статусом priced — отдельные строки комплектующих к модели; included / not_priced — только статус в карточке двери.
+      for (const [kind, c] of Object.entries(p.components) as [ComponentKind, { status: 'priced' | 'included' | 'not_priced'; price: number | null }][]) {
+        if (c.status !== 'priced' || !c.price) continue;
+        rows.push({ ...base, model: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} (${p.model})`, price: c.price, widthMm: null, heightMm: null, category: 'component', componentKind: kind, equipment: null, description: `комплектующее к ${p.model}`, estimate: false, status: p.status === 'inactive' ? 'inactive' : 'active', card: null, componentStatus: null, note: `лист 1, строка ${p.row}, колонка «${kind}»` });
+        components += 1;
+      }
+    }
+    let hardwareUnpriced = 0;
+    for (const h of book.hardware) {
+      if (h.price === null) hardwareUnpriced += 1;
+      rows.push({ model: h.name, factory: input.factory ?? null, unit: h.unit, widthMm: null, heightMm: null, price: h.price ?? 0, vat, validAt, confidence: input.confidence, origin: 'price_list', nonstandard: {}, note: `вкладка «Дополнения», строка ${h.row}${h.price === null ? '; цены нет' : ''}`, sourceRow: h.row, category: 'hardware', tariffId: h.tariffId, status: h.price === null ? 'estimate_only' : h.status, appliesTo: h.forModels === '*' ? [] : h.forModels, card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: [], leafCount: null, colors: [], baseIncludes: null, note: h.type, technical: null, quoteNotes: [], priceConditions: null, hardwareUnit: h.unit, includes: h.includes, clarify: h.clarify }, description: h.type });
+    }
+    const aliases = [
+      ...book.products.flatMap((p) => (p.productId ? [...p.aliases, ...(p.abbr ? [p.abbr] : [])].map((a) => ({ productId: p.productId as string, canonical: p.model, alias: a })) : [])),
+      ...book.hardware.flatMap((h) => h.aliases.map((a) => ({ productId: h.tariffId, canonical: h.name, alias: a }))),
+    ];
+    let r: Awaited<ReturnType<KbPricesRepo['replacePriceBook']>>;
+    try {
+      r = await prices.replacePriceBook(accountId, sourceId, priceKey, { rows, sizes: book.sizes, rule: book.rule, dictionary: book.dictionary, aliases }, replaceIds, input.userId);
+    } catch (err) {
+      return fail(`запись в базу: ${(err as Error).message}`, [{ sheet: '—', row: null, column: null, message: (err as Error).message }]);
+    }
+    const doors = book.products.length;
+    const comments = book.products.filter((p) => p.card.comment).length;
+    const updated = sameKey.length > 0 || (source.priceKey === priceKey && r.was > 0);
+    const counts = { doors, components, hardware: book.hardware.length, hardwareUnpriced, estimates, sizes: r.sizes, aliases: r.aliases, comments, dictionary: r.dictionary, skipped: book.skipped.map((x) => `${x.sheet}${x.row ? `:${x.row}` : ''}${x.column ? ` [${x.column}]` : ''} — ${x.message}`) };
+    await repo.setPriceInfo(sourceId, priceKey, { title: priceTitle, updated, was: r.was, imported: r.imported, removed: r.removed, added: r.added, at: new Date().toISOString(), book: counts });
+    const summary = `прайс «${priceTitle}» (${doors} ID): цен дверей ${doors}${estimates ? ` (сметных ${estimates})` : ''}, комплектующих ${components}, фурнитуры ${book.hardware.length}${hardwareUnpriced ? ` (без цены ${hardwareUnpriced})` : ''}, размеров ${r.sizes}, синонимов ${r.aliases}, комментариев ${comments}, словарь ${r.dictionary}${updated ? `; прежние данные прайса заменены (было строк ${r.was})` : ''}${book.skipped.length ? `; пропущено: ${book.skipped.length}` : ''}`;
+    await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: ${summary}`, details: { sourceId, priceKey, priceTitle, book: counts, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, replacedSources: replaceIds, skipped: book.skipped, auto: Boolean(input.auto), userId: input.userId, audit: 'kb_prices' } });
+    return { imported: r.imported, skipped: book.skipped.length, replaced: r.replaced, headerFound: true, priceKey, priceTitle, updated, was: r.was, removed: r.removed, added: r.added, book: counts };
+  }
+
   async function textOf(source: KbSource): Promise<string> {
     if (!source.filePath) throw new Error('У источника нет файла на томе — добавьте его заново');
     const bytes = new Uint8Array(await readFile(source.filePath));

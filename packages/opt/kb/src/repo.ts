@@ -49,6 +49,10 @@ export interface PriceImportSummary {
   removed: number;
   added: number;
   at: string;
+  /** Многолистовой прайс (KB-PRICE-SHEETS): счётчики по вкладкам и что пропущено. */
+  book?: { doors: number; components: number; hardware: number; hardwareUnpriced: number; estimates: number; sizes: number; aliases: number; comments: number; dictionary: number; skipped: string[] } | null;
+  /** Импорт отменён (ошибка на вкладке, расхождение тарифа): причина для карточки источника; прежние данные прайса сохранены. */
+  error?: string | null;
 }
 
 export interface NewKbSource {

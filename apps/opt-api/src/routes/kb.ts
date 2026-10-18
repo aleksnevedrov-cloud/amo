@@ -66,9 +66,10 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   /** Список источников с состоянием задания очереди и занятым объёмом. */
   api.get('/kb/sources', async (req) => {
     const accountId = principal(req).accountId;
-    const [sources, usage, priceCounts] = await Promise.all([kb.repo.list(accountId), kb.repo.usage(accountId), kb.prices.countBySource(accountId)]);
+    const [sources, usage, priceCounts, bookCounts] = await Promise.all([kb.repo.list(accountId), kb.repo.usage(accountId), kb.prices.countBySource(accountId), kb.prices.bookCountsBySource(accountId)]);
     const jobs = await deps.kbQueue.states(accountId, sources.filter((s) => s.status === 'new').map((s) => s.id));
-    return { sources: sources.map((s) => ({ ...view(s), job: jobs[s.id] ?? null, prices: priceCounts.get(s.id) ?? 0 })), usage };
+    // KB-PRICE-SHEETS: счётчики файла — цены дверей / комплектующих / фурнитуры / размеров / синонимов / комментариев.
+    return { sources: sources.map((s) => ({ ...view(s), job: jobs[s.id] ?? null, prices: priceCounts.get(s.id) ?? 0, counts: bookCounts.get(s.id) ?? null })), usage };
   });
 
   api.post('/kb/sources/text', async (req, reply) => {
@@ -98,7 +99,8 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: загружен файл «${b.data.filename}» (${Math.round(bytes.byteLength / 1024)} КБ)`, details: { sourceId: id, kind: 'file', userId: p.userId, audit: 'kb' } });
       // Если xlsx распознан как прайс, цены импортирует задание индексации (в тестах — тут же); виджет видит их число.
       const prices = (await kb.prices.countBySource(p.accountId)).get(id) ?? 0;
-      return reply.code(202).send({ source: { ...view(await kb.repo.get(p.accountId, id)), prices } });
+      const counts = (await kb.prices.bookCountsBySource(p.accountId)).get(id) ?? null;
+      return reply.code(202).send({ source: { ...view(await kb.repo.get(p.accountId, id)), prices, counts } });
     } catch (err) {
       return fail(reply, err);
     }

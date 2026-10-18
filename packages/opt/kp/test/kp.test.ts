@@ -24,7 +24,7 @@ describe('сборка КП: значения для шаблона', () => {
     const data = templateData({ kpNo: 'КП-2026-1', date: new Date(2026, 9, 12), basis: 'запрос от 09.10.2026', clientName: 'ООО Ромашка', clientPhone: '+7 900', lines: [line, { ...line, price: null }], vatRate: 22, priceNote: DEFAULT_PRICE_NOTE });
     // Разделитель тысяч в ru-RU — неразрывный пробел.
     const plain = (v: string) => v.replace(/\u00a0/g, ' ');
-    expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '0 ₽']]);
+    expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '—']]); // KB-PRICE-SHEETS: у строки без цены сумма «—», не «0 ₽»
     // KP-LAYOUT: размер в документе с пробелами вокруг × — перенос в узкой колонке по пробелу, а не посреди числа.
     expect(data.items[0]?.size).toBe('2000 × 800 мм');
     expect(plain(data.grand_total)).toBe('18 000 ₽');

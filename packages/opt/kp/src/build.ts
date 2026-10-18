@@ -23,6 +23,10 @@ export interface KpBuildLine {
   /** KP-LAYOUT: комплектация и обозначение по прайсу — свои плейсхолдеры {{equipment}} и {{designation}} в строке таблицы. */
   equipment?: string;
   designation?: string;
+  /** KB-PRICE-SHEETS: текст вместо цены, когда цены нет («уточнить у менеджера»); сумма такой строки — «—», в итог не входит. */
+  priceText?: string;
+  /** Примечания под позицией (вкладка «Подбор», нестандарт, «в цену блока входит …») — плейсхолдер {{quote_note}}. */
+  notes?: string[];
 }
 
 export interface KpBuildInput {
@@ -54,7 +58,7 @@ export interface KpTemplateData {
   order_basis: string;
   client_name: string;
   client_phone: string;
-  items: { n: number; name: string; size: string; qty: string; price: string; sum: string; equipment: string; designation: string }[];
+  items: { n: number; name: string; size: string; qty: string; price: string; sum: string; equipment: string; designation: string; quote_note: string }[];
   total_in_words: string;
   vat_phrase: string;
   grand_total: string;
@@ -128,11 +132,12 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     name: l.name || '—',
     equipment: l.equipment ?? '',
     designation: l.designation ?? '',
+    quote_note: (l.notes ?? []).map((n) => n.trim()).filter(Boolean).join('\n'),
     // «1010 × 2100 мм» с пробелами вокруг ×: в узкой колонке шаблона (2,1 см) перенос идёт по пробелу, а не посреди числа («1010×210|0»).
     size: l.size ? l.size.replace(/(\d)\s*[×x]\s*(\d)/g, '$1 × $2') : '—',
     qty: `${l.qty.toLocaleString('ru-RU')} шт`,
-    price: l.price === null ? '—' : money(l.price),
-    sum: money(lineSum(l)),
+    price: l.price === null ? l.priceText || '—' : money(l.price),
+    sum: l.price === null ? '—' : money(lineSum(l)),
   }));
   // Итог и НДС — в целых копейках: цены в КП конечные, НДС выделяется из них (этап 4 ТЗ RFD-AI-AGENT-OPT-PRICE), а не начисляется сверху.
   const totalKopecks = input.lines.reduce((s, l) => s + lineSumKopecks(l), 0);
@@ -183,9 +188,9 @@ export function withServiceNoteFallback(tags: { serviceNote: boolean; priceNote:
  * Строка в три части (KP-LAYOUT): если в шаблоне нет плейсхолдеров {{equipment}} / {{designation}}, комплектация и
  * обозначение идут строками под названием в {{name}} («Комплектация: …», «Обозначение: …»), чтобы не потеряться.
  */
-export function withLayoutFallback(tags: { equipment: boolean; designation: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+export function withLayoutFallback(tags: { equipment: boolean; designation: boolean; quoteNote?: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
   const items = data.items.map((it) => {
-    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение заказчика: ${it.designation}` : ''].filter(Boolean);
+    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение заказчика: ${it.designation}` : '', !(tags.quoteNote ?? false) && it.quote_note ? it.quote_note : ''].filter(Boolean);
     return extra.length ? { ...it, name: [it.name, ...extra].join('\n') } : it;
   });
   const fallback = items.some((it, i) => it.name !== data.items[i]?.name);
@@ -264,7 +269,7 @@ export async function buildKp(
   const text = doc.getFullText();
   const { data: withNote, fallback } = withPriceNoteFallback(text.includes('price_note'), data);
   const { data: withService, fallback: serviceNoteFallback } = withServiceNoteFallback({ serviceNote: text.includes('service_note'), priceNote: text.includes('price_note'), vatPhrase: text.includes('vat_phrase'), totalInWords: text.includes('total_in_words'), totalQty: text.includes('total_qty') }, withNote);
-  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation') }, withService);
+  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation'), quoteNote: text.includes('quote_note') }, withService);
   const currencyStripped = currencyTagsInTemplate(text);
   doc.render(withCurrencyFallback(currencyStripped, laidOut));
   await mkdir(outDir, { recursive: true });

@@ -67,6 +67,6 @@ describe('архив виджета «Агент опт»', () => {
     // После стилей по макету (DESIGN, DESIGN-FIX) архив 134 КБ; вкладка «База знаний» (RFD-AI-AGENT-OPT-KB: источники, ссылки,
     // прайсы, синонимы) добавила ≈ 20 КБ к script.js — архив 144 КБ, script.js 341 КБ; запас до 160 / 360.
     expect(zipBytes).toBeLessThan(160 * 1024);
-    expect(files['script.js']!.length).toBeLessThan(360 * 1024);
+    expect(files['script.js']!.length).toBeLessThan(380 * 1024); // KB-PRICE-SHEETS: пометки статусов и счётчики прайса, 1.2.1 — 361 КБ
   });
 });

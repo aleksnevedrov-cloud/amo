@@ -69,6 +69,17 @@ export interface KpLine {
   equipment?: string | null;
   /** Сокращение по ГОСТ из строки прайса («ДВ 1Рп Г ПрБ») — в строку «Обозначение» КП (KP-LAYOUT). */
   priceAbbr?: string | null;
+  /**
+   * KB-PRICE-SHEETS: исход подбора по многолистовому прайсу — included: входит в цену блока двери (в таблицу и итог не идёт,
+   * пишется под дверью); not_priced: в прайсе цены нет («уточнить у менеджера», не 0 ₽, в итог не идёт); estimate: сметная цена.
+   */
+  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate';
+  /** Примечания под позицией в КП: из вкладки «Подбор», нестандарт, «в цену блока входит …». */
+  quoteNotes?: string[];
+  /** ID товара прайса (INT-013), по которому взята цена двери: контекст для комплектующих и фурнитуры ниже. */
+  productId?: string | null;
+  /** priceOutcome = included: во что входит — ID двери (цена блока) или название комплекта фурнитуры. */
+  includedIn?: string | null;
 }
 
 export interface KpPayload {
@@ -604,9 +615,14 @@ export function kpLineName(l: Pick<KpLine, 'name' | 'priceModel'>): string {
  * «Дверной блок ДВ CPL 0,2 мм, глухой, светло-серый». Без строки прайса — название клиента как есть. Служебные слова
  * («по прайсу», источник цены) в клиентский документ не попадают.
  */
-export function kpShortName(l: Pick<KpLine, 'name' | 'priceModel'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): string {
+export function kpShortName(l: Pick<KpLine, 'name' | 'priceModel' | 'category'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): string {
   if (!l.priceModel) return l.name;
   const text = `${item?.name ?? l.name} | ${item?.raw ?? ''}`;
+  // Комплектующее и фурнитура (KB-PRICE-SHEETS): название строки прайса как есть («Коробка (ДВ CPL)», «Доводчик»), без «Дверь …» и признаков двери.
+  if (l.category === 'component' || l.category === 'hardware') {
+    const c = colorOf(text);
+    return c ? `${l.priceModel.trim()}, ${c}` : l.priceModel.trim();
+  }
   const f = mergeFeatures(featuresOf(text), item?.features ?? null);
   // Род прилагательных: блок — мужской, полотно — средний, неизвестно — «дверь», женский.
   const g = f.type === 'block' ? 0 : f.type === 'leaf' ? 1 : 2;
@@ -629,7 +645,7 @@ export function kpShortName(l: Pick<KpLine, 'name' | 'priceModel'>, item?: Pick<
  * чтобы клиент узнал свою позицию. Шаблон с плейсхолдерами {{equipment}} и {{designation}} раскладывает их по своим
  * абзацам; без них они идут строками под названием.
  */
-export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'equipment'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): { name: string; equipment: string; designation: string } {
+export function kpLineParts(l: Pick<KpLine, 'name' | 'priceModel' | 'equipment' | 'category'>, item?: Pick<KpRequestItem, 'raw' | 'name' | 'features'> | null): { name: string; equipment: string; designation: string } {
   const name = kpShortName(l, item);
   // Без строки прайса первый уровень и есть строка клиента — третий уровень не нужен.
   const original = l.priceModel ? tidyName(item?.raw || item?.name || l.name) : '';
