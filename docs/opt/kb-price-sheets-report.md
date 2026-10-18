@@ -1,6 +1,6 @@
 # RFD-AI-AGENT-OPT-KB-PRICE-SHEETS: многолистовые прайсы (все вкладки файла)
 
-Дата: 18.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после cbe5856). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
+Дата: 18.10.2026. Ветка `claude/opt-kb`, коммит 424b261 (после cbe5856). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
 виджет 1.2.1. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 **Важное допущение.** Файлы «Прайс_межкомнатные_двери_ГОСТ.xlsx» и «Прайс_металлические_двери_ГОСТ.xlsx» в сессию не
@@ -72,7 +72,7 @@ typecheck пяти пакетов опта — чистый; eslint — те ж�
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 424b261
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграцию 009 применит opt-api при старте
 docker compose logs --tail=30 opt-api | grep -iE "миграц|009|kb_sizes"
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
