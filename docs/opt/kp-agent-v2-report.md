@@ -2,7 +2,7 @@
 
 Дата: 19.10.2026. Ветка `claude/opt-kb`, поверх KB-WEB-ROWS и KP-DOCX-APPENDIX (`8038a94`, виджет 1.2.8).
 
-Коммиты: `82f8699`, `3b404d2`, `8f6b572`, `abc8734`, `538440d`, `0467679`, `<7/7>`. Всего +4 6xx / −7xx строк.
+Коммиты: `82f8699`, `3b404d2`, `8f6b572`, `abc8734`, `538440d`, `0467679`, `6eeb415`. Всего +4 748 / −698 строк в 67 файлах.
 
 | Коммит | Этап | Строк |
 | --- | --- | --- |
@@ -12,7 +12,7 @@
 | `abc8734` | 4/7 документ КП | +83 / −21 |
 | `538440d` | 5/7 виджет 2.0.0 | +1 311 / −449 |
 | `0467679` | 6/7 эталонный набор 12 сделок, flow-export | +1 121 / −67 |
-| `<7/7>` | 7/7 настройки КП (срок действия цены, НДС), отчёт | см. коммит |
+| `6eeb415` | 7/7 настройки КП (срок действия цены, НДС), отчёт | +180 / −3 |
 
 Виджет — 2.0.0 (окно КП вместо плиток в колонке). Миграция БД — `013_kb_sites_candidates.sql` (база знаний), применяется при старте opt-api.
 
@@ -119,7 +119,7 @@
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <7/7>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 6eeb415
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграция 013 — при старте opt-api
 docker compose logs --tail=20 opt-api | grep -i migrat                              # «013_kb_sites_candidates» применена
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
