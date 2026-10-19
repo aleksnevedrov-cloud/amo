@@ -1,6 +1,6 @@
 # KB-PRICE-SHEETS-FIX: правки по реальной загрузке прайсов 19.10 и хвосты
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после 88e5282 с файлами заказчика). Сервер (`@opt/kb`, `@opt/kp`,
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `4751658` (после 88e5282 с файлами заказчика). Сервер (`@opt/kb`, `@opt/kp`,
 `apps/opt-api`) и виджет 1.2.2. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 Файлы «Межкомнатные двери.xlsx» и «Металлические двери.xlsx» из 88e5282 прогнаны разбором и импортом в тестах: ошибок нет.
@@ -62,7 +62,7 @@ typecheck пяти пакетов опта — чистый; eslint — те ж�
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 4751658
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграцию 010 применит opt-api при старте
 docker compose logs --tail=30 opt-api | grep -iE "миграц|010"
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
