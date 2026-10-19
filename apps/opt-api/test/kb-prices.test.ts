@@ -1,6 +1,7 @@
 // RFD-AI-AGENT-OPT-KB, этап 3: цены из xlsx-прайса с предпросмотром, синонимы, приоритет «база → веб»,
 // автопополнение из веб-поиска и правок менеджера, группировка веб-поиска по модели, дневной лимит, подпись источника.
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import PizZip from 'pizzip';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
@@ -689,5 +690,60 @@ describe('база знаний опта: цены и синонимы → по�
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d2.id } });
     const d3 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(d3.items[0]).toMatchObject({ price: 23_900, productId: 'INT-013' });
+  });
+  it('KB-PRICE-SHEETS-FIX: настоящие файлы заказчика («Межкомнатные двери.xlsx», «Металлические двери.xlsx») грузятся без ошибок со счётчиками; предпросмотр книги вместо разметки колонок; «Найти цены» на старом черновике без категорий ставит категории заново; веб-цена автопорога 27 295 ₽ отсечена медианой фурнитуры, 1 425 ₽ принята', async () => {
+    type Src = { id: number; prices: number; priceTitle: string; counts: Record<string, number> | null; priceImport: { error?: string; book?: Record<string, unknown> } | null };
+    // Синтетические прайсы предыдущего сценария уносят свои тарифы OPT-… (другие цены) — иначе сверка тарифов остановит импорт.
+    const before = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources as { id: number; priceKey: string | null }[];
+    for (const s of before.filter((x) => x.priceKey && /прайс (межкомнатные|металлические) двери гост/.test(x.priceKey))) await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${s.id}`, headers });
+    const real = (name: string) => readFileSync(fileURLToPath(new URL(`../../../packages/opt/kb/test/fixtures/real/${name}`, import.meta.url)));
+    const upload = async (filename: string) =>
+      (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/file', headers, payload: { filename, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', contentBase64: real(filename).toString('base64') } })).json().source as Src;
+    const inner = await upload('Межкомнатные двери.xlsx');
+    expect(inner.priceImport?.error).toBeUndefined();
+    expect(inner).toMatchObject({ priceTitle: 'Межкомнатные', counts: { doors: 30, hardware: 31, sizes: 147, comments: 30 }, priceImport: { book: { doors: 30, estimates: 1, hardware: 31, hardwareUnpriced: 9, sizes: 147, comments: 30 } } });
+    const metal = await upload('Металлические двери.xlsx');
+    expect(metal.priceImport?.error).toBeUndefined();
+    expect(metal).toMatchObject({ priceTitle: 'Металлические', counts: { doors: 20, hardware: 31, sizes: 46, comments: 20 } });
+    // Предпросмотр книги (п. 3): не разметка колонок, а счётчики файла и итог импорта.
+    const pv = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kb/sources/${inner.id}/prices/preview`, headers })).json();
+    expect(pv).toMatchObject({ isPriceBook: true, isPriceList: false, book: { doors: 30, estimates: 1, hardware: 31, hardwareUnpriced: 9, sizes: 147, errors: [] }, priceImport: { book: { doors: 30 } } });
+    expect(pv.sheets).toContain('Подбор');
+    // «Импортировать заново» без разметки — книга перечитана, счётчики те же.
+    const re = (await ctx.app.inject({ method: 'POST', url: `/widget/v1/kb/sources/${inner.id}/prices/import`, headers, payload: { mapping: {} } })).json();
+    expect(re).toMatchObject({ imported: inner.prices, book: { doors: 30 }, counts: { doors: 30, sizes: 147 } });
+    // Старый черновик без категорий (до KB-COMPONENTS): дверь по синониму «Финская с четвертью ДПГ», автопорог (нет в прайсе), монтаж.
+    letter.request_items = [
+      { raw: 'Финская с четвертью ДПГ 600×1900 — 2 шт', name: 'Финская с четвертью ДПГ', width_mm: 600, height_mm: 1900, qty: 2 },
+      { raw: 'Автопорог LDM-03 24×1020 — 2 шт', name: 'Автопорог LDM-03 24×1020', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Монтаж дверного блока — 2 шт', name: 'Монтаж дверного блока', width_mm: null, height_mm: null, qty: 2 },
+    ] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const old = (await ctx.deps.kp.byId(ACCOUNT_ID, d0.id))!;
+    const strip = ({ category: _c, kind: _k, ...rest }: Record<string, unknown>) => rest;
+    const oldPayload = old.payload as unknown as { items: Record<string, unknown>[]; request_items: Record<string, unknown>[] };
+    await ctx.deps.kp.setPayload(d0.id, { ...oldPayload, items: oldPayload.items.map(strip), request_items: oldPayload.request_items.map(strip) } as unknown as Record<string, unknown>);
+    expect(((await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft.items as { category?: string }[]).map((l) => l.category)).toEqual([undefined, undefined, undefined]);
+    g.web.price = 27_295;
+    const searches = g.searches();
+    const run = (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } })).json();
+    // Категории поставлены заново: монтаж — работы, в поиск не ушёл; автопорог — фурнитура.
+    expect(run).toMatchObject({ total: 2, categoriesRefreshed: 3 });
+    expect(g.searches()).toBe(searches + 1);
+    const d1 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const items = d1.items as { category: string; price: number | null; productId?: string | null; priceLabel?: string | null }[];
+    expect(items.map((l) => l.category)).toEqual(['door', 'hardware', 'service']);
+    expect(items[0]).toMatchObject({ price: 3100, productId: 'INT-001' });
+    // Веб-цена автопорога 27 295 ₽ — вне 40–300 % медианы фурнитуры прайса (2 890 ₽): отброшена, цена пустая, пометка менеджеру.
+    expect(items[1]?.price).toBeNull();
+    const notes = (d1.needsManager as { request_index: number; reason: string }[]).filter((n) => n.request_index === 1).map((n) => n.reason);
+    expect(notes.some((n) => n.includes('веб-цена 27\u00a0295 ₽ отброшена: вне диапазона прайса (медиана прайса по группе «фурнитура»') && n.includes('допустимо 40–300 %'))).toBe(true);
+    // Реальная цена 1 425 ₽ проходит.
+    g.web.price = 1425;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id, requestIndexes: [1], force: true } });
+    const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(d2.items[1]).toMatchObject({ price: 1425, category: 'hardware', priceSource: 'research' });
+    expect(d2.items[2]).toMatchObject({ price: null, category: 'service' });
   });
 });

@@ -394,7 +394,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     const rows: Parameters<KbPricesRepo['replacePriceBook']>[3]['rows'] = [];
     const sizesByProduct = new Map<string, { widthMm: number; heightMm: number }[]>();
     for (const z of book.sizes) sizesByProduct.set(z.productId, [...(sizesByProduct.get(z.productId) ?? []), { widthMm: z.widthMm, heightMm: z.heightMm }]);
-    const doorFeatures = (p: BookProduct) => mergeFeatures(featuresOf([p.model, p.abbr, p.typeText, p.equipment].filter(Boolean).join(' | ')), featuresFromColumns({ go: p.card.fill === 'solid' ? 'Г' : p.card.fill === 'glazed' ? 'О' : p.typeText, coating: p.coating, material: p.material, fire: p.fire }));
+    const doorFeatures = (p: BookProduct) => mergeFeatures(featuresOf([p.model, p.abbr, p.typeText, p.equipment].filter(Boolean).join(' | ')), featuresFromColumns({ go: p.card.fill === 'solid' ? 'Г' : p.card.fill === 'glazed' ? 'О' : p.typeText, coating: p.coating, material: p.material, construction: p.construction, purpose: p.purpose, fire: p.fire }));
     let components = 0;
     let estimates = 0;
     for (const p of book.products) {
@@ -405,7 +405,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       const family = p.family ?? (features.material === 'steel' ? 'steel' : features.material === 'aluminium' ? 'aluminium' : 'interior');
       const componentStatus: Partial<Record<ComponentKind, 'priced' | 'included' | 'not_priced'>> = {};
       for (const [kind, c] of Object.entries(p.components) as [ComponentKind, { status: 'priced' | 'included' | 'not_priced'; price: number | null }][]) componentStatus[kind] = c.status;
-      const base = { factory: input.factory ?? null, unit: 'шт', vat, validAt, confidence: input.confidence, origin: 'price_list' as const, nonstandard: {}, abbr: p.abbr, description: [p.typeText, p.fire].filter(Boolean).join('; ') || null, sourceRow: p.row, features, coating: p.coating, equipment: p.equipment, productId: p.productId, status: p.status, estimate: p.estimate, family: family as BookProduct['family'], componentStatus, card: p.card, note: `лист 1, строка ${p.row}${p.estimate ? '; сметная цена' : ''}` };
+      const base = { factory: input.factory ?? null, unit: 'шт', vat, validAt, confidence: input.confidence, origin: 'price_list' as const, nonstandard: {}, abbr: p.abbr, description: [p.typeText, p.construction, p.purpose, p.fire].filter(Boolean).join('; ') || null, sourceRow: p.row, features, coating: p.coating, equipment: p.equipment, productId: p.productId, status: p.status, estimate: p.estimate, family: family as BookProduct['family'], componentStatus, card: p.card, note: `лист 1, строка ${p.row}${p.estimate ? '; сметная цена' : ''}` };
       if (p.estimate) estimates += 1;
       // Дверь: одна строка на ID товара без размера — размеры живут в kb_sizes, нестандарт считается по сетке модели (book-pricing).
       rows.push({ ...base, model: p.model, price: p.price as number, widthMm: null, heightMm: null, category: 'door', note: `${base.note}${sizes.length ? `; размеров в сетке: ${sizes.length}` : ''}` });

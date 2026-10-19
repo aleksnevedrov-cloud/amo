@@ -652,6 +652,48 @@ describe('виджет «Агент опт»: вкладка «База знан
     expect(document.body.textContent).toContain('Выгружено записей: 1');
   });
 
+  it('KB-PRICE-SHEETS-FIX, п. 3–4: у файла с вкладкой ID вместо разметки колонок — панель книги (счётчики файла и базы, ошибка импорта из журнала, «Импортировать заново»); ошибка видна в карточке сразу', async () => {
+    const book = { doors: 30, estimates: 1, components: 44, hardware: 31, hardwareUnpriced: 9, sizes: 147, aliases: 79, comments: 30, dictionary: 243, skipped: ['Прайс по ГОСТ: Цветов, Итого комплект, руб неизвестные колонки — пропущены'] };
+    let imp: Record<string, unknown> = { title: 'Межкомнатные двери', updated: false, was: 0, imported: 0, removed: 0, added: 0, at: '2026-10-19T07:00:00Z', book: null, error: 'Подбор: не найдена шапка с колонкой ID' };
+    let counts: Record<string, number> | null = null;
+    const posted: unknown[] = [];
+    const { self } = fakeSelf('settings', {
+      'GET /widget/v1/kb/sources': () => ({ sources: [src({ id: 2, kind: 'file', title: 'Межкомнатные двери.xlsx', original: 'Межкомнатные двери.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', prices: counts ? 105 : 0, priceKey: 'межкомнатные двери', priceTitle: 'Межкомнатные двери', priceImport: imp, counts })], usage: { sources: 1, bytes: 80789, chunks: 32, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
+      'GET /widget/v1/kb/sources/2/prices/preview': () => ({ sheets: ['Прайс по ГОСТ', 'ID', 'Размеры', 'Подбор', 'Дополнения'], columns: [], mapping: { sheet: null, model: 0, price: 0, headerRow: null }, headerFound: true, sample: [], total: 30, skipped: 1, isPriceList: false, isPriceBook: true, book: { ...book, errors: [] }, priceImport: imp }),
+      'POST /widget/v1/kb/sources/2/prices/import': (data?: string) => {
+        posted.push(JSON.parse(data ?? '{}'));
+        imp = { ...imp, error: null, book, imported: 105 };
+        counts = { doors: 30, components: 44, hardware: 31, sizes: 147, aliases: 79, comments: 30, dictionary: 243 };
+        return { imported: 105, skipped: 1, replaced: 0, book, counts };
+      },
+      'GET /widget/v1/kb/prices': { items: [], total: 0 },
+      'GET /widget/v1/kb/aliases': { aliases: [] },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    const text = () => document.body.textContent ?? '';
+    // Ошибка импорта — в карточке файла, без похода в журнал.
+    expect(text()).toContain('прайс не импортирован: Подбор: не найдена шапка с колонкой ID; прежние данные прайса сохранены');
+    await click('Цены из прайса');
+    await flush();
+    expect(text()).toContain('Многолистовой прайс · вкладки: Прайс по ГОСТ, ID, Размеры, Подбор, Дополнения');
+    expect(text()).toContain('В файле: дверей 30 (сметных 1) · комплектующих 44 · фурнитуры 31 (без цены 9) · размеров 147 · синонимов 79 · комментариев 30 · словарь 243');
+    expect(text()).toContain('В базе сейчас: прайс не импортирован');
+    expect(text()).toContain('Импорт не выполнен: Подбор: не найдена шапка с колонкой ID');
+    expect(button('Импортировать заново')).toBeTruthy();
+    expect([...document.querySelectorAll('button')].some((b) => /^Импортировать \d+ цен/.test(b.textContent ?? ''))).toBe(false);
+    expect(text()).not.toContain('По выбранным колонкам');
+    await click('Импортировать заново');
+    await flush();
+    expect(posted).toEqual([{ mapping: {} }]);
+    expect(text()).toContain('Прайс «Межкомнатные двери.xlsx» импортирован заново: дверей 30 (сметных 1), комплектующих 44, фурнитуры 31 (без цены 9), размеров 147, синонимов 79, комментариев 30');
+    expect(text()).toContain('прайс «Межкомнатные двери»: дверей 30 · комплектующих 44 · фурнитуры 31 (без цены 9) · размеров 147 · синонимов 79 · комментариев 30 · словарь 243 · сметных 1');
+  });
+
   it('раздел «Цены» (KB-PRICES-UI): сводка по прайсу, вебу и правкам; вкладки с числом строк, поиск по вводу, страницы по 20; удаление только у веб-цен и правок; обновление после удаления источника без перезагрузки', async () => {
     const price = (i: number, origin: 'price_list' | 'web' | 'manager', extra: Record<string, unknown> = {}) => ({ id: i, sourceId: origin === 'price_list' ? 2 : null, model: origin === 'price_list' ? `ДВ CPL ${i}` : origin === 'web' ? `Турин ${i}` : `Тоскана ${i}`, modelKey: '', factory: null, unit: 'шт', baseSize: '910×2100', widthMm: 910, heightMm: 2100, price: 20000 + i, vat: 'no_vat', validAt: i === 5 ? '2026-10-16T00:00:00Z' : '2026-10-10T00:00:00Z', confidence: 70, origin, nonstandard: {}, url: origin === 'web' ? 'https://dveri-a.ru/turin' : null, note: null, createdAt: '2026-10-16T10:00:00Z', sourceTitle: origin === 'price_list' ? '475-2016 CPL.xlsx' : null, sourceKind: origin === 'price_list' ? 'file' : null, ...extra });
     // KB-MULTIPRICE: два прайса-файла — «Межкомнатные» (28 строк, источник 2) и «Металлические» (3 строки, источник 3).

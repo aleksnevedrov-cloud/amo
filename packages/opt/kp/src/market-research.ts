@@ -1,3 +1,4 @@
+import type { PositionCategory } from '@opt/kb';
 import { costOfUsage, WebSearchUnavailableError, LlmError, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides, type RoutedResponse, type WebSource } from '@core/llm';
 import { z } from 'zod';
 import { comparablePrice, isManufacturerDomain, referencePrice, sourceKindOf, suggestAnalog, type AnalogCandidate, type AnalogSuggestion, type SourceKind, type VatStated } from './analog.ts';
@@ -141,6 +142,8 @@ export interface MarketResearchResult {
 export interface MarketResearchInput {
   line: Pick<KpLine, 'name' | 'size' | 'qty' | 'price'>;
   item: Pick<KpRequestItem, 'raw' | 'name' | 'width_mm' | 'height_mm' | 'features'>;
+  /** Категория позиции (KB-PRICE-SHEETS-FIX, п. 5): у фурнитуры и комплектующих пересчёт по площади не делается. */
+  category?: PositionCategory | null;
   /** ГОСТ, ТУ и прочие требования заявки. */
   requirements: string[];
   /** Цена менеджера в строке — опорная для аналога, когда медианы по точной модели нет. */
@@ -545,6 +548,9 @@ export const AREA_ANALOG_MAX = 3;
  * и модель уже проверены) с известным размером — до трёх ближайших по площади, цена × (S позиции / S предложения).
  * Без размера у позиции или у предложения — не берутся.
  */
+/** Категории без пересчёта по площади (фурнитура, комплектующие). */
+export const noAreaScaling = (input: Pick<MarketResearchInput, 'category'>): boolean => input.category === 'hardware' || input.category === 'component';
+
 export function scaleByArea(judged: OfferJudgement[], card: ItemCard, max = AREA_ANALOG_MAX): { judged: OfferJudgement[]; scaled: boolean } {
   // Точных совпадений нет или их меньше целевых трёх — одиночное точное совпадение не должно перекрывать аналоги (дефект 5.1: 3 500 ₽ «за статью»).
   if (judged.filter((j) => j.accepted).length >= AREA_ANALOG_MAX) return { judged, scaled: false };
@@ -652,7 +658,8 @@ export async function researchMarketPrice(llm: LlmGateway, route: ChatRoute, inp
     provider = found.res.provider;
     model = found.res.model;
     const exact = found.offers.map((o) => judgeOffer(o, card as ItemCard, found.sources, opts));
-    const area = scaleByArea(exact, card as ItemCard);
+    // Фурнитура и комплектующие по площади не пересчитываются: «автопорог 24×1020» — не дверь.
+    const area = noAreaScaling(input) ? { judged: exact, scaled: false } : scaleByArea(exact, card as ItemCard);
     const judged = dropOutliers(area.judged);
     const stats = statsOf(judged);
     const areaScaled = judged.some((j) => j.accepted && j.areaScaled);

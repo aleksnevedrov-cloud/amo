@@ -120,6 +120,8 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
           onPricesImported={(m) => {
             setMsg(m);
             setPricesKey((k) => k + 1);
+            // KB-PRICE-SHEETS-FIX: счётчики и итог импорта в карточке файла — перечитать список источников.
+            void reload();
           }}
           onReindex={() => void run(async () => (await api.kbReindex(src.id), null))}
           onRemove={() => {

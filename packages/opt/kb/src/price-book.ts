@@ -8,7 +8,7 @@
  * надбавок. «Подбор» — синонимы, характеристики, примечания КП, условия цены. «Дополнения» — фурнитура по ID тарифа.
  * «Словарь», «Сокращения», «ГОСТы», «Типоразмеры» — словарь агента. «Задача_Клауду» — документация, не импортируется.
  */
-import type { KbSheetRow } from './extract.ts';
+import { FORMULA_NO_VALUE, type KbSheetRow } from './extract.ts';
 import { parsePrice } from './price-list.ts';
 import type { ComponentKind } from './category.ts';
 import { sizesOf } from './model-key.ts';
@@ -40,6 +40,8 @@ export interface ProductCard {
   clarify?: string | null;
   /** Сметная цена собрана по правилу из комментария (INT-008): из чего. */
   estimateFormula?: string | null;
+  /** «Обозначение по ГОСТ (шаблон)» с листа 1. */
+  designation?: string | null;
 }
 
 export interface BookProduct {
@@ -51,6 +53,8 @@ export interface BookProduct {
   typeText: string | null;
   coating: string | null;
   material: string | null;
+  construction: string | null;
+  purpose: string | null;
   fire: string | null;
   sizesText: string | null;
   equipment: string | null;
@@ -228,6 +232,11 @@ const enumOf = <T extends string>(s: string, values: readonly T[]): T | null => 
   return (values as readonly string[]).includes(t) ? (t as T) : null;
 };
 
+/** Текст ошибки для ячейки с ценой: формула без значения (файл писала не Excel) или просто не число. */
+function formulaOrNotNumber(cell: string): string {
+  return cell.startsWith(FORMULA_NO_VALUE) ? `ячейка ${cell.slice(FORMULA_NO_VALUE.length)} — формула без значения, пересохраните файл в Excel` : `не число: «${cell}»`;
+}
+
 /** Сметная цена по правилу из комментария: «полотно INT-005 8 800 + коробка 3 160 = 11 960» → 11 960 (или сумма чисел). */
 export function estimateFromComment(comment: string | null | undefined): { price: number; formula: string } | null {
   if (!comment) return null;
@@ -275,10 +284,13 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
   const L1 = findHeader(list1.rows, {
     no: /^№$|^№ ?п\/?п$|^n$|^номер$/,
     model: /модель|наимен|назван/,
-    abbr: /сокращ|аббрев|обознач/,
+    abbr: /сокращ|аббрев/,
+    designation: /обознач/,
     type: /^тип|тип двер|г\/о/,
     coating: /покрыт|отделк|облицов/,
     material: /материал/,
+    construction: /конструкц/,
+    purpose: /назначен/,
     fire: /огнест|звукоизол|предел огн/,
     sizes: /размер/,
     equipment: /комплектац/,
@@ -289,7 +301,8 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
     порог: COMPONENT_COLS.порог,
     gosts: /^гост/,
     leaves: /створ/,
-    colors: /цвет/,
+    // «Цветов» (число) — не список цветов: берётся колонка «Цвета / исполнения».
+    colors: /^цвета|^цвет$|цвета ?\//,
     baseIncludes: /входит/,
     note: /примеч/,
   });
@@ -309,7 +322,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
     const priceCell = cellOf(r, L1.cols, 'price');
     const price = priceCell ? parsePrice(priceCell) : null;
     if (priceCell && price === null && !/^[-—–]+$/.test(priceCell.trim()) && !/смет|уточн|по запрос/i.test(priceCell)) {
-      book.errors.push({ sheet: list1.name, row: r.row, column: 'Цена', message: `не число: «${priceCell}»` });
+      book.errors.push({ sheet: list1.name, row: r.row, column: 'Цена', message: formulaOrNotNumber(priceCell) });
       continue;
     }
     const components: BookProduct['components'] = {};
@@ -328,6 +341,8 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
       typeText: cellOf(r, L1.cols, 'type') || null,
       coating: cellOf(r, L1.cols, 'coating') || null,
       material: cellOf(r, L1.cols, 'material') || null,
+      construction: cellOf(r, L1.cols, 'construction') || null,
+      purpose: cellOf(r, L1.cols, 'purpose') || null,
       fire: cellOf(r, L1.cols, 'fire') || null,
       sizesText: cellOf(r, L1.cols, 'sizes') || null,
       equipment: cellOf(r, L1.cols, 'equipment') || null,
@@ -336,7 +351,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
       family: null,
       status: 'active',
       estimate: false,
-      card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: list(cellOf(r, L1.cols, 'gosts')), leafCount: leaves && leaves <= 4 ? leaves : null, colors: list(cellOf(r, L1.cols, 'colors')), baseIncludes: cellOf(r, L1.cols, 'baseIncludes') || null, note: cellOf(r, L1.cols, 'note') || null, technical: null, quoteNotes: [], priceConditions: null },
+      card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: list(cellOf(r, L1.cols, 'gosts')), leafCount: leaves && leaves <= 4 ? leaves : null, colors: list(cellOf(r, L1.cols, 'colors')), baseIncludes: cellOf(r, L1.cols, 'baseIncludes') || null, note: cellOf(r, L1.cols, 'note') || null, technical: null, quoteNotes: [], priceConditions: null, designation: cellOf(r, L1.cols, 'designation') || null },
       aliases: [],
     };
     book.products.push(p);
@@ -348,7 +363,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
   if (idSheet) {
     const H = findHeader(idSheet.rows, {
       no: /^№$|^№ ?п\/?п$|^n$|^номер$/,
-      productId: /^id$|^ид$|product_id|id товар/,
+      productId: /^id\b|^ид\b|product[_ ]?id|id товар/,
       unit: /единиц/,
       sizeBasis: /основани/,
       geometry: /геометр/,
@@ -408,13 +423,15 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
         if (p.status === 'active') p.status = 'estimate_only';
       } else book.skipped.push({ sheet: list1.name, row: p.row, column: 'Цена', message: `«${p.model}»: цены нет и правила сборки в комментарии нет — строка без цены пропущена` });
     }
+    // Комментарий ID говорит «estimate_only» — позиция только для сметы, даже если цена на листе 1 есть (формула сборки).
+    if (p.status === 'active' && /estimate_only/i.test(p.card.comment ?? '')) p.status = 'estimate_only';
   }
   book.products = book.products.filter((p) => p.price !== null);
 
   // ---- Размеры
   const sizesSheet = byKind.get('sizes')?.[0];
   if (sizesSheet) {
-    const H = findHeader(sizesSheet.rows, { sizeId: /^size[_ ]?id|^id размер/, productId: /product[_ ]?id|^id$|товар/, width: /^width|^ширин/, height: /^height|^высот/, basis: /basis|основани/, leafWidths: /leaf[_ ]?widths|створ/ });
+    const H = findHeader(sizesSheet.rows, { sizeId: /^size[_ ]?id|^id размер/, productId: /product[_ ]?id|^id\b|^ид\b|товар/, width: /^width|^ширин/, height: /^height|^высот/, basis: /basis|основани/, leafWidths: /leaf[_ ]?widths|створ/ });
     if (!H || H.cols.productId === undefined || H.cols.width === undefined || H.cols.height === undefined) book.errors.push({ sheet: sizesSheet.name, row: null, column: null, message: 'не найдена шапка с колонками product_id, width_mm, height_mm' });
     else {
       unknownCols(sizesSheet.name, H.unknown);
@@ -468,7 +485,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
   // ---- Подбор
   const pick = byKind.get('pick')?.[0];
   if (pick) {
-    const H = findHeader(pick.rows, { productId: /product[_ ]?id|^id$|^ид$/, aliases: /синоним/, technical: /характерист/, quoteNotes: /примеч/, conditions: /услови/ });
+    const H = findHeader(pick.rows, { productId: /product[_ ]?id|^id\b|^ид\b/, aliases: /синоним/, technical: /характерист/, quoteNotes: /примеч/, conditions: /услови/ });
     if (!H || H.cols.productId === undefined) book.errors.push({ sheet: pick.name, row: null, column: null, message: 'не найдена шапка с колонкой ID' });
     else {
       unknownCols(pick.name, H.unknown);
@@ -495,6 +512,16 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
     }
   }
 
+  // Позиция только для сметы с ценой на листе 1 (формула сборки, INT-008 = P12+Q12): правило из комментария — в карточку.
+  for (const p of book.products) {
+    if (p.status !== 'estimate_only' || p.estimate) continue;
+    const est = estimateFromComment(p.card.comment) ?? estimateFromComment(p.card.baseIncludes);
+    if (est) {
+      p.estimate = true;
+      p.card.estimateFormula = est.formula;
+    }
+  }
+
   // ---- Дополнения (фурнитура)
   const extras = byKind.get('extras')?.[0];
   if (extras) {
@@ -510,7 +537,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
         const priceCell = cellOf(r, H.cols, 'price');
         const price = priceCell ? parsePrice(priceCell) : null;
         if (priceCell && price === null && !/^[-—–]+$/.test(priceCell) && !/уточн|по запрос|нет/i.test(priceCell)) {
-          book.errors.push({ sheet: extras.name, row: r.row, column: 'Цена', message: `${tariffId}: не число: «${priceCell}»` });
+          book.errors.push({ sheet: extras.name, row: r.row, column: 'Цена', message: `${tariffId}: ${formulaOrNotNumber(priceCell)}` });
           continue;
         }
         const unitRaw = cellOf(r, H.cols, 'unit').toLowerCase();
@@ -524,7 +551,7 @@ export function parsePriceBook(rows: KbSheetRow[]): PriceBook {
 
   // ---- Словари
   for (const d of byKind.get('dictionary') ?? []) {
-    const H = findHeader(d.rows, { term: /слово|код|сокращ|термин|^гост|типоразм|обознач|наимен/, meaning: /значен|расшифр|описан/, context: /контекст|где|примен/, rule: /правил|агент/ });
+    const H = findHeader(d.rows, { term: /слово|код|сокращ|термин|^гост|типоразм|обознач|наимен|^полотно|^марк/, meaning: /значен|расшифр|описан|регламент|област|проем|проём|пример/, context: /контекст|где|примен|роль|замена/, rule: /правил|агент/ });
     if (!H || H.cols.term === undefined) {
       book.skipped.push({ sheet: d.name, row: null, column: null, message: 'не найдена шапка словаря (слово/код, значение) — вкладка пропущена' });
       continue;

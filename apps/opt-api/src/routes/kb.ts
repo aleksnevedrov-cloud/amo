@@ -1,5 +1,5 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { exportPricesXlsx, KbLimitError, previewPriceList, pricesExportFilename, type ColumnMapping, priceListTitleOf } from '@opt/kb';
+import { exportPricesXlsx, isPriceBook, KbLimitError, parsePriceBook, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping, priceListTitleOf } from '@opt/kb';
 import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -33,7 +33,7 @@ const nonstandardSchema = z.object({ heightPct: z.number().min(0).max(300).optio
 const vatSchema = z.enum(['included', 'no_vat', 'unknown']);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).transform((s) => new Date(`${s}T00:00:00Z`));
 /** Импорт прайса: сопоставление колонок после предпросмотра, фабрика и дата актуальности по умолчанию, НДС, правила нестандарта. */
-const importBody = z.object({ mapping: mappingSchema, factory: z.string().trim().max(200).optional(), validAt: dateSchema.optional(), vat: vatSchema.optional(), nonstandard: nonstandardSchema.optional(), confidence: z.number().int().min(0).max(100).optional() });
+const importBody = z.object({ mapping: mappingSchema.default({}), factory: z.string().trim().max(200).optional(), validAt: dateSchema.optional(), vat: vatSchema.optional(), nonstandard: nonstandardSchema.optional(), confidence: z.number().int().min(0).max(100).optional() });
 const priceBody = z.object({
   model: z.string().trim().min(1).max(300),
   factory: z.string().trim().max(200).nullable().optional(),
@@ -208,6 +208,38 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     }
     const x = await xlsxSource(principal(req).accountId, id);
     if (!x) return reply.code(404).send({ error: 'not_xlsx', message: 'Цены извлекаются только из xlsx-источников' });
+    // KB-PRICE-SHEETS-FIX, п. 3: многолистовой прайс — не ручная разметка колонок, а разбор всех вкладок: счётчики, ошибки
+    // (лист, строка, колонка), пропущенное; виджет показывает это вместо панели «Импортировать N цен».
+    const rows = await readKbSheetRows(x.bytes);
+    if (isPriceBook(rows)) {
+      const book = parsePriceBook(rows);
+      return {
+        sheets: [...new Set(rows.map((r) => r.sheet))],
+        columns: [],
+        mapping: { sheet: null, model: 0, price: 0, size: null, width: null, height: null, factory: null, unit: null, abbr: null, description: null, headerRow: null },
+        headerFound: true,
+        sample: [],
+        total: book.products.length,
+        skipped: book.skipped.length,
+        vatHint: 'unknown',
+        isPriceList: false,
+        isPriceBook: true,
+        book: {
+          doors: book.products.length,
+          estimates: book.products.filter((p) => p.estimate).length,
+          components: book.products.reduce((n, p) => n + Object.values(p.components).filter((c) => c.status === 'priced' && c.price).length, 0),
+          hardware: book.hardware.length,
+          hardwareUnpriced: book.hardware.filter((h) => h.price === null).length,
+          sizes: book.sizes.length,
+          aliases: book.products.reduce((n, p) => n + p.aliases.length + (p.abbr ? 1 : 0), 0) + book.hardware.reduce((n, h) => n + h.aliases.length, 0),
+          comments: book.products.filter((p) => p.card.comment).length,
+          dictionary: book.dictionary.length,
+          errors: book.errors.map((e) => `${e.sheet}${e.row ? `, строка ${e.row}` : ''}${e.column ? `, колонка «${e.column}»` : ''}: ${e.message}`),
+          skipped: book.skipped.map((e) => `${e.sheet}${e.row ? `, строка ${e.row}` : ''}${e.column ? `, колонка «${e.column}»` : ''}: ${e.message}`),
+        },
+        priceImport: x.source.priceImport ?? null,
+      };
+    }
     return previewPriceList(x.bytes, given);
   });
 
@@ -221,8 +253,10 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     const p = principal(req);
     const r = await kb.importPriceList(p.accountId, id, { mapping: b.data.mapping as Partial<ColumnMapping>, factory: b.data.factory ?? null, validAt: b.data.validAt, vat: b.data.vat, nonstandard: b.data.nonstandard, confidence: b.data.confidence, userId: p.userId });
     if (!r) return reply.code(404).send({ error: 'not_xlsx' });
+    // Многолистовой прайс: ошибка вкладки — текстом (лист, строка, колонка), прежние данные прайса сохранены.
+    if (r.error) return reply.code(422).send({ error: 'book_error', message: `${r.error}; прежние данные прайса сохранены` });
     if (!r.imported) return reply.code(422).send({ error: 'no_prices', message: 'По выбранным колонкам цен не найдено' });
-    return { imported: r.imported, skipped: r.skipped, replaced: r.replaced };
+    return { imported: r.imported, skipped: r.skipped, replaced: r.replaced, ...(r.book ? { book: r.book, counts: (await kb.prices.bookCountsBySource(p.accountId)).get(id) ?? null } : {}) };
   });
 
   api.get('/kb/prices', async (req, reply) => {

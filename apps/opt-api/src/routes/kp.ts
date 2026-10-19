@@ -2,7 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
-import { sizeOf } from '@opt/kb';
+import { categoryOf, sizeOf } from '@opt/kb';
 import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -97,6 +97,37 @@ type Principal = (req: FastifyRequest) => WidgetPrincipal;
 type RequireAdmin = (req: FastifyRequest, reply: FastifyReply) => boolean;
 
 /** Настройки КП, шаблон, черновики, сборка документа и отправка — весь путь менеджера от кнопки до письма. */
+
+/**
+ * Категории позиций старого черновика (до KB-COMPONENTS / KB-PRICE-SHEETS в payload их нет): дверь / комплектующее / фурнитура /
+ * работы по названию и строке заявки; ID двери, которого в базе уже нет (прайс перезалит), снимается. Возвращает число
+ * изменённых позиций; payload сохраняется, только если что-то поменялось.
+ */
+async function refreshDraftCategories(deps: Deps, accountId: number, draft: KpDraft): Promise<{ payload: Partial<KpPayload>; changed: number }> {
+  const payload = draft.payload as unknown as Partial<KpPayload>;
+  const items = payload.items ?? [];
+  const requestItems = payload.request_items ?? [];
+  let changed = 0;
+  const next: KpLine[] = [];
+  for (const l of items) {
+    const line = { ...l };
+    const item = requestItems[l.request_index];
+    if (!line.category) {
+      line.category = line.kind === 'service' || item?.kind === 'service' ? 'service' : categoryOf(`${item?.name ?? line.name} | ${item?.raw ?? ''}`);
+      changed += 1;
+    }
+    if (line.kbPriceId && line.productId && !(await deps.kb.prices.byId(accountId, line.kbPriceId))) {
+      line.productId = null;
+      changed += 1;
+    }
+    next.push(line);
+  }
+  if (!changed) return { payload, changed: 0 };
+  const fresh = { ...payload, items: next, request_items: requestItems.map((it, i) => (it.category || !items.some((l) => l.request_index === i) ? it : { ...it, category: next.find((l) => l.request_index === i)?.category })) };
+  await deps.kp.setPayload(draft.id, fresh as unknown as Record<string, unknown>);
+  return { payload: fresh, changed };
+}
+
 export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal, requireAdmin: RequireAdmin) {
   const repo = deps.kp;
   // Путь шаблона в базе — относительно KP_FILES_ROOT (дефект 2а); абсолютный собирается при чтении.
@@ -228,9 +259,13 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!draft) return reply.code(404).send({ error: 'not_found' });
     if (draft.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
     if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
+    // KB-PRICE-SHEETS-FIX, п. 6: черновик, собранный до загрузки прайса, не знает категорий и ID — перед поиском категория
+    // позиций ставится по названию заново, ID двери, которого в базе больше нет, снимается (контекст подберётся по свежему прайсу).
+    const refreshed = await refreshDraftCategories(deps, p.accountId, draft);
+    const payload = refreshed.payload;
     // KB-COMPONENTS, п. 6: «Найти цены» по всем — все позиции без цены за одно нажатие, в очередь порциями по 20 подряд
     // (лимит maxPositionsPerRun остаётся для автопоиска при сборке); работы не ставятся.
-    const positions = researchablePositions(draft.payload as unknown as Partial<KpPayload>, b.data.requestIndexes, b.data.requestIndexes === 'all' ? Number.MAX_SAFE_INTEGER : 200);
+    const positions = researchablePositions(payload, b.data.requestIndexes, b.data.requestIndexes === 'all' ? Number.MAX_SAFE_INTEGER : 200);
     if (!positions.length) return reply.code(202).send({ queued: [], reason: b.data.requestIndexes === 'all' ? 'у всех позиций уже есть цена' : 'позиции не найдены' });
     const batches: number[][] = [];
     for (let i = 0; i < positions.length; i += RESEARCH_BATCH) batches.push(positions.slice(i, i + RESEARCH_BATCH));
@@ -238,7 +273,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       await deps.researchQueue.enqueue(batch.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: b.data.force, replace: b.data.requestIndexes !== 'all', batch: n + 1, batches: batches.length })));
     }
     if (positions.length > RESEARCH_BATCH) await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'note', summary: `Поиск цен: поставлено позиций ${positions.length} порциями по ${RESEARCH_BATCH} (${batches.length})`, details: { draftId: draft.id, positions: positions.length, batches: batches.length, userId: p.userId } });
-    return reply.code(202).send({ queued: positions, total: positions.length, batches: batches.length });
+    return reply.code(202).send({ queued: positions, total: positions.length, batches: batches.length, ...(refreshed.changed ? { categoriesRefreshed: refreshed.changed } : {}) });
   });
 
   /** Состояние поиска по позициям черновика: задание (queued / running / failed) и последняя запись kp_price_research. */

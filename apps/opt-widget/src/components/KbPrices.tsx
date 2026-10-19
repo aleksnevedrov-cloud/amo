@@ -32,6 +32,8 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
   if (state.status === 'loading') return <div style={{ ...s.muted, ...s.small, marginTop: 6 }}>Читаю прайс…</div>;
   if (state.status === 'error') return <div style={s.error}>{state.message}</div>;
   const p: PriceListPreviewInfo = state.data;
+  // KB-PRICE-SHEETS-FIX, п. 3: у файла с вкладкой ID ручная разметка колонок не нужна — статус книги, счётчики, ошибки, «Импортировать заново».
+  if (p.isPriceBook && p.book) return <BookImport api={api} src={src} preview={p} onDone={onDone} />;
   const m = p.mapping;
   const setCol = (key: keyof ColumnMappingInfo, raw: string) => setMapping({ ...m, ...mapping, [key]: raw === '' ? null : key === 'sheet' ? raw : Number(raw) });
   const col = (key: Exclude<keyof ColumnMappingInfo, 'sheet' | 'headerRow'>, label: string, required = false) => (
@@ -118,6 +120,55 @@ export function PriceImport({ api, src, onDone }: { api: KpApi; src: KbSourceInf
       </div>
       <button type="button" style={s.button} disabled={busy || !p.total} onClick={() => void run()}>
         Импортировать {p.total} цен
+      </button>
+      {err && <div style={s.error}>{err}</div>}
+    </div>
+  );
+}
+
+/** Многолистовой прайс (KB-PRICE-SHEETS): что в файле, что в базе, ошибка импорта и кнопка «Импортировать заново». */
+function BookImport({ api, src, preview, onDone }: { api: KpApi; src: KbSourceInfo; preview: PriceListPreviewInfo; onDone: (msg: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const b = preview.book as NonNullable<PriceListPreviewInfo['book']>;
+  const imp = preview.priceImport ?? src.priceImport ?? null;
+  const counts = src.counts ?? null;
+  const run = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.kbPriceImport(src.id, { mapping: {} });
+      const c = r.book;
+      onDone(`Прайс «${src.title}» импортирован заново: дверей ${c?.doors ?? r.imported}${c?.estimates ? ` (сметных ${c.estimates})` : ''}, комплектующих ${c?.components ?? 0}, фурнитуры ${c?.hardware ?? 0}${c?.hardwareUnpriced ? ` (без цены ${c.hardwareUnpriced})` : ''}, размеров ${c?.sizes ?? 0}, синонимов ${c?.aliases ?? 0}, комментариев ${c?.comments ?? 0}`);
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="opt-kb-book" style={{ marginTop: 8, padding: 8, background: '#f6f8fa', borderRadius: 6 }}>
+      <div style={{ ...s.small, marginBottom: 4 }}>
+        <b>Многолистовой прайс</b> · вкладки: {preview.sheets.join(', ')}
+      </div>
+      <div style={{ ...s.small, ...s.muted, marginBottom: 4 }} className="opt-kb-book-file">
+        В файле: дверей {b.doors}{b.estimates ? ` (сметных ${b.estimates})` : ''} · комплектующих {b.components} · фурнитуры {b.hardware}{b.hardwareUnpriced ? ` (без цены ${b.hardwareUnpriced})` : ''} · размеров {b.sizes} · синонимов {b.aliases} · комментариев {b.comments}{b.dictionary ? ` · словарь ${b.dictionary}` : ''}
+      </div>
+      <div style={{ ...s.small, ...s.muted, marginBottom: 4 }} className="opt-kb-book-db">
+        {counts ? `В базе сейчас: дверей ${counts.doors} · комплектующих ${counts.components} · фурнитуры ${counts.hardware} · размеров ${counts.sizes} · синонимов ${counts.aliases} · комментариев ${counts.comments}${imp?.at ? ` · импорт ${date(imp.at)}` : ''}` : 'В базе сейчас: прайс не импортирован'}
+      </div>
+      {imp?.error && <div style={s.error} className="opt-kb-book-error">Импорт не выполнен: {imp.error}; прежние данные прайса сохранены</div>}
+      {b.errors.length > 0 && (
+        <div style={s.error} className="opt-kb-book-errors">
+          Файл сейчас не импортируется:
+          {b.errors.map((e) => (
+            <div key={e}>— {e}</div>
+          ))}
+        </div>
+      )}
+      {b.skipped.length > 0 && <div style={{ ...s.small, ...s.muted, marginBottom: 4 }}>Пропущено при разборе: {b.skipped.join('; ')}</div>}
+      <button type="button" style={s.button} disabled={busy || b.errors.length > 0} onClick={() => void run()}>
+        Импортировать заново
       </button>
       {err && <div style={s.error}>{err}</div>}
     </div>

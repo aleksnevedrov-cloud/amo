@@ -403,13 +403,14 @@ describe('категории: комплектующие, фурнитура, р
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Ручка Palladium Luna' }, new Date('2026-10-17'))).toMatchObject({ price: 1450, row: { category: 'hardware' } });
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Замок врезной' }, new Date('2026-10-17'))).toMatchObject({ price: 980 });
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Монтаж дверного блока' }, new Date('2026-10-17'))).toBeNull();
-    // Медиана по категории: добор — 875 (900 и 850), дверь CPL — 23 900, фурнитура «ручка» — 1450, «порог» и «петля такой-то» без группы — null.
+    // Медиана по категории: добор — 875 (900 и 850), дверь CPL — 23 900, фурнитура «ручка» — 1450, «порог» без группы — null.
     const rows = await prices.listByOrigin(ACC, 'price_list');
     expect(categoryMedian(rows, { category: 'component', features: featuresOf('Добор телескопический'), componentKind: 'добор', tokens: ['добор', 'телескопический'] })).toBe(875);
     expect(categoryMedian(rows, { category: 'door', features: featuresOf('Дверной блок деревянный глухой CPL'), componentKind: null, tokens: [] })).toBe(23_900);
     expect(categoryMedian(rows, { category: 'component', features: EMPTY_FEATURES, componentKind: 'порог', tokens: ['порог'] })).toBeNull();
     expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['ручка', 'дверная'] })).toBe(1450);
-    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['доводчик'] })).toBeNull();
+    // KB-PRICE-SHEETS-FIX, п. 5: фурнитура без своей группы по первому слову («доводчик», «автопорог») — медиана всей фурнитуры прайса (980 из 1450 / 980 / 190).
+    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['доводчик'] })).toBe(980);
     // backfillCategories: веб-запись «Добор …» со старой категорией door → component.
     const web = await prices.upsert({ accountId: ACC, model: 'Добор телескопический МДФ', widthMm: 300, heightMm: 2150, price: 2013, origin: 'web' });
     await db.query("UPDATE kb_prices SET category = 'door', component_kind = NULL WHERE id = $1", [web]);

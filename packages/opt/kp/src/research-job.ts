@@ -63,7 +63,7 @@ export interface ResearchJobResult {
 /** Вход исследования из строки черновика и позиции заявки. */
 export function researchInputOf(payload: Partial<KpPayload>, line: KpLine): MarketResearchInput {
   const item: KpRequestItem = payload.request_items?.[line.request_index] ?? { raw: line.name, name: line.name, width_mm: null, height_mm: null, qty: line.qty };
-  return { line, item, requirements: payload.requirements ?? [], managerPrice: line.priceSource === 'manager' ? line.price : null };
+  return { line, item, requirements: payload.requirements ?? [], managerPrice: line.priceSource === 'manager' ? line.price : null, category: lineCategory(line) };
 }
 
 /** Позиции, по которым имеет смысл искать: без цены (режим «по всем») или заданные явно. */

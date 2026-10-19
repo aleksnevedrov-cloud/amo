@@ -1,7 +1,7 @@
 import type { Db } from '@core/db';
 import type { ChatRoute, LlmGateway } from '@core/llm';
 import { modelKeyOf } from '@opt/kb';
-import { cleanName, orientSize, parseSizeMm, researchMarketPrice, type MarketResearchInput, type MarketResearchOptions, type MarketResearchResult } from './market-research.ts';
+import { cleanName, orientSize, parseSizeMm, researchMarketPrice, type MarketResearchInput, type MarketResearchOptions, type MarketResearchResult, noAreaScaling } from './market-research.ts';
 
 /**
  * Хранение результатов поиска рыночных цен и кэш (RFD-AI-AGENT-OPT-PRICE, этап 3).
@@ -239,7 +239,7 @@ export async function researchWithCache(repo: KpPriceResearchRepo, llm: LlmGatew
     const same = await repo.latestByItemKey(opts.accountId, key, days);
     if (same) return { result: rowToResult(same), cached: true, researchId: same.id, createdAt: same.createdAt };
     const byModel = mkey ? await repo.latestByModelKey(opts.accountId, mkey, days) : null;
-    if (byModel) return { result: rescaleResult(byModel, sizeOfInput(input)), cached: true, researchId: byModel.id, createdAt: byModel.createdAt };
+    if (byModel) return { result: noAreaScaling(input) ? rowToResult(byModel) : rescaleResult(byModel, sizeOfInput(input)), cached: true, researchId: byModel.id, createdAt: byModel.createdAt };
   }
   const result = await researchMarketPrice(llm, route, input, opts);
   const researchId = await repo.save({ accountId: opts.accountId, draftId: opts.draftId, requestIndex: opts.requestIndex, itemKey: key, modelKey: mkey, result });

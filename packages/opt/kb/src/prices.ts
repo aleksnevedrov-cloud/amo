@@ -203,7 +203,7 @@ export class KbPricesRepo {
     const { rows } = await q.query<{ id: string }>(
       `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind, product_id, tariff_id, status, estimate, family, applies_to, component_status, card)
        SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text, $30::text, $31::text, $32::text, $33::boolean, $34::text, $35::text[], $36::jsonb, $37::jsonb
-       WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0))
+       WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0) AND coalesce(product_id, '') = coalesce($30::text, '') AND coalesce(tariff_id, '') = coalesce($31::text, ''))
        RETURNING id`,
       params,
     );
@@ -211,7 +211,7 @@ export class KbPricesRepo {
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
                abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = $28::text, component_kind = $29::text, product_id = $30::text, tariff_id = $31::text, status = $32::text, estimate = $33::boolean, family = $34::text, applies_to = $35::text[], component_status = $36::jsonb, card = $37::jsonb, updated_at = now()
-        WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0)
+        WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0) AND coalesce(product_id, '') = coalesce($30::text, '') AND coalesce(tariff_id, '') = coalesce($31::text, '')
         RETURNING id`,
       params,
     );
@@ -910,6 +910,9 @@ export function categoryMedian(rows: Pick<KbPrice, 'category' | 'componentKind' 
   if (q.category === 'hardware') {
     const head = q.tokens[0];
     group = head ? same.filter((r) => r.modelKey.split(' ')[0] === head).map((r) => r.price) : [];
+    // KB-PRICE-SHEETS-FIX, п. 5: своей группы по первому слову нет («автопорог») — медиана всей фурнитуры прайса с ценой,
+    // чтобы веб-цена 27 295 ₽ за автопорог не прошла как реальная.
+    if (!group.length) group = same.map((r) => r.price).filter((p) => p > 0);
   }
   if (!group.length) return null;
   const sorted = [...group].sort((a, b) => a - b);
