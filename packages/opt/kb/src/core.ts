@@ -400,7 +400,9 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     for (const p of book.products) {
       const f = doorFeatures(p);
       const leaves = p.card.leafCount === 2 || p.card.geometry === 'pair' || p.card.geometry === 'overall_pair' || p.card.geometry === 'each_leaf' ? 2 : p.card.leafCount === 1 ? 1 : f.leaves;
-      const features = { ...f, leaves: leaves ?? null, fire: p.fire && /ei\s?-?\s?\d{2}/i.test(p.fire) ? f.fire : f.fire };
+      // Единица базы (вкладка ID) задаёт тип: block — дверной блок, leaf — полотно; иначе «ДПГ» в названии делало блок полотном (п. 7).
+      const type = p.card.unit === 'block' || p.card.unit === 'leaf_pair' ? 'block' : p.card.unit === 'leaf' ? 'leaf' : f.type;
+      const features = { ...f, type, leaves: leaves ?? null, fire: p.fire && /ei\s?-?\s?\d{2}/i.test(p.fire) ? f.fire : f.fire };
       const sizes = sizesByProduct.get(p.productId ?? '') ?? [];
       const family = p.family ?? (features.material === 'steel' ? 'steel' : features.material === 'aluminium' ? 'aluminium' : 'interior');
       const componentStatus: Partial<Record<ComponentKind, 'priced' | 'included' | 'not_priced'>> = {};

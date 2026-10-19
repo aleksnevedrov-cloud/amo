@@ -745,5 +745,35 @@ describe('база знаний опта: цены и синонимы → по�
     const d2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(d2.items[1]).toMatchObject({ price: 1425, category: 'hardware', priceSource: 'research' });
     expect(d2.items[2]).toMatchObject({ price: null, category: 'service' });
+    // П. 7: письмо 90025 (черновик 61, КП-2026-13) — три позиции длинным текстом; синоним «ДВ 1Рп Г ПрБ» / «Дверной блок деревянный
+    // внутренний глухой однопольный» внутри названия → INT-013 «ДПГ CPL» 23 900, а не ALU-006 из металлического прайса (+30 %).
+    const LONG = 'Дверной блок, деревянный, внутренний, глухой, однопольный, без порога, распашной с доводчиком ДВ 1Рп 2100-10 Г ПрБ М3 ГОСТ 475-2016, облицовка cpl светлосерый';
+    letter.request_items = [
+      { raw: `${LONG} 1010×2100 — 1 шт`, name: LONG, width_mm: 1010, height_mm: 2100, qty: 1 },
+      { raw: `${LONG} 910×2100 — 1 шт`, name: LONG, width_mm: 910, height_mm: 2100, qty: 1 },
+      { raw: `${LONG} 910×2100 — 1 шт (поз. 3)`, name: LONG, width_mm: 910, height_mm: 2100, qty: 1 },
+      { raw: 'Дверной блок деревянный внутренний глухой однопольный без порога CPL 1010×2100 — 1 шт', name: 'Дверной блок деревянный внутренний глухой однопольный без порога CPL', width_mm: 1010, height_mm: 2100, qty: 1 },
+    ] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d3 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const s3 = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d3.id } });
+    expect(g.searches()).toBe(s3);
+    const d4 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const lines = d4.items as { price: number | null; productId?: string | null; priceLabel?: string | null; priceModel?: string | null }[];
+    expect(lines.map((l) => [l.price, l.productId, l.priceLabel])).toEqual([
+      [23_900, 'INT-013', 'по прайсу: ДПГ CPL (строка 23)'],
+      [23_900, 'INT-013', 'по прайсу: ДПГ CPL (строка 23)'],
+      [23_900, 'INT-013', 'по прайсу: ДПГ CPL (строка 23)'],
+      [23_900, 'INT-013', 'по прайсу: ДПГ CPL (строка 23)'],
+    ]);
+    const n4 = (d4.needsManager as { request_index: number; reason: string }[]).filter((n) => n.request_index === 0).map((n) => n.reason);
+    expect(n4).toContain('цена из базы: по синониму: ДПГ CPL (слова синонима — в названии позиции, ID INT-013)');
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d3.id } })).json()).toMatchObject({ draft: { status: 'built' } });
+    const doc4 = await ctx.deps.kp.byId(ACCOUNT_ID, d3.id);
+    const text4 = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc4!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
+    expect(text4).toContain('итого 95 600 ₽');
+    expect(text4).not.toContain('ДА-1-Г-Т-V60');
   });
 });

@@ -20,7 +20,7 @@ describe('многолистовой прайс (RFD-AI-AGENT-OPT-KB-PRICE-SHEET
     expect(book.products.map((p) => p.productId)).toEqual(Array.from({ length: 30 }, (_, i) => `INT-${String(i + 1).padStart(3, '0')}`));
     const cpl = book.products.find((p) => p.productId === 'INT-013')!;
     expect(cpl).toMatchObject({ model: 'ДВ CPL', abbr: 'ДВ 1Рп Г ПрБ', price: 23_900, status: 'active', estimate: false, family: 'interior', components: { коробка: { status: 'priced', price: 3160 }, наличник: { status: 'priced', price: 1200 }, добор: { status: 'not_priced', price: null }, порог: { status: 'included', price: null } } });
-    expect(cpl.card).toMatchObject({ unit: 'leaf', sizeBasis: 'opening', geometry: 'single', fill: 'solid', gosts: ['ГОСТ 475-2016'], leafCount: 1, colors: ['белый', 'дуб'], quoteNotes: ['Цвет полотна по каталогу CPL.'], technical: { thickness_mm: 40 } });
+    expect(cpl.card).toMatchObject({ unit: 'block', sizeBasis: 'opening', geometry: 'single', fill: 'solid', gosts: ['ГОСТ 475-2016'], leafCount: 1, colors: ['белый', 'дуб'], quoteNotes: ['Цвет полотна по каталогу CPL.'], technical: { thickness_mm: 40 } });
     expect(cpl.aliases).toEqual(['ДВ CPL / ДВ 1Рп Г ПрБ', 'дверь внутренняя CPL', 'ДВ CPL']);
     // INT-008: на листе 1 цены нет — сметная по правилу из комментария, статус estimate_only.
     const est = book.products.find((p) => p.productId === 'INT-008')!;

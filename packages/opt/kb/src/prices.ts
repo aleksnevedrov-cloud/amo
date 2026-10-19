@@ -507,6 +507,41 @@ export class KbAliasesRepo {
     const all = await this.db.query<{ alias_key: string }>('SELECT alias_key FROM kb_aliases WHERE account_id = $1 AND canonical_key = $2', [accountId, hit.canonicalKey]);
     return { canonical: hit.canonical, canonicalKey: hit.canonicalKey, keys: [...new Set([hit.canonicalKey, ...all.rows.map((r) => r.alias_key)])] };
   }
+
+  /**
+   * KB-PRICE-SHEETS-FIX, п. 7а: синоним прайса внутри длинного названия позиции («Дверной блок, деревянный, внутренний, глухой,
+   * однопольный, … ДВ 1Рп 2100-10 Г ПрБ …» содержит все слова синонима «ДВ 1Рп Г ПрБ» → INT-013). Берётся самый длинный
+   * синоним с ID товара, все слова которого есть среди слов позиции; синонимы из одного слова короче четырёх букв не считаются.
+   */
+  async resolveInText(accountId: number, tokens: string[]): Promise<{ canonical: string; canonicalKey: string; keys: string[]; productId: string } | null> {
+    const words = [...new Set(tokens.filter(Boolean))];
+    if (!words.length) return null;
+    const { rows } = await this.db.query(
+      `SELECT * FROM kb_aliases WHERE account_id = $1 AND product_id IS NOT NULL AND string_to_array(alias_key, ' ') <@ $2::text[]
+       ORDER BY cardinality(string_to_array(alias_key, ' ')) DESC, length(alias_key) DESC LIMIT 20`,
+      [accountId, words],
+    );
+    const hit = rows.map(mapAlias).find((a) => a.aliasKey.split(' ').length >= 2 || a.aliasKey.length >= 4 || /\d/.test(a.aliasKey));
+    if (!hit || !hit.productId) return null;
+    const all = await this.db.query<{ alias_key: string }>('SELECT alias_key FROM kb_aliases WHERE account_id = $1 AND canonical_key = $2', [accountId, hit.canonicalKey]);
+    return { canonical: hit.canonical, canonicalKey: hit.canonicalKey, keys: [...new Set([hit.canonicalKey, ...all.rows.map((r) => r.alias_key)])], productId: hit.productId };
+  }
+}
+
+/** Семейство двери по тексту позиции (KB-PRICE-SHEETS-FIX, п. 7б): деревянная / межкомнатная — interior, стальная — steel, алюминиевая — aluminium. */
+export function familyOfText(text: string): Family | null {
+  const t = ` ${text.toLowerCase().replace(/ё/g, 'е')} `;
+  if (/алюмини/.test(t)) return 'aluminium';
+  if (/стальн|\sсталь|металлическ|\sметалл\s|железн/.test(t)) return 'steel';
+  if (/деревянн|межкомнатн|мдф|\scpl|cpl\s|\sпвх|шпон|экошпон|ламинир|ламинат|эмал|массив/.test(t)) return 'interior';
+  return null;
+}
+
+/** Семейство строки базы: из многолистового прайса — как в файле; у остальных — по материалу признаков. */
+export function familyOfRow(row: Pick<KbPrice, 'family' | 'features' | 'model' | 'abbr' | 'description'>): Family | null {
+  if (row.family) return row.family;
+  const m = rowFeatures(row).material;
+  return m === 'wood' ? 'interior' : m === 'steel' ? 'steel' : m === 'aluminium' ? 'aluminium' : null;
 }
 
 /** Что ищем в базе цен: позиция заявки. */
@@ -681,7 +716,11 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // KB-COMPONENTS: работы цены не ищут; остальные — только среди записей своей категории (комплектующие — своего вида).
   let category: PositionCategory = q.category ?? categoryOf(text);
   if (category === 'service') return null;
-  const alias = key ? await aliases.resolve(accountId, key) : null;
+  // Синоним целиком или синоним с ID товара внутри длинного названия (п. 7а).
+  const exactAlias = key ? await aliases.resolve(accountId, key) : null;
+  const inText = exactAlias ? null : await aliases.resolveInText(accountId, tokensOf(key));
+  const alias = exactAlias ?? inText;
+  const namedProductId = inText?.productId ?? null;
   // KB-PRICE-SHEETS: синоним или точный ключ из прайса ведёт в другую категорию (вкладка «Дополнения»: «Фрамуга» — фурнитура,
   // а по словам позиция считалась дверью) — категория позиции берётся из найденной строки.
   if (category === 'door' && key) {
@@ -712,13 +751,24 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // Статусы прайса: inactive / estimate_only — только в смете или когда позиция названа прямо (точный ключ или синоним);
   // фурнитура без цены (price 0) остаётся видимой — менеджер увидит «уточнить», а не веб-цену.
   const allowed = (row: KbPrice, match: PriceHit['match'] | null) => row.status === 'active' || Boolean(q.estimate) || (row.category === 'hardware' && row.price === 0) || match === 'exact' || match === 'alias';
+  // Семейство (п. 7б): деревянная дверь письма не подбирается к стальной или алюминиевой строке и наоборот; покрытие письма (п. 7в) —
+  // обязательный признак: строка двери с другим покрытием в колонке прайса не подходит. Названная синонимом модель — вне этих правил.
+  const qFamily = category === 'door' ? familyOfText(text) : null;
+  const named = (row: KbPrice) => Boolean(namedProductId && row.productId === namedProductId);
+  const fits = (row: KbPrice) => {
+    if (row.category !== 'door' || named(row)) return true;
+    const rf = qFamily ? familyOfRow(row) : null;
+    if (qFamily && rf && rf !== qFamily) return false;
+    if (qf.coating && row.coating && rowFeatures(row).coating !== qf.coating) return false;
+    return true;
+  };
   // Фурнитура «Для моделей»: при известной двери — только подходящая ей; без двери — любая, с пометкой.
   const forDoor = (row: KbPrice) => !(row.category === 'hardware' && row.appliesTo.length && q.doorProductId && !row.appliesTo.includes(q.doorProductId));
   // Строки прайса: совпадение по признакам; если строка нашлась и по ключу модели — ключ остаётся видом совпадения,
   // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
   if (hasFeatures(qf) || category === 'component') {
     for (const row of priceList) {
-      if (!forDoor(row)) continue;
+      if (!forDoor(row) || !fits(row)) continue;
       const fm = matchFeatures(qf, rowFeatures(row));
       // Комплектующее того же вида (добор, коробка…) подходит и без общих признаков двери: лишь бы обязательные не расходились.
       const ok = category === 'component' ? fm.conflict === null && Boolean(componentKind) && row.componentKind === componentKind : fm.ok;
@@ -731,7 +781,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     }
   }
   for (const { row, similarity } of found) {
-    if (seen.has(row.id) || !forDoor(row)) continue;
+    if (seen.has(row.id) || !forDoor(row) || !fits(row)) continue;
     const m = keyMatch(row, key, alias, itemTokens, qSet, similarity);
     if (!m || !allowed(row, m.match)) continue;
     const rf = rowFeatures(row);
@@ -739,6 +789,14 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (m.match !== 'exact' && m.match !== 'alias' && hasFeatures(qf) && hasFeatures(rf) && matchFeatures(qf, rf).conflict) continue;
     cands.push({ row, match: m.match, similarity, words: m.words, features: null });
     seen.add(row.id);
+  }
+  // Модель названа синонимом с ID товара, но её строки не попали в кандидаты (другая категория по словам, расхождение признаков) — добавить.
+  if (namedProductId && !cands.some((c) => named(c.row))) {
+    for (const row of (await prices.doorsByProductId(accountId, namedProductId)).filter((r) => r.category === category)) {
+      if (seen.has(row.id)) continue;
+      cands.push({ row, match: 'alias', similarity: 1, words: 0, features: null });
+      seen.add(row.id);
+    }
   }
   if (!cands.length) return null;
   // Комплектующее к известной двери: строки её модели («Коробка (ДВ CPL)») в приоритете перед остальными (п. 6 задания).
@@ -755,7 +813,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const closeness = (r: KbPrice) => (area && r.widthMm && r.heightMm ? Math.abs(Math.log((r.widthMm * r.heightMm) / area)) : 1);
   const strongKey = (c: Candidate) => (c.match === 'exact' || c.match === 'alias' ? 0 : 1);
   // Модель прайса названа в заявке целиком («ДПГ сота с коробкой» = INT-008): такая строка выше подбора по признакам.
-  const namedModel = (c: Candidate) => (c.row.origin === 'price_list' && c.match === 'exact' && c.row.modelKey === key ? 0 : 1);
+  const namedModel = (c: Candidate) => (c.row.origin === 'price_list' && ((c.match === 'exact' && c.row.modelKey === key) || (c.match === 'alias' && named(c.row))) ? 0 : 1);
   // Цена строки по размеру: строки многолистового прайса — по сетке размеров модели и правилу файла; прочие — по правилам записи.
   const sizesCache = new Map<string, Promise<KbSize[]>>();
   const rulesCache = new Map<string, Promise<BookRule>>();
@@ -839,10 +897,10 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     // Строка прайса подошла по признакам: подпись «по прайсу: ДВ CPL (строка 17)» и пометка, что именно совпало.
     label = `по прайсу: ${best.row.model}${where}`;
     notes.push(`по прайсу: ${best.row.model}${where} — совпали: ${describeFeatures(qf, best.features.matched)}`);
-    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
+    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}${inText && named(best.row) ? ` (слова синонима — в названии позиции, ID ${namedProductId})` : ''}`);
   } else {
     if (best.match === 'exact' && best.row.modelKey !== key) notes.push(`найдено по прайсу: ${best.row.model}${where}, по ${modelKeyOf(best.row.abbr ?? '') === key ? 'сокращению' : 'назначению'}`);
-    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}`);
+    if (best.match === 'alias') notes.push(`по синониму: ${best.row.model}${inText && named(best.row) ? ` (слова синонима — в названии позиции, ID ${namedProductId})` : ''}`);
     if (best.match === 'tokens' || best.match === 'similar') notes.push(`похожая модель в базе: ${best.row.model}${best.row.factory ? ` (${best.row.factory})` : ''}`);
     if (best.match === 'words') notes.push(`найдено по прайсу: ${best.row.model}${where}, совпадение ${Math.round(best.words * 100)} %`);
   }
