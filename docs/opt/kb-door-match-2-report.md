@@ -1,6 +1,6 @@
 # KB-DOOR-MATCH-2: неверный подбор дверей на 89813 и «0 ₽» у коробки «входит в блок»
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после f75797b). Сервер (`@opt/kb`, `@opt/kp`) и виджет 1.2.6.
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `e2e746d` (после f75797b). Сервер (`@opt/kb`, `@opt/kp`) и виджет 1.2.6.
 Миграций нет. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Что было (89813, сделка 30008823, черновик 68)
@@ -52,7 +52,7 @@ typecheck — чистый; eslint — те же 9 старых ошибок в 
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout e2e746d
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграций нет
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
 ```
