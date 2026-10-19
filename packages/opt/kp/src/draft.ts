@@ -3,7 +3,7 @@ import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
-import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, type DoorFeatures, type PositionCategory } from '@opt/kb';
+import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, profileOf, type DoorFeatures, type GostProfile, type PositionCategory } from '@opt/kb';
 
 /**
  * Черновик КП «Агента опт». Единственный вход — карточка сделки amoCRM (ТЗ разделение, 6.4):
@@ -27,6 +27,8 @@ export interface KpRequestItem {
   features?: Partial<DoorFeatures> | null;
   /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ, приложенная к позиции («Раздел «15. Базовая комплектация»: …»). */
   tzEquipment?: string | null;
+  /** KP-AGENT-V2: остальные колонки строки спецификации («ГОСТ, ТУ: …; Технические характеристики: …») — для ГОСТ-профиля. */
+  details?: string | null;
 }
 
 /** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
@@ -71,6 +73,10 @@ export interface KpLine {
   equipment?: string | null;
   /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента (Word-файл заявки) — в плитке и примечанием под позицией в КП. */
   tzEquipment?: string | null;
+  /** KP-AGENT-V2, п. 3: ГОСТ-профиль двери (из текста позиции, дополненный выбранной строкой прайса). */
+  gostProfile?: GostProfile | null;
+  /** Обозначение по ГОСТ для КП — по шаблону строки прайса («ДМ 1Рл 21×9 Г ПрБ ГОСТ 475-2016»). */
+  gostDesignation?: string | null;
   /** Сокращение по ГОСТ из строки прайса («ДВ 1Рп Г ПрБ») — в строку «Обозначение» КП (KP-LAYOUT). */
   priceAbbr?: string | null;
   /**
@@ -701,12 +707,26 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     category,
     ...(service ? { kind: 'service' as const } : {}),
     ...(p.tzEquipment ? { tzEquipment: p.tzEquipment } : {}),
+    ...(p.note ? { details: p.note.slice(0, 1000) } : {}),
   };
 }
 
+/** ГОСТ-профиль позиции заявки по её тексту: наименование, исходная строка, остальные колонки спецификации (KP-AGENT-V2). */
+export const requestProfile = (it: Pick<KpRequestItem, 'name' | 'raw' | 'details'>): GostProfile => profileOf([it.name, it.raw, it.details ?? ''].filter(Boolean).join(' | '));
+
 function toLine(it: KpRequestItem, i: number): KpLine {
   const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}) };
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
+}
+
+/** Профиль строки: из текста, размер — из колонок позиции (они точнее текста). */
+function lineProfile(it: KpRequestItem): GostProfile {
+  const p = requestProfile(it);
+  if (it.width_mm && it.height_mm) {
+    p.heightMm = Math.max(it.width_mm, it.height_mm);
+    p.widthMm = Math.min(it.width_mm, it.height_mm);
+  }
+  return p;
 }
 
 /** Размер в строке позиции — ширина × высота (RFD-AI-AGENT-OPT-MAIL-READ-6, п. 3). */

@@ -235,7 +235,8 @@ describe('черновик КП опта: источник — карточка 
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 89835, route, pricing: {} }, { amo, analyze });
     expect(amo.downloaded).toEqual(['Двери (3).docx', 'кривой.xlsx']);
     expect(r.payload.items).toEqual([
-      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0, category: 'door' },
+      // KP-AGENT-V2: у двери — ГОСТ-профиль из текста позиции (ДПС 01 — однопольная противопожарная, класс EI не указан).
+      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0, category: 'door', gostProfile: expect.objectContaining({ gost: 'Р 57327-2016', kind: 'ДПС', leaves: 1, fire: 'EI?', heightMm: 2100, widthMm: 900 }) },
       { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0, category: 'component' },
     ]);
     expect(r.payload.needs_manager).toEqual([{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }]);

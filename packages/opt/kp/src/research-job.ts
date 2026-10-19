@@ -1,7 +1,7 @@
 import type { JournalKind } from '@core/db';
-import { componentOfDoor, doorTitleOf, specialModelOf, lookupPrice, priceModelOf, type ComponentKind, type KbPrice, type PriceHit } from '@opt/kb';
+import { completeProfile, componentOfDoor, doorTitleOf, gostDesignation, profileOfRow, specialModelOf, lookupPrice, priceModelOf, type ComponentKind, type KbPrice, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
-import { lineCategory, NO_PRICE, tidyName, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
+import { lineCategory, NO_PRICE, requestProfile, tidyName, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
 import { doorComponentKind, matchComponentDoor, type ComponentDoorMatch } from './component-door.ts';
 import { VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { sizeOfInput } from './research-repo.ts';
@@ -178,6 +178,14 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       next.priceModel = own ? priceModelOf(hit.row) : null;
       next.equipment = own ? hit.row.equipment : null;
       next.priceAbbr = own ? hit.row.abbr : null;
+      // KP-AGENT-V2, п. 3: профиль двери дополняется строкой прайса, к которой она отнесена; обозначение по ГОСТ — по её шаблону.
+      if (lineCategory(next) === 'door') {
+        const item = payload.request_items?.[requestIndex];
+        const q = line.gostProfile ?? (item ? requestProfile(item) : null);
+        const full = q ? completeProfile(q, own && !hit.ambiguous ? profileOfRow(hit.row) : null) : null;
+        next.gostProfile = full;
+        next.gostDesignation = full && own && !hit.ambiguous ? gostDesignation(hit.row.card?.designation ?? null, full) : null;
+      }
       // Примечания под позицией в КП: вкладка «Подбор», фразы нестандарта (эталон, производство, огнестойкость).
       const production = hit.notes.filter((n) => /подлежат уточнению на производстве|огнестойкость исполнения|^нестандарт /.test(n));
       next.quoteNotes = [...(hit.quoteNotes ?? []), ...production];

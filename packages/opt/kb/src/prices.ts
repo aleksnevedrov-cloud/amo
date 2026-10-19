@@ -4,6 +4,7 @@ import { priceListTitleOf } from './price-key.ts';
 import { categoryOf, componentKindOf, type ComponentKind, type PositionCategory } from './category.ts';
 import type { BookDictionaryEntry, BookRule, BookSize, ComponentStatus, ProductCard, ProductStatus, Family, UnitBasis } from './price-book.ts';
 import { nonstandardBySizes } from './book-pricing.ts';
+import { profileConflicts, profileOf, profileOfRow, type GostProfile } from './gost-profile.ts';
 import { colorOf, withoutEdge, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
@@ -832,8 +833,13 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // только если это исполнение названо в позиции; код особого исполнения (ДПГУЧ, Аква) — только к строке, где он есть.
   const qSpecial = category === 'door' ? specialOfQuery(text, qf) : null;
   const special = category === 'door' ? specialModelOf(text) : null;
+  // KP-AGENT-V2, п. 3.2: подбор двери — по ГОСТ-профилю: ГОСТ, вид, створки, Г/О, огнестойкость не должны расходиться.
+  const qProfile = category === 'door' ? profileOf(text) : null;
+  const rowProfiles = new Map<number, GostProfile>();
+  const rowProfile = (row: KbPrice) => rowProfiles.get(row.id) ?? (rowProfiles.set(row.id, profileOfRow(row)), rowProfiles.get(row.id) as GostProfile);
   const fits = (row: KbPrice) => {
     if (row.category !== 'door' || named(row)) return true;
+    if (qProfile && profileConflicts(qProfile, rowProfile(row)).length) return false;
     const rf = qFamily ? familyOfRow(row) : null;
     if (qFamily && rf && rf !== qFamily) return false;
     if (qf.coating && row.coating && rowFeatures(row).coating !== qf.coating) return false;

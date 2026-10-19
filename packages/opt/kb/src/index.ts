@@ -5,6 +5,7 @@ export * from './env.ts';
 export * from './export.ts';
 export * from './extract.ts';
 export * from './features.ts';
+export * from './gost-profile.ts';
 export * from './price-key.ts';
 export * from './category.ts';
 export * from './price-book.ts';
