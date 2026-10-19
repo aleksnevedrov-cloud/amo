@@ -3,7 +3,8 @@
 // блокирующих вопросов. Цены прежнего веб-поиска и строки базы не из прайса в черновик не идут (KB-WEB-ROWS).
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import type { KpPayload, OptAiProvider } from '@opt/kp';
-import { applyKbPriceToDraft, KP_PRICE_RESEARCH_KIND, researchablePositions } from '@opt/kp';
+import { readFileSync } from 'node:fs';
+import { applyKbPriceToDraft, KP_PRICE_RESEARCH_KIND, researchablePositions, resolveKpPath } from '@opt/kp';
 import PizZip from 'pizzip';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ACCOUNT_ID, answerSurvey, LEAD_ID, setup, widgetToken } from './helpers.ts';
@@ -156,6 +157,10 @@ describe('«Найти цены» и опросник (KP-AGENT-V2)', () => {
     expect(built).toMatchObject({ draft: { status: 'built' } });
     const doc = await ctx.deps.kp.byId(ACCOUNT_ID, draftId);
     expect(doc?.docxPath).toBeTruthy();
+    // KP-AGENT-V2, п. 6: доставка — последней строкой и в итоге; источников цен (сайтов) в документе нет.
+    const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
+    expect(text).toContain('3. Доставка по адресу: г. Москва, ул. Строителей, 1 — 4 500 ₽; итого 179 000 ₽');
+    expect(text).not.toMatch(/fabrika-l|dveri-[abc]|https?:/);
     await ctx.deps.kp.setStatus(draftId, 'draft');
   });
 

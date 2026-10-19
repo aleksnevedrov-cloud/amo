@@ -131,8 +131,8 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     }
     // Тариф «Дополнений» без цены: позиция — фурнитура (категорию даёт строка прайса), дальше — интернет.
     if (noPriceTariff && category !== 'hardware') await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, category: 'hardware' }), null);
-    // Ручная цена менеджера остаётся: заменить её нечем.
-    const keptManagerPrice = line.priceSource === 'manager' && line.price !== null;
+    // Ручная цена менеджера и цена интернета, выбранная им в опроснике, остаются: заменить их строкой прайса нечем.
+    const keptManagerPrice = (line.priceSource === 'manager' || line.priceSource === 'web_confirmed') && line.price !== null;
     if (keptManagerPrice) return { researchId: 0, status: 'ok', cached: true, price: line.price, keptManagerPrice: true, notes: [], fromKb: true };
     const text = `${input.item.name || line.name} | ${input.item.raw} | ${input.item.details ?? ''}`;
     const profile = line.gostProfile ?? (category === 'door' ? requestProfile({ name: input.item.name || line.name, raw: input.item.raw, details: input.item.details ?? null }) : null);

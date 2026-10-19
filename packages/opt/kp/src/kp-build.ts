@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, SERVICE_NOTE, templateData } from './build.ts';
+import { DEFAULT_VAT_RATE } from './offer-price.ts';
 import { blockingOpen, buildQuestions, hasSourcedPrice } from './questions.ts';
 import { isServiceLine, kpLineParts, lineCategory, tidyName, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
@@ -125,8 +126,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     if (d) includedBy.set(d.request_index, [...(includedBy.get(d.request_index) ?? []), c]);
   }
   const notesOf = (l: KpLine): string[] => {
-    // KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента — первым примечанием под позицией.
-    const own = [...(l.tzEquipment ? [`Комплектация по ТЗ: ${l.tzEquipment}`] : []), ...(l.quoteNotes ?? [])];
+    // KP-AGENT-V2, п. 6.3: у двери — обозначение по ГОСТ; KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента — примечанием.
+    const gost = lineCategory(l) === 'door' && l.gostDesignation ? [`Обозначение по ГОСТ: ${l.gostDesignation}`] : [];
+    const own = [...gost, ...(l.tzEquipment ? [`Комплектация по ТЗ: ${l.tzEquipment}`] : []), ...(l.quoteNotes ?? [])];
     if (lineCategory(l) !== 'door') return own;
     const group = includedBy.get(l.request_index) ?? [];
     const inBlock = group.filter((c) => !c.includedIn || c.includedIn === l.productId).map((c) => tidyName(c.name));
@@ -146,9 +148,13 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     // KP-LAYOUT: ячейка в три уровня — короткое название по прайсу / комплектация / обозначение заказчика (его строка
     // запроса); в шаблоне без {{equipment}} и {{designation}} второй и третий уровни идут строками под названием.
     lines: lines.map((l) => ({ ...kpLineParts(l, payload.request_items?.[l.request_index] ?? null), size: l.size, qty: l.qty, price: l.price, discount: l.discount, priceText: l.price === null ? 'уточнить у менеджера' : undefined, notes: notesOf(l) })),
-    vatRate: s.constants.vatRate ?? 0,
+    // KP-AGENT-V2, п. 6: цены с НДС 22 % (константа vatRate — иная ставка, 0 — «НДС не облагается»); фраза о монтаже — в каждом КП;
+    // срок действия цены — ответ опросника или настройки; доставка — строкой с суммой (самовывоз — без строки). Источники цен в КП не идут.
+    vatRate: s.constants.vatRate ?? DEFAULT_VAT_RATE,
     priceNote: s.constants.priceNote ?? DEFAULT_PRICE_NOTE,
-    serviceNote: hasServices ? SERVICE_NOTE : '',
+    serviceNote: SERVICE_NOTE,
+    priceValidity: payload.priceValidity?.trim() || s.constants.priceValidity?.trim() || null,
+    delivery: payload.delivery?.mode === 'delivery' && (payload.delivery.sum ?? 0) > 0 ? { address: payload.delivery.address, sum: payload.delivery.sum as number } : null,
   });
   const outRel = kpLeadDirRel(accountId, draft.leadId);
   const outDir = resolveKpPath(d.filesRoot, outRel);
@@ -187,7 +193,10 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (built.layoutFallback ? '; в шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием' : '') +
       (built.currencyStripped.length ? `; в шаблоне знак ₽ стоит после ${built.currencyStripped.map((t) => `{{${t}}}`).join(', ')} — из значений убран` : '') +
       (built.pageBreaksRemoved ? `; разрывов страницы после таблицы убрано: ${built.pageBreaksRemoved}` : '') +
-      (hasServices ? `; работ вне таблицы: ${(payload.items ?? []).length - goods.length}${built.serviceNoteFallback ? ' (в шаблоне нет {{service_note}} — фраза под фразой о ценах)' : ''}` : '') +
+      (hasServices ? `; работ вне таблицы: ${(payload.items ?? []).length - goods.length}` : '') +
+      (built.serviceNoteFallback ? '; в шаблоне нет {{service_note}} — фраза о монтаже под фразой о ценах' : '') +
+      (data.items.length > lines.length ? `; доставка строкой: ${data.items[data.items.length - 1]?.sum}` : '') +
+      (data.price_validity ? `; ${data.price_validity.toLowerCase()}${built.validityFallback ? ' (в шаблоне нет {{price_validity}} — строкой под фразой о ценах)' : ''}` : '') +
       (included.length ? `; входит в цену блока (под дверью, не в таблице): ${included.length}` : '') +
       (lines.some((l) => l.price === null) ? `; без цены в прайсе («уточнить у менеджера», не в итоге): ${lines.filter((l) => l.price === null).length}` : '') +
       `; ${(ms / 1000).toFixed(1)} с`,

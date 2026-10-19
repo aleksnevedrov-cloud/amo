@@ -1,7 +1,7 @@
 import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback, currencyTagsInTemplate, withCurrencyFallback, dropPageBreaksAfterTable, SERVICE_NOTE, withServiceNoteFallback } from '../src/build.ts';
+import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback, currencyTagsInTemplate, withCurrencyFallback, dropPageBreaksAfterTable, SERVICE_NOTE, withServiceNoteFallback, withValidityFallback } from '../src/build.ts';
 import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, isServiceLine, kpLineName, kpLineParts, kpShortName, lineCategory, tidyName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
@@ -29,7 +29,7 @@ describe('сборка КП: значения для шаблона', () => {
     expect(data.items[0]?.size).toBe('2000 × 800 мм');
     expect(plain(data.grand_total)).toBe('18 000 ₽');
     expect(data.total_qty).toBe('4 позиции');
-    expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 3 245,90 ₽');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 3 245,90 ₽');
     expect(templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 0, priceNote: '' }).vat_phrase).toBe('НДС не облагается');
     expect(data.price_note).toBe('Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.');
   });
@@ -43,6 +43,26 @@ describe('сборка КП: значения для шаблона', () => {
     expect(fb.fallback).toBe(true);
     expect(fb.data.vat_phrase).toBe('НДС не облагается\nЦены ориентировочные.');
     expect(withPriceNoteFallback(false, { ...data, price_note: '' })).toEqual({ data: { ...data, price_note: '' }, fallback: false });
+  });
+
+  it('KP-AGENT-V2, п. 6: доставка — последней строкой и в итоге (не в «N позиций»); срок действия цены — тегом или строкой под фразой о ценах', () => {
+    const plain = (v: string) => v.replace(/\u00a0/g, ' ');
+    const line = { name: 'ДПГ', size: '800×2000 мм', qty: 2, price: 10_000, discount: 0 };
+    const base = { kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 22, priceNote: 'Цены ориентировочные.' };
+    const data = templateData({ ...base, delivery: { address: 'г. Москва, ул. Строителей, 1', sum: 4_500 }, priceValidity: '30 календарных дней' });
+    expect(data.items.map((i) => [i.n, i.name, i.qty, plain(i.sum)])).toEqual([[1, 'ДПГ', '2 шт', '20 000 ₽'], [2, 'Доставка по адресу: г. Москва, ул. Строителей, 1', '1 усл.', '4 500 ₽']]);
+    expect(plain(data.grand_total)).toBe('24 500 ₽');
+    expect(data.total_qty).toBe('2 позиции');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 4 418,03 ₽');
+    expect(data.price_validity).toBe('Срок действия цены: 30 календарных дней');
+    // Самовывоз — строки нет; срок не задан — пусто.
+    const pickup = templateData({ ...base, delivery: null });
+    expect(pickup.items).toHaveLength(1);
+    expect(pickup.price_validity).toBe('');
+    // Нет тега — под фразой о ценах; нет и её тега — под строкой НДС.
+    expect(withValidityFallback({ priceValidity: true, priceNote: true }, data)).toEqual({ data, fallback: false });
+    expect(withValidityFallback({ priceValidity: false, priceNote: true }, data).data.price_note).toBe('Цены ориентировочные.\nСрок действия цены: 30 календарных дней');
+    expect(plain(withValidityFallback({ priceValidity: false, priceNote: false, vatPhrase: true }, data).data.vat_phrase)).toBe('в т.ч. НДС 22 % — 4 418,03 ₽\nСрок действия цены: 30 календарных дней');
   });
 });
 

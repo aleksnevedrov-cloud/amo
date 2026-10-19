@@ -279,7 +279,8 @@ export function applyAnswer(payload: Partial<KpPayload>, key: string, answer: Kp
         if (size) out.size = `${Math.min(Number(size[1]), Number(size[2]))}×${Math.max(Number(size[1]), Number(size[2]))} мм`;
         return out;
       });
-      research.push(...items.filter(mine).map((l) => l.request_index));
+      // Подбор заново — по строкам без подтверждённой цены (интернет / ввод менеджера она не теряет).
+      research.push(...items.filter((l) => mine(l) && !(l.price !== null && (l.priceSource === 'web_confirmed' || l.priceSource === 'manager'))).map((l) => l.request_index));
       break;
     }
     case 'delivery':
