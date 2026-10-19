@@ -1,6 +1,6 @@
 # KB-HW-NULL-2: тарифы «Дополнений» попадали в двери, ID тарифа не сохранялся
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после 8dbbb22). Сервер (`@opt/kb`, `apps/opt-api`); виджет не менялся
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `b8c2a4e` (после 8dbbb22). Сервер (`@opt/kb`, `apps/opt-api`); виджет не менялся
 (1.2.3). Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Причина
@@ -45,7 +45,7 @@ typecheck пакетов опта — чистый; eslint — те же 9 ст�
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout b8c2a4e
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграцию 012 применит opt-api при старте
 docker compose logs --tail=30 opt-api | grep -iE "миграц|012|категории"
 ```
