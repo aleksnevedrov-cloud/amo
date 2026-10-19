@@ -318,3 +318,9 @@
 .opt-kp-question-options { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .opt-kp-door-option { text-align: left; white-space: normal; }
 .opt-kp-questions-hint { color: #8a5a00; }
+/* KB-COMPONENT-DOOR-GROUP: блок «Вопросы по комплектующим» над позициями, ссылка «изменить дверь» у строки */
+.opt-kp-questions-block { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.opt-kp-questions-title { font-weight: 600; }
+.opt-kp-door-change { background: none; border: 0; padding: 0; color: #1a73e8; text-decoration: underline; cursor: pointer; font: inherit; }
+.opt-kp-door-change:disabled { color: var(--kp-muted, #8a949f); cursor: default; }
+.opt-kp-door-line-option { text-align: left; white-space: normal; }

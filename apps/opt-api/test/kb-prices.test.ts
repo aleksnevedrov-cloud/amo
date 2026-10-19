@@ -620,11 +620,11 @@ describe('база знаний опта: цены и синонимы → по�
     const q = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     for (const i of [1, 2, 3]) expect(q.items[i]).toMatchObject({ category: 'component', price: null, priceOutcome: 'question', question: { reason: 'many' } });
     expect(q.items[1].question.options.map((o: { productId: string; size: string; qty: number }) => [o.productId, o.size, o.qty])).toEqual([['INT-013', '900×2000 мм', 3], ['INT-013', '899×2000 мм', 1], ['INT-013', '1171×2000 мм', 1], ['INT-013', '900×2601 мм', 1], ['ALU-005', '1950×2375 мм', 1], ['MET-012', '960×2050 мм', 2], ['INT-008', '800×2000 мм', 1]]);
-    expect(q.needsManager.filter((n: { request_index: number }) => n.request_index === 1).map((n: { reason: string }) => n.reason)).toEqual([expect.stringMatching(/^вопрос по комплектующему: К какой двери считать «Коробка, 3 шт»\? Подходит несколько дверей заявки: INT-013 ДВ CPL 900×2000 мм × 3; /)]);
+    expect(q.needsManager.filter((n: { request_index: number }) => n.request_index === 1).map((n: { reason: string }) => n.reason)).toEqual([expect.stringMatching(/^вопрос по комплектующему: группа «Коробка» — подходит несколько дверей заявки: INT-013 ДВ CPL 900×2000 мм × 3; .*; ответ — в блоке «Вопросы по комплектующим»$/)]);
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/template', headers, payload: { filename: 'kp.docx', contentBase64: templateDocx() } });
     const blocked = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } });
     expect(blocked.statusCode).toBe(409);
-    expect(blocked.json()).toMatchObject({ error: 'component_questions', message: 'ответьте на вопросы по комплектующим: 3 (поз. 2, поз. 3, поз. 4)' });
+    expect(blocked.json()).toMatchObject({ error: 'component_questions', message: 'ответьте на вопросы по комплектующим: 3 («Коробка», «Добор», «Порог»)' });
     // Менеджер относит все три к двери поз. 1 (INT-013): цены — из строки INT-013; «Найти цены» выбор не сбрасывает.
     for (const i of [1, 2, 3]) await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d0.id}/component-door`, headers, payload: { requestIndex: i, doorRequestIndex: 0 } });
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
@@ -640,11 +640,11 @@ describe('база знаний опта: цены и синонимы → по�
     // 2. Комплектующие по модели двери заявки: коробка 3 160 (строка INT-013), добор — в прайсе без цены → «уточнить у менеджера», не 0; порог — входит в блок.
     expect(items[1]).toMatchObject({ price: 3160, category: 'component', priceLabel: 'по двери INT-013, ДВ CPL', priceOutcome: 'priced', componentDoor: 0 });
     expect((items[1] as { question?: unknown }).question ?? null).toBeNull();
-    expect(needs[1]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера', 'цена из базы: комплектующее по двери INT-013, ДВ CPL: Коробка (ДВ CPL) (строка 16)']);
+    expect(needs[1]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера для этой строки', 'цена из базы: комплектующее по двери INT-013, ДВ CPL: Коробка (ДВ CPL) (строка 16)']);
     expect(items[2]).toMatchObject({ price: null, category: 'component', priceOutcome: 'not_priced', componentDoor: 0 });
-    expect(needs[2]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера', 'уточнить у менеджера: добор к двери INT-013, ДВ CPL в прайсе без цены']);
+    expect(needs[2]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера для этой строки', 'уточнить у менеджера: добор к двери INT-013, ДВ CPL в прайсе без цены']);
     expect(items[3]).toMatchObject({ price: 0, priceOutcome: 'included', componentDoor: 0 });
-    expect(needs[3]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера', 'цена из базы: порог входит в цену блока INT-013, ДВ CPL (в базу входит: полотно, коробка)']);
+    expect(needs[3]).toEqual(['цена из базы: по двери INT-013, ДВ CPL (поз. 1): выбор менеджера для этой строки', 'цена из базы: порог входит в цену блока INT-013, ДВ CPL (в базу входит: полотно, коробка)']);
     // 3. Нестандарт по сетке: 899 при эталоне 900 → +30 %; 1171 → +100 %; 2601 → +100 %; фраза о производстве — под позицией в КП.
     expect(items[4]).toMatchObject({ price: 31_070, productId: 'INT-013' });
     expect(needs[4]).toContain('цена из базы: нестандарт 899×2000 при эталоне 900×2000: +30 % к базе');
@@ -858,65 +858,101 @@ describe('база знаний опта: цены и синонимы → по�
     expect(text7).toContain('итого 24 271 ₽');
     // Два файла заказчика, четыре поиска и три сборки документа — дольше 5 с по умолчанию.
   }, 30_000);
-  it('KB-COMPONENT-DOOR (89813): комплектующие — только из строки прайса своей двери заявки; неясно, какой — вопрос менеджеру со списком дверей, документ не собирается до ответа; после выбора — колонка этой двери, «Найти цены» выбор не сбрасывает', async () => {
-    // Файлы заказчика уже загружены предыдущим сценарием («Межкомнатные двери.xlsx», «Металлические двери.xlsx»).
+  it('KB-COMPONENT-DOOR-GROUP (89813): вопросы — по одному на группу похожих комплектующих (вид + исполнение, без размера); ответ на группу ставит цену во все её строки из колонки выбранной двери; «изменить дверь» меняет только одну строку; однозначные строки вопросов не получают', async () => {
+    // Файлы заказчика уже загружены сценарием KB-PRICE-SHEETS-FIX («Межкомнатные двери.xlsx», «Металлические двери.xlsx»).
+    const r = (raw: string, qty: number) => ({ raw: `${raw} — ${qty} шт`, name: raw, width_mm: null, height_mm: null, qty });
     letter.request_items = [
       { raw: 'ДПГ усиленная ПВХ 800×2000 — 5 шт', name: 'ДПГ усиленная ПВХ', width_mm: 800, height_mm: 2000, qty: 5 },
       { raw: 'ДПГ CPL 910×2100 — 3 шт', name: 'ДПГ CPL', width_mm: 910, height_mm: 2100, qty: 3 },
       { raw: 'Дверь техническая ДМ-1 860×2050 — 2 шт', name: 'Дверь техническая ДМ-1', width_mm: 860, height_mm: 2050, qty: 2 },
-      { raw: 'Коробка ТЕЛЕСКОП, сэндвич 74×2150 — 35 шт', name: 'Коробка ТЕЛЕСКОП, сэндвич 74×2150', width_mm: null, height_mm: null, qty: 35 },
-      { raw: 'Наличник ПВХ 70 мм — 10 шт', name: 'Наличник ПВХ 70 мм', width_mm: null, height_mm: null, qty: 10 },
-      { raw: 'Добор к двери ДПГ CPL 150 мм — 4 шт', name: 'Добор к двери ДПГ CPL 150 мм', width_mm: null, height_mm: null, qty: 4 },
-      { raw: 'Коробка стальная — 2 шт', name: 'Коробка стальная', width_mm: null, height_mm: null, qty: 2 },
+      r('Коробка ТЕЛЕСКОП, сэндвич 74×2150', 20),
+      r('Коробка ТЕЛЕСКОП, сэндвич 74×2400', 10),
+      r('Коробка ТЕЛЕСКОП, сэндвич 92×2150', 7),
+      r('Коробка ТЕЛЕСКОП, ДПК 74×2150', 5),
+      r('Наличник телескопический, МДФ 70×2150', 40),
+      r('Наличник телескопический, МДФ 70×2400', 10),
+      r('Наличник телескопический, ДПК 70×2150', 10),
+      r('Добор телескопический, МДФ 100 мм', 10),
+      r('Добор телескопический, МДФ 150 мм', 6),
+      r('Добор телескопический, ДПК 100 мм', 4),
+      r('Наличник ПВХ 70 мм', 10),
+      r('Коробка стальная', 2),
     ] as unknown as typeof letter.request_items;
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
     const d0 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
-    expect(d0.items.map((l: { category: string }) => l.category)).toEqual(['door', 'door', 'door', 'component', 'component', 'component', 'component']);
+    expect(d0.items.filter((l: { category: string }) => l.category === 'component')).toHaveLength(12);
     const searches = g.searches();
     await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
     expect(g.searches()).toBe(searches);
-    const get = async () => (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft as { items: { price: number | null; priceLabel?: string | null; priceOutcome?: string; productId?: string | null; componentDoor?: number | null; question?: { text: string; reason: string; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null }[]; needsManager: { request_index: number; reason: string }[] };
+    type Line = { request_index: number; qty: number; price: number | null; priceLabel?: string | null; priceOutcome?: string; productId?: string | null; componentDoor?: number | null; componentDoorBy?: string | null; componentDoorGroup?: string | null; question?: { group: string; groupTitle: string; reason: string; options: { requestIndex: number; productId: string | null }[] } | null };
+    const get = async () => (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft as { items: Line[]; needsManager: { request_index: number; reason: string }[] };
     const d1 = await get();
-    // Двери заявки — из прайса: INT-002 (ПВХ, не шпон INT-003), INT-013, MET-001.
     expect(d1.items.slice(0, 3).map((l) => [l.productId, l.price])).toEqual([['INT-002', 6800], ['INT-013', 23_900], ['MET-001', 24_100]]);
-    // Коробка ТЕЛЕСКОП без признаков двери — вопрос со списком дверей заявки (ID, модель, размер, кол-во).
-    expect(d1.items[3]).toMatchObject({ price: null, priceOutcome: 'question', question: { text: 'К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?', reason: 'many' } });
-    expect(d1.items[3]?.question?.options).toEqual([
-      { requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 },
-      { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 },
-      { requestIndex: 2, productId: 'MET-001', model: 'Дверь техническая ДМ-1', size: '860×2050 мм', qty: 2 },
+    // 10 строк с вопросом → 6 групп; размер группу не делит.
+    const asked = d1.items.filter((l) => l.priceOutcome === 'question');
+    expect(asked).toHaveLength(10);
+    const groups = [...new Map(asked.map((l) => [l.question!.group, l.question!.groupTitle])).entries()];
+    expect(groups).toEqual([
+      ['коробка|сэндвич|телескоп', 'Коробка ТЕЛЕСКОП, сэндвич'],
+      ['коробка|дпк|телескоп', 'Коробка ТЕЛЕСКОП, ДПК'],
+      ['наличник|мдф|телескоп', 'Наличник телескопический, МДФ'],
+      ['наличник|дпк|телескоп', 'Наличник телескопический, ДПК'],
+      ['добор|мдф|телескоп', 'Добор телескопический, МДФ'],
+      ['добор|дпк|телескоп', 'Добор телескопический, ДПК'],
     ]);
-    // Наличник ПВХ — к INT-002 (CPL и сталь исключены): колонка «Наличник» строки INT-002.
-    expect(d1.items[4]).toMatchObject({ price: 1430, priceOutcome: 'priced', priceLabel: 'по двери INT-002, ДПГ усиленная' });
-    // «к двери ДПГ CPL» — INT-013: добор у неё без цены → «уточнить у менеджера», не 0.
-    expect(d1.items[5]).toMatchObject({ price: null, priceOutcome: 'not_priced', priceLabel: 'по двери INT-013, ДПГ CPL' });
-    expect(d1.needsManager.filter((n) => n.request_index === 5).map((n) => n.reason)).toEqual(['цена из базы: по двери INT-013, ДПГ CPL (поз. 2): в строке указано «ДПГ CPL»', 'уточнить у менеджера: добор к двери INT-013, ДПГ CPL в прайсе без цены']);
-    // Коробка стальная — к MET-001: коробка включена в цену блока.
-    expect(d1.items[6]).toMatchObject({ price: 0, priceOutcome: 'included', priceLabel: 'по двери MET-001, Дверь техническая ДМ-1' });
-    // Ни одной цены от дверей не из заявки (Финская 1 550, «ДПГ ПВХ» 830, «ДПГ усиленная» Шпон и пр.): метки — только двери заявки.
-    const labels = d1.items.slice(3).map((l) => l.priceLabel ?? '').filter((x) => x.startsWith('по двери'));
-    expect(labels.every((x) => /INT-002|INT-013|MET-001/.test(x))).toBe(true);
-    expect(d1.items.slice(3).map((l) => l.price)).not.toContain(1550);
-    // Пока вопрос не отвечен — документ не собирается.
+    // МДФ — деревянное исполнение: стальная MET-001 в варианты не попадает; у сэндвича — все три двери.
+    expect(asked.find((l) => l.question!.group === 'наличник|мдф|телескоп')!.question!.options.map((o) => o.productId)).toEqual(['INT-002', 'INT-013']);
+    expect(asked.find((l) => l.question!.group === 'коробка|сэндвич|телескоп')!.question!.options.map((o) => o.productId)).toEqual(['INT-002', 'INT-013', 'MET-001']);
+    // Однозначные строки — без вопроса и вне групп: «Наличник ПВХ» → INT-002, «Коробка стальная» → MET-001 (входит в цену блока).
+    expect(d1.items[13]).toMatchObject({ price: 1430, priceOutcome: 'priced', priceLabel: 'по двери INT-002, ДПГ усиленная' });
+    expect(d1.items[14]).toMatchObject({ price: 0, priceOutcome: 'included' });
+    expect(d1.items[13]?.componentDoorGroup ?? null).toBeNull();
+    // Сборка до ответов — 409 со списком групп.
     const blocked = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } });
-    expect(blocked.json()).toMatchObject({ error: 'component_questions', message: 'ответьте на вопросы по комплектующим: 1 (поз. 4)' });
-    // Неверный ответ (не дверь) — 400; ответ менеджера: коробка к INT-002 → колонка «Коробка» INT-002 (1 910).
-    expect((await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d0.id}/component-door`, headers, payload: { requestIndex: 3, doorRequestIndex: 4 } })).json()).toMatchObject({ error: 'not_door' });
-    expect((await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d0.id}/component-door`, headers, payload: { requestIndex: 3, doorRequestIndex: 0 } })).statusCode).toBe(200);
+    expect(blocked.json()).toMatchObject({ error: 'component_questions', message: 'ответьте на вопросы по комплектующим: 6 («Коробка ТЕЛЕСКОП, сэндвич», «Коробка ТЕЛЕСКОП, ДПК», «Наличник телескопический, МДФ», «Наличник телескопический, ДПК», …)' });
+    // Ответ на группу «Коробка ТЕЛЕСКОП, сэндвич» → INT-002: цена во все три строки из колонки «Коробка» INT-002 (1 910).
+    const ans = async (groupKey: string, door: number) => (await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d0.id}/component-door`, headers, payload: { groupKey, doorRequestIndex: door } })).json();
+    expect(await ans('коробка|сэндвич|телескоп', 0)).toMatchObject({ applied: 3 });
     const d2 = await get();
-    expect(d2.items[3]).toMatchObject({ price: 1910, priceOutcome: 'priced', componentDoor: 0, priceLabel: 'по двери INT-002, ДПГ усиленная' });
-    expect(d2.items[3]?.question ?? null).toBeNull();
-    expect(d2.needsManager.filter((n) => n.request_index === 3).map((n) => n.reason)).toEqual(['цена из базы: по двери INT-002, ДПГ усиленная (поз. 1): выбор менеджера', 'цена из базы: комплектующее по двери INT-002, ДПГ усиленная: Коробка (ДПГ усиленная) (строка 9)']);
-    // «Найти цены» по всем ещё раз (в т. ч. с заменой) — выбор менеджера остаётся.
-    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id, requestIndexes: [3, 4, 5, 6] } });
+    expect([3, 4, 5].map((i) => [d2.items[i]?.price, d2.items[i]?.priceLabel, d2.items[i]?.componentDoorBy, d2.items[i]?.componentDoor])).toEqual([[1910, 'по двери INT-002, ДПГ усиленная', 'group', 0], [1910, 'по двери INT-002, ДПГ усиленная', 'group', 0], [1910, 'по двери INT-002, ДПГ усиленная', 'group', 0]]);
+    expect(d2.needsManager.filter((n) => n.request_index === 3).map((n) => n.reason)[0]).toBe('цена из базы: по двери INT-002, ДПГ усиленная (поз. 1): ответ менеджера по группе «Коробка ТЕЛЕСКОП, сэндвич»');
+    // «Изменить дверь» у одной строки (74×2400 → INT-013): меняется только она, у INT-013 коробка входит в цену блока.
+    expect((await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d0.id}/component-door`, headers, payload: { requestIndex: 4, doorRequestIndex: 1 } })).statusCode).toBe(200);
     const d3 = await get();
-    expect(d3.items[3]).toMatchObject({ price: 1910, componentDoor: 0 });
-    expect(d3.items[4]).toMatchObject({ price: 1430 });
-    // Документ собирается: коробка 35 × 1 910, наличник 10 × 1 430; добор — «уточнить», коробка стальная — под дверью.
+    expect(d3.items[4]).toMatchObject({ price: 0, priceOutcome: 'included', componentDoor: 1, componentDoorBy: 'line', priceLabel: 'по двери INT-013, ДПГ CPL' });
+    expect([d3.items[3]?.price, d3.items[5]?.price]).toEqual([1910, 1910]);
+    // Повторный ответ на группу строку с «изменить дверь» не трогает.
+    expect(await ans('коробка|сэндвич|телескоп', 0)).toMatchObject({ applied: 2 });
+    expect((await get()).items[4]).toMatchObject({ componentDoor: 1, componentDoorBy: 'line' });
+    // Остальные группы.
+    await ans('коробка|дпк|телескоп', 2);
+    await ans('наличник|мдф|телескоп', 1);
+    await ans('наличник|дпк|телескоп', 0);
+    await ans('добор|мдф|телескоп', 0);
+    await ans('добор|дпк|телескоп', 1);
+    const d4 = await get();
+    expect(d4.items.filter((l) => l.priceOutcome === 'question')).toEqual([]);
+    expect(d4.items.slice(3, 13).map((l) => [l.request_index, l.price, l.priceOutcome])).toEqual([
+      [3, 1910, 'priced'], [4, 0, 'included'], [5, 1910, 'priced'],
+      [6, 0, 'included'],
+      [7, 2000, 'priced'], [8, 2000, 'priced'],
+      [9, 1430, 'priced'],
+      [10, 1060, 'priced'], [11, 1060, 'priced'],
+      [12, null, 'not_priced'],
+    ]);
+    // Ни одной цены не от дверей заявки: подписи — только INT-002 / INT-013 / MET-001.
+    expect(d4.items.slice(3).every((l) => /по двери (INT-002|INT-013|MET-001),/.test(l.priceLabel ?? ''))).toBe(true);
+    // «Найти цены» (по всем и с заменой) — ответы групп и строки остаются.
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id, requestIndexes: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12] } });
+    const d5 = await get();
+    expect(d5.items.slice(3, 13).map((l) => [l.price, l.componentDoor, l.componentDoorBy])).toEqual([
+      [1910, 0, 'group'], [0, 1, 'line'], [1910, 0, 'group'], [0, 2, 'group'], [2000, 1, 'group'], [2000, 1, 'group'], [1430, 0, 'group'], [1060, 0, 'group'], [1060, 0, 'group'], [null, 1, 'group'],
+    ]);
+    // Все группы отвечены — документ собирается.
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } })).json()).toMatchObject({ draft: { status: 'built' } });
     const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, (await ctx.deps.kp.byId(ACCOUNT_ID, d0.id))!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
-    const total = 5 * 6800 + 3 * 23_900 + 2 * 24_100 + 35 * 1910 + 10 * 1430;
+    const total = 5 * 6800 + 3 * 23_900 + 2 * 24_100 + (20 + 7) * 1910 + (40 + 10) * 2000 + 10 * 1430 + (10 + 6) * 1060 + 10 * 1430;
     expect(text).toContain(`итого ${total.toLocaleString('ru-RU').replace(/\u00a0/g, ' ')} ₽`);
-    expect(text).toContain('В цену блока входит: Коробка стальная');
   }, 30_000);
 });

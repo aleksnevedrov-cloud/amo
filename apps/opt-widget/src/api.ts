@@ -77,8 +77,11 @@ export interface KpDraftLine {
   includedIn?: string | null;
   /** KB-COMPONENT-DOOR: дверь заявки (request_index), к которой менеджер отнёс комплектующее. */
   componentDoor?: number | null;
+  /** KB-COMPONENT-DOOR-GROUP: дверь выбрана для этой строки (line) или ответом на группу (group). */
+  componentDoorBy?: 'line' | 'group' | null;
+  componentDoorGroup?: string | null;
   /** Вопрос «К какой двери считать …?» со списком дверей заявки; пока он есть — без цены, документ не собирается. */
-  question?: { kind: 'component_door'; text: string; reason: 'many' | 'none'; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null;
+  question?: { kind: 'component_door'; text: string; reason: 'many' | 'none'; group?: string; groupTitle?: string; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null;
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */
@@ -413,6 +416,8 @@ export class KpApi extends ApiClient {
   /** Кнопка «Собрать КП»: задание в очередь, ответ сразу. */
   makeDraft = (leadId: number) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', { leadId });
   /** KB-COMPONENT-DOOR: ответ менеджера — к какой двери заявки считать комплектующее. */
+  /** KB-COMPONENT-DOOR-GROUP: ответ на группу похожих комплектующих — ко всем её строкам. */
+  componentDoorGroup = (draftId: number, groupKey: string, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null; applied: number }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { groupKey, doorRequestIndex });
   componentDoor = (draftId: number, requestIndex: number, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { requestIndex, doorRequestIndex });
   saveDraftItems = (id: number, items: KpDraftLine[]) => this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   /** Кнопка «Собрать документ»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */

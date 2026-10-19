@@ -85,6 +85,13 @@ export interface KpLine {
    * менеджера, «Найти цены» его не сбрасывает; цена комплектующего — из строки прайса этой двери.
    */
   componentDoor?: number | null;
+  /**
+   * KB-COMPONENT-DOOR-GROUP: откуда дверь строки — line: менеджер выбрал её для этой строки («изменить дверь», строка вне группы);
+   * group: ответ на вопрос группы (componentDoorGroup); нет поля у строки с componentDoor — как line (ответы до группировки).
+   */
+  componentDoorBy?: 'line' | 'group' | null;
+  /** Ключ группы похожих комплектующих строки (вид + исполнение без размера), если дверь — из ответа группы. */
+  componentDoorGroup?: string | null;
   /** Вопрос менеджеру «К какой двери считать …?» со списком дверей заявки; пока он есть — цены нет, документ не собирается. */
   question?: ComponentDoorQuestionInfo | null;
 }
@@ -94,6 +101,9 @@ export interface ComponentDoorQuestionInfo {
   kind: 'component_door';
   text: string;
   reason: 'many' | 'none';
+  /** Группа похожих строк (KB-COMPONENT-DOOR-GROUP): один ответ на все. */
+  group?: string;
+  groupTitle?: string;
   options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[];
 }
 
@@ -107,6 +117,8 @@ export interface KpPayload {
   required_blocks: string[];
   questions: string[];
   needs_manager: { request_index: number; reason: string }[];
+  /** KB-COMPONENT-DOOR-GROUP: ответы менеджера на группы комплектующих — ключ группы → строка двери заявки (request_index). */
+  componentDoorGroups?: Record<string, number>;
   source: {
     from: 'amo_card' | 'mailbox' | 'none';
     mails: number;

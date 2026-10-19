@@ -217,23 +217,42 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const p = principal(req);
     const id = Number((req.params as { id?: string }).id);
     if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
-    const b = z.object({ requestIndex: z.number().int().min(0), doorRequestIndex: z.number().int().min(0) }).safeParse(req.body);
+    // KB-COMPONENT-DOOR-GROUP: ответ на группу похожих строк ({ groupKey }) или дверь для одной строки ({ requestIndex } — «изменить дверь»).
+    const b = z.union([z.object({ groupKey: z.string().min(1).max(300), doorRequestIndex: z.number().int().min(0) }), z.object({ requestIndex: z.number().int().min(0), doorRequestIndex: z.number().int().min(0) })]).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body' });
     const d = await repo.byId(p.accountId, id);
     if (!d) return reply.code(404).send({ error: 'not_found' });
     if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
     const payload = d.payload as unknown as KpPayload;
     const items = payload.items ?? [];
-    const line = items.find((l) => l.request_index === b.data.requestIndex);
     const door = items.find((l) => l.request_index === b.data.doorRequestIndex);
-    if (!line || lineCategory(line) !== 'component') return reply.code(400).send({ error: 'not_component', message: 'Позиция — не комплектующее' });
     if (!door || lineCategory(door) !== 'door') return reply.code(400).send({ error: 'not_door', message: 'Выбранная позиция — не дверь этой заявки' });
-    const next = items.map((l) => (l.request_index === line.request_index ? { ...l, componentDoor: door.request_index, question: null, priceOutcome: undefined, price: l.priceSource === 'manager' ? l.price : null } : l));
-    await repo.setPayload(id, { ...payload, items: next } as unknown as Record<string, unknown>);
-    await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary: `Комплектующее «${line.name}» отнесено менеджером к двери «${door.name}» (поз. ${door.request_index + 1})`, details: { draftId: id, requestIndex: line.request_index, doorRequestIndex: door.request_index, userId: p.userId } });
-    await deps.researchQueue.enqueue([{ accountId: p.accountId, draftId: id, requestIndex: line.request_index, userId: p.userId, force: false, replace: true }]);
+    let targets: KpLine[];
+    let next: KpLine[];
+    let groups = payload.componentDoorGroups ?? {};
+    let summary: string;
+    if ('groupKey' in b.data) {
+      const key = b.data.groupKey;
+      // Строки группы: с вопросом этой группы и уже посчитанные по прежнему ответу группы; строки с «изменить дверь» — не трогаются.
+      targets = items.filter((l) => lineCategory(l) === 'component' && l.componentDoorBy !== 'line' && ((l.priceOutcome === 'question' && l.question?.group === key) || (l.componentDoorBy === 'group' && l.componentDoorGroup === key)));
+      if (!targets.length) return reply.code(400).send({ error: 'no_group', message: 'В черновике нет строк этой группы' });
+      groups = { ...groups, [key]: door.request_index };
+      const title = targets.find((l) => l.question?.groupTitle)?.question?.groupTitle ?? key;
+      next = items.map((l) => (targets.includes(l) ? { ...l, componentDoor: door.request_index, componentDoorBy: 'group' as const, componentDoorGroup: key, question: null, priceOutcome: undefined, price: null } : l));
+      summary = `Комплектующие группы «${title}» (строк ${targets.length}) отнесены менеджером к двери «${door.name}» (поз. ${door.request_index + 1})`;
+    } else {
+      const ri = b.data.requestIndex;
+      const line = items.find((l) => l.request_index === ri);
+      if (!line || lineCategory(line) !== 'component') return reply.code(400).send({ error: 'not_component', message: 'Позиция — не комплектующее' });
+      targets = [line];
+      next = items.map((l) => (l === line ? { ...l, componentDoor: door.request_index, componentDoorBy: 'line' as const, componentDoorGroup: null, question: null, priceOutcome: undefined, price: l.priceSource === 'manager' ? l.price : null } : l));
+      summary = `Комплектующее «${line.name}» отнесено менеджером к двери «${door.name}» (поз. ${door.request_index + 1}) — только эта строка`;
+    }
+    await repo.setPayload(id, { ...payload, items: next, componentDoorGroups: groups } as unknown as Record<string, unknown>);
+    await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary, details: { draftId: id, requestIndexes: targets.map((l) => l.request_index), doorRequestIndex: door.request_index, groupKey: 'groupKey' in b.data ? b.data.groupKey : null, userId: p.userId } });
+    await deps.researchQueue.enqueue(targets.map((l) => ({ accountId: p.accountId, draftId: id, requestIndex: l.request_index, userId: p.userId, force: false, replace: true })));
     const fresh = await repo.byId(p.accountId, id);
-    return { draft: fresh ? view(fresh) : null };
+    return { draft: fresh ? view(fresh) : null, applied: targets.length };
   });
 
   /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */

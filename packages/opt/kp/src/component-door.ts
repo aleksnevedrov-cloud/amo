@@ -28,6 +28,50 @@ export interface ComponentDoorQuestion {
   /** many — подходит несколько дверей; none — не подходит ни одна (в списке все двери заявки). */
   reason: 'many' | 'none';
   options: ComponentDoorOption[];
+  /** Группа похожих строк: вид комплектующего + исполнение без размера (componentGroupOf). */
+  group: string;
+  groupTitle: string;
+}
+
+/** Признаки исполнения комплектующего из названия (KB-COMPONENT-DOOR-GROUP): размер и количество не учитываются. */
+/** Слово целиком: `\b` в JS кириллицу не знает — границы по буквам явно. */
+const word = (w: string) => new RegExp(`(?<![a-zа-я0-9])(?:${w})(?![a-zа-я0-9])`);
+const EXECUTION: [string, RegExp][] = [
+  ['телескоп', /телескоп/],
+  ['комплект', /комплект|(?<![a-zа-я])ком-т(?![a-zа-я])|(?<![a-zа-я])к-т(?![a-zа-я])|(?<![a-zа-я])компл(?![a-zа-я])/],
+  ['сэндвич', /с[эе]ндвич/],
+  ['дпк', word('дпк')],
+  ['мдф', word('мдф')],
+  ['хдф', word('хдф')],
+  ['пвх', word('пвх')],
+  ['cpl', word('cpl|цпл')],
+  ['экошпон', /экошпон/],
+  ['шпон', /(?<!эко)шпон/],
+  ['эмаль', /эмал/],
+  ['ламинат', /ламин/],
+  ['массив', /массив/],
+  ['металл', /металл|сталь|стальн/],
+  ['алюминий', /алюмин/],
+];
+
+/**
+ * Группа похожих строк: «Коробка ТЕЛЕСКОП, сэндвич 74×2150», «… 74×2400», «… 92×2150» → одна группа «коробка|сэндвич|телескоп»
+ * с названием «Коробка ТЕЛЕСКОП, сэндвич». Вид комплектующего, признаки исполнения и цвет; размер и количество — нет.
+ */
+export function componentGroupOf(name: string): { key: string; title: string } {
+  const t = ` ${name.toLowerCase().replace(/ё/g, 'е').replace(/[«»"()]/g, ' ')} `.replace(/\s+/g, ' ');
+  const kind = componentKindOf(name) ?? 'комплектующее';
+  const marks = EXECUTION.filter(([, rx]) => rx.test(t)).map(([k]) => k).sort();
+  const color = colorOf(name);
+  const key = [kind, ...marks, ...(color ? [color.toLowerCase()] : [])].join('|');
+  const title = tidyName(name)
+    .replace(/\d+(?:[.,]\d+)?\s*[×xх*]\s*\d+(?:[.,]\d+)?(?:\s*[×xх*]\s*\d+(?:[.,]\d+)?)?\s*(?:мм|см|м)?/gi, ' ')
+    .replace(/\s+\d+(?:[.,]\d+)?\s*(?:мм|см|шт)\.?(?=\s|$|,)/gi, ' ')
+    .replace(/\s*[—–-]\s*\d+([.,]\d+)?\s*шт\.?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[\s,;:—–-]+$/g, '')
+    .trim();
+  return { key, title: title || name };
 }
 
 export type ComponentDoorMatch =
@@ -146,7 +190,8 @@ export function matchComponentDoor(payload: Partial<KpPayload>, line: KpLine, do
     if (top.length === 1) return pick((top[0] as { g: DoorGroup }).g, 'модель двери названа в строке');
   }
   const reason = candidates.length ? 'many' : 'none';
-  return { kind: 'question', question: { kind: 'component_door', text: componentQuestionText(payload, line), reason, options: doorOptions(candidates.length ? candidates : groups) } };
+  const group = componentGroupOf(payload.request_items?.[line.request_index]?.name ?? line.name);
+  return { kind: 'question', question: { kind: 'component_door', text: componentQuestionText(payload, line), reason, options: doorOptions(candidates.length ? candidates : groups), group: group.key, groupTitle: group.title } };
 }
 
 /** Вид комплектующего строки, если это коробка / наличник / добор / порог; иначе null (обычный подбор). */

@@ -308,38 +308,57 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(button('Найти цены')?.disabled).toBe(false);
   });
 
-  it('KB-COMPONENT-DOOR: у строки комплектующего — вопрос «К какой двери считать …?» с дверями заявки; до ответа «Собрать документ» недоступна с подсказкой; выбор двери шлёт ответ и показывает цену по этой двери', async () => {
+  it('KB-COMPONENT-DOOR-GROUP: блок «Вопросы по комплектующим» над позициями — один вопрос на группу (3 строки, 37 шт), ответ — ко всем строкам группы; у строки «изменить дверь» меняет только её; «Собрать документ» — когда отвечены все группы', async () => {
     const doorLine = (i: number, name: string, size: string, qty: number, price: number, productId: string) => ({ request_index: i, page_id: null, name, size, qty, price, lead_time: '', discount: 0, category: 'door' as const, priceSource: 'kb' as const, priceLabel: `по прайсу: ${name}`, productId });
-    const question = { kind: 'component_door' as const, text: 'К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?', reason: 'many' as const, options: [{ requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 }, { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 }] };
-    const box = { request_index: 2, page_id: null, name: 'Коробка ТЕЛЕСКОП, сэндвич 74×2150', size: '', qty: 35, price: null as number | null, lead_time: '', discount: 0, category: 'component' as const, priceSource: 'kb' as const, priceLabel: 'вопрос: к какой двери', priceOutcome: 'question' as string, question: question as typeof question | null, componentDoor: null as number | null };
-    let current = { ...draft, id: 64, items: [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013'), box], needsManager: [{ request_index: 2, reason: 'вопрос по комплектующему: К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?' }] };
-    const answers: unknown[] = [];
+    const options = [{ requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 }, { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 }];
+    const q = (text: string) => ({ kind: 'component_door' as const, text, reason: 'many' as const, group: 'коробка|сэндвич|телескоп', groupTitle: 'Коробка ТЕЛЕСКОП, сэндвич', options });
+    type L = Record<string, unknown> & { request_index: number };
+    const box = (i: number, size: string, qty: number): L => ({ request_index: i, page_id: null, name: `Коробка ТЕЛЕСКОП, сэндвич ${size}`, size: '', qty, price: null, lead_time: '', discount: 0, category: 'component', priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q(`К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич ${size}, ${qty} шт»?`) });
+    const doors = [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013')];
+    let items: L[] = [...doors, box(2, '74×2150', 20), box(3, '74×2400', 10), box(4, '92×2150', 7)];
+    const priced = (l: L, door: number, by: 'group' | 'line', price: number, label: string): L => ({ ...l, price, priceOutcome: price ? 'priced' : 'included', question: null, componentDoor: door, componentDoorBy: by, componentDoorGroup: by === 'group' ? 'коробка|сэндвич|телескоп' : null, priceLabel: label });
+    const posted: unknown[] = [];
     const { self } = fakeSelf('lcard', {
-      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
-      'POST /widget/v1/kp/draft/64/component-door': (data?: string) => {
-        answers.push(JSON.parse(data ?? '{}'));
-        current = { ...current, items: [current.items[0], current.items[1], { ...box, price: 1910, priceOutcome: 'priced', question: null, componentDoor: 0, priceLabel: 'по двери INT-002, ДПГ усиленная' }], needsManager: [] } as typeof current;
-        return { draft: current };
+      'GET /widget/v1/kp/draft': () => ({ draft: { ...draft, id: 66, items, needsManager: [] }, job: null }),
+      'POST /widget/v1/kp/draft/66/component-door': (data?: string) => {
+        const b = JSON.parse(data ?? '{}') as { groupKey?: string; requestIndex?: number; doorRequestIndex: number };
+        posted.push(b);
+        if (b.groupKey) items = items.map((l) => (l.category === 'component' ? priced(l, b.doorRequestIndex, 'group', 1910, 'по двери INT-002, ДПГ усиленная') : l));
+        else items = items.map((l) => (l.request_index === b.requestIndex ? priced(l, b.doorRequestIndex, 'line', 0, 'по двери INT-013, ДПГ CPL') : l));
+        return { draft: { ...draft, id: 66, items, needsManager: [] }, applied: b.groupKey ? 3 : 1 };
       },
     });
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
     const text = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
-    expect(text()).toContain('К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?');
-    expect(text()).toContain('Подходит несколько дверей заявки — выберите, из строки прайса какой двери брать цену:');
-    const options = [...document.querySelectorAll('.opt-kp-door-option')].map((b) => b.textContent?.replace(/\u00a0/g, ' '));
-    expect(options).toEqual(['INT-002 · ДПГ усиленная · 800 × 2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910 × 2100 мм · 3 шт']);
+    // Один вопрос на группу — над позициями; у строк — ссылка на блок, без своих кнопок.
+    expect(document.querySelectorAll('.opt-kp-questions-block .opt-kp-question')).toHaveLength(1);
+    expect(text()).toContain('Вопросы по комплектующим (1)');
+    expect(text()).toContain('К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич» (3 строки, 37 шт)?');
+    expect([...document.querySelectorAll('.opt-kp-door-option')].map((b) => b.textContent?.replace(/\u00a0/g, ' '))).toEqual(['INT-002 · ДПГ усиленная · 800 × 2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910 × 2100 мм · 3 шт']);
+    expect(document.querySelectorAll('.opt-kp-question-ref')).toHaveLength(3);
     expect(button('Собрать документ')?.disabled).toBe(true);
     expect(button('Собрать документ')?.title).toBe('Ответьте на вопросы по комплектующим');
-    expect(text()).toContain('Ответьте на вопросы по комплектующим (1)');
+    expect(text()).toContain('Ответьте на вопросы по комплектующим (1): в блоке над позициями выберите дверь для каждой группы');
+    // Ответ на группу — один запрос, цена во всех трёх строках.
     await act(async () => (document.querySelector('.opt-kp-door-option') as HTMLButtonElement).click());
     await flush();
-    expect(answers).toEqual([{ requestIndex: 2, doorRequestIndex: 0 }]);
-    expect(text()).not.toContain('К какой двери считать');
-    expect(text()).toContain('Цена · по двери INT-002, ДПГ усиленная');
-    expect(text()).toContain('дверь выбрана менеджером: поз. 1');
+    expect(posted).toEqual([{ groupKey: 'коробка|сэндвич|телескоп', doorRequestIndex: 0 }]);
+    expect(document.querySelector('.opt-kp-questions-block')).toBeNull();
+    expect(text().match(/Цена · по двери INT-002, ДПГ усиленная/g)).toHaveLength(3);
+    expect(text().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(3);
     expect(button('Собрать документ')?.disabled).toBe(false);
+    // «Изменить дверь» у второй строки → INT-013: только эта строка.
+    await act(async () => ([...document.querySelectorAll('.opt-kp-door-change')][1] as HTMLButtonElement).click());
+    await flush();
+    const lineOptions = [...document.querySelectorAll('.opt-kp-door-line-option')];
+    expect(lineOptions.map((b) => b.textContent?.replace(/\u00a0/g, ' '))).toEqual(['INT-002 · ДПГ усиленная ПВХ · 800 × 2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910 × 2100 мм · 3 шт']);
+    await act(async () => (lineOptions[1] as HTMLButtonElement).click());
+    await flush();
+    expect(posted[1]).toEqual({ requestIndex: 3, doorRequestIndex: 1 });
+    expect(text()).toContain('дверь: поз. 2 — выбрана для этой строки');
+    expect(text().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(2);
   });
 
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {

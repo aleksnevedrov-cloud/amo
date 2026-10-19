@@ -87,7 +87,11 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   // строка с «уточнить у менеджера» вместо цены, в итог не входит.
   // KB-COMPONENT-DOOR: пока менеджер не ответил, к какой двери считать комплектующее, документ не собирается.
   const questions = goods.filter((l) => l.question && l.priceOutcome === 'question');
-  if (questions.length) throw new KpBuildError('component_questions', `ответьте на вопросы по комплектующим: ${questions.length} (${questions.slice(0, 3).map((l) => `поз. ${l.request_index + 1}`).join(', ')}${questions.length > 3 ? ', …' : ''})`);
+  if (questions.length) {
+    // KB-COMPONENT-DOOR-GROUP: вопрос — один на группу похожих строк.
+    const titles = [...new Set(questions.map((l) => l.question?.groupTitle ?? tidyName(l.name)))];
+    throw new KpBuildError('component_questions', `ответьте на вопросы по комплектующим: ${titles.length} (${titles.slice(0, 4).map((t) => `«${t}»`).join(', ')}${titles.length > 4 ? ', …' : ''})`);
+  }
   const included = goods.filter((l) => l.priceOutcome === 'included');
   const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null && l.priceOutcome !== 'included').concat(goods.filter((l) => l.price === null && l.priceOutcome === 'not_priced') as (KpLine & { price: number })[]).sort((a, b) => a.request_index - b.request_index);
   if (!lines.some((l) => l.price !== null)) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');

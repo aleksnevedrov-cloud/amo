@@ -1,6 +1,6 @@
 import type { KbPrice } from '@opt/kb';
 import { describe, expect, it } from 'vitest';
-import { explicitDoorRef, matchComponentDoor } from '../src/component-door.ts';
+import { componentGroupOf, explicitDoorRef, matchComponentDoor } from '../src/component-door.ts';
 import type { KpLine, KpPayload } from '../src/draft.ts';
 
 /** Строка двери прайса: только поля, которые читает сопоставление. */
@@ -71,5 +71,20 @@ describe('комплектующее — к какой двери заявки (
     const solo = line(20, 'Коробка', '', 1, 'component');
     expect(matchComponentDoor(payloadOf([solo]), solo, new Map())).toEqual({ kind: 'no_doors' });
     expect(matchComponentDoor(payloadOf([items[1] as KpLine, solo]), solo, rows)).toMatchObject({ kind: 'door', row: { productId: 'INT-013' }, reason: 'единственная дверь в заявке' });
+  });
+
+  it('группа похожих строк (KB-COMPONENT-DOOR-GROUP): вид + исполнение (телескоп, комплект, сэндвич, ДПК, МДФ, цвет), размер не учитывается', () => {
+    const g = (n: string) => componentGroupOf(n);
+    // 89813: шесть групп.
+    expect([g('Коробка ТЕЛЕСКОП, сэндвич 74×2150'), g('Коробка ТЕЛЕСКОП, сэндвич 74×2400'), g('Коробка ТЕЛЕСКОП сэндвич 92×2150 мм')].map((x) => x.key)).toEqual(['коробка|сэндвич|телескоп', 'коробка|сэндвич|телескоп', 'коробка|сэндвич|телескоп']);
+    expect(g('Коробка ТЕЛЕСКОП, сэндвич 74×2150')).toEqual({ key: 'коробка|сэндвич|телескоп', title: 'Коробка ТЕЛЕСКОП, сэндвич' });
+    expect(g('Коробка ТЕЛЕСКОП, ДПК 74×2150')).toEqual({ key: 'коробка|дпк|телескоп', title: 'Коробка ТЕЛЕСКОП, ДПК' });
+    expect(g('Наличник телескопический, МДФ 70×2150')).toEqual({ key: 'наличник|мдф|телескоп', title: 'Наличник телескопический, МДФ' });
+    expect(g('Наличник телескопический, ДПК 70×2200').key).toBe('наличник|дпк|телескоп');
+    expect(g('Добор телескопический, МДФ 100 мм').key).toBe(g('Добор телескопический, МДФ 150×2150').key);
+    expect(g('Добор телескопический, ДПК 100 мм').key).toBe('добор|дпк|телескоп');
+    // Комплект: «ком-т», «комплект», «к-т» — один признак; цвет разделяет группы.
+    expect(g('Наличник ком-т МДФ').key).toBe(g('Наличник комплект МДФ').key);
+    expect(g('Наличник МДФ белый').key).not.toBe(g('Наличник МДФ дуб').key);
   });
 });

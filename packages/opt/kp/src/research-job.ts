@@ -2,7 +2,7 @@ import type { JournalKind } from '@core/db';
 import { categoryMedian, componentKindOf, componentOfDoor, doorTitleOf, featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceModelOf, searchTokensOf, WEB_BAND, webPriceRealistic, type ComponentKind, type KbPrice, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
 import { lineCategory, NO_PRICE, tidyName, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
-import { doorComponentKind, matchComponentDoor } from './component-door.ts';
+import { doorComponentKind, matchComponentDoor, type ComponentDoorMatch } from './component-door.ts';
 import { cleanName, VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { manufacturerCoefficient, offerPrice, type OfferPrice } from './offer-price.ts';
 import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
@@ -377,7 +377,7 @@ export async function doorRowsOf(core: OptCore, accountId: number, payload: Part
 }
 
 /** Правка своей строки черновика с проверкой версии (как applyKbPriceToDraft): поля строки и пометки менеджеру по позиции. */
-async function patchLine(core: OptCore, accountId: number, draftId: number, requestIndex: number, patch: (l: KpLine) => KpLine, notes: string[]): Promise<KpLine> {
+async function patchLine(core: OptCore, accountId: number, draftId: number, requestIndex: number, patch: (l: KpLine) => KpLine, notes: string[] | null): Promise<KpLine> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const draft = await core.kp.byId(accountId, draftId);
     if (!draft) throw new Error(`черновик ${draftId} не найден`);
@@ -387,8 +387,9 @@ async function patchLine(core: OptCore, accountId: number, draftId: number, requ
     if (i < 0) throw new Error(`в черновике ${draftId} нет позиции ${requestIndex}`);
     const next = patch(items[i] as KpLine);
     items[i] = next;
-    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
-    for (const n of notes) needs.push({ request_index: requestIndex, reason: n });
+    // notes = null — пометки менеджеру по позиции не трогаются (уже записаны applyKbPriceToDraft).
+    const needs = notes === null ? (payload.needs_manager ?? []) : (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
+    for (const n of notes ?? []) needs.push({ request_index: requestIndex, reason: n });
     if (await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items, needs_manager: needs } as unknown as Record<string, unknown>)) return next;
   }
   throw new Error(`черновик ${draftId} меняется параллельно — позиция ${requestIndex} не записана`);
@@ -403,8 +404,19 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   const managerPrice = line.priceSource === 'manager' && line.price !== null && !job.replace;
   if (managerPrice) return { researchId: 0, status: 'ok', cached: true, price: line.price, keptManagerPrice: true, notes: [], fromKb: true };
   const doorRows = await doorRowsOf(core, accountId, payload);
-  const chosen = line.componentDoor !== null && line.componentDoor !== undefined ? (payload.items ?? []).find((l) => l.request_index === line.componentDoor && lineCategory(l) === 'door') ?? null : null;
-  const match = chosen ? ({ kind: 'door', door: chosen, row: doorRows.get(chosen.request_index) ?? null, reason: 'выбор менеджера' } as const) : matchComponentDoor(payload, line, doorRows);
+  const doorAt = (ri: number | null | undefined) => (ri === null || ri === undefined ? null : ((payload.items ?? []).find((l) => l.request_index === ri && lineCategory(l) === 'door') ?? null));
+  // Порядок (KB-COMPONENT-DOOR-GROUP): дверь, выбранная менеджером для этой строки («изменить дверь») → однозначное сопоставление
+  // (такие строки в группы не попадают) → ответ менеджера на группу похожих строк → вопрос группы.
+  const lineChoice = line.componentDoorBy === 'group' ? null : doorAt(line.componentDoor);
+  const auto = lineChoice ? null : matchComponentDoor(payload, line, doorRows);
+  const groupKey = auto?.kind === 'question' ? auto.question.group : null;
+  const groupDoor = groupKey ? doorAt(payload.componentDoorGroups?.[groupKey]) : null;
+  const match: ComponentDoorMatch = lineChoice
+    ? { kind: 'door', door: lineChoice, row: doorRows.get(lineChoice.request_index) ?? null, reason: 'выбор менеджера для этой строки' }
+    : groupDoor && auto?.kind === 'question'
+      ? { kind: 'door', door: groupDoor, row: doorRows.get(groupDoor.request_index) ?? null, reason: `ответ менеджера по группе «${auto.question.groupTitle}»` }
+      : (auto as ComponentDoorMatch);
+  const viaGroup = Boolean(groupDoor && !lineChoice && match.kind === 'door' && match.door === groupDoor);
   const journal = (summary: string, details: Record<string, unknown>) => core.journal.add({ accountId, leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: ${summary}`, details: { draftId, requestIndex, source: 'kb_component_door', componentKind: kind, webSearchCalls: 0, costUsd: 0, userId: job.userId, ...details } });
   if (match.kind === 'no_doors') {
     const note = `уточнить у менеджера: в заявке нет дверей — ${kind} не к чему привязать, цену из прайса другой двери агент не берёт`;
@@ -415,8 +427,8 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   if (match.kind === 'question') {
     const q = match.question;
     const variants = q.options.map((o) => `${o.productId ? `${o.productId} ` : ''}${o.model}${o.size ? ` ${o.size}` : ''} × ${o.qty.toLocaleString('ru-RU')}`).join('; ');
-    const note = `вопрос по комплектующему: ${q.text} ${q.reason === 'many' ? 'Подходит несколько дверей заявки' : 'Ни одна дверь заявки не подходит однозначно'}: ${variants}`;
-    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    const note = `вопрос по комплектующему: группа «${q.groupTitle}» — ${q.reason === 'many' ? 'подходит несколько дверей заявки' : 'ни одна дверь заявки не подходит однозначно'}: ${variants}; ответ — в блоке «Вопросы по комплектующим»`;
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q, componentDoorGroup: q.group, componentDoorBy: l.componentDoorBy === 'line' ? 'line' : null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
     await journal(`вопрос менеджеру — ${q.text} (вариантов ${q.options.length})`, { outcome: 'question', options: q.options });
     return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
   }
@@ -433,6 +445,8 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   const why = `по двери ${doorTitleOf(row)} (поз. ${door.request_index + 1}): ${match.reason}`;
   const withWhy: PriceHit = { ...hit, notes: [why, ...hit.notes] };
   await applyKbPriceToDraft(core, accountId, draftId, requestIndex, withWhy, true);
+  // Откуда дверь — для плитки («по группе …» / «для этой строки») и для «Найти цены»: строка группы следует за ответом группы.
+  await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, componentDoorBy: lineChoice ? 'line' : viaGroup ? 'group' : null, componentDoorGroup: viaGroup ? groupKey : null, componentDoor: lineChoice ? lineChoice.request_index : viaGroup ? (groupDoor as KpLine).request_index : null }), null);
   const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽`;
   await journal(`${priceText} ${hit.label}, веб-поиск не вызывался`, { outcome: hit.outcome ?? 'priced', kbPriceId: hit.row.id, price: hit.price, doorRequestIndex: door.request_index, doorProductId: row.productId, notes: withWhy.notes });
   return { researchId: 0, status: 'ok', cached: true, price: hit.price, keptManagerPrice: false, notes: withWhy.notes, fromKb: true };
