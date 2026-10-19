@@ -144,7 +144,7 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: 999_999 } })).statusCode).toBe(404);
   });
 
-  it('KB-COMPONENT-DOOR: добор к двери, оценённой по рынку (не из прайса), в интернете не ищется — «уточнить у менеджера», цены нет', async () => {
+  it('KB-COMPONENT-DOOR: добор к двери, оценённой по рынку (не подобрана в прайсе), в интернете не ищется — «уточнить у менеджера», цены нет', async () => {
     const d = (await ctx.deps.kp.byId(ACCOUNT_ID, draftId))!;
     const payload = d.payload as unknown as KpPayload;
     const dobor = { request_index: 2, page_id: null, name: 'Добор', size: '', qty: 2, price: null, lead_time: '', discount: 0, category: 'component' as const };
@@ -154,7 +154,7 @@ describe('поиск цен из черновика: кнопка «Найти �
     expect(g.searches()).toBe(before);
     const after = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
     expect(after.items[2]).toMatchObject({ price: null, priceOutcome: 'not_priced' });
-    expect(after.needsManager.filter((n: { request_index: number }) => n.request_index === 2).map((n: { reason: string }) => n.reason)).toEqual(['уточнить у менеджера: дверь «Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo» (поз. 1) не из прайса — цены на добор к ней в прайсе нет']);
+    expect(after.needsManager.filter((n: { request_index: number }) => n.request_index === 2).map((n: { reason: string }) => n.reason)).toEqual(['уточнить у менеджера: дверь «Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo» (поз. 1) не подобрана в прайсе — цены на добор к ней в прайсе нет']);
   });
 });
 

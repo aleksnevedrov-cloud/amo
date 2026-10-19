@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { colorOf, describeFeatures, featureKeyOf, featuresFromColumns, featuresFromModel, featuresOf, keysCompatible, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, priceModelOf } from '../src/features.ts';
+import { colorOf, describeFeatures, featureKeyOf, featuresFromColumns, featuresFromModel, featuresOf, keysCompatible, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, priceModelOf, withoutEdge } from '../src/features.ts';
+import { specialModelOf } from '../src/prices.ts';
 
 describe('признаки двери (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
   it('из текста позиции письма: тип, материал, Г/О, створки, порог, открывание, покрытие, доводчик, замок', () => {
@@ -87,5 +88,21 @@ describe('признаки двери (RFD-AI-AGENT-OPT-KB-MATCH)', () => {
     expect(priceModelOf({ model: 'ДВ CPL', coating: 'cpl' })).toBe('ДВ CPL');
     expect(priceModelOf({ model: 'ДПГ сота', coating: 'ламинат' })).toBe('ДПГ сота ламинат');
     expect(priceModelOf({ model: 'ДПГ сота', coating: null })).toBe('ДПГ сота');
+  });
+});
+
+describe('KB-DOOR-MATCH-2: кромка — не покрытие, особые исполнения', () => {
+  it('«кромка ПВХ 1 мм с 2-х сторон» не даёт покрытие ПВХ; ПВХ вне фразы про кромку — покрытие', () => {
+    expect(withoutEdge('ДПГ + УПД, сота; кромка ПВХ 1 мм с 2-х сторон').replace(/\s+/g, ' ').trim()).toBe('ДПГ + УПД, сота;');
+    expect(featuresOf('ДПГ + УПД, сота; кромка ПВХ 1 мм с 2-х сторон').coating ?? null).toBeNull();
+    expect(featuresOf('ДПГ + УПД, сота; кромкой ABS').coating ?? null).toBeNull();
+    expect(featuresOf('ДПГ усиленная ПВХ').coating).toBe('pvc');
+    expect(featuresOf('ДПГ ПВХ, кромка ПВХ').coating).toBe('pvc');
+  });
+
+  it('ДПГУЧ и Аква — особые модели, обычная ДПГ — нет', () => {
+    expect(specialModelOf('ДПГУЧ + УПД, сота')?.title).toBe('ДПГУЧ');
+    expect(specialModelOf('Аква 01 ПГ + УПД 600*2000*40 мм окут Белый ПВХ')?.title).toBe('Аква');
+    expect(specialModelOf('ДПГ + УПД, сота')).toBeNull();
   });
 });

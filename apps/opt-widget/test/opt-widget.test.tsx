@@ -316,7 +316,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const box = (i: number, size: string, qty: number): L => ({ request_index: i, page_id: null, name: `Коробка ТЕЛЕСКОП, сэндвич ${size}`, size: '', qty, price: null, lead_time: '', discount: 0, category: 'component', priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q(`К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич ${size}, ${qty} шт»?`) });
     const doors = [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013')];
     let items: L[] = [...doors, box(2, '74×2150', 20), box(3, '74×2400', 10), box(4, '92×2150', 7)];
-    const priced = (l: L, door: number, by: 'group' | 'line', price: number, label: string): L => ({ ...l, price, priceOutcome: price ? 'priced' : 'included', question: null, componentDoor: door, componentDoorBy: by, componentDoorGroup: by === 'group' ? 'коробка|сэндвич|телескоп' : null, priceLabel: label });
+    const priced = (l: L, door: number, by: 'group' | 'line', price: number | null, label: string): L => ({ ...l, price, priceOutcome: price ? 'priced' : 'included', question: null, componentDoor: door, componentDoorBy: by, componentDoorGroup: by === 'group' ? 'коробка|сэндвич|телескоп' : null, priceLabel: label });
     const posted: unknown[] = [];
     const { self } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': () => ({ draft: { ...draft, id: 66, items, needsManager: [] }, job: null }),
@@ -324,7 +324,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
         const b = JSON.parse(data ?? '{}') as { groupKey?: string; requestIndex?: number; doorRequestIndex: number };
         posted.push(b);
         if (b.groupKey) items = items.map((l) => (l.category === 'component' ? priced(l, b.doorRequestIndex, 'group', 1910, 'по двери INT-002, ДПГ усиленная') : l));
-        else items = items.map((l) => (l.request_index === b.requestIndex ? priced(l, b.doorRequestIndex, 'line', 0, 'по двери INT-013, ДПГ CPL') : l));
+        else items = items.map((l) => (l.request_index === b.requestIndex ? priced(l, b.doorRequestIndex, 'line', null, 'по двери INT-013, ДПГ CPL') : l));
         return { draft: { ...draft, id: 66, items, needsManager: [] }, applied: b.groupKey ? 3 : 1 };
       },
     });
@@ -359,6 +359,8 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(posted[1]).toEqual({ requestIndex: 3, doorRequestIndex: 1 });
     expect(text()).toContain('дверь: поз. 2 — выбрана для этой строки');
     expect(text().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(2);
+    // KB-DOOR-MATCH-2, п. 5: коробка входит в цену блока INT-013 — в поле цены подсказка, не 0.
+    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="входит в цену блока"]')].map((i) => i.value)).toEqual(['']);
   });
 
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {

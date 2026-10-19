@@ -609,7 +609,8 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind, o
                   Цена{priceSourceLabel(l) ? ` · ${priceSourceLabel(l)}` : ''}
                   {priceIsStale(l) && <span className="opt-kp-stale"> · цена устарела</span>}
                 </span>
-                <input type="number" min={0} value={l.price ?? ''} placeholder={service ? 'по замеру' : 'Нет цены'} onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
+                {/* KB-DOOR-MATCH-2, п. 5: «входит в цену блока» и «нет цены в прайсе» — подсказкой в поле, не 0 ₽. */}
+                <input type="number" min={0} value={l.priceOutcome === 'included' ? '' : (l.price ?? '')} placeholder={service ? 'по замеру' : l.priceOutcome === 'included' ? 'входит в цену блока' : l.priceOutcome === 'not_priced' ? 'уточнить у менеджера' : 'Нет цены'} onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
               </label>
               <label className="opt-kp-field opt-kp-field-discount">
                 <span className="opt-kp-label">Скидка</span>

@@ -95,15 +95,33 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   const included = goods.filter((l) => l.priceOutcome === 'included');
   const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null && l.priceOutcome !== 'included').concat(goods.filter((l) => l.price === null && l.priceOutcome === 'not_priced') as (KpLine & { price: number })[]).sort((a, b) => a.request_index - b.request_index);
   if (!lines.some((l) => l.price !== null)) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');
+  // KB-DOOR-MATCH-2, п. 5: «входит в цену блока» — под своей дверью: выбранной для комплектующего (componentDoor), дверью с этим ID
+  // товара (фурнитура, includedIn) или ближайшей дверью выше (как раньше).
+  const doorLines = lines.filter((d) => lineCategory(d) === 'door');
+  const doorOfIncluded = (c: KpLine): KpLine | null => {
+    if (c.componentDoor !== null && c.componentDoor !== undefined) {
+      const d = doorLines.find((x) => x.request_index === c.componentDoor);
+      if (d) return d;
+    }
+    if (c.includedIn) {
+      const d = doorLines.find((x) => x.productId === c.includedIn);
+      if (d) return d;
+    }
+    return [...doorLines].reverse().find((d) => d.request_index < c.request_index) ?? null;
+  };
+  const includedBy = new Map<number, KpLine[]>();
+  for (const c of included) {
+    const d = doorOfIncluded(c);
+    if (d) includedBy.set(d.request_index, [...(includedBy.get(d.request_index) ?? []), c]);
+  }
   const notesOf = (l: KpLine): string[] => {
     const own = l.quoteNotes ?? [];
     if (lineCategory(l) !== 'door') return own;
-    // Позиции группы этой двери (до следующей двери) со статусом «входит»: в цену блока — одной строкой; в комплект фурнитуры — своей.
-    const group = included.filter((c) => c.request_index > l.request_index && !lines.some((d) => lineCategory(d) === 'door' && d.request_index > l.request_index && d.request_index < c.request_index));
+    const group = includedBy.get(l.request_index) ?? [];
     const inBlock = group.filter((c) => !c.includedIn || c.includedIn === l.productId).map((c) => tidyName(c.name));
     const sets = new Map<string, string[]>();
     for (const c of group) if (c.includedIn && c.includedIn !== l.productId) sets.set(c.includedIn, [...(sets.get(c.includedIn) ?? []), tidyName(c.name)]);
-    return [...own, ...(inBlock.length ? [`В цену блока входит: ${inBlock.join(', ')}`] : []), ...[...sets].map(([set, names]) => `В составе комплекта «${set}»: ${names.join(', ')}`)];
+    return [...own, ...(inBlock.length ? [`В цену блока входит: ${[...new Set(inBlock)].join(', ')}`] : []), ...[...sets].map(([set, names]) => `В составе комплекта «${set}»: ${names.join(', ')}`)];
   };
 
   const kpNo = draft.kpNo ?? (await d.kp.nextNumber(accountId, input.now));

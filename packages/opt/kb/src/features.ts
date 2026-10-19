@@ -35,11 +35,18 @@ export const EMPTY_FEATURES: DoorFeatures = { type: null, material: null, glazin
 
 const norm = (s: string) => ` ${s.toLowerCase().replace(/ё/g, 'е').replace(/[«»"'()[\],;:/\\|—–+=#№%]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
 
+/** Текст без фразы про кромку («кромка ПВХ 1 мм с 2-х сторон»): кромка — обработка торца, не покрытие и не модель (KB-DOOR-MATCH-2). */
+export function withoutEdge(text: string): string {
+  return text.replace(/кромк[а-яё]*(?:\s+(?:пвх|abs|абс|меламин[а-яё]*|pvc))?[^,;|/]*/gi, ' ');
+}
+
 /** Признаки из свободного текста: название позиции в письме, строка прайса, сокращение по ГОСТ («ДВ 1Рп Г ПрБ», «ДПГ», «ДПО»). */
 export function featuresOf(text: string | null | undefined): DoorFeatures {
   const f: DoorFeatures = { ...EMPTY_FEATURES };
   if (!text) return f;
-  const t = norm(text);
+  // KB-DOOR-MATCH-2: «кромка ПВХ 1 мм с 2-х сторон» — обработка торца, не покрытие полотна («Кромка ПВХ не доказывает
+  // ПВХ-покрытие всего полотна», Задача_Клауду, стр. 29): фраза про кромку в признаки не идёт.
+  const t = norm(withoutEdge(text));
   // Тип: дверной блок (или «блок дверной», ДБ; по ГОСТ 475-2016 «ДВ …» / «ДН …» — блок внутренний / наружный) /
   // полотно (ДПГ, ДПО — дверное полотно глухое/остеклённое).
   if (/дверн\w* блок|блок дверн|\sдб\s|\sдб-|\sблок\s|\sд[вн]\s|\sд[вн]\d/.test(t)) f.type = 'block';

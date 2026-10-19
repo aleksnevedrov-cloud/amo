@@ -4,7 +4,7 @@ import { priceListTitleOf } from './price-key.ts';
 import { categoryOf, componentKindOf, type ComponentKind, type PositionCategory } from './category.ts';
 import type { BookDictionaryEntry, BookRule, BookSize, ComponentStatus, ProductCard, ProductStatus, Family, UnitBasis } from './price-book.ts';
 import { nonstandardBySizes } from './book-pricing.ts';
-import { colorOf, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
+import { colorOf, withoutEdge, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
 /** Куда писать: пул или клиент транзакции. */
@@ -509,13 +509,13 @@ export class KbAliasesRepo {
   }
 
   /** Каноническое название по ключу синонима (и наоборот: каноническое знает все свои синонимы). */
-  async resolve(accountId: number, key: string): Promise<{ canonical: string; canonicalKey: string; keys: string[] } | null> {
+  async resolve(accountId: number, key: string): Promise<{ canonical: string; canonicalKey: string; keys: string[]; productId: string | null } | null> {
     if (!key) return null;
     const { rows } = await this.db.query('SELECT * FROM kb_aliases WHERE account_id = $1 AND (alias_key = $2 OR canonical_key = $2) LIMIT 1', [accountId, key]);
     const hit = rows[0] ? mapAlias(rows[0]) : null;
     if (!hit) return null;
     const all = await this.db.query<{ alias_key: string }>('SELECT alias_key FROM kb_aliases WHERE account_id = $1 AND canonical_key = $2', [accountId, hit.canonicalKey]);
-    return { canonical: hit.canonical, canonicalKey: hit.canonicalKey, keys: [...new Set([hit.canonicalKey, ...all.rows.map((r) => r.alias_key)])] };
+    return { canonical: hit.canonical, canonicalKey: hit.canonicalKey, keys: [...new Set([hit.canonicalKey, ...all.rows.map((r) => r.alias_key)])], productId: hit.aliasKey === key ? hit.productId ?? null : null };
   }
 
   /**
@@ -575,11 +575,52 @@ export interface PriceQuery {
   estimate?: boolean;
   /** Основание размера в заявке (проём / полотно / блок / пара); расходится с прайсом — пересчёта нет, вопрос менеджеру. */
   sizeBasis?: UnitBasis | null;
+  /** KB-DOOR-MATCH-2: ID товара, уже выбранный для такой же строки заявки — одинаковые строки получают один ID. */
+  productId?: string | null;
+}
+
+/**
+ * Особые исполнения, которые нельзя заменять похожей моделью (Задача_Клауду, стр. 28: «ДПГУЧ 52 мм с обратной четвертью и
+ * АКВА 01 ПГ не заменять обычной ДПГ»): позиция с таким кодом подбирается только к строке прайса, где этот код есть.
+ */
+export const SPECIAL_MODELS: { code: RegExp; title: string }[] = [
+  { code: /дпгуч/, title: 'ДПГУЧ' },
+  { code: /аква/, title: 'Аква' },
+];
+export function specialModelOf(text: string): { code: RegExp; title: string } | null {
+  const t = text.toLowerCase().replace(/ё/g, 'е');
+  return SPECIAL_MODELS.find((m) => m.code.test(t)) ?? null;
+}
+
+/** Особое исполнение строки прайса двери: противопожарная, двустворчатая, влагостойкая (санузловая), раздвижная. */
+function specialOfRow(row: KbPrice): { fire: boolean; pair: boolean; wet: boolean; sliding: boolean } {
+  const rf = rowFeatures(row);
+  const t = ` ${[row.model, row.abbr, row.description, row.card?.comment ?? ''].filter(Boolean).join(' ').toLowerCase().replace(/ё/g, 'е')} `;
+  return {
+    fire: Boolean(rf.fire) || /(?<![a-zа-я])(ei|е|e)[\s-]?(15|30|45|60|90)(?![0-9])|противопож|огнестойк/.test(t),
+    pair: rf.leaves === 2 || row.card?.leafCount === 2 || /двухствор|двуствор|двупол|2 полотн/.test(t),
+    // «ДС» — санузловой блок только у межкомнатных; в металлическом прайсе ДС — «дверь стальная».
+    wet: /влагост|санузл/.test(t) || (familyOfRow(row) === 'interior' && /(?<![a-zа-я])дс(?![a-zа-я])/.test(` ${(row.abbr ?? '').toLowerCase()} `)),
+    sliding: /раздвиж|купе(?![a-zа-я])/.test(t),
+  };
+}
+
+/** То же по тексту позиции: особое исполнение подбирается, только если оно названо в заявке. */
+function specialOfQuery(text: string, qf: DoorFeatures): { fire: boolean; pair: boolean; wet: boolean; wetCode: boolean; sliding: boolean } {
+  const t = ` ${text.toLowerCase().replace(/ё/g, 'е')} `;
+  return {
+    fire: Boolean(qf.fire) || /(?<![a-zа-я])(ei|е|e)[\s-]?(15|30|45|60|90)(?![0-9])|противопож|огнестойк|(?<![a-zа-я])ддп/.test(t),
+    pair: qf.leaves === 2 || /двухствор|двуствор|двупол|2 полотн|две створ/.test(t),
+    wet: /влагост|санузл/.test(t),
+    // «ДС» в позиции — санузловой блок только для межкомнатных строк (см. specialOfRow).
+    wetCode: /(?<![a-zа-я])дс(?![a-zа-я])/.test(t),
+    sliding: /раздвиж|купе(?![a-zа-я])/.test(t),
+  };
 }
 
 export interface PriceHit {
   row: KbPrice;
-  /** Цена за единицу позиции после правил; null — только при outcome = not_priced (в прайсе цены нет, KB-HW-NULL). */
+  /** Цена за единицу позиции после правил; null — при outcome = not_priced (в прайсе цены нет) и included (входит в цену блока, не 0 ₽). */
   price: number | null;
   /** exact — модель и размер совпали; rules — правила нестандарта; area — пересчёт по площади; base — размер в прайсе не указан. */
   basis: 'exact' | 'rules' | 'area' | 'base';
@@ -605,6 +646,8 @@ export interface PriceHit {
   quoteNotes?: string[];
   /** outcome = included: ID двери, в цену блока которой входит позиция (или название комплекта — ставит вызывающий). */
   includedIn?: string | null;
+  /** KB-DOOR-MATCH-2: позиция одинаково подходит к нескольким моделям прайса — их ID; строка прайса (row) не выбрана. */
+  ambiguous?: string[];
 }
 
 export function validityDaysOf(row: Pick<KbPrice, 'origin' | 'sourceKind'>): number {
@@ -727,7 +770,9 @@ function keyMatch(row: KbPrice, key: string, alias: { keys: string[] } | null, i
  *     (слова › похожесть › общие слова) › размер (точный › правила нестандарта › площадь › базовая) › доверие ›
  *     близость площади › свежесть.
  */
-export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, q: PriceQuery, now = new Date()): Promise<PriceHit | null> {
+export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, query: PriceQuery, now = new Date()): Promise<PriceHit | null> {
+  // KB-DOOR-MATCH-2, п. 1: «кромка ПВХ …» не участвует ни в ключе модели, ни в словах, ни в признаках.
+  const q: PriceQuery = { ...query, name: withoutEdge(query.name).replace(/\s+/g, ' ').replace(/[\s,;|/]+$/, '').trim() || query.name, raw: query.raw ? withoutEdge(query.raw) : query.raw };
   const text = `${q.name} ${q.raw ?? ''}`;
   const key = modelKeyOf(q.name) || modelKeyOf(text);
   const qf = mergeFeatures(featuresOf(text), q.features);
@@ -738,7 +783,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const exactAlias = key ? await aliases.resolve(accountId, key) : null;
   const inText = exactAlias ? null : await aliases.resolveInText(accountId, tokensOf(key));
   const alias = exactAlias ?? inText;
-  const namedProductId = inText?.productId ?? null;
+  const namedProductId = q.productId ?? exactAlias?.productId ?? inText?.productId ?? null;
   // KB-PRICE-SHEETS: синоним или точный ключ из прайса ведёт в другую категорию (вкладка «Дополнения»: «Фрамуга» — фурнитура,
   // а по словам позиция считалась дверью) — категория позиции берётся из найденной строки.
   // Синоним с ID тарифа внутри названия («СПД40 … для алюминиевой двери» → OPT-012): позиция — фурнитура, а не дверь по умолчанию.
@@ -781,11 +826,22 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // обязательный признак: строка двери с другим покрытием в колонке прайса не подходит. Названная синонимом модель — вне этих правил.
   const qFamily = category === 'door' ? familyOfText(text) : null;
   const named = (row: KbPrice) => Boolean(namedProductId && row.productId === namedProductId);
+  // KB-DOOR-MATCH-2: противопожарная (EI / Е-30 / ДДП), двустворчатая, влагостойкая (санузловой блок ДС) и раздвижная строки прайса —
+  // только если это исполнение названо в позиции; код особого исполнения (ДПГУЧ, Аква) — только к строке, где он есть.
+  const qSpecial = category === 'door' ? specialOfQuery(text, qf) : null;
+  const special = category === 'door' ? specialModelOf(text) : null;
   const fits = (row: KbPrice) => {
     if (row.category !== 'door' || named(row)) return true;
     const rf = qFamily ? familyOfRow(row) : null;
     if (qFamily && rf && rf !== qFamily) return false;
     if (qf.coating && row.coating && rowFeatures(row).coating !== qf.coating) return false;
+    if (qSpecial) {
+      const rs = specialOfRow(row);
+      // В обе стороны: обычная позиция не берёт особое исполнение, позиция с особым исполнением — обычную строку.
+      const qWet = qSpecial.wet || (qSpecial.wetCode && familyOfRow(row) === 'interior');
+      if (rs.fire !== qSpecial.fire || rs.pair !== qSpecial.pair || rs.wet !== qWet || rs.sliding !== qSpecial.sliding) return false;
+    }
+    if (special && !special.code.test([row.model, row.abbr, ...row.altKeys].filter(Boolean).join(' ').toLowerCase().replace(/ё/g, 'е'))) return false;
     return true;
   };
   // Фурнитура «Для моделей»: при известной двери — только подходящая ей; без двери — любая, с пометкой.
@@ -844,6 +900,16 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const closeness = (r: KbPrice) => (area && r.widthMm && r.heightMm ? Math.abs(Math.log((r.widthMm * r.heightMm) / area)) : 1);
   const strongKey = (c: Candidate) => (c.match === 'exact' || c.match === 'alias' ? 0 : 1);
   // Модель прайса названа в заявке целиком («ДПГ сота с коробкой» = INT-008): такая строка выше подбора по признакам.
+  // Сколько слов модели строки прайса (без отделки и общих слов) есть в позиции: «ДПГ усиленная» в «ДПГ усиленная ПВХ» — 2, «ДПГ ПВХ» — 1.
+  const coverCache = new Map<number, number>();
+  const cover = (c: Candidate): number => {
+    const hit = coverCache.get(c.row.id);
+    if (hit !== undefined) return hit;
+    const mw = tokensOf(c.row.modelKey).filter((w) => !FINISH_WORDS.has(w) && !/^(cpl|пвх|шпон|экошпон|эмаль|мдф)$/.test(w));
+    const n = mw.filter((w) => itemTokens.has(w)).length;
+    coverCache.set(c.row.id, n);
+    return n;
+  };
   const namedModel = (c: Candidate) => (c.row.origin === 'price_list' && ((c.match === 'exact' && c.row.modelKey === key) || (c.match === 'alias' && named(c.row))) ? 0 : 1);
   // Цена строки по размеру: строки многолистового прайса — по сетке размеров модели и правилу файла; прочие — по правилам записи.
   const sizesCache = new Map<string, Promise<KbSize[]>>();
@@ -883,9 +949,12 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
         namedModel(a) - namedModel(b) ||
         Number(Boolean(b.features)) - Number(Boolean(a.features)) ||
         strongKey(a) - strongKey(b) ||
+        cover(b) - cover(a) ||
         (b.features?.score ?? 0) - (a.features?.score ?? 0) ||
         MATCH_RANK[a.match] - MATCH_RANK[b.match] ||
-        BASIS_RANK[a.applied.basis] - BASIS_RANK[b.applied.basis] ||
+        // У многолистового прайса размер — сетка одной модели, а не признак другой модели: одинаковые строки заявки разного
+        // размера не расходятся по разным ID (KB-DOOR-MATCH-2, п. 4).
+        (a.row.productId && b.row.productId ? 0 : BASIS_RANK[a.applied.basis] - BASIS_RANK[b.applied.basis]) ||
         b.words - a.words ||
         b.row.confidence - a.row.confidence ||
         closeness(a.row) - closeness(b.row) ||
@@ -895,6 +964,19 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
         b.row.validAt.getTime() - a.row.validAt.getTime(),
     );
   let best = ranked[0] as (typeof ranked)[number];
+  // KB-DOOR-MATCH-2, п. 2–3 (Задача_Клауду, стр. 17–18: «ДПГ и ДПО могут быть неоднозначны; при нескольких моделях уточнить
+  // различающий признак»): дверь не названа ни моделью, ни синонимом, а по признакам и словам одинаково подходят несколько
+  // моделей прайса — цену не ставим, спрашиваем менеджера; «первая подходящая» не берётся.
+  if (category === 'door' && best.row.origin === 'price_list' && best.row.productId && !named(best.row) && strongKey(best) !== 0 && namedModel(best) !== 0) {
+    const tie = (c: (typeof ranked)[number]) =>
+      c.row.origin === 'price_list' && Boolean(c.row.productId) && namedModel(c) === namedModel(best) && Boolean(c.features) === Boolean(best.features) && strongKey(c) === strongKey(best) && cover(c) === cover(best) && (c.features?.score ?? 0) === (best.features?.score ?? 0) && MATCH_RANK[c.match] === MATCH_RANK[best.match];
+    const models = [...new Map(ranked.filter(tie).map((c) => [c.row.productId as string, c.row])).values()];
+    if (models.length >= 2) {
+      const list = models.slice(0, 5).map((r) => `${r.productId} «${r.model}»`).join(', ');
+      const note = `уточнить у менеджера: «${q.name.trim()}» подходит к нескольким моделям прайса: ${list}${models.length > 5 ? ` и ещё ${models.length - 5}` : ''} — нужен различающий признак (модель, покрытие, исполнение)`;
+      return { row: best.row, price: null, basis: 'base', match: best.match, similarity: best.similarity, confidence: best.row.confidence, stale: false, validityDays: validityDaysOf(best.row), notes: [note], label: 'несколько моделей в прайсе', features: null, outcome: 'not_priced', quoteNotes: [], includedIn: null, ambiguous: models.map((r) => r.productId as string) };
+    }
+  }
   // KB-MULTIPRICE, п. 3: одинаково подходящие строки в двух прайсах-файлах — берётся более свежая, менеджеру пометка.
   const twoLists: string[] = [];
   if (best.row.origin === 'price_list') {
@@ -951,7 +1033,8 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   let includedIn: string | null = null;
   if (best.row.category === 'hardware' && door && hardwareIncluded(best.row, door)) {
     outcome = 'included';
-    price = 0;
+    // KB-DOOR-MATCH-2, п. 5: «входит в цену блока» — без цены, не 0 ₽.
+    price = null;
     includedIn = door.productId ?? door.model;
     notes.push(`${best.row.model} входит в цену блока ${door.model}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`);
   } else if (price === null || price <= 0) {
@@ -1004,7 +1087,7 @@ export async function componentOfDoor(prices: KbPricesRepo, accountId: number, d
 function doorOutcome(door: KbPrice, outcome: 'included' | 'not_priced', notes: string[], now: Date): PriceHit {
   const validityDays = validityDaysOf(door);
   const where = door.sourceRow ? ` (строка ${door.sourceRow})` : '';
-  return { row: door, price: outcome === 'included' ? 0 : null, basis: 'base', match: 'exact', similarity: 1, confidence: door.confidence, stale: now.getTime() - door.validAt.getTime() > validityDays * 86_400_000, validityDays, notes, label: `по прайсу: ${door.model}${where}`, features: null, outcome, quoteNotes: [], includedIn: outcome === 'included' ? door.productId ?? door.model : null };
+  return { row: door, price: null, basis: 'base', match: 'exact', similarity: 1, confidence: door.confidence, stale: now.getTime() - door.validAt.getTime() > validityDays * 86_400_000, validityDays, notes, label: `по прайсу: ${door.model}${where}`, features: null, outcome, quoteNotes: [], includedIn: outcome === 'included' ? door.productId ?? door.model : null };
 }
 
 /** Фурнитура уже в базе двери: тариф или название упомянуты в «Входит в базу» / комментарии / комплектации двери (ALU-005 — фрамуга, MET-012 — вентиляция). */
