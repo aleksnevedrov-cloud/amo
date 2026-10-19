@@ -224,7 +224,7 @@ export function summaryText(sum: ReturnType<typeof pricesSummary>): string {
   const pl = lists.length
     ? `${lists.length === 1 ? 'Прайс' : 'Прайсы'}: ${lists.map((l) => `${l.title} — ${l.count} ${plural(l.count, 'цена', 'цены', 'цен')}${l.validAt ? ` (${dayMonth(l.validAt)})` : ''}`).join(' · ')}`
     : 'Прайс не загружен';
-  return `${pl}  |  веб-цены: ${sum.web}  |  правки менеджера: ${sum.manager}`;
+  return `${pl}  |  веб-цены: ${sum.web}  |  правки менеджера: ${sum.manager}${sum.web + sum.manager ? ' (в КП не используются)' : ''}`;
 }
 
 /**
@@ -241,24 +241,7 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
   const [page, setPage] = useState(0);
   // Фильтр вкладки «Прайс» по файлу (KB-MULTIPRICE): '' — все прайсы.
   const [list, setList] = useState('');
-  const [model, setModel] = useState('');
-  const [size, setSize] = useState('');
-  const [price, setPrice] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
-  const add = async () => {
-    const m = /(\d{3,4})\s*[×x*хХ]\s*(\d{3,4})/.exec(size);
-    try {
-      await api.kbAddPrice({ model: model.trim(), widthMm: m ? Math.min(Number(m[1]), Number(m[2])) : null, heightMm: m ? Math.max(Number(m[1]), Number(m[2])) : null, price: priceNumber(price), origin: 'manager', validAt: today() });
-      setModel('');
-      setSize('');
-      setPrice('');
-      setMsg('Цена записана (доверие 90)');
-      setTab('manager');
-      reload();
-    } catch (e) {
-      setMsg(errorMessage(e));
-    }
-  };
   const remove = async (p: KbPriceInfo) => {
     if (!window.confirm(`Удалить цену «${p.model}${p.baseSize ? ` ${p.baseSize}` : ''}» — ${rub(p.price)}?`)) return;
     try {
@@ -307,7 +290,7 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
       {msg && <div style={{ ...s.muted, ...s.small, marginBottom: 6 }}>{msg}</div>}
       {open && state.status === 'ready' && (
         <div className="opt-kb-prices-table">
-          <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>Агент берёт цену отсюда до веб-поиска: прайс › правка менеджера › веб; точное совпадение модели и размера, иначе базовая цена × правила нестандарта.</div>
+          <div style={{ ...s.small, ...s.muted, marginBottom: 6 }}>В КП идут только цены прайса: точное совпадение модели и размера, иначе базовая цена × правила нестандарта; строки прайса нет — «уточнить у менеджера». Веб-цены и правки менеджера хранятся для справки, в КП не используются — их можно удалить.</div>
           <div style={{ ...s.row, marginBottom: 6 }}>
             {(['price_list', 'web', 'manager'] as PriceTab[]).map((t) => (
               <button key={t} type="button" className={`opt-kb-prices-tab${t === tab ? ' opt-kb-prices-tab-active' : ''}`} style={{ ...s.buttonGhost, ...(t === tab ? { fontWeight: 600, borderColor: '#1f6feb' } : {}) }} onClick={() => pick(t)}>
@@ -340,7 +323,7 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
               }}
             />
           </div>
-          {filtered.length === 0 && <div style={s.muted}>{items.length === 0 ? 'Цен пока нет — загрузите xlsx-прайс во вкладке или добавьте правку руками' : needle ? 'По запросу ничего не найдено' : tab === 'price_list' ? 'Прайс не загружен' : tab === 'web' ? 'Веб-цен ещё нет' : 'Правок менеджера нет'}</div>}
+          {filtered.length === 0 && <div style={s.muted}>{items.length === 0 ? 'Цен пока нет — загрузите xlsx-прайс во вкладке' : needle ? 'По запросу ничего не найдено' : tab === 'price_list' ? 'Прайс не загружен' : tab === 'web' ? 'Веб-цен ещё нет' : 'Правок менеджера нет'}</div>}
           {filtered.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
@@ -380,12 +363,6 @@ export function PricesSection({ api, version = 0 }: { api: KpApi; version?: numb
               <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>→</button>
             </div>
           )}
-          <div style={{ ...s.row, marginTop: 8 }}>
-            <input style={{ ...s.input, maxWidth: 220 }} placeholder="Модель" value={model} onChange={(e) => setModel(e.target.value)} />
-            <input style={{ ...s.input, maxWidth: 110 }} placeholder="800×2000" value={size} onChange={(e) => setSize(e.target.value)} />
-            <input style={{ ...s.input, maxWidth: 110 }} placeholder="цена, ₽" value={price} onChange={(e) => setPrice(e.target.value)} />
-            <button type="button" style={s.buttonGhost} disabled={!model.trim() || !priceNumber(price)} onClick={() => void add()}>Добавить цену</button>
-          </div>
         </div>
       )}
     </div>
@@ -464,6 +441,5 @@ export function downloadBase64(base64: string, name: string, mime = 'application
 }
 
 /** «4 100,50» → 4100.5; не число — 0. */
-const priceNumber = (raw: string) => Number(raw.replace(/[\s\u00a0₽]/g, '').replace(',', '.')) || 0;
 
 const td = { padding: '4px 6px', borderBottom: '1px solid #f0f3f5', verticalAlign: 'top' } as const;

@@ -2,8 +2,8 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
-import { categoryOf, sizeOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { categoryOf } from '@opt/kb';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -76,7 +76,7 @@ const linesSchema = z.object({
     .max(200),
 });
 
-/** Кнопка «Найти цены»: все позиции без цены или явный список; force — «искать заново» мимо кэша. */
+/** Кнопка «Найти цены»: все позиции без цены или явный список; force — прежний флаг веб-поиска, не используется (KB-WEB-ROWS). */
 const researchBody = z.object({
   draftId: z.coerce.number().int().positive(),
   requestIndexes: z.union([z.literal('all'), z.array(z.number().int().min(0)).max(200)]).default('all'),
@@ -126,6 +126,39 @@ async function refreshDraftCategories(deps: Deps, accountId: number, draft: KpDr
   const fresh = { ...payload, items: next, request_items: requestItems.map((it, i) => (it.category || !items.some((l) => l.request_index === i) ? it : { ...it, category: next.find((l) => l.request_index === i)?.category })) };
   await deps.kp.setPayload(draft.id, fresh as unknown as Record<string, unknown>);
   return { payload: fresh, changed };
+}
+
+/**
+ * KB-WEB-ROWS: цена позиции не из прайса — из интернета (по рынку / по аналогу) или из строки базы знаний, которая не строка
+ * прайса (веб-поиск, правка менеджера, закупка), — снимается: «уточнить у менеджера», без цены, в итог не идёт. Ручная цена
+ * менеджера в этом черновике (priceSource = manager) остаётся. Строки базы не удаляются.
+ */
+export async function dropNonPriceListPrices(deps: Deps, accountId: number, draft: KpDraft): Promise<number> {
+  const payload = draft.payload as unknown as Partial<KpPayload>;
+  const items = payload.items ?? [];
+  const foreign = new Set<number>();
+  for (const l of items) {
+    if (l.price === null && l.priceOutcome !== 'included') continue;
+    if (l.priceSource === 'research' || l.priceSource === 'analog') foreign.add(l.request_index);
+    else if (l.priceSource === 'kb' && l.kbPriceId) {
+      const row = await deps.kb.prices.byId(accountId, l.kbPriceId);
+      if (row && row.origin !== 'price_list') foreign.add(l.request_index);
+    }
+  }
+  if (!foreign.size) return 0;
+  const next = items.map((l): KpLine => {
+    if (!foreign.has(l.request_index)) return l;
+    const rest: KpLine = { ...l };
+    delete rest.coefficient;
+    return { ...rest, price: null, priceSource: 'kb', priceLabel: 'цена не из прайса', priceOutcome: 'not_priced', priceStale: false, kbPriceId: null, productId: null, priceModel: null, equipment: null, priceAbbr: null, market: null, includedIn: null };
+  });
+  const needs = (payload.needs_manager ?? []).filter((n) => !(foreign.has(n.request_index) && ownNote(n.reason)));
+  for (const l of items.filter((x) => foreign.has(x.request_index))) {
+    needs.push({ request_index: l.request_index, reason: `уточнить у менеджера: цена «${l.name}» была взята не из прайса (${l.priceLabel ?? 'из интернета'}) — в КП не идёт; в прайсе позиции нет — введите цену вручную` });
+  }
+  await deps.kp.setPayload(draft.id, { ...payload, items: next, needs_manager: needs } as unknown as Record<string, unknown>);
+  await deps.journal.add({ accountId, leadId: draft.leadId, kind: 'note', summary: `Цены не из прайса сняты: ${foreign.size} поз. (из интернета или из базы не по прайсу) — «уточнить у менеджера»`, details: { draftId: draft.id, requestIndexes: [...foreign] } });
+  return foreign.size;
 }
 
 export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal, requireAdmin: RequireAdmin) {
@@ -267,27 +300,16 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (d.status !== 'draft' && d.status !== 'built') return reply.code(409).send({ error: 'locked' });
     // Цена, которую менеджер поменял руками, становится ручной: автозаполнение её не затирает (этап 5, 9.3).
     const before = (d.payload as unknown as Partial<KpPayload>).items ?? [];
-    const requestItems = (d.payload as unknown as Partial<KpPayload>).request_items ?? [];
-    const manual: KpLine[] = [];
     const items = (b.data.items as KpLine[]).map((l) => {
       const prev = before.find((x) => x.request_index === l.request_index);
       const changed = l.price !== (prev?.price ?? null);
       if (changed && l.price !== null) {
-        manual.push(l);
         return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null } as KpLine;
       }
       return { ...prev, ...l, priceSource: l.priceSource ?? prev?.priceSource } as KpLine;
     });
     await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
-    // Правка менеджера — в базу знаний с доверием 90 (RFD-AI-AGENT-OPT-KB): следующая заявка с этой моделью возьмёт её без поиска.
-    for (const l of manual) {
-      if (l.kind === 'service' || l.price === null) continue;
-      const ri = requestItems[l.request_index];
-      const size = ri?.width_mm && ri?.height_mm ? { widthMm: Math.min(ri.width_mm, ri.height_mm), heightMm: Math.max(ri.width_mm, ri.height_mm) } : sizeOf(`${l.size} ${l.name}`);
-      await deps.kb.prices
-        .upsert({ accountId: p.accountId, model: l.name, widthMm: size?.widthMm ?? null, heightMm: size?.heightMm ?? null, price: l.price, origin: 'manager', createdBy: p.userId, note: `черновик ${id}, сделка ${d.leadId}` })
-        .catch((err: Error) => req.log.warn({ err: err.message }, 'kb: цена менеджера не записана'));
-    }
+    // KB-WEB-ROWS: правка менеджера остаётся в этом черновике и в базу знаний не пишется — цены других КП только из прайсов.
     const fresh = await repo.byId(p.accountId, id);
     return { draft: fresh ? view(fresh) : null };
   });
@@ -304,10 +326,11 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const draft = await repo.byId(p.accountId, b.data.draftId);
     if (!draft) return reply.code(404).send({ error: 'not_found' });
     if (draft.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
-    if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
+    // KB-WEB-ROWS: цена только из прайса — модель и веб-поиск не нужны; цены из интернета и строк базы не из прайса снимаются.
+    await dropNonPriceListPrices(deps, p.accountId, draft);
     // KB-PRICE-SHEETS-FIX, п. 6: черновик, собранный до загрузки прайса, не знает категорий и ID — перед поиском категория
     // позиций ставится по названию заново, ID двери, которого в базе больше нет, снимается (контекст подберётся по свежему прайсу).
-    const refreshed = await refreshDraftCategories(deps, p.accountId, draft);
+    const refreshed = await refreshDraftCategories(deps, p.accountId, (await repo.byId(p.accountId, draft.id)) ?? draft);
     const payload = refreshed.payload;
     // KB-COMPONENTS, п. 6: «Найти цены» по всем — все позиции без цены за одно нажатие, в очередь порциями по 20 подряд
     // (лимит maxPositionsPerRun остаётся для автопоиска при сборке); работы не ставятся.
@@ -316,7 +339,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const batches: number[][] = [];
     for (let i = 0; i < positions.length; i += RESEARCH_BATCH) batches.push(positions.slice(i, i + RESEARCH_BATCH));
     for (const [n, batch] of batches.entries()) {
-      await deps.researchQueue.enqueue(batch.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: b.data.force, replace: b.data.requestIndexes !== 'all', batch: n + 1, batches: batches.length })));
+      await deps.researchQueue.enqueue(batch.map((requestIndex) => ({ accountId: p.accountId, draftId: draft.id, requestIndex, userId: p.userId, force: false, replace: b.data.requestIndexes !== 'all', batch: n + 1, batches: batches.length })));
     }
     if (positions.length > RESEARCH_BATCH) await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'note', summary: `Поиск цен: поставлено позиций ${positions.length} порциями по ${RESEARCH_BATCH} (${batches.length})`, details: { draftId: draft.id, positions: positions.length, batches: batches.length, userId: p.userId } });
     return reply.code(202).send({ queued: positions, total: positions.length, batches: batches.length, ...(refreshed.changed ? { categoriesRefreshed: refreshed.changed } : {}) });
@@ -366,6 +389,9 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     const b = draftBody.safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body' });
     try {
+      // KB-WEB-ROWS: в документ — только цены прайса и ручные цены менеджера.
+      const before = await repo.byId(p.accountId, b.data.draftId);
+      if (before && before.status === 'draft') await dropNonPriceListPrices(deps, p.accountId, before);
       const r = await buildDraftDocument(deps, { accountId: p.accountId, draftId: b.data.draftId, userId: p.userId });
       return { draft: view(r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })) };
     } catch (err) {

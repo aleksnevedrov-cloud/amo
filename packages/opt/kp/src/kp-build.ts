@@ -81,7 +81,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   // KB-COMPONENTS, п. 5: работы (монтаж, врезка, доставка) в таблицу и итог не входят — под таблицей фраза о расчёте после замера.
   // KB-HW-NULL: строка из базы с ценой 0, которая не «входит в блок» (черновик искал цену, когда тариф без цены хранился как 0,00), —
   // это «в прайсе цены нет»: в таблице «уточнить у менеджера», не 0 ₽, в итог не входит.
-  const goods = (payload.items ?? []).filter((l) => !isServiceLine(l)).map((l) => (l.priceSource === 'kb' && l.price === 0 && l.priceOutcome !== 'included' ? { ...l, price: null, priceOutcome: 'not_priced' as const } : l));
+  // KB-WEB-ROWS: цена из интернета (по рынку / по аналогу) от прежнего поиска в документ не идёт — «уточнить у менеджера».
+  const webPrice = (l: KpLine) => l.priceSource === 'research' || l.priceSource === 'analog';
+  const goods = (payload.items ?? []).filter((l) => !isServiceLine(l)).map((l) => ((l.priceSource === 'kb' && l.price === 0 && l.priceOutcome !== 'included') || (webPrice(l) && l.price !== null) ? { ...l, price: null, priceOutcome: 'not_priced' as const } : l));
   const hasServices = (payload.items ?? []).length > goods.length;
   // KB-PRICE-SHEETS: «входит в цену блока» — не строка таблицы, а примечание под ближайшей дверью выше; «в прайсе цены нет» —
   // строка с «уточнить у менеджера» вместо цены, в итог не входит.

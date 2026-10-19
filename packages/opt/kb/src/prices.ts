@@ -4,7 +4,7 @@ import { priceListTitleOf } from './price-key.ts';
 import { categoryOf, componentKindOf, type ComponentKind, type PositionCategory } from './category.ts';
 import type { BookDictionaryEntry, BookRule, BookSize, ComponentStatus, ProductCard, ProductStatus, Family, UnitBasis } from './price-book.ts';
 import { nonstandardBySizes } from './book-pricing.ts';
-import { colorOf, withoutEdge, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, webPriceRealistic, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
+import { colorOf, withoutEdge, describeFeatures, featureKeyOf, featuresOf, hasFeatures, matchFeatures, mergeFeatures, priceListMedian, type DoorFeatures, type FeatureKey, type FeatureMatch } from './features.ts';
 import { leavesOf, modelKeyOf, searchTokensOf, sizeLabel, sizeOf, tokensOf } from './model-key.ts';
 
 /** Куда писать: пул или клиент транзакции. */
@@ -811,7 +811,9 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const banDoorBound = category === 'component' && !door;
   const keys = key ? (alias ? [key, ...alias.keys] : [key]) : [];
   const queryTokens = searchTokensOf(q.name, q.raw);
-  const found = (keys.length ? await prices.candidates(accountId, keys, queryTokens) : []).filter((f) => sameCategory(f.row));
+  // KB-WEB-ROWS: цена в КП — только из прайсов. Строки базы из веб-поиска, правок менеджера и закупки остаются в базе,
+  // но в подбор не идут: без строки прайса позиция — «уточнить у менеджера».
+  const found = (keys.length ? await prices.candidates(accountId, keys, queryTokens) : []).filter((f) => f.row.origin === 'price_list' && sameCategory(f.row));
   const priceList = (await prices.listByOrigin(accountId, 'price_list')).filter(sameCategory);
   const cands: Candidate[] = [];
   const seen = new Set<number>();
@@ -889,11 +891,8 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // Комплектующее к известной двери: строки её модели («Коробка (ДВ CPL)») в приоритете перед остальными (п. 6 задания).
   const own = door && category === 'component' ? cands.filter((c) => c.row.productId === door.productId) : [];
   const pool = own.length ? own : cands;
-  // Порядок источников; веб-цены сверяются с медианой прайса по группе позиции (KB-COMPONENTS: внутри категории).
-  const median = categoryMedian(priceList, { category, features: qf, componentKind, tokens: queryTokens });
-  const realistic = (c: Candidate) => c.row.origin !== 'web' || (hasPrice(c.row) && webPriceRealistic(c.row.price, median));
-  const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => pool.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
-  if (!group) return null;
+  const group = pool.filter((c) => c.row.origin === 'price_list');
+  if (!group.length) return null;
   const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4, features: 5 };
   const BASIS_RANK: Record<PriceHit['basis'], number> = { exact: 0, rules: 1, area: 2, base: 3 };
   const area = size.widthMm && size.heightMm ? size.widthMm * size.heightMm : null;
