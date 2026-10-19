@@ -1,0 +1,6 @@
+{
+  "deal": 89838,
+  "leadId": null,
+  "source": "missing",
+  "note": "файлов сделки в репозитории нет — выгрузить командой flow-export на сервере (см. README.md)"
+}

@@ -23,6 +23,14 @@ export interface AmoMock {
   /** Письмо-примечание в сделке; null — писем нет. */
   mail: Record<string, unknown> | null;
   files: unknown[];
+  /** Содержимое файлов сделки по uuid (скачивание по ссылке из карточки файла). */
+  blobs?: Record<string, { bytes: Uint8Array; mime: string }>;
+}
+
+/** Файл сделки для AmoMock.files и его содержимое для AmoMock.blobs (эталонный набор KP-AGENT-V2). */
+export function leadFile(mock: AmoMock, uuid: string, name: string, bytes: Uint8Array, mime: string) {
+  mock.files.push({ file_uuid: uuid, file: { uuid, name, size: bytes.byteLength, metadata: { mime_type: mime }, _links: { download: { href: `https://drive-b.amocrm.ru/download/${uuid}` } } } });
+  mock.blobs = { ...(mock.blobs ?? {}), [uuid]: { bytes, mime } };
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -45,6 +53,10 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/files`) && method === 'PUT') return json(200, {});
     if (url.includes(`/api/v4/leads/${LEAD_ID}`)) return json(200, { id: LEAD_ID, name: 'Двери для офиса', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
     if (url.endsWith('/api/v4/contacts/77')) return json(200, { id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }] });
+    if (url.startsWith('https://drive-b.amocrm.ru/download/')) {
+      const blob = mock.blobs?.[url.slice('https://drive-b.amocrm.ru/download/'.length)];
+      return blob ? new Response(blob.bytes, { status: 200, headers: { 'content-type': blob.mime } }) : json(404, {});
+    }
     if (url === 'https://drive-b.amocrm.ru/v1.0/sessions' && method === 'POST') return json(200, { upload_url: 'https://upload.amocrm.ru/part/1', max_part_size: 10_000_000 });
     if (url.startsWith('https://upload.amocrm.ru/')) return json(200, { uuid: 'file-uuid-1' });
     return json(404, {});
