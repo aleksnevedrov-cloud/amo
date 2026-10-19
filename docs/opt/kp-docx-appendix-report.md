@@ -1,6 +1,6 @@
 # KP-DOCX-APPENDIX: спецификация из Word-файла ТЗ — таблицей, построчно
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после 865b248). Сервер (`@opt/kp`) и виджет 1.2.8.
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `5d0b209` (после 865b248). Сервер (`@opt/kp`) и виджет 1.2.8.
 Миграций нет. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 Файл задания «Задание-Коду-KP-DOCX-APPENDIX.md» до Кода не дошёл. Сделано по описанию в сообщении. Файла
@@ -42,7 +42,7 @@ typecheck — чистый; eslint — те же 9 старых ошибок в 
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 5d0b209
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграций нет
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
 ```
