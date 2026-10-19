@@ -429,5 +429,12 @@ describe('категории: комплектующие, фурнитура, р
     expect(await prices.backfillCategories()).toBe(1);
     expect((await prices.byId(ACC, web))).toMatchObject({ category: 'component', componentKind: 'добор' });
     expect(await prices.backfillCategories()).toBe(0);
+    // KB-HW-NULL-2: категория, заданная импортом явно, пересчётом при старте не меняется («СПД40 … для алюминиевой двери» по словам — дверь).
+    const tariff = await prices.upsert({ accountId: ACC, model: 'СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери', price: null, origin: 'price_list', category: 'hardware', tariffId: 'OPT-012', productId: 'OPT-012' });
+    expect(await prices.backfillCategories()).toBe(0);
+    expect(await prices.byId(ACC, tariff)).toMatchObject({ category: 'hardware', productId: 'OPT-012', tariffId: 'OPT-012', price: null });
+    // Повторная запись той же строки без категории (как у веб-цен) категорию из импорта не затирает.
+    await prices.upsert({ accountId: ACC, model: 'СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери', price: null, origin: 'price_list', tariffId: 'OPT-012', productId: 'OPT-012' });
+    expect((await prices.byId(ACC, tariff))?.category).toBe('hardware');
   });
 });

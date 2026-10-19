@@ -201,10 +201,10 @@ export class KbPricesRepo {
     // Категория (KB-COMPONENTS): явная или по тексту модели; вид комплектующего — по модели.
     const category: PositionCategory = p.category ?? categoryOf([p.model, abbr].filter(Boolean).join(' '));
     const componentKind = p.componentKind ?? (category === 'component' ? componentKindOf(p.model) : null);
-    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null, category, componentKind, p.productId ?? null, p.tariffId ?? null, p.status ?? 'active', Boolean(p.estimate), p.family ?? null, p.appliesTo ?? [], p.componentStatus ? JSON.stringify(p.componentStatus) : null, p.card ? JSON.stringify(p.card) : null];
+    const params = [p.accountId, p.sourceId ?? null, p.model.trim().slice(0, 300), modelKey, p.factory?.trim() || null, p.unit ?? 'шт', sizeLabel(width, height), width, height, p.price, p.vat ?? 'unknown', p.validAt ?? new Date(), p.confidence ?? DEFAULT_CONFIDENCE[p.origin], p.origin, JSON.stringify(p.nonstandard ?? {}), p.url ?? null, p.note ?? null, p.createdBy ?? null, abbr, description, altKeys, searchTokens, p.sourceRow ?? null, JSON.stringify(features), featureKeyOf(features), p.coating?.trim().slice(0, 300) || null, p.equipment?.trim().slice(0, 1000) || null, category, componentKind, p.productId ?? null, p.tariffId ?? null, p.status ?? 'active', Boolean(p.estimate), p.family ?? null, p.appliesTo ?? [], p.componentStatus ? JSON.stringify(p.componentStatus) : null, p.card ? JSON.stringify(p.card) : null, p.category !== undefined && p.category !== null];
     const { rows } = await q.query<{ id: string }>(
-      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind, product_id, tariff_id, status, estimate, family, applies_to, component_status, card)
-       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text, $30::text, $31::text, $32::text, $33::boolean, $34::text, $35::text[], $36::jsonb, $37::jsonb
+      `INSERT INTO kb_prices (account_id, source_id, model, model_key, factory, unit, base_size, width_mm, height_mm, price, vat, valid_at, confidence, origin, nonstandard, url, note, created_by, abbr, description, alt_keys, search_tokens, source_row, features, feature_key, coating, equipment, category, component_kind, product_id, tariff_id, status, estimate, family, applies_to, component_status, card, category_fixed)
+       SELECT $1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text, $7::text, $8::int, $9::int, $10::numeric, $11::text, $12::date, $13::int, $14::text, $15::jsonb, $16::text, $17::text, $18::bigint, $19::text, $20::text, $21::text[], $22::text[], $23::int, $24::jsonb, $25::text, $26::text, $27::text, $28::text, $29::text, $30::text, $31::text, $32::text, $33::boolean, $34::text, $35::text[], $36::jsonb, $37::jsonb, $38::boolean
        WHERE NOT EXISTS (SELECT 1 FROM kb_prices WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0) AND coalesce(product_id, '') = coalesce($30::text, '') AND coalesce(tariff_id, '') = coalesce($31::text, ''))
        RETURNING id`,
       params,
@@ -212,7 +212,7 @@ export class KbPricesRepo {
     if (rows[0]) return Number(rows[0].id);
     const upd = await q.query<{ id: string }>(
       `UPDATE kb_prices SET model = $3::text, factory = COALESCE($5::text, factory), unit = $6::text, width_mm = $8::int, height_mm = $9::int, price = $10::numeric, vat = $11::text, valid_at = $12::date, confidence = $13::int, nonstandard = $15::jsonb, url = COALESCE($16::text, url), note = COALESCE($17::text, note), created_by = COALESCE($18::bigint, created_by),
-               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = $28::text, component_kind = $29::text, product_id = $30::text, tariff_id = $31::text, status = $32::text, estimate = $33::boolean, family = $34::text, applies_to = $35::text[], component_status = $36::jsonb, card = $37::jsonb, updated_at = now()
+               abbr = COALESCE($19::text, abbr), description = COALESCE($20::text, description), alt_keys = CASE WHEN cardinality($21::text[]) > 0 THEN $21::text[] ELSE alt_keys END, search_tokens = $22::text[], source_row = COALESCE($23::int, source_row), features = $24::jsonb, feature_key = $25::text, coating = COALESCE($26::text, coating), equipment = COALESCE($27::text, equipment), category = CASE WHEN $38::boolean OR NOT category_fixed THEN $28::text ELSE category END, component_kind = CASE WHEN $38::boolean OR NOT category_fixed THEN $29::text ELSE component_kind END, category_fixed = category_fixed OR $38::boolean, product_id = $30::text, tariff_id = $31::text, status = $32::text, estimate = $33::boolean, family = $34::text, applies_to = $35::text[], component_status = $36::jsonb, card = $37::jsonb, updated_at = now()
         WHERE account_id = $1::bigint AND model_key = $4::text AND coalesce(base_size, '') = coalesce($7::text, '') AND origin = $14::text AND coalesce(source_id, 0) = coalesce($2::bigint, 0) AND coalesce(product_id, '') = coalesce($30::text, '') AND coalesce(tariff_id, '') = coalesce($31::text, '')
         RETURNING id`,
       params,
@@ -359,6 +359,12 @@ export class KbPricesRepo {
     return rows.map(mapPrice);
   }
 
+  /** Все строки прайса по ID товара или тарифа (дверь, её комплектующие, тариф «Дополнений»). */
+  async rowsByProductId(accountId: number, productId: string): Promise<KbPrice[]> {
+    const { rows } = await this.db.query(`${SELECT} WHERE p.account_id = $1 AND p.product_id = $2 ORDER BY p.valid_at DESC, p.id`, [accountId, productId]);
+    return rows.map(mapPrice);
+  }
+
   /** Строки двери по ID товара многолистового прайса (KB-PRICE-SHEETS): контекст модели для комплектующих и фурнитуры. */
   async doorsByProductId(accountId: number, productId: string): Promise<KbPrice[]> {
     const { rows } = await this.db.query(`${SELECT} WHERE p.account_id = $1 AND p.product_id = $2 AND p.category = 'door' ORDER BY p.valid_at DESC, p.id`, [accountId, productId]);
@@ -377,7 +383,9 @@ export class KbPricesRepo {
 
   /** Категория у записей, импортированных до KB-COMPONENTS: по тексту модели (веб-«Добор…» → комплектующее); один раз при старте. */
   async backfillCategories(): Promise<number> {
-    const { rows } = await this.db.query<{ id: string; model: string; abbr: string | null; category: string }>('SELECT id, model, abbr, category FROM kb_prices');
+    // KB-HW-NULL-2: только строки, категорию которых никто не задавал явно (веб-цены и правки до KB-COMPONENTS); категорию из импорта
+    // прайса («Дополнения» — фурнитура, лист 1 — дверь) пересчёт по словам больше не трогает.
+    const { rows } = await this.db.query<{ id: string; model: string; abbr: string | null; category: string }>('SELECT id, model, abbr, category FROM kb_prices WHERE NOT category_fixed');
     let n = 0;
     for (const r of rows) {
       const cat = categoryOf([r.model, r.abbr].filter(Boolean).join(' '));
@@ -733,6 +741,9 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const namedProductId = inText?.productId ?? null;
   // KB-PRICE-SHEETS: синоним или точный ключ из прайса ведёт в другую категорию (вкладка «Дополнения»: «Фрамуга» — фурнитура,
   // а по словам позиция считалась дверью) — категория позиции берётся из найденной строки.
+  // Синоним с ID тарифа внутри названия («СПД40 … для алюминиевой двери» → OPT-012): позиция — фурнитура, а не дверь по умолчанию.
+  const namedRows = namedProductId ? await prices.rowsByProductId(accountId, namedProductId) : [];
+  if (category === 'door' && namedRows.length && !namedRows.some((r) => r.category === 'door')) category = (namedRows[0] as KbPrice).category;
   if (category === 'door' && key) {
     const exact = (await prices.candidates(accountId, alias ? [key, ...alias.keys] : [key], [])).filter((f) => f.row.modelKey === key || f.row.altKeys.includes(key) || (alias?.keys ?? []).some((k) => k === f.row.modelKey || f.row.altKeys.includes(k)));
     const other = exact.find((f) => f.row.category === 'hardware') ?? exact[0];
@@ -803,7 +814,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   }
   // Модель названа синонимом с ID товара, но её строки не попали в кандидаты (другая категория по словам, расхождение признаков) — добавить.
   if (namedProductId && !cands.some((c) => named(c.row))) {
-    for (const row of (await prices.doorsByProductId(accountId, namedProductId)).filter((r) => r.category === category)) {
+    for (const row of namedRows.filter((r) => r.category === category && r.origin === 'price_list' && !(r.category === 'component' && componentKind && r.componentKind !== componentKind))) {
       if (seen.has(row.id)) continue;
       cands.push({ row, match: 'alias', similarity: 1, words: 0, features: null });
       seen.add(row.id);

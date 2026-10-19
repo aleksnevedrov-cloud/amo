@@ -776,6 +776,17 @@ describe('база знаний опта: цены и синонимы → по�
     expect(text4).toContain('итого 95 600 ₽');
     expect(text4).not.toContain('ДА-1-Г-Т-V60');
 
+    // KB-HW-NULL-2: перезапуск opt-api (пересчёт категорий по словам) не переводит тарифы «Дополнений» в двери; ID товара = ID тарифа.
+    await ctx.deps.kb.prices.backfillCategories();
+    const acc = (await ctx.deps.kb.db.query<{ source_id: string; category: string; n: number; with_id: number }>(
+      `SELECT source_id, category, count(*)::int AS n, count(product_id)::int AS with_id FROM kb_prices WHERE source_id = ANY($1::bigint[]) AND product_id LIKE 'OPT%' GROUP BY source_id, category ORDER BY source_id, category`,
+      [[inner.id, metal.id]],
+    )).rows.map((r) => [Number(r.source_id), r.category, r.n, r.with_id]);
+    expect(acc).toEqual([[inner.id, 'hardware', 31, 31], [metal.id, 'hardware', 31, 31]]);
+    const doorsBy = (await ctx.deps.kb.db.query<{ source_id: string; n: number }>(`SELECT source_id, count(*)::int AS n FROM kb_prices WHERE source_id = ANY($1::bigint[]) AND category = 'door' GROUP BY source_id ORDER BY source_id`, [[inner.id, metal.id]])).rows.map((r) => [Number(r.source_id), r.n]);
+    expect(doorsBy).toEqual([[inner.id, 30], [metal.id, 20]]);
+    expect((await ctx.deps.kb.db.query(`SELECT 1 FROM kb_prices WHERE source_id = ANY($1::bigint[]) AND tariff_id IS NOT NULL AND (category <> 'hardware' OR product_id IS DISTINCT FROM tariff_id)`, [[inner.id, metal.id]])).rowCount).toBe(0);
+
     // KB-HW-NULL: 9 тарифов «Дополнений» без цены (OPT-009…017) в каждом файле — цена NULL, а не 0,00; нулевых цен прайса в базе нет.
     const all = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { origin: string; category: string; tariffId: string | null; price: number | null; sourceId: number }[];
     const unpriced = all.filter((p) => p.origin === 'price_list' && p.price === null);

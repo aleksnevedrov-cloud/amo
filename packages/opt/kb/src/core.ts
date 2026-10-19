@@ -423,7 +423,9 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     let hardwareUnpriced = 0;
     for (const h of book.hardware) {
       if (h.price === null) hardwareUnpriced += 1;
-      rows.push({ model: h.name, factory: input.factory ?? null, unit: h.unit, widthMm: null, heightMm: null, price: h.price, vat, validAt, confidence: input.confidence, origin: 'price_list', nonstandard: {}, note: `вкладка «Дополнения», строка ${h.row}${h.price === null ? '; цены нет' : ''}`, sourceRow: h.row, category: 'hardware', tariffId: h.tariffId, status: h.price === null ? 'estimate_only' : h.status, appliesTo: h.forModels === '*' ? [] : h.forModels, card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: [], leafCount: null, colors: [], baseIncludes: null, note: h.type, technical: null, quoteNotes: [], priceConditions: null, hardwareUnit: h.unit, includes: h.includes, clarify: h.clarify }, description: h.type });
+      // KB-HW-NULL-2: строка «Дополнений» — всегда фурнитура (работы — по типу тарифа), не по словам названия; ID товара = ID тарифа.
+      const category = /работ|услуг|монтаж|доставк|^service$/i.test(h.type ?? '') ? 'service' : 'hardware';
+      rows.push({ model: h.name, factory: input.factory ?? null, unit: h.unit, widthMm: null, heightMm: null, price: h.price, vat, validAt, confidence: input.confidence, origin: 'price_list', nonstandard: {}, note: `вкладка «Дополнения», строка ${h.row}${h.price === null ? '; цены нет' : ''}`, sourceRow: h.row, category, productId: h.tariffId, tariffId: h.tariffId, status: h.price === null ? 'estimate_only' : h.status, appliesTo: h.forModels === '*' ? [] : h.forModels, card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: [], leafCount: null, colors: [], baseIncludes: null, note: h.type, technical: null, quoteNotes: [], priceConditions: null, hardwareUnit: h.unit, includes: h.includes, clarify: h.clarify }, description: h.type });
     }
     const aliases = [
       ...book.products.flatMap((p) => (p.productId ? [...p.aliases, ...(p.abbr ? [p.abbr] : [])].map((a) => ({ productId: p.productId as string, canonical: p.model, alias: a })) : [])),
