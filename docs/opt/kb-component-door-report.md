@@ -1,6 +1,6 @@
 # KB-COMPONENT-DOOR: комплектующие — только из строки прайса своей двери
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после f5db999). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `4458fd2` (после f5db999). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
 виджет 1.2.4. Миграций нет. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Что было (89813, черновик 64)
@@ -53,7 +53,7 @@ typecheck пакетов опта — чистый; eslint — те же 9 ст�
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 4458fd2
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграций нет
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
 ```
