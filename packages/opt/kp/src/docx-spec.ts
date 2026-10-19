@@ -190,6 +190,9 @@ export function specCandidates(blocks: DocxBlock[]): SpecTable[] {
     const rows = tableRows(b);
     const h = detectHeader(rows);
     if (!h || h.cols.qty === null) return;
+    // «Наименование приложения | Количество листов» — перечень приложений, не спецификация (ТЗ 90091, таблица 25).
+    const titles = h.cols.titles.join(' | ').toLowerCase();
+    if (/лист(?:ов|а)?(?![а-яё])/.test(h.cols.titles[h.cols.qty] ?? '') || /наименование приложени/.test(titles)) return;
     const items = tableItems(rows, h.index + 1, h.cols).items.filter((it) => it.qty !== null).length;
     if (items) out.push({ table: b, title: titleOf(blocks, i), items });
   });
@@ -203,35 +206,64 @@ export function pickSpecTable(cands: SpecTable[]): SpecTable | null {
   );
 }
 
-/** Раздел ТЗ о комплектации: заголовок и текст до следующего заголовка (таблицы внутри — строками «ячейка — ячейка»). */
+/** Раздел ТЗ: заголовок, номер, текст до следующего заголовка и его части (абзацы, ячейки таблиц) с диапазонами позиций. */
 export interface EquipmentSection {
   title: string;
-  /** Номер раздела, если написан в тексте заголовка («15.», «15 »). */
+  /** Номер раздела из заголовка («РАЗДЕЛ 15.», «15.», «15 »). */
   number: string | null;
   text: string;
+  /** Части текста; positions — номера позиций спецификации, к которым часть относится («поз. 14-18 Приложения 1»). */
+  parts: { text: string; positions: number[] | null }[];
 }
 
-/** Абзац-заголовок: стиль заголовка, нумерованный абзац верхнего уровня или «15. Текст» — короткий. */
+/** Абзац-заголовок: стиль заголовка, нумерованный абзац верхнего уровня, «15. Текст» или «РАЗДЕЛ 15. …» — короткий. */
 const isHeading = (p: DocxParagraph) =>
-  p.text.length <= 160 && (/heading|заголов|^title$|^[1-3]$/i.test(p.style ?? '') || (p.numbered && (p.level ?? 0) === 0) || /^\d{1,2}\.?\s+[А-ЯЁA-Z]/.test(p.text));
+  p.text.length <= 160 && (/heading|заголов|^title$|^[1-3]$/i.test(p.style ?? '') || (p.numbered && (p.level ?? 0) === 0) || /^\d{1,2}\.?\s+[А-ЯЁA-Z]/.test(p.text) || /^раздел\s+\d{1,2}/i.test(p.text));
 
 const MAX_SECTION = 1500;
+const sectionNumber = (title: string) => /^(?:раздел\s+)?(\d{1,2})(?:[.\s)]|$)/i.exec(title.trim())?.[1] ?? null;
 
-/** Разделы с «комплектац» в заголовке. */
+/** Номера позиций из текста: «поз. 14-18», «позиции 14–18, 20», «поз. 3». */
+export function positionsOf(text: string): number[] | null {
+  const m = /поз(?:иц[а-яё]*|\.)?\s*((?:\d{1,3}\s*(?:[-–—]\s*\d{1,3})?\s*(?:,|и)?\s*)+)/i.exec(text);
+  if (!m) return null;
+  const out: number[] = [];
+  for (const part of (m[1] as string).split(/,|\sи\s/)) {
+    const r = /(\d{1,3})\s*(?:[-–—]\s*(\d{1,3}))?/.exec(part);
+    if (!r) continue;
+    const from = Number(r[1]);
+    const to = r[2] ? Number(r[2]) : from;
+    for (let n = from; n <= to && n - from < 200; n += 1) out.push(n);
+  }
+  return out.length ? out : null;
+}
+
+/** Разделы ТЗ: с номером в заголовке (по ссылке «см. раздел 15») и разделы о комплектации без номера. */
 export function equipmentSections(blocks: DocxBlock[]): EquipmentSection[] {
   const out: EquipmentSection[] = [];
   for (let i = 0; i < blocks.length; i += 1) {
     const b = blocks[i] as DocxBlock;
-    if (b.kind !== 'p' || !isHeading(b) || !/комплектац/i.test(b.text)) continue;
-    const body: string[] = [];
-    for (let j = i + 1; j < blocks.length; j += 1) {
+    if (b.kind !== 'p' || !isHeading(b)) continue;
+    const number = sectionNumber(b.text);
+    if (!number && !/комплектац/i.test(b.text)) continue;
+    const parts: EquipmentSection['parts'] = [];
+    let size = 0;
+    for (let j = i + 1; j < blocks.length && size <= MAX_SECTION; j += 1) {
       const n = blocks[j] as DocxBlock;
       if (n.kind === 'p' && isHeading(n) && !/^\d{1,2}\.\d/.test(n.text)) break;
-      body.push(n.kind === 'p' ? n.text : n.rows.map((r) => r.filter(Boolean).join(' — ')).join('; '));
-      if (body.join(' ').length > MAX_SECTION) break;
+      // «Приложение № 1» — начало приложения, не текст раздела.
+      if (n.kind === 'p' && /^приложени[ея]\s*№?\s*\d/i.test(n.text)) break;
+      // Таблица раздела: каждая непустая ячейка — своя часть (ТЗ 90091: таблица 1×1 «ДЛЯ ПРОТИВОПОЖАРНЫХ ДВЕРЕЙ поз. 14-18 …»);
+      // строка из нескольких ячеек — одной частью «ячейка — ячейка».
+      const texts = n.kind === 'p' ? [n.text] : n.rows.map((r) => r.filter(Boolean)).map((r) => (r.length === 1 ? (r[0] as string) : r.join(' — ')));
+      for (const t of texts) {
+        if (!t.trim()) continue;
+        parts.push({ text: clean(t), positions: positionsOf(t) });
+        size += t.length;
+      }
     }
-    const text = clean(body.join(' ')).slice(0, MAX_SECTION);
-    if (text) out.push({ title: b.text, number: /^(\d{1,2})(?:\.|\s)/.exec(b.text)?.[1] ?? null, text });
+    const text = clean(parts.map((p) => p.text).join(' ')).slice(0, MAX_SECTION);
+    if (text) out.push({ title: b.text, number, text, parts });
   }
   return out;
 }
@@ -250,20 +282,155 @@ export function markersOf(text: string): string[] {
   return [...out];
 }
 
+/** Комплектация из ТЗ для позиции: раздел и часть его текста. */
+export interface EquipmentHit {
+  section: EquipmentSection;
+  text: string;
+  /** Как найдено: ссылка «см. раздел N», диапазон «поз. 14-18» в разделе, обозначение позиции в разделе о комплектации. */
+  by: 'ref' | 'positions' | 'marker';
+}
+
+/** Часть раздела для позиции с номером n: части с её номером в диапазоне; диапазонов нет — весь раздел. */
+function partFor(s: EquipmentSection, n: number | null): string | null {
+  const ranged = s.parts.filter((p) => p.positions);
+  if (!ranged.length) return s.text;
+  const mine = n === null ? [] : ranged.filter((p) => p.positions?.includes(n));
+  return mine.length ? clean(mine.map((p) => p.text).join(' ')).slice(0, MAX_SECTION) : null;
+}
+
 /**
- * Раздел комплектации для позиции: строка ссылается на раздел («см. раздел 15», «п. 15») — он; иначе раздел, в заголовке или
- * тексте которого есть отличительное обозначение позиции (ДПС, EI60, номер ГОСТ). Несколько — первый по документу.
+ * Комплектация для строки спецификации (rowNo — её № п/п): 1) строка ссылается на раздел («СМ. РАЗДЕЛ 15») — этот раздел,
+ * его часть с номером строки в «поз. 14-18»; 2) в каком-либо разделе есть часть «поз. 14-18 Приложения …» с номером строки;
+ * 3) раздел о комплектации, где есть обозначение позиции (ДПС, EI60, номер ГОСТ). Слово «комплектац» в заголовке не обязательно.
  */
-export function equipmentFor(rowText: string, sections: EquipmentSection[]): EquipmentSection | null {
-  const ref = /(?:раздел[а-я]*|пункт[а-я]*|п\.)\s*(\d{1,2})(?![\d.])/i.exec(rowText)?.[1];
+export function equipmentFor(rowText: string, sections: EquipmentSection[], rowNo: number | null = null): EquipmentHit | null {
+  const ref = /(?:раздел[а-яё]*|пункт[а-яё]*|п\.)\s*(\d{1,2})(?![\d.])/i.exec(rowText)?.[1];
   if (ref) {
     const s = sections.find((x) => x.number === ref);
-    if (s) return s;
+    const text = s ? partFor(s, rowNo) : null;
+    if (s && text) return { section: s, text, by: 'ref' };
+  }
+  if (rowNo !== null) {
+    for (const s of sections) {
+      const mine = s.parts.filter((p) => p.positions?.includes(rowNo) && /приложени/i.test(p.text));
+      if (mine.length) return { section: s, text: clean(mine.map((p) => p.text).join(' ')).slice(0, MAX_SECTION), by: 'positions' };
+    }
   }
   const markers = markersOf(rowText);
   if (!markers.length) return null;
-  return sections.find((s) => {
+  for (const s of sections.filter((x) => /комплектац/i.test(`${x.title} ${x.text}`))) {
     const t = ` ${s.title} ${s.text} `.toLowerCase();
-    return markers.some((k) => new RegExp(`(?<![а-яёa-z0-9])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![а-яёa-z])`).test(t));
-  }) ?? null;
+    if (markers.some((k) => new RegExp(`(?<![а-яёa-z0-9])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![а-яёa-z])`).test(t))) {
+      const text = partFor(s, rowNo) ?? s.text;
+      return { section: s, text, by: 'marker' };
+    }
+  }
+  return null;
+}
+
+/** Условия закупки (п. 2.7): адрес и срок поставки, аванс, НДС, сертификаты, вес / габариты — из абзацев ТЗ и колонок спецификации. */
+const CONDITION = /адрес[а-яё]* (?:поставки|доставки)|место поставки|срок[а-яё]* поставки|аванс|предоплат|ндс|сертификат|паспорт[а-яё]* качества|вес[а-яё]*\s|габарит|разгрузк|доставк/i;
+
+export function requirementsOf(blocks: DocxBlock[], spec: DocxTable | null): string[] {
+  const out: string[] = [];
+  const push = (s: string) => {
+    const t = clean(s).slice(0, 300);
+    if (t && !out.includes(t)) out.push(t);
+  };
+  if (spec) {
+    const rows = tableRows(spec);
+    const h = detectHeader(rows);
+    if (h) {
+      for (const e of h.cols.extra.filter((x) => /срок[а-яё]* постав|место постав|адрес/i.test(x.title))) {
+        const values = [...new Set(rows.slice(h.index + 1).map((r) => (r.cells[e.col] ?? '').trim()).filter(Boolean))];
+        if (values.length && values.length <= 3) push(`${e.title}: ${values.join('; ')}`);
+      }
+    }
+  }
+  for (const b of blocks) {
+    if (out.length >= 15) break;
+    if (b.kind === 'p' && b.text.length <= 300 && CONDITION.test(b.text)) push(b.text);
+  }
+  return out;
+}
+
+/** Реквизиты предприятия (карточка): ИНН, КПП, ОГРН, БИК, р/с, к/с — и ни слова о дверях. Не заявка (п. 2.1). */
+export function looksLikeRequisites(text: string): boolean {
+  const t = text.toLowerCase();
+  const hits = [/инн/, /кпп/, /огрн/, /бик/, /р\/с|расч[её]тн[а-яё]* сч[её]т/, /к\/с|корр[а-яё.]* сч[её]т/, /окпо|оквэд/].filter((rx) => rx.test(t)).length;
+  return hits >= 3 && !/двер|полотн|короб|налични|фурнитур/.test(t);
+}
+
+/** Матрица характеристик (п. 2.3, сделка 89835 «Двери.docx»): позиция — колонка или блок строк, строка — характеристика. */
+export interface MatrixPosition {
+  name: string;
+  qty: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  /** «характеристика: значение» через «; ». */
+  note: string | null;
+}
+
+const NAME_KEY = /^(наименовани[ея]|тип|марка|модель|изделие|позиция|обозначение)(?![а-яё])/i;
+const QTY_KEY = /^(кол-?во|количество)(?![а-яё])/i;
+const CHAR_KEY = /размер|ширин|высот|материал|покрыт|цвет|фурнитур|замок|петл|открыван|порог|короб|наличник|заполнен|остекл|толщин|кол-?во|количеств|отделк|огнестойк|класс/i;
+const mm = (s: string) => {
+  const n = Number(/\d{3,4}/.exec(s)?.[0] ?? NaN);
+  return Number.isFinite(n) ? n : null;
+};
+
+function positionFrom(pairs: [string, string][]): MatrixPosition | null {
+  const name = pairs.find(([k]) => NAME_KEY.test(k))?.[1]?.trim();
+  if (!name) return null;
+  const qtyText = pairs.find(([k]) => QTY_KEY.test(k))?.[1] ?? '';
+  const qty = /\d/.test(qtyText) ? Number(/\d+(?:[.,]\d+)?/.exec(qtyText)?.[0].replace(',', '.')) : null;
+  const sizeText = pairs.find(([k]) => /размер|габарит/i.test(k))?.[1] ?? '';
+  const pair = /(\d{3,4})\s*[×xх*]\s*(\d{3,4})/i.exec(sizeText);
+  let widthMm = pair ? Math.min(Number(pair[1]), Number(pair[2])) : null;
+  let heightMm = pair ? Math.max(Number(pair[1]), Number(pair[2])) : null;
+  if (!pair) {
+    widthMm = mm(pairs.find(([k]) => /ширин/i.test(k))?.[1] ?? '');
+    heightMm = mm(pairs.find(([k]) => /высот/i.test(k))?.[1] ?? '');
+  }
+  const note = pairs.filter(([k, v]) => v && !NAME_KEY.test(k) && !QTY_KEY.test(k)).map(([k, v]) => `${k}: ${v}`).join('; ').slice(0, 1000) || null;
+  return { name: name.slice(0, 300), qty: qty && qty > 0 ? qty : null, widthMm, heightMm, note };
+}
+
+/**
+ * Позиции матрицы: а) по колонкам — первая колонка подписи характеристик, первая строка (или строка «Наименование / Тип / Марка»)
+ * — названия позиций; б) блоками строк — таблица «характеристика | значение», где «Наименование / Тип / Марка» повторяется.
+ */
+export function matrixPositions(t: DocxTable): MatrixPosition[] {
+  const rows = t.rows.filter((r) => r.some(Boolean));
+  if (rows.length < 3) return [];
+  const labels = rows.map((r) => (r[0] ?? '').trim());
+  const charRows = labels.filter((l) => CHAR_KEY.test(l) || NAME_KEY.test(l)).length;
+  const width = Math.max(...rows.map((r) => r.length));
+  // а) По колонкам.
+  if (width >= 3 && charRows >= Math.max(3, Math.ceil(labels.length * 0.5))) {
+    const nameRow = rows.findIndex((r) => NAME_KEY.test((r[0] ?? '').trim()));
+    const head = nameRow >= 0 ? rows[nameRow] as string[] : rows[0] as string[];
+    const out: MatrixPosition[] = [];
+    for (let c = 1; c < width; c += 1) {
+      const name = (head[c] ?? '').trim();
+      if (!name) continue;
+      const pairs: [string, string][] = rows.map((r) => [(r[0] ?? '').trim() || 'Наименование', (r[c] ?? '').trim()]);
+      if (nameRow < 0) pairs.unshift(['Наименование', name]);
+      const p = positionFrom(pairs);
+      if (p) out.push(p);
+    }
+    if (out.length >= 2) return out;
+  }
+  // б) Блоками строк.
+  const starts = labels.map((l, i) => (NAME_KEY.test(l) ? i : -1)).filter((i) => i >= 0);
+  if (starts.length >= 2 && width >= 2) {
+    const out: MatrixPosition[] = [];
+    starts.forEach((s, k) => {
+      const end = starts[k + 1] ?? rows.length;
+      const p = positionFrom(rows.slice(s, end).map((r) => [(r[0] ?? '').trim(), r.slice(1).filter(Boolean).join(' ').trim()]));
+      if (p) out.push(p);
+    });
+    return out;
+  }
+  return [];
 }

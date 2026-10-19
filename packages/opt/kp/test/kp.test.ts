@@ -131,7 +131,7 @@ describe('черновик: разбор ответа модели и позиц
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
     const r = positionToRequest({ name: 'Дверь противопожарная', marking: 'ДПС 01 EI30', width_mm: 900, height_mm: 2100, qty: 3, unit: 'компл.', price_rub: 25_000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: null });
     expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3, category: 'door' });
-    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1, category: 'component' });
+    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1, category: 'component', qtyUnknown: true });
     // XLSX-2: работы — без размера и с признаком service; дробное количество из заявки сохраняется.
     expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, category: 'service', kind: 'service' });
     expect(positionToRequest(position('Наличник ТЕЛЕСКОП', 70, 2150, 24.5))).toMatchObject({ raw: 'Наличник ТЕЛЕСКОП 70×2150 24.5 шт', qty: 24.5 });
@@ -237,7 +237,8 @@ describe('черновик КП опта: источник — карточка 
     expect(r.payload.items).toEqual([
       // KP-AGENT-V2: у двери — ГОСТ-профиль из текста позиции (ДПС 01 — однопольная противопожарная, класс EI не указан).
       { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0, category: 'door', gostProfile: expect.objectContaining({ gost: 'Р 57327-2016', kind: 'ДПС', leaves: 1, fire: 'EI?', heightMm: 2100, widthMm: 900 }) },
-      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0, category: 'component' },
+      // KP-AGENT-V2, п. 2.3: количества в файле нет — 1 до ответа менеджера, флаг «уточнить».
+      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0, category: 'component', qtyUnknown: true },
     ]);
     expect(r.payload.needs_manager).toEqual([{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }]);
     // Письмо прочитано моделью ради реквизитов и блоков; позиции из письма не используются, когда есть спецификация.

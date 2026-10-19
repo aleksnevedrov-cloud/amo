@@ -2,9 +2,9 @@
 import PizZip from 'pizzip';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { equipmentFor, equipmentSections, markersOf, pickSpecTable, readDocxBlocks, specCandidates } from '../src/docx-spec.ts';
+import { equipmentFor, equipmentSections, looksLikeRequisites, markersOf, matrixPositions, pickSpecTable, positionsOf, readDocxBlocks, requirementsOf, specCandidates } from '../src/docx-spec.ts';
 import { analyzeDraftFile, type DraftFileDeps } from '../src/file-analyze.ts';
-import { positionToRequest } from '../src/draft.ts';
+import { notRequestReason, positionToRequest } from '../src/draft.ts';
 import { defaultOptSettings, toWidgetSettings } from '../src/settings.ts';
 
 const route = { primary: { provider: 'openai' as const, model: 'gpt-5.5' }, fallback: { provider: 'openai' as const, model: 'gpt-5.1' } };
@@ -78,6 +78,52 @@ function tz(): Uint8Array {
   // Двери ДПС 01 (поз. 14–18): наименование — одна ячейка, объединённая по вертикали на пять строк.
   const name = (i: number, v: string): Cell => (i === 13 ? { text: v, vMerge: 'restart' } : i > 13 && i < 18 ? { text: '', vMerge: 'continue' } : v);
   blocks.push({ table: [[{ text: 'Спецификация поставляемого товара', span: 13 }], HEAD, ...SPEC.map((r, i) => [String(i + 1), name(i, r[0]), ...r.slice(1, 9).map(String), String(r[9]), '30 дней', r[10] as string])] });
+  return docx(blocks);
+}
+
+/**
+ * ТЗ 90091 как в настоящем файле: 26 таблиц; 25-я — перечень приложений «№ п/п | Наименование приложения | Количество листов»;
+ * раздел 15 — «РАЗДЕЛ 15. ДОПОЛНИТЕЛЬНЫЕ (ИНЫЕ) ТРЕБОВАНИЯ», текст — таблица 1×1 «ДЛЯ ПРОТИВОПОЖАРНЫХ ДВЕРЕЙ поз. 14-18
+ * Приложения 1 / Комплектация базовая: …»; над 26-й таблицей — «Приложение № 1»; шапка из 13 колонок; в поз. 14–18 —
+ * «ДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ СМ. РАЗДЕЛ 15 НАСТОЯЩЕГО ТЗ».
+ */
+export const REAL_HEAD = ['№ п/п', 'Наименование, тип, марка', 'Технические характеристики', 'Класс безопас-ности по НП-001', 'Категория сейсмо-стойкости НП-031', 'Климати-ческое исполнение ГОСТ 15150', 'Материал', 'ГОСТ, ТУ', 'Ед. изм.', 'Кол-во', 'Срок поставки', 'Место поставки', 'Условия хранения по ГОСТ 15150'];
+export const REAL_EQUIPMENT = 'Комплектация базовая: коробка, полотно, 3 петли, противопожарный замок, ручка, доводчик, терморасширяющийся уплотнитель, противосъёмные штыри.';
+function tzReal(): Uint8Array {
+  const blocks: Block[] = [{ p: 'ТЕХНИЧЕСКОЕ ЗАДАНИЕ', style: 'Title' }];
+  const filler = 'Поставщик обязан поставить товар надлежащего качества в соответствии с требованиями настоящего технического задания. ';
+  for (let s = 1; s <= 14; s += 1) {
+    blocks.push({ p: `РАЗДЕЛ ${s}. ТРЕБОВАНИЯ ${s}` });
+    for (let k = 0; k < 14; k += 1) blocks.push({ p: filler });
+    blocks.push({ table: [['Наименование показателя', 'Значение'], ['Срок гарантии', '24 месяца']] });
+    if (s % 2 === 0) blocks.push({ table: [['Характеристика', 'Требование'], ['Цвет', 'по согласованию']] });
+    if (s <= 2) blocks.push({ table: [['Документ', 'Номер'], ['Сертификат', 'обязателен']] });
+  }
+  blocks.push({ p: 'РАЗДЕЛ 15. ДОПОЛНИТЕЛЬНЫЕ (ИНЫЕ) ТРЕБОВАНИЯ' });
+  blocks.push({ table: [['ДЛЯ ПРОТИВОПОЖАРНЫХ ДВЕРЕЙ поз. 14-18 Приложения 1\n' + REAL_EQUIPMENT]] });
+  blocks.push({ p: 'РАЗДЕЛ 16. ПРИЛОЖЕНИЯ' });
+  blocks.push({ table: [['№ п/п', 'Наименование приложения', 'Количество листов'], ['1', 'Приложение №1', '12']] });
+  blocks.push({ p: 'Приложение № 1' });
+  const ref = 'ДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ СМ. РАЗДЕЛ 15 НАСТОЯЩЕГО ТЗ';
+  const row = (n: number, name: string, tech: string, gost: string, qty: number) => [String(n), name, tech, '4', 'II', 'УХЛ4', 'сталь', gost, 'шт', String(qty), 'август 2026', 'г. Москва, ул. Строителей, 1', '2 (С)'];
+  const rows = [
+    row(1, 'Дверь AquaDoor (Аква ДПК ДГ-01), серый RAL 7035', 'размер 2000×700', '', 1),
+    row(2, 'Дверь AquaDoor (Аква ДПК ДГ-01), серый RAL 7035', 'размер 2000×600', '', 6),
+    row(3, 'Дверь AquaDoor (Аква ДПК ДГ-01), серый RAL 7035', 'размер 2000×800', '', 2),
+    row(4, 'Петля 750-4 STD 100×70, Нора-М', '', '', 18),
+    row(5, 'Ручка H-0661-CR Apecs', '', '', 9),
+    row(6, 'Замок врезной 6000-CR Apecs', '', '', 9),
+    row(7, 'Полотно ПГ Классика Pleskovdoor, шпон дуб', 'размер 2000×600', '', 2),
+    row(8, 'Коробка массив, шпон дуб, 76×33, длина 2100', '', '', 6),
+    row(9, 'Наличник полукруглый, шпон дуб, 70×11', '', '', 6),
+    row(10, 'Наличник телескопический Аква ДПК 70×10×2200', '', '', 27),
+    row(11, 'Коробка Аква ДПК 74×10×2200', '', '', 27),
+    row(12, 'Замок L03 PG Morelli', '', '', 5),
+    row(13, 'Порог алюминиевый 40×1800, дуб', '', '', 30),
+    ...[[2060, 780, 'левая'], [2060, 780, 'правая'], [2060, 880, 'левая'], [2060, 880, 'правая'], [2060, 980, 'левая']].map(([h, w, side], k) => row(14 + k, `Дверь ДПС 01 EI60 ${side}`, `${h}×${w}, ${ref}`, 'ГОСТ Р 57327-2016', 1)),
+    row(19, 'Блок ДСН двупольный 2300×1430', '', 'ГОСТ 31173-2016', 1),
+  ];
+  blocks.push({ table: [REAL_HEAD, ...rows] });
   return docx(blocks);
 }
 
@@ -159,18 +205,22 @@ describe('спецификация в Word-файле ТЗ (KP-DOCX-APPENDIX, с
 
   it('раздел о комплектации: заголовок (нумерованный абзац) и текст до следующего заголовка; к позиции — по ссылке «раздел 15» или по обозначению ДПС / EI60 / ГОСТ', () => {
     const sections = equipmentSections(readDocxBlocks(tz()));
-    expect(sections).toHaveLength(1);
-    expect(sections[0]).toMatchObject({ title: 'Базовая комплектация противопожарных дверей', number: null });
-    expect(sections[0]?.text).toContain('3 петли, противопожарный замок');
-    expect(sections[0]?.text).toContain('Петля — 3; Доводчик — 1');
-    expect(sections[0]?.text).not.toContain('стретч-плёнку');
+    // Разделы с номером (1–14, 16) и раздел о комплектации без номера.
+    expect(sections.map((x) => x.number)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', null, '16']);
+    const eq = sections.find((x) => !x.number)!;
+    expect(eq).toMatchObject({ title: 'Базовая комплектация противопожарных дверей', number: null });
+    expect(eq.text).toContain('3 петли, противопожарный замок');
+    expect(eq.text).toContain('Петля — 3 Доводчик — 1');
+    expect(eq.text).not.toContain('стретч-плёнку');
+    // Раздел 16 кончается перед «Приложение №1»: спецификация в его текст не входит.
+    expect(sections.find((x) => x.number === '16')?.text).toBe('Каждое изделие упаковывается в стретч-плёнку и гофрокартон.');
     expect(markersOf('Дверь ДПС 01 EI60 | ГОСТ Р 57327-2016 | RAL 7035')).toEqual(['дпс', 'ei60', '57327-2016']);
-    expect(equipmentFor('Дверь ДПС 01 EI60 | правая', sections)?.title).toBe('Базовая комплектация противопожарных дверей');
+    expect(equipmentFor('Дверь ДПС 01 EI60 | правая', sections)?.section.title).toBe('Базовая комплектация противопожарных дверей');
     expect(equipmentFor('Блок ДСН двупольный | ГОСТ 31173-2016', sections)).toBeNull();
     expect(equipmentFor('Дверь AquaDoor | Аква ДПК ДГ-01 | серый RAL 7035', sections)).toBeNull();
     // Ссылка «раздел N» — на раздел с этим номером в заголовке.
-    const numbered = [{ title: '15. Базовая комплектация', number: '15', text: 'доводчик' }, { title: '16. Комплектация ДСН', number: '16', text: 'ДСН' }];
-    expect(equipmentFor('Дверь | см. раздел 16', numbered)?.number).toBe('16');
+    const numbered = [{ title: '15. Базовая комплектация', number: '15', text: 'доводчик', parts: [{ text: 'доводчик', positions: null }] }, { title: '16. Комплектация ДСН', number: '16', text: 'ДСН', parts: [{ text: 'ДСН', positions: null }] }];
+    expect(equipmentFor('Дверь | см. раздел 16', numbered)).toMatchObject({ section: { number: '16' }, by: 'ref' });
   });
 
   it('«Собрать заново» на 90091: 19 позиций из «Приложения №1» одним вызовом нормализации, весь документ в модель не уходит; к дверям ДПС 01 (поз. 14–18) — комплектация из раздела 15', async () => {
@@ -194,7 +244,7 @@ describe('спецификация в Word-файле ТЗ (KP-DOCX-APPENDIX, с
     // Комплектация из ТЗ — у пяти дверей ДПС 01 (четыре по ссылке «раздел 15», пятая по обозначению), у остальных нет.
     const withEq = r.positions.map((p, i) => (p.tzEquipment ? i + 1 : null)).filter(Boolean);
     expect(withEq).toEqual([14, 15, 16, 17, 18]);
-    expect(r.positions[17]?.tzEquipment).toBe(`раздел «Базовая комплектация противопожарных дверей»: ${EQUIPMENT} Наименование — Кол-во на 1 дверь, шт; Петля — 3; Доводчик — 1; Замок противопожарный — 1`);
+    expect(r.positions[17]?.tzEquipment).toBe(`раздел «Базовая комплектация противопожарных дверей»: ${EQUIPMENT} Наименование — Кол-во на 1 дверь, шт Петля — 3 Доводчик — 1 Замок противопожарный — 1`);
     // В строку черновика: комплектация по ТЗ идёт с позицией.
     expect(positionToRequest(r.positions[14]!)).toMatchObject({ name: 'Дверь ДПС 01 EI60', qty: 1, tzEquipment: expect.stringContaining('3 петли') });
     expect(positionToRequest(r.positions[0]!).tzEquipment).toBeUndefined();
@@ -204,6 +254,33 @@ describe('спецификация в Word-файле ТЗ (KP-DOCX-APPENDIX, с
     expect(progress).toContain('№ 204 68 двери и комп-ющие_ТЗ.docx: комплектация из ТЗ приложена к 5 поз.');
   });
 
+  it('настоящее ТЗ 90091: перечень приложений — не спецификация; «Приложение № 1» — 19 позиций; «СМ. РАЗДЕЛ 15» → часть раздела 15 с «поз. 14-18 Приложения 1» — у поз. 14–18; ДСН и Аква — без неё', async () => {
+    const blocks = readDocxBlocks(tzReal());
+    expect(blocks.filter((b) => b.kind === 'table')).toHaveLength(26);
+    const cands = specCandidates(blocks);
+    expect(cands.map((c) => c.table.n)).toEqual([26]);
+    expect(pickSpecTable(cands)?.title).toBe('Приложение № 1');
+    const sections = equipmentSections(blocks);
+    const s15 = sections.find((x) => x.number === '15')!;
+    expect(s15.title).toBe('РАЗДЕЛ 15. ДОПОЛНИТЕЛЬНЫЕ (ИНЫЕ) ТРЕБОВАНИЯ');
+    expect(s15.parts).toEqual([{ text: `ДЛЯ ПРОТИВОПОЖАРНЫХ ДВЕРЕЙ поз. 14-18 Приложения 1 ${REAL_EQUIPMENT}`, positions: [14, 15, 16, 17, 18] }]);
+    // Раздел 16 кончается перед «Приложение № 1» — таблица спецификации в него не входит.
+    expect(sections.find((x) => x.number === '16')?.text).toBe('№ п/п — Наименование приложения — Количество листов; 1 — Приложение №1 — 12'.split('; ').join(' '));
+    const { llm, requests } = gateway();
+    const docsCalls: string[] = [];
+    const r = await analyzeDraftFile(deps(llm, docsCalls, []), { filename: '№ 204 68 двери и комп-ющие_ТЗ.docx', mime: DOCX_MIME, bytes: tzReal() });
+    expect(docsCalls).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(r.positions).toHaveLength(19);
+    expect(r.positions.map((p) => p.qty)).toEqual([1, 6, 2, 18, 9, 9, 2, 6, 6, 27, 27, 5, 30, 1, 1, 1, 1, 1, 1]);
+    expect(r.positions.slice(0, 3).map((p) => [p.width_mm, p.height_mm])).toEqual([[700, 2000], [600, 2000], [800, 2000]]);
+    expect(r.positions.slice(13, 18).map((p) => [p.width_mm, p.height_mm])).toEqual([[780, 2060], [780, 2060], [880, 2060], [880, 2060], [980, 2060]]);
+    expect(r.positions.map((p, i) => (p.tzEquipment ? i + 1 : null)).filter(Boolean)).toEqual([14, 15, 16, 17, 18]);
+    expect(r.positions[13]?.tzEquipment).toBe(`раздел «РАЗДЕЛ 15. ДОПОЛНИТЕЛЬНЫЕ (ИНЫЕ) ТРЕБОВАНИЯ»: ДЛЯ ПРОТИВОПОЖАРНЫХ ДВЕРЕЙ поз. 14-18 Приложения 1 ${REAL_EQUIPMENT}`);
+    expect(r.positions[13]?.note).toContain('ГОСТ, ТУ: ГОСТ Р 57327-2016');
+    expect(r.warnings).toEqual([]);
+  });
+
   it('Word без таблицы спецификации — как раньше, весь документ в @core/docs', async () => {
     const { llm, requests } = gateway();
     const docsCalls: string[] = [];
@@ -211,5 +288,64 @@ describe('спецификация в Word-файле ТЗ (KP-DOCX-APPENDIX, с
     expect(r.method).toBe('docs');
     expect(docsCalls).toEqual(['письмо.docx']);
     expect(requests).toHaveLength(0);
+  });
+
+  it('требования закупки: место и срок поставки из колонок спецификации, аванс / НДС / сертификаты из текста', () => {
+    const blocks = readDocxBlocks(docx([
+      { p: 'Оплата: аванс 30 %, остаток по факту поставки.' },
+      { p: 'Цена включает НДС 22 % и доставку до склада заказчика.' },
+      { p: 'Поставщик обязан поставить товар надлежащего качества.' },
+      { table: [REAL_HEAD, ['1', 'Дверь ДПС 01 EI60', '2060×780', '', '', '', 'сталь', 'ГОСТ Р 57327-2016', 'шт', '1', 'август 2026', 'г. Москва, ул. Строителей, 1', '2 (С)']] },
+    ]));
+    const spec = blocks.find((b) => b.kind === 'table');
+    expect(requirementsOf(blocks, spec && spec.kind === 'table' ? spec : null)).toEqual(['Срок поставки: август 2026', 'Место поставки: г. Москва, ул. Строителей, 1', 'Оплата: аванс 30 %, остаток по факту поставки.', 'Цена включает НДС 22 % и доставку до склада заказчика.']);
+    expect(positionsOf('ДЛЯ ДВЕРЕЙ поз. 14-18, 20 Приложения 1')).toEqual([14, 15, 16, 17, 18, 20]);
+  });
+
+  it('матрица характеристик (89835 «Двери.docx»): позиция — блок строк или колонка; количества нет — «уточнить»', async () => {
+    const types = ['ДМ{w}-С', 'ДМ{w}', 'ДС{w}'];
+    const widths = [600, 700, 800, 900, 1000, 1100, 1200];
+    const rows: Cell[][] = [];
+    for (const t of types) for (const w of widths) rows.push(['Наименование', t.replace('{w}', String(w))], ['Размер', `2100×${w}`], ['Материал', 'МДФ'], ['Покрытие', 'ПВХ белый'], ['Фурнитура', 'петли, замок']);
+    const bytes = docx([{ p: 'Перечень дверей' }, { table: rows }]);
+    const table = readDocxBlocks(bytes).find((b) => b.kind === 'table');
+    const ps = table && table.kind === 'table' ? matrixPositions(table) : [];
+    expect(ps).toHaveLength(21);
+    expect(ps[0]).toEqual({ name: 'ДМ600-С', qty: null, widthMm: 600, heightMm: 2100, note: 'Размер: 2100×600; Материал: МДФ; Покрытие: ПВХ белый; Фурнитура: петли, замок' });
+    expect(ps.map((p) => p.name).slice(6, 9)).toEqual(['ДМ1200-С', 'ДМ600', 'ДМ700']);
+    // По колонкам: «Характеристика | ДМ600 | ДМ700», количество есть.
+    const cols = readDocxBlocks(docx([{ table: [['Характеристика', 'ДМ600', 'ДМ700'], ['Размер', '2100×600', '2100×700'], ['Материал', 'МДФ', 'МДФ'], ['Кол-во', '4', '2']] }])).find((b) => b.kind === 'table');
+    expect(cols && cols.kind === 'table' ? matrixPositions(cols).map((p) => [p.name, p.qty, p.widthMm]) : []).toEqual([['ДМ600', 4, 600], ['ДМ700', 2, 700]]);
+    // Через разбор файла: 21 позиция без модели, у всех количество «уточнить», в черновике — флаг qtyUnknown.
+    const { llm, requests } = gateway();
+    const r = await analyzeDraftFile(deps(llm, [], []), { filename: 'Двери.docx', mime: DOCX_MIME, bytes });
+    expect(r).toMatchObject({ method: 'matrix', warnings: ['количество не указано у 21 поз. — вопрос менеджеру'] });
+    expect(requests).toHaveLength(0);
+    expect(r.positions).toHaveLength(21);
+    expect(positionToRequest(r.positions[0]!)).toMatchObject({ name: 'ДМ600-С', width_mm: 600, height_mm: 2100, qty: 1, qtyUnknown: true });
+  });
+
+  it('не заявка: карточка предприятия (по содержимому и по имени), наши КП; «КП 1404.docx» клиента — заявка', async () => {
+    const card = docx([{ p: 'Карточка предприятия ООО «Ромашка»' }, { table: [['ИНН', '7700000000'], ['КПП', '770001001'], ['ОГРН', '1027700000000'], ['БИК', '044525225'], ['Р/с', '40702810000000000000']] }]);
+    expect(looksLikeRequisites('ИНН 7700 КПП 7701 ОГРН 1027 БИК 0445 р/с 4070')).toBe(true);
+    expect(looksLikeRequisites('ИНН 7700 КПП 7701 ОГРН 1027 БИК 0445 — двери ДПС 01')).toBe(false);
+    const { llm } = gateway();
+    const docsCalls: string[] = [];
+    const r = await analyzeDraftFile(deps(llm, docsCalls, []), { filename: 'ООО Ромашка.docx', mime: DOCX_MIME, bytes: card });
+    expect(r).toMatchObject({ id: 0, kind: 'requisites', positions: [], method: 'skipped', warnings: ['реквизиты предприятия — не заявка'] });
+    expect(docsCalls).toEqual([]);
+    expect(notRequestReason('Карточка предприятия.pdf')).toBe('реквизиты предприятия — не заявка');
+    expect(notRequestReason('Реквизиты ООО Ромашка.rtf')).toBe('реквизиты предприятия — не заявка');
+    expect(notRequestReason('KP-КП-2026-13.pdf')).toBe('наше КП — не заявка');
+    expect(notRequestReason('kp_dveri_89813.docx')).toBe('наше КП — не заявка');
+    expect(notRequestReason('KP_RUS_DVERI_2026.pdf')).toBe('наше КП — не заявка');
+    expect(notRequestReason('КП 1404.docx')).toBeNull();
+    expect(notRequestReason('Двери.docx')).toBeNull();
+  });
+
+  it('фото без позиций — образец; скриншот с позициями — заявка', async () => {
+    const { llm } = gateway();
+    const photo = await analyzeDraftFile(deps(llm, [], []), { filename: 'IMG_2031.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1, 2, 3]) });
+    expect(photo).toMatchObject({ method: 'docs', photo: true, positions: [] });
   });
 });

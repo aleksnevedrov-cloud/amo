@@ -6,7 +6,7 @@ import { analyzeDraftFile } from './file-analyze.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
 
 /** Подпись способа разбора файла для журнала. */
-const METHOD_LABEL: Record<NonNullable<ParsedFile['method']>, string> = { docs: 'модель одним запросом', columns: 'по колонкам, без модели', 'columns+model': 'по колонкам + модель', 'model-chunks': 'модель порциями' };
+const METHOD_LABEL: Record<NonNullable<ParsedFile['method']>, string> = { docs: 'модель одним запросом', columns: 'по колонкам, без модели', 'columns+model': 'по колонкам + модель', 'model-chunks': 'модель порциями', matrix: 'матрица характеристик, без модели', skipped: 'не заявка, не разбирался' };
 
 /** Очередь опта в Redis (база 1): задание «собрать черновик» по кнопке менеджера; плановых задач нет (ТЗ 6.5). */
 export const KP_QUEUE = 'kp';

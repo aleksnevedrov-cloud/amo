@@ -29,6 +29,8 @@ export interface KpRequestItem {
   tzEquipment?: string | null;
   /** KP-AGENT-V2: остальные колонки строки спецификации («ГОСТ, ТУ: …; Технические характеристики: …») — для ГОСТ-профиля. */
   details?: string | null;
+  /** П. 2.3: количества в заявке нет (матрица характеристик) — qty = 1 до ответа менеджера, вопрос в опросник. */
+  qtyUnknown?: boolean;
 }
 
 /** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
@@ -73,6 +75,8 @@ export interface KpLine {
   equipment?: string | null;
   /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента (Word-файл заявки) — в плитке и примечанием под позицией в КП. */
   tzEquipment?: string | null;
+  /** П. 2.3: количество в заявке не указано — «уточнить» (вопрос в опросник). */
+  qtyUnknown?: boolean;
   /** KP-AGENT-V2, п. 3: ГОСТ-профиль двери (из текста позиции, дополненный выбранной строкой прайса). */
   gostProfile?: GostProfile | null;
   /** Обозначение по ГОСТ для КП — по шаблону строки прайса («ДМ 1Рл 21×9 Г ПрБ ГОСТ 475-2016»). */
@@ -144,6 +148,10 @@ export interface KpPayload {
   generatedAt: string;
   /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
   requirements: string[];
+  /** KP-AGENT-V2, п. 2.5: фото без текста — образец; к какой позиции, решает менеджер в опроснике. */
+  photos?: { name: string }[];
+  /** Текст письма заявки (п. 2.4) — во вкладке «Письмо и файлы» большого окна. */
+  letterText?: string | null;
 }
 
 /** Итог чтения ящика для черновика и журнала (mail_fetch). */
@@ -196,7 +204,9 @@ export interface ParsedFile {
   /** Время разбора, мс — в журнал (RFD-AI-AGENT-OPT-XLSX-TIMEOUT, п. 1). */
   ms?: number;
   /** docs — @core/docs одним запросом; columns / columns+model / model-chunks — таблица (table-parse.ts). */
-  method?: 'docs' | 'columns' | 'columns+model' | 'model-chunks';
+  method?: 'docs' | 'columns' | 'columns+model' | 'model-chunks' | 'matrix' | 'skipped';
+  /** KP-AGENT-V2, п. 2.5: картинка без текста и позиций — фото-образец (вопрос «образец к какой позиции?»). */
+  photo?: boolean;
   chunks?: number;
   model?: string | null;
   warnings?: string[];
@@ -343,12 +353,14 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         mails: card.mails,
         letterAt: card.letter?.createdAt.toISOString() ?? null,
         attachments: sources.map((f) => f.name),
-        documents: files.parsed.map((f) => f.id),
+        documents: files.parsed.map((f) => f.id).filter((id) => id > 0),
         skipped: files.skipped,
         ...(mail.source ? { mail: mail.source } : {}),
       },
       generatedAt: new Date().toISOString(),
       requirements,
+      ...(files.parsed.some((f) => f.photo) ? { photos: files.parsed.filter((f) => f.photo).map((f) => ({ name: f.filename })) } : {}),
+      letterText: card.letter ? clip(card.letter.text, 20_000) : null,
     },
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,
@@ -524,12 +536,19 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
 async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFiles: number; maxBytes: number }): Promise<{ parsed: ParsedFile[]; skipped: KpPayload['source']['skipped'] }> {
   const parsed: ParsedFile[] = [];
   const skipped: KpPayload['source']['skipped'] = [];
-  for (const [i, f] of files.entries()) {
+  let i = 0;
+  for (const f of files) {
+    // KP-AGENT-V2, п. 2.1: наши КП и карточки предприятий — не заявка; лимит файлов не занимают.
+    const notRequest = notRequestReason(f.name);
+    if (notRequest) {
+      skipped.push({ name: f.name, reason: notRequest });
+      continue;
+    }
     if (!d.analyze) {
       skipped.push({ name: f.name, reason: 'разбор файлов недоступен' });
       continue;
     }
-    if (i >= limits.maxFiles) {
+    if (i++ >= limits.maxFiles) {
       skipped.push({ name: f.name, reason: `больше ${limits.maxFiles} файлов за раз не разбираем` });
       continue;
     }
@@ -545,6 +564,14 @@ async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFile
     }
   }
   return { parsed, skipped };
+}
+
+/** Вложение — не заявка по имени: наше КП (KP-КП-…, kp_dveri…, KP_RUS_DVERI…) или карточка / реквизиты предприятия. «КП 1404.docx» клиента — заявка. */
+export function notRequestReason(name: string): string | null {
+  const n = name.trim().toLowerCase().replace(/ё/g, 'е');
+  if (/^kp-кп-|^kp_dveri|^kp_rus_dveri|^kp-rus-dveri/.test(n)) return 'наше КП — не заявка';
+  if (/карточк|реквизит/.test(n)) return 'реквизиты предприятия — не заявка';
+  return null;
 }
 
 async function parseLetter(llm: LlmGateway, input: KpDraftInput, text: string) {
@@ -708,6 +735,7 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     ...(service ? { kind: 'service' as const } : {}),
     ...(p.tzEquipment ? { tzEquipment: p.tzEquipment } : {}),
     ...(p.note ? { details: p.note.slice(0, 1000) } : {}),
+    ...(!service && !(p.qty && p.qty > 0) ? { qtyUnknown: true } : {}),
   };
 }
 
@@ -716,7 +744,7 @@ export const requestProfile = (it: Pick<KpRequestItem, 'name' | 'raw' | 'details
 
 function toLine(it: KpRequestItem, i: number): KpLine {
   const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(it.qtyUnknown ? { qtyUnknown: true } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
 }
 
 /** Профиль строки: из текста, размер — из колонок позиции (они точнее текста). */

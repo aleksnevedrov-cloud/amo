@@ -298,7 +298,9 @@ export function tableItems(rows: SheetRow[], from: number, cols: TableColumns, s
       width_mm = null;
       height_mm = null;
     } else if (width_mm === null && height_mm === null) {
-      const fromName = sizeFromText(name);
+      // Размер из названия, затем из колонки характеристик (ТЗ 90091: «Наименование, тип, марка | Технические характеристики»).
+      const spec = cols.extra.filter((e) => /характерист|размер|габарит/i.test(e.title)).map((e) => cell(r, e.col)).filter(Boolean);
+      const fromName = sizeFromText(name) ?? spec.map(sizeFromText).find(Boolean) ?? null;
       if (fromName) {
         width_mm = fromName.widthMm;
         height_mm = fromName.heightMm;
