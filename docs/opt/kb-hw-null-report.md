@@ -1,6 +1,6 @@
 # KB-HW-NULL: фурнитура без цены хранилась как 0,00
 
-Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `<COMMIT>` (после 4dd6388). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
+Дата: 19.10.2026. Ветка `claude/opt-kb`, коммит `7ccd1af` (после 4dd6388). Сервер (`@opt/kb`, `@opt/kp`, `apps/opt-api`) и
 виджет 1.2.3. Розница и ядро не менялись (`git diff 06d538d -- packages/retail apps/api apps/worker apps/widget packages/core` = 0).
 
 ## Что было
@@ -49,7 +49,7 @@ typecheck пяти пакетов опта — чистый; eslint — те ж�
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout <COMMIT>
+cd /opt/agent-opt && git -C src fetch origin claude/opt-kb && git -C src checkout 7ccd1af
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграцию 011 применит opt-api при старте
 docker compose logs --tail=30 opt-api | grep -iE "миграц|011"
 cd src && WIDGET_API_URL=https://opt.rf-dveri.ru pnpm opt-widget:build && cp apps/opt-widget/dist/widget.zip /opt/agent-opt/dl/widget-opt-7c1e.zip && md5sum /opt/agent-opt/dl/widget-opt-7c1e.zip
