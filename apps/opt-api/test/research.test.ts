@@ -10,7 +10,9 @@ const letterAnswer = JSON.stringify({
   client: { org: 'ООО Стройоптпоставка', fio: '', email: 'stoptpostavka@yandex.ru', phone: '' },
   request_items: [
     { raw: 'Дверь межкомнатная двухпольная из массива лиственницы 1400x2700 мм, окраска L429 Indigo, 2 шт', name: 'дверь межкомнатная двухпольная из массива лиственницы', width_mm: 1400, height_mm: 2700, qty: 2 },
-    { raw: 'Добор 2 шт', name: 'добор', width_mm: null, height_mm: null, qty: 2 },
+    // Вторая позиция — фурнитура (ищется в интернете). Комплектующее (добор, коробка) по KB-COMPONENT-DOOR в интернете не ищется: цена
+    // только из строки прайса своей двери — см. отдельный сценарий ниже.
+    { raw: 'Ручка дверная 2 шт', name: 'ручка дверная', width_mm: null, height_mm: null, qty: 2 },
   ],
   required_blocks: ['price'],
   questions: [],
@@ -84,7 +86,7 @@ describe('поиск цен из черновика: кнопка «Найти �
     // Медиана четырёх (80 000 без указания НДС принято как конечная цена, 5.1) = 85 000 × коэффициент производителя 0,9 = 76 500,00.
     expect(d.items[0]).toMatchObject({ price: 76_500, priceSource: 'research', coefficient: 0.9, market: { median: 85_000, min: 80_000, max: 90_000, count: 4, unit: 'piece' } });
     expect(d.items[0].market.researchId).toBeGreaterThan(0);
-    // Вторая позиция («добор») получила те же предложения, но карточка позиции другая — для теста важно, что цена поставлена и пометок о «цена не задана» нет.
+    // Вторая позиция («ручка дверная») получила те же предложения, но карточка позиции другая — для теста важно, что цена поставлена и пометок о «цена не задана» нет.
     expect(d.items[1].price).not.toBeNull();
     const st = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/research?draftId=${draftId}`, headers })).json();
     expect(st.pending).toBe(false);
@@ -141,6 +143,19 @@ describe('поиск цен из черновика: кнопка «Найти �
     await ctx.deps.kp.setStatus(draftId, 'draft');
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: 999_999 } })).statusCode).toBe(404);
   });
+
+  it('KB-COMPONENT-DOOR: добор к двери, оценённой по рынку (не из прайса), в интернете не ищется — «уточнить у менеджера», цены нет', async () => {
+    const d = (await ctx.deps.kp.byId(ACCOUNT_ID, draftId))!;
+    const payload = d.payload as unknown as KpPayload;
+    const dobor = { request_index: 2, page_id: null, name: 'Добор', size: '', qty: 2, price: null, lead_time: '', discount: 0, category: 'component' as const };
+    await ctx.deps.kp.setPayload(draftId, { ...payload, items: [...payload.items, dobor], request_items: [...payload.request_items, { raw: 'Добор 2 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 2, category: 'component' }] } as unknown as Record<string, unknown>);
+    const before = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId, requestIndexes: [2] } });
+    expect(g.searches()).toBe(before);
+    const after = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    expect(after.items[2]).toMatchObject({ price: null, priceOutcome: 'not_priced' });
+    expect(after.needsManager.filter((n: { request_index: number }) => n.request_index === 2).map((n: { reason: string }) => n.reason)).toEqual(['уточнить у менеджера: дверь «Дверь межкомнатная двухпольная из массива лиственницы, окраска L429 Indigo» (поз. 1) не из прайса — цены на добор к ней в прайсе нет']);
+  });
 });
 
 describe('поиск цен: нет цен, ошибка провайдера, автозапуск, гонка версий', () => {
@@ -169,7 +184,7 @@ describe('поиск цен: нет цен, ошибка провайдера, �
       expect(d.items[1].price).toBeNull();
       expect(d.needsManager.filter((n: { request_index: number }) => n.request_index === 1).map((n: { reason: string }) => n.reason)).toEqual(['цена не задана', 'поиск цены: веб-поиск недоступен: OpenAI отверг запрос с веб-поиском']);
       const errors = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/journal?kind=${KP_PRICE_ERROR_KIND}`, headers })).json().items;
-      expect(errors[0].summary).toBe('Цена не найдена: добор — веб-поиск недоступен: OpenAI отверг запрос с веб-поиском');
+      expect(errors[0].summary).toBe('Цена не найдена: ручка дверная — веб-поиск недоступен: OpenAI отверг запрос с веб-поиском');
       const st2 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/research?draftId=${draftId}`, headers })).json();
       expect(st2.positions[1]).toMatchObject({ job: null, research: { status: 'failed', error: 'веб-поиск недоступен: OpenAI отверг запрос с веб-поиском' } });
     } finally {

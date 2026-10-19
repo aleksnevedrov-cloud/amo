@@ -17,7 +17,7 @@ import type { KpDraft, KpRepo } from './repo.ts';
  * памяти, а к тому времени по сделке уже был создан новый («Собрать заново»); setBuilt писал в старый. Теперь
  * сборка отвергает черновик, который не последний по сделке (stale_draft), а запись в kp_drafts проверяется.
  */
-export type KpBuildErrorCode = 'not_found' | 'already_sent' | 'no_template' | 'no_priced_lines' | 'stale_draft' | 'build_failed';
+export type KpBuildErrorCode = 'not_found' | 'already_sent' | 'no_template' | 'no_priced_lines' | 'stale_draft' | 'build_failed' | 'component_questions';
 
 export class KpBuildError extends Error {
   override name = 'KpBuildError';
@@ -85,6 +85,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   const hasServices = (payload.items ?? []).length > goods.length;
   // KB-PRICE-SHEETS: «входит в цену блока» — не строка таблицы, а примечание под ближайшей дверью выше; «в прайсе цены нет» —
   // строка с «уточнить у менеджера» вместо цены, в итог не входит.
+  // KB-COMPONENT-DOOR: пока менеджер не ответил, к какой двери считать комплектующее, документ не собирается.
+  const questions = goods.filter((l) => l.question && l.priceOutcome === 'question');
+  if (questions.length) throw new KpBuildError('component_questions', `ответьте на вопросы по комплектующим: ${questions.length} (${questions.slice(0, 3).map((l) => `поз. ${l.request_index + 1}`).join(', ')}${questions.length > 3 ? ', …' : ''})`);
   const included = goods.filter((l) => l.priceOutcome === 'included');
   const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null && l.priceOutcome !== 'included').concat(goods.filter((l) => l.price === null && l.priceOutcome === 'not_priced') as (KpLine & { price: number })[]).sort((a, b) => a.request_index - b.request_index);
   if (!lines.some((l) => l.price !== null)) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');

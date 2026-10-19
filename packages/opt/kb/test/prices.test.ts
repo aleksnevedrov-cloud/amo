@@ -1,7 +1,7 @@
 import type { Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { leavesOf, modelKeyOf, sizeOf } from '../src/model-key.ts';
-import { applyRules, categoryMedian, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, type KbPrice } from '../src/prices.ts';
+import { applyRules, categoryMedian, componentOfDoor, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, type KbPrice } from '../src/prices.ts';
 import { EMPTY_FEATURES, featuresOf } from '../src/features.ts';
 import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
@@ -390,7 +390,7 @@ describe('категории: комплектующие, фурнитура, р
       { model: 'ДВ ПВХ', widthMm: 910, heightMm: 2100, price: 19_900, origin: 'price_list', features: { ...cpl, coating: 'pvc' }, coating: 'ПВХ' },
       { model: 'Добор (ДВ CPL)', price: 900, origin: 'price_list', category: 'component', componentKind: 'добор', features: cpl, coating: 'CPL 0,2 мм', description: 'комплектующее к ДВ CPL' },
       { model: 'Добор (ДВ ПВХ)', price: 850, origin: 'price_list', category: 'component', componentKind: 'добор', features: { ...cpl, coating: 'pvc' }, coating: 'ПВХ', description: 'комплектующее к ДВ ПВХ' },
-      { model: 'Коробка (ДВ CPL)', price: 3500, origin: 'price_list', category: 'component', componentKind: 'коробка', features: cpl, coating: 'CPL 0,2 мм' },
+      { model: 'Коробка (ДВ CPL)', price: 3500, origin: 'price_list', category: 'component', componentKind: 'коробка', features: cpl, coating: 'CPL 0,2 мм', description: 'комплектующее к ДВ CPL' },
     ]);
     const hw = await repo.createSource({ accountId: ACC, kind: 'file', title: 'Прайс_фурнитура.xlsx', original: 'Прайс_фурнитура.xlsx' });
     await repo.setPriceInfo(hw, 'прайс фурнитура', null);
@@ -403,13 +403,18 @@ describe('категории: комплектующие, фурнитура, р
     // Дверь: строки комплектующих («Добор (ДВ CPL)» содержит те же слова) в кандидаты не попадают.
     const door = await lookupPrice(prices, aliases, ACC, { name: 'Дверной блок деревянный глухой CPL', widthMm: 910, heightMm: 2100 }, new Date('2026-10-17'));
     expect(door).toMatchObject({ price: 23_900, row: { model: 'ДВ CPL', category: 'door' } });
-    // Добор без указания двери: своего вида, по признакам (МДФ → дерево совпало) — самая дешёвая из равных строк с пометкой.
-    const dobor = await lookupPrice(prices, aliases, ACC, { name: 'Добор телескопический, МДФ, 300×2150' }, new Date('2026-10-17'));
-    expect(dobor).toMatchObject({ price: 850, basis: 'base', match: 'features', row: { model: 'Добор (ДВ ПВХ)', category: 'component' } });
-    expect(dobor?.notes).toEqual(['в прайсе нет размера — базовая цена', 'комплектующее по прайсу: Добор (ДВ ПВХ) — совпали: деревянный']);
-    // Добор с покрытием CPL — строка к ДВ CPL; коробка — своя строка; порога в прайсе нет → null.
-    expect(await lookupPrice(prices, aliases, ACC, { name: 'Добор CPL 200 мм' }, new Date('2026-10-17'))).toMatchObject({ price: 900, row: { model: 'Добор (ДВ CPL)' } });
-    expect(await lookupPrice(prices, aliases, ACC, { name: 'Коробка дверная CPL' }, new Date('2026-10-17'))).toMatchObject({ price: 3500, row: { model: 'Коробка (ДВ CPL)' } });
+    // KB-COMPONENT-DOOR: без двери строка комплектующего из колонки прайса дверей не подбирается — ни «самая дешёвая», ни по покрытию.
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Добор телескопический, МДФ, 300×2150' }, new Date('2026-10-17'))).toBeNull();
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Добор CPL 200 мм' }, new Date('2026-10-17'))).toBeNull();
+    expect(await lookupPrice(prices, aliases, ACC, { name: 'Коробка дверная CPL' }, new Date('2026-10-17'))).toBeNull();
+    // По своей двери — колонка этой двери: «Коробка (ДВ CPL)» 3 500, «Добор (ДВ ПВХ)» 850; колонки нет — «уточнить», не 0.
+    const dvCpl = (await prices.listByOrigin(ACC, 'price_list')).find((r) => r.model === 'ДВ CPL' && r.category === 'door') as KbPrice;
+    const dvPvh = (await prices.listByOrigin(ACC, 'price_list')).find((r) => r.model === 'ДВ ПВХ' && r.category === 'door') as KbPrice;
+    expect(await componentOfDoor(prices, ACC, dvCpl, 'коробка', new Date('2026-10-17'))).toMatchObject({ price: 3500, outcome: 'priced', label: 'по двери ДВ CPL', row: { model: 'Коробка (ДВ CPL)' } });
+    expect(await componentOfDoor(prices, ACC, dvPvh, 'добор', new Date('2026-10-17'))).toMatchObject({ price: 850, outcome: 'priced', row: { model: 'Добор (ДВ ПВХ)' } });
+    const noSill = await componentOfDoor(prices, ACC, dvPvh, 'порог', new Date('2026-10-17'));
+    expect(noSill).toMatchObject({ price: null, outcome: 'not_priced', row: { model: 'ДВ ПВХ' } });
+    expect(noSill.notes).toEqual(['уточнить у менеджера: у двери ДВ ПВХ в прайсе нет цены на порог']);
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Порог дубовый' }, new Date('2026-10-17'))).toBeNull();
     // Фурнитура: по ключу/словам среди строк фурнитуры; дверные строки не мешают; работы — null.
     expect(await lookupPrice(prices, aliases, ACC, { name: 'Ручка Palladium Luna' }, new Date('2026-10-17'))).toMatchObject({ price: 1450, row: { category: 'hardware' } });

@@ -68,13 +68,17 @@ export interface KpDraftLine {
    * KB-PRICE-SHEETS: included — входит в цену блока двери (в таблицу и итог КП не идёт); not_priced — в прайсе цены нет
    * («уточнить у менеджера», не 0 ₽); estimate — сметная цена.
    */
-  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate';
+  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate' | 'question';
   /** Примечания под позицией в КП (вкладка «Подбор», нестандарт). */
   quoteNotes?: string[];
   /** ID товара прайса двери (INT-013) — контекст для комплектующих и фурнитуры ниже. */
   productId?: string | null;
   /** priceOutcome = included: ID двери или название комплекта, в который входит позиция. */
   includedIn?: string | null;
+  /** KB-COMPONENT-DOOR: дверь заявки (request_index), к которой менеджер отнёс комплектующее. */
+  componentDoor?: number | null;
+  /** Вопрос «К какой двери считать …?» со списком дверей заявки; пока он есть — без цены, документ не собирается. */
+  question?: { kind: 'component_door'; text: string; reason: 'many' | 'none'; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null;
 }
 
 /** Состояние поиска цен по позициям черновика (GET /kp/research). */
@@ -408,6 +412,8 @@ export class KpApi extends ApiClient {
   draft = (leadId: number) => this.call<{ draft: KpDraftInfo | null; job: DraftJob }>('GET', `/widget/v1/kp/draft?leadId=${leadId}`);
   /** Кнопка «Собрать КП»: задание в очередь, ответ сразу. */
   makeDraft = (leadId: number) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', { leadId });
+  /** KB-COMPONENT-DOOR: ответ менеджера — к какой двери заявки считать комплектующее. */
+  componentDoor = (draftId: number, requestIndex: number, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { requestIndex, doorRequestIndex });
   saveDraftItems = (id: number, items: KpDraftLine[]) => this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   /** Кнопка «Собрать документ»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
   buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[]; files?: { kind: 'docx' | 'pdf'; name: string; bytes: number }[] }>('POST', '/widget/v1/kp/build', { draftId });

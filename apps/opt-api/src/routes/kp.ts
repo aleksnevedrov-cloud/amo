@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf, sizeOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -207,6 +207,33 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
     await deps.queue.enqueue({ accountId: p.accountId, leadId: b.data.leadId, userId: p.userId });
     return reply.code(202).send({ queued: true });
+  });
+
+  /**
+   * KB-COMPONENT-DOOR: ответ менеджера на вопрос «К какой двери считать …?» — дверь (строка заявки) сохраняется в черновике
+   * (componentDoor, «Найти цены» её не сбрасывает), вопрос снимается, цена комплектующего пересчитывается по строке прайса этой двери.
+   */
+  api.post('/kp/draft/:id/component-door', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const b = z.object({ requestIndex: z.number().int().min(0), doorRequestIndex: z.number().int().min(0) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
+    const payload = d.payload as unknown as KpPayload;
+    const items = payload.items ?? [];
+    const line = items.find((l) => l.request_index === b.data.requestIndex);
+    const door = items.find((l) => l.request_index === b.data.doorRequestIndex);
+    if (!line || lineCategory(line) !== 'component') return reply.code(400).send({ error: 'not_component', message: 'Позиция — не комплектующее' });
+    if (!door || lineCategory(door) !== 'door') return reply.code(400).send({ error: 'not_door', message: 'Выбранная позиция — не дверь этой заявки' });
+    const next = items.map((l) => (l.request_index === line.request_index ? { ...l, componentDoor: door.request_index, question: null, priceOutcome: undefined, price: l.priceSource === 'manager' ? l.price : null } : l));
+    await repo.setPayload(id, { ...payload, items: next } as unknown as Record<string, unknown>);
+    await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary: `Комплектующее «${line.name}» отнесено менеджером к двери «${door.name}» (поз. ${door.request_index + 1})`, details: { draftId: id, requestIndex: line.request_index, doorRequestIndex: door.request_index, userId: p.userId } });
+    await deps.researchQueue.enqueue([{ accountId: p.accountId, draftId: id, requestIndex: line.request_index, userId: p.userId, force: false, replace: true }]);
+    const fresh = await repo.byId(p.accountId, id);
+    return { draft: fresh ? view(fresh) : null };
   });
 
   /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */

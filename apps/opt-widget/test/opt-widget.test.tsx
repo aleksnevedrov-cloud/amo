@@ -308,6 +308,40 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(button('Найти цены')?.disabled).toBe(false);
   });
 
+  it('KB-COMPONENT-DOOR: у строки комплектующего — вопрос «К какой двери считать …?» с дверями заявки; до ответа «Собрать документ» недоступна с подсказкой; выбор двери шлёт ответ и показывает цену по этой двери', async () => {
+    const doorLine = (i: number, name: string, size: string, qty: number, price: number, productId: string) => ({ request_index: i, page_id: null, name, size, qty, price, lead_time: '', discount: 0, category: 'door' as const, priceSource: 'kb' as const, priceLabel: `по прайсу: ${name}`, productId });
+    const question = { kind: 'component_door' as const, text: 'К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?', reason: 'many' as const, options: [{ requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 }, { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 }] };
+    const box = { request_index: 2, page_id: null, name: 'Коробка ТЕЛЕСКОП, сэндвич 74×2150', size: '', qty: 35, price: null as number | null, lead_time: '', discount: 0, category: 'component' as const, priceSource: 'kb' as const, priceLabel: 'вопрос: к какой двери', priceOutcome: 'question' as string, question: question as typeof question | null, componentDoor: null as number | null };
+    let current = { ...draft, id: 64, items: [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013'), box], needsManager: [{ request_index: 2, reason: 'вопрос по комплектующему: К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?' }] };
+    const answers: unknown[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'POST /widget/v1/kp/draft/64/component-door': (data?: string) => {
+        answers.push(JSON.parse(data ?? '{}'));
+        current = { ...current, items: [current.items[0], current.items[1], { ...box, price: 1910, priceOutcome: 'priced', question: null, componentDoor: 0, priceLabel: 'по двери INT-002, ДПГ усиленная' }], needsManager: [] } as typeof current;
+        return { draft: current };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    const text = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
+    expect(text()).toContain('К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич 74×2150, 35 шт»?');
+    expect(text()).toContain('Подходит несколько дверей заявки — выберите, из строки прайса какой двери брать цену:');
+    const options = [...document.querySelectorAll('.opt-kp-door-option')].map((b) => b.textContent?.replace(/\u00a0/g, ' '));
+    expect(options).toEqual(['INT-002 · ДПГ усиленная · 800 × 2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910 × 2100 мм · 3 шт']);
+    expect(button('Собрать документ')?.disabled).toBe(true);
+    expect(button('Собрать документ')?.title).toBe('Ответьте на вопросы по комплектующим');
+    expect(text()).toContain('Ответьте на вопросы по комплектующим (1)');
+    await act(async () => (document.querySelector('.opt-kp-door-option') as HTMLButtonElement).click());
+    await flush();
+    expect(answers).toEqual([{ requestIndex: 2, doorRequestIndex: 0 }]);
+    expect(text()).not.toContain('К какой двери считать');
+    expect(text()).toContain('Цена · по двери INT-002, ДПГ усиленная');
+    expect(text()).toContain('дверь выбрана менеджером: поз. 1');
+    expect(button('Собрать документ')?.disabled).toBe(false);
+  });
+
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела», кнопка «Искать в интернете» шлёт force', async () => {
     const kbDraft = { ...draft, items: [
       { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' },

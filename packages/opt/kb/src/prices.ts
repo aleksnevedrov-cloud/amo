@@ -760,6 +760,10 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (st === 'included') return doorOutcome(door, 'included', [`${componentKind} входит в цену блока ${door.model}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`], now);
     if (st === 'not_priced') return doorOutcome(door, 'not_priced', [`уточнить у менеджера: ${componentKind} к ${door.model} в прайсе без цены`], now);
   }
+  // KB-COMPONENT-DOOR: комплектующее из колонки прайса дверей («Коробка (ДПГ CPL)») — только по своей двери (componentOfDoor);
+  // без двери такие строки не подбираются: «первая / самая дешёвая строка» другой двери запрещена.
+  const doorBound = (row: KbPrice) => row.origin === 'price_list' && row.category === 'component' && Boolean(row.productId || row.description?.startsWith('комплектующее к '));
+  const banDoorBound = category === 'component' && !door;
   const keys = key ? (alias ? [key, ...alias.keys] : [key]) : [];
   const queryTokens = searchTokensOf(q.name, q.raw);
   const found = (keys.length ? await prices.candidates(accountId, keys, queryTokens) : []).filter((f) => sameCategory(f.row));
@@ -790,7 +794,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
   if (hasFeatures(qf) || category === 'component') {
     for (const row of priceList) {
-      if (!fits(row)) continue;
+      if (!fits(row) || (banDoorBound && doorBound(row))) continue;
       const fm = matchFeatures(qf, rowFeatures(row));
       // Комплектующее того же вида (добор, коробка…) подходит и без общих признаков двери: лишь бы обязательные не расходились.
       const ok = category === 'component' ? fm.conflict === null && Boolean(componentKind) && row.componentKind === componentKind : fm.ok;
@@ -803,7 +807,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     }
   }
   for (const { row, similarity } of found) {
-    if (seen.has(row.id) || !fits(row)) continue;
+    if (seen.has(row.id) || !fits(row) || (banDoorBound && doorBound(row))) continue;
     const m = keyMatch(row, key, alias, itemTokens, qSet, similarity);
     if (!m || !allowed(row, m.match)) continue;
     const rf = rowFeatures(row);
@@ -969,6 +973,32 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
 }
 
 const BASIS_NAME: Record<UnitBasis, string> = { leaf: 'полотну', block: 'блоку', leaf_pair: 'паре полотен', opening: 'проёму' };
+
+/** Подпись двери прайса для пометок: «INT-013, ДПГ CPL». */
+export const doorTitleOf = (door: Pick<KbPrice, 'productId' | 'model'>): string => `${door.productId ? `${door.productId}, ` : ''}${door.model}`;
+
+/**
+ * KB-COMPONENT-DOOR: цена комплектующего (коробка, наличник, добор, порог) — только из строки прайса своей двери: колонка этой
+ * двери («Коробка (ДПГ CPL)» с тем же ID товара; у одностраничного прайса — «комплектующее к <модель двери>» того же файла) и
+ * статус компонента в её карточке. included → «входит в цену блока»; not_priced или колонки нет → «уточнить у менеджера», не 0.
+ */
+export async function componentOfDoor(prices: KbPricesRepo, accountId: number, door: KbPrice, kind: ComponentKind, now = new Date()): Promise<PriceHit> {
+  const title = doorTitleOf(door);
+  const st = door.componentStatus?.[kind] ?? null;
+  if (st === 'included') return { ...doorOutcome(door, 'included', [`${kind} входит в цену блока ${title}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`], now), label: `по двери ${title}` };
+  if (st === 'not_priced') return { ...doorOutcome(door, 'not_priced', [`уточнить у менеджера: ${kind} к двери ${title} в прайсе без цены`], now), label: `по двери ${title}` };
+  const own = door.productId
+    ? (await prices.rowsByProductId(accountId, door.productId)).filter((r) => r.category === 'component' && r.componentKind === kind && r.origin === 'price_list')
+    : (await prices.listByOrigin(accountId, 'price_list')).filter((r) => r.category === 'component' && r.componentKind === kind && r.sourceId === door.sourceId && r.description === `комплектующее к ${door.model}`);
+  const row = own.find(hasPrice);
+  if (!row) return { ...doorOutcome(door, 'not_priced', [`уточнить у менеджера: у двери ${title} в прайсе нет цены на ${kind}`], now), label: `по двери ${title}` };
+  const validityDays = validityDaysOf(row);
+  const stale = now.getTime() - row.validAt.getTime() > validityDays * 86_400_000;
+  const where = row.sourceRow ? ` (строка ${row.sourceRow})` : '';
+  const notes = [`комплектующее по двери ${title}: ${row.model}${where}`];
+  if (stale) notes.push(`цена устарела: актуальна на ${row.validAt.toLocaleDateString('ru-RU')}, срок ${validityDays} дн.`);
+  return { row, price: row.price as number, basis: 'base', match: 'exact', similarity: 1, confidence: row.confidence, stale, validityDays, notes, label: `по двери ${title}`, features: null, outcome: 'priced', quoteNotes: [] };
+}
 
 /** Исход «входит в блок» / «без цены» по карточке двери: строка двери, цена 0, подпись прайса двери. */
 function doorOutcome(door: KbPrice, outcome: 'included' | 'not_priced', notes: string[], now: Date): PriceHit {

@@ -1,5 +1,6 @@
 export * from './analog.ts';
 export * from './build.ts';
+export * from './component-door.ts';
 export * from './convert.ts';
 export * from './deps.ts';
 export * from './draft.ts';

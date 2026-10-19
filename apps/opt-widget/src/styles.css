@@ -311,3 +311,10 @@
 .opt-kp .opt-kp-offer { padding: 4px 0; border-top: 1px solid var(--kp-line); }
 .opt-kp .opt-kp-offer:first-of-type { border-top: 0; }
 .opt-kp .opt-kp-offer .opt-link { font-size: 12px; }
+
+/* KB-COMPONENT-DOOR: вопрос «К какой двери считать …?» у строки комплектующего */
+.opt-kp-question { margin: 6px 0; padding: 8px; border: 1px solid #f0c36d; border-radius: 6px; background: #fff8e6; }
+.opt-kp-question-text { font-weight: 600; margin-bottom: 4px; }
+.opt-kp-question-options { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.opt-kp-door-option { text-align: left; white-space: normal; }
+.opt-kp-questions-hint { color: #8a5a00; }

@@ -189,7 +189,9 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   // Работы в итог не входят и цены для сборки не требуют (KB-COMPONENTS, п. 5).
   const goods = lines.filter((l) => !isServiceLine(l));
   const total = goods.reduce((sum, l) => sum + (l.price === null ? 0 : l.price * l.qty * (1 - l.discount / 100)), 0);
-  const ready = goods.length > 0 && goods.every((l) => l.price !== null);
+  // KB-COMPONENT-DOOR: вопросы «к какой двери» блокируют сборку; «в прайсе цены нет» и «входит в блок» — нет (в КП — «уточнить» / под дверью).
+  const questions = goods.filter((l) => l.priceOutcome === 'question' && l.question).length;
+  const ready = goods.length > 0 && questions === 0 && goods.every((l) => l.price !== null || l.priceOutcome === 'not_priced' || l.priceOutcome === 'included');
 
   const kpStatus = STATUS[draft?.status ?? 'draft'] ?? draft?.status ?? '';
   // Скачивание файла КП (RFD-AI-AGENT-OPT-KP-DOWNLOAD): подписанная ссылка от API, по ней браузер получает файл как вложение.
@@ -278,7 +280,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
                 </button>
               </div>
             )}
-            <KpLinesTiles lines={lines} needsManager={draft.needsManager} research={research} locked={draft.status !== 'draft' || busy || pending || dirty} onEdit={edit} onFind={(i, force) => void findPrices([i], force)} />
+            <KpLinesTiles lines={lines} needsManager={draft.needsManager} research={research} locked={draft.status !== 'draft' || busy || pending || dirty} onEdit={edit} onFind={(i, force) => void findPrices([i], force)} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
             <div className="opt-kp-sep" />
             <div className="opt-kp-total">
               <span>Итого</span>
@@ -320,6 +322,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           busy={busy || pending}
           dirty={dirty}
           ready={ready}
+          questions={questions}
           onDraft={start}
           onSave={() => void act(() => api.saveDraftItems(draft.id, lines))}
           onBuild={() => void act(() => api.buildDoc(draft.id))}
@@ -329,7 +332,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
 
       {/* 6. Примечание */}
       <section className="opt-kp-card opt-kp-note">
-        <KpNote draft={draft} ready={ready} />
+        <KpNote draft={draft} ready={ready} questions={questions} />
       </section>
 
       {preview && (
@@ -483,7 +486,7 @@ function SearchDiag({ m }: { m: MailSourceInfo }) {
 }
 
 /** Позиции плитками по макету: название, размер серым, состояние поиска цены с раскрытием «Источники», поля «Количество», «Цена», «Скидка». */
-function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; research: ResearchState | null; locked: boolean; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onFind: (requestIndex: number, force: boolean) => void }) {
+function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind, onDoor }: { lines: KpDraftLine[]; needsManager: KpDraftInfo['needsManager']; research: ResearchState | null; locked: boolean; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onFind: (requestIndex: number, force: boolean) => void; onDoor?: (requestIndex: number, doorRequestIndex: number) => void }) {
   // «Цена не задана» под размером не показываем: это состояние и так видно в поле «Цена» (DESIGN-FIX, п. 4).
   const reasons = (i: number) => needsManager.filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
   return (
@@ -505,6 +508,20 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind }:
             {l.priceOutcome === 'included' && <div className="opt-kp-sub opt-kp-outcome">входит в цену блока{l.includedIn ? ` (${l.includedIn})` : ''}: отдельной строкой в таблицу и итог КП не идёт, пишется под дверью</div>}
             {l.priceOutcome === 'not_priced' && <div className="opt-kp-sub opt-kp-outcome opt-kp-stale">в прайсе цены нет — уточнить у менеджера (в КП строка без цены, в итог не входит)</div>}
             {l.priceOutcome === 'estimate' && <div className="opt-kp-sub opt-kp-outcome">сметная цена — для сметы, уточнить у менеджера</div>}
+            {l.priceOutcome === 'question' && l.question && (
+              <div className="opt-kp-question">
+                <div className="opt-kp-question-text">{l.question.text}</div>
+                <div className="opt-kp-sub">{l.question.reason === 'many' ? 'Подходит несколько дверей заявки — выберите, из строки прайса какой двери брать цену:' : 'Ни одна дверь заявки не подходит однозначно — выберите дверь:'}</div>
+                <div className="opt-kp-question-options">
+                  {l.question.options.map((o) => (
+                    <button key={o.requestIndex} type="button" className="opt-btn opt-btn-small opt-kp-door-option" disabled={locked || !onDoor} onClick={() => onDoor?.(l.request_index, o.requestIndex)}>
+                      {o.productId ? `${o.productId} · ` : ''}{o.model}{o.size ? ` · ${sizeLabel(o.size)}` : ''} · {o.qty.toLocaleString('ru-RU')} шт
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {l.componentDoor !== null && l.componentDoor !== undefined && l.priceOutcome !== 'question' && <div className="opt-kp-sub opt-kp-door-chosen">дверь выбрана менеджером: поз. {l.componentDoor + 1}</div>}
             {l.quoteNotes && l.quoteNotes.length > 0 && <div className="opt-kp-sub opt-kp-quote-notes">Примечание в КП: {l.quoteNotes.join(' ')}</div>}
             {why.length > 0 && <div className="opt-kp-sub">{why.filter((w) => !(service && w === 'цена не задана')).join('; ')}</div>}
             {!service && <PriceState line={l} pos={pos} locked={locked} onFind={(force) => onFind(l.request_index, force)} />}
@@ -620,7 +637,7 @@ const safeHost = (url: string) => {
 };
 
 /** Кнопки шагов во всю ширину одна под другой: собрать заново → сохранить правки → собрать документ → отправить (окно предпросмотра). */
-function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend }: { draft: KpDraftInfo; busy: boolean; dirty: boolean; ready: boolean; onDraft: () => void; onSave: () => void; onBuild: () => void; onSend: () => void }) {
+function KpActions({ draft, busy, dirty, ready, questions = 0, onDraft, onSave, onBuild, onSend }: { draft: KpDraftInfo; busy: boolean; dirty: boolean; ready: boolean; questions?: number; onDraft: () => void; onSave: () => void; onBuild: () => void; onSend: () => void }) {
   const canSend = (draft.status === 'built' || draft.status === 'sent') && !dirty;
   return (
     <div className="opt-actions">
@@ -630,7 +647,7 @@ function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend
       <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={onSave}>
         Сохранить правки
       </button>
-      <button type="button" className="opt-btn opt-btn-green" disabled={busy || dirty || !ready} title={dirty ? 'Сначала сохраните правки' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
+      <button type="button" className="opt-btn opt-btn-green" disabled={busy || dirty || !ready} title={dirty ? 'Сначала сохраните правки' : questions ? 'Ответьте на вопросы по комплектующим' : !ready ? 'У каждой позиции должна быть цена' : 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
         Собрать документ
       </button>
       <button type="button" className="opt-btn" disabled={busy || !canSend} title={canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
@@ -641,9 +658,10 @@ function KpActions({ draft, busy, dirty, ready, onDraft, onSave, onBuild, onSend
 }
 
 /** Примечание под действиями: что дальше по состоянию черновика. */
-function KpNote({ draft, ready }: { draft: KpDraftInfo; ready: boolean }) {
+function KpNote({ draft, ready, questions = 0 }: { draft: KpDraftInfo; ready: boolean; questions?: number }) {
   if (draft.status === 'sent') return <>Отправлено{draft.sentAt ? ` ${date(draft.sentAt)}` : ''}. Повторная отправка — через «Отправить клиенту» с подтверждением.</>;
   if (draft.status === 'built') return <>Документ собран{draft.hasPdf ? ' (DOCX и PDF)' : ' (PDF не получился, есть DOCX)'} — файлы в карточке сделки. Проверьте документ и отправьте клиенту.</>;
+  if (questions > 0 && draft.status === 'draft') return <span className="opt-kp-questions-hint">Ответьте на вопросы по комплектующим ({questions}): у каждой такой строки выберите дверь заявки — цена возьмётся из строки прайса этой двери. До ответа документ не собирается.</span>;
   if (!ready && draft.items.length > 0) return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя. Сборка документа включится, когда у каждой позиции (кроме работ) будет цена.</>;
   return <>Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.</>;
 }

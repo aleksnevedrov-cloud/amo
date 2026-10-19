@@ -1,7 +1,8 @@
 import type { JournalKind } from '@core/db';
-import { categoryMedian, componentKindOf, featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceModelOf, searchTokensOf, WEB_BAND, webPriceRealistic, type PriceHit } from '@opt/kb';
+import { categoryMedian, componentKindOf, componentOfDoor, doorTitleOf, featureKeyOf, featuresOf, lookupPrice, mergeFeatures, priceModelOf, searchTokensOf, WEB_BAND, webPriceRealistic, type ComponentKind, type KbPrice, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
-import { lineCategory, NO_PRICE, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
+import { lineCategory, NO_PRICE, tidyName, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
+import { doorComponentKind, matchComponentDoor } from './component-door.ts';
 import { cleanName, VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { manufacturerCoefficient, offerPrice, type OfferPrice } from './offer-price.ts';
 import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
@@ -92,6 +93,10 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     const { constants } = await core.kp.getSettings(accountId);
     const input = researchInputOf(payload, line);
     const size = sizeOfInput(input);
+    // KB-COMPONENT-DOOR: коробка / наличник / добор / порог — только из строки прайса своей двери этой заявки; не ясно, какой —
+    // вопрос менеджеру; веб-поиск и чужие двери не используются.
+    const componentKind = doorComponentKind(payload, line);
+    if (componentKind) return await priceComponentByDoor(core, job, draft.leadId, payload, line, componentKind, lineLabel);
     // 1. База знаний (RFD-AI-AGENT-OPT-KB): модель и размер из kb_prices → базовая цена × правила нестандарта, без веб-поиска.
     //    force («искать заново» / «искать в интернете») идёт мимо базы и кэша.
     if (!job.force && !constants.skipKnowledgeBase) {
@@ -205,7 +210,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
 }
 
 /** Пометки позиции, которые ставит сам поиск цен (их мы заменяем при повторе); остальное — слова менеджера или разбора. */
-const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела') || reason.startsWith('цвет уточнить');
+const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела') || reason.startsWith('цвет уточнить') || reason.startsWith('уточнить у менеджера') || reason.startsWith('вопрос по комплектующему');
 
 /**
  * Цена из базы знаний в строку черновика: price, priceSource = kb, подпись и пометка «устарела», ссылка на kb_prices;
@@ -232,7 +237,8 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       next.priceStale = hit.stale;
       next.kbPriceId = hit.row.id;
       next.priceOutcome = outcome;
-      next.productId = hit.row.category === 'door' ? hit.row.productId : null;
+      delete next.question;
+      next.productId = hit.row.category === 'door' && lineCategory(line) === 'door' ? hit.row.productId : null;
       next.includedIn = outcome === 'included' ? hit.includedIn ?? null : null;
       // Синоним прайса увёл позицию в другую категорию («Фрамуга» — фурнитура): плитка и таблица КП следуют за строкой базы.
       // Строка двери-контекста («входит в блок» / «нет цены» у комплектующего) категорию позиции не меняет; тариф «Дополнений» без цены —
@@ -340,4 +346,94 @@ export async function hardwareSetOf(core: OptCore, accountId: number, payload: P
     if (set && set.tariffId && set.tariffId !== tariffId && (set.card?.includes ?? '').toLowerCase().includes(id)) return set.model;
   }
   return null;
+}
+
+/**
+ * Строка прайса двери заявки: по уже найденной цене двери (kbPriceId) или подбором по базе здесь же (без записи в черновик).
+ * Кэш — по тексту двери: 30 одинаковых строк «ДВ CPL» подбираются один раз.
+ */
+export async function doorRowsOf(core: OptCore, accountId: number, payload: Partial<KpPayload>): Promise<Map<number, KbPrice | null>> {
+  const out = new Map<number, KbPrice | null>();
+  const cache = new Map<string, Promise<KbPrice | null>>();
+  for (const door of (payload.items ?? []).filter((l) => lineCategory(l) === 'door')) {
+    if (door.kbPriceId) {
+      const row = await core.kb.prices.byId(accountId, door.kbPriceId);
+      if (row && row.category === 'door') {
+        out.set(door.request_index, row);
+        continue;
+      }
+    }
+    const input = researchInputOf(payload, door);
+    const size = sizeOfInput(input);
+    const key = `${input.item.name}|${input.item.raw}|${size.widthMm}|${size.heightMm}`;
+    let p = cache.get(key);
+    if (!p) {
+      p = lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || door.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category: 'door' }).then((h) => (h && h.row.category === 'door' ? h.row : null));
+      cache.set(key, p);
+    }
+    out.set(door.request_index, await p);
+  }
+  return out;
+}
+
+/** Правка своей строки черновика с проверкой версии (как applyKbPriceToDraft): поля строки и пометки менеджеру по позиции. */
+async function patchLine(core: OptCore, accountId: number, draftId: number, requestIndex: number, patch: (l: KpLine) => KpLine, notes: string[]): Promise<KpLine> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const draft = await core.kp.byId(accountId, draftId);
+    if (!draft) throw new Error(`черновик ${draftId} не найден`);
+    const payload = draft.payload as unknown as Partial<KpPayload>;
+    const items = [...(payload.items ?? [])];
+    const i = items.findIndex((l) => l.request_index === requestIndex);
+    if (i < 0) throw new Error(`в черновике ${draftId} нет позиции ${requestIndex}`);
+    const next = patch(items[i] as KpLine);
+    items[i] = next;
+    const needs = (payload.needs_manager ?? []).filter((n) => !(n.request_index === requestIndex && ownNote(n.reason)));
+    for (const n of notes) needs.push({ request_index: requestIndex, reason: n });
+    if (await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items, needs_manager: needs } as unknown as Record<string, unknown>)) return next;
+  }
+  throw new Error(`черновик ${draftId} меняется параллельно — позиция ${requestIndex} не записана`);
+}
+
+/**
+ * KB-COMPONENT-DOOR: цена коробки / наличника / добора / порога по двери этой заявки. Дверь — выбор менеджера (componentDoor) или
+ * однозначное сопоставление (matchComponentDoor); иначе — вопрос «К какой двери считать …?» со списком дверей, без цены.
+ */
+export async function priceComponentByDoor(core: OptCore, job: ResearchJob, leadId: number, payload: Partial<KpPayload>, line: KpLine, kind: ComponentKind, lineLabel: string): Promise<ResearchJobResult> {
+  const { accountId, draftId, requestIndex } = job;
+  const managerPrice = line.priceSource === 'manager' && line.price !== null && !job.replace;
+  if (managerPrice) return { researchId: 0, status: 'ok', cached: true, price: line.price, keptManagerPrice: true, notes: [], fromKb: true };
+  const doorRows = await doorRowsOf(core, accountId, payload);
+  const chosen = line.componentDoor !== null && line.componentDoor !== undefined ? (payload.items ?? []).find((l) => l.request_index === line.componentDoor && lineCategory(l) === 'door') ?? null : null;
+  const match = chosen ? ({ kind: 'door', door: chosen, row: doorRows.get(chosen.request_index) ?? null, reason: 'выбор менеджера' } as const) : matchComponentDoor(payload, line, doorRows);
+  const journal = (summary: string, details: Record<string, unknown>) => core.journal.add({ accountId, leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: ${summary}`, details: { draftId, requestIndex, source: 'kb_component_door', componentKind: kind, webSearchCalls: 0, costUsd: 0, userId: job.userId, ...details } });
+  if (match.kind === 'no_doors') {
+    const note = `уточнить у менеджера: в заявке нет дверей — ${kind} не к чему привязать, цену из прайса другой двери агент не берёт`;
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'нет двери в заявке', priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await journal('в заявке нет дверей — цена не поставлена, уточнить у менеджера', { outcome: 'not_priced' });
+    return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
+  }
+  if (match.kind === 'question') {
+    const q = match.question;
+    const variants = q.options.map((o) => `${o.productId ? `${o.productId} ` : ''}${o.model}${o.size ? ` ${o.size}` : ''} × ${o.qty.toLocaleString('ru-RU')}`).join('; ');
+    const note = `вопрос по комплектующему: ${q.text} ${q.reason === 'many' ? 'Подходит несколько дверей заявки' : 'Ни одна дверь заявки не подходит однозначно'}: ${variants}`;
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await journal(`вопрос менеджеру — ${q.text} (вариантов ${q.options.length})`, { outcome: 'question', options: q.options });
+    return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
+  }
+  const door = match.door;
+  const row = match.row;
+  const doorName = tidyName(door.name);
+  if (!row || row.origin !== 'price_list') {
+    const note = `уточнить у менеджера: дверь «${doorName}» (поз. ${door.request_index + 1}) не из прайса — цены на ${kind} к ней в прайсе нет`;
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: `по двери «${doorName}»`, priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await journal(`дверь «${doorName}» не из прайса — цена не поставлена`, { outcome: 'not_priced', doorRequestIndex: door.request_index });
+    return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
+  }
+  const hit = await componentOfDoor(core.kb.prices, accountId, row, kind);
+  const why = `по двери ${doorTitleOf(row)} (поз. ${door.request_index + 1}): ${match.reason}`;
+  const withWhy: PriceHit = { ...hit, notes: [why, ...hit.notes] };
+  await applyKbPriceToDraft(core, accountId, draftId, requestIndex, withWhy, true);
+  const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽`;
+  await journal(`${priceText} ${hit.label}, веб-поиск не вызывался`, { outcome: hit.outcome ?? 'priced', kbPriceId: hit.row.id, price: hit.price, doorRequestIndex: door.request_index, doorProductId: row.productId, notes: withWhy.notes });
+  return { researchId: 0, status: 'ok', cached: true, price: hit.price, keptManagerPrice: false, notes: withWhy.notes, fromKb: true };
 }

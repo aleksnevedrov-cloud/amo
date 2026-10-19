@@ -73,13 +73,28 @@ export interface KpLine {
    * KB-PRICE-SHEETS: исход подбора по многолистовому прайсу — included: входит в цену блока двери (в таблицу и итог не идёт,
    * пишется под дверью); not_priced: в прайсе цены нет («уточнить у менеджера», не 0 ₽, в итог не идёт); estimate: сметная цена.
    */
-  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate';
+  priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate' | 'question';
   /** Примечания под позицией в КП: из вкладки «Подбор», нестандарт, «в цену блока входит …». */
   quoteNotes?: string[];
   /** ID товара прайса (INT-013), по которому взята цена двери: контекст для комплектующих и фурнитуры ниже. */
   productId?: string | null;
   /** priceOutcome = included: во что входит — ID двери (цена блока) или название комплекта фурнитуры. */
   includedIn?: string | null;
+  /**
+   * KB-COMPONENT-DOOR: к какой двери заявки менеджер отнёс комплектующее (request_index строки двери). Ставится только ответом
+   * менеджера, «Найти цены» его не сбрасывает; цена комплектующего — из строки прайса этой двери.
+   */
+  componentDoor?: number | null;
+  /** Вопрос менеджеру «К какой двери считать …?» со списком дверей заявки; пока он есть — цены нет, документ не собирается. */
+  question?: ComponentDoorQuestionInfo | null;
+}
+
+/** Вопрос по комплектующему в черновике (тип повторён здесь, чтобы draft.ts не зависел от component-door.ts). */
+export interface ComponentDoorQuestionInfo {
+  kind: 'component_door';
+  text: string;
+  reason: 'many' | 'none';
+  options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[];
 }
 
 export interface KpPayload {
