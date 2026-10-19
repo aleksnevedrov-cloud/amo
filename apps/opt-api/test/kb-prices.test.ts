@@ -775,5 +775,57 @@ describe('база знаний опта: цены и синонимы → по�
     const text4 = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc4!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
     expect(text4).toContain('итого 95 600 ₽');
     expect(text4).not.toContain('ДА-1-Г-Т-V60');
-  });
+
+    // KB-HW-NULL: 9 тарифов «Дополнений» без цены (OPT-009…017) в каждом файле — цена NULL, а не 0,00; нулевых цен прайса в базе нет.
+    const all = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/prices?limit=1000', headers })).json().items as { origin: string; category: string; tariffId: string | null; price: number | null; sourceId: number }[];
+    const unpriced = all.filter((p) => p.origin === 'price_list' && p.price === null);
+    expect(unpriced.map((p) => p.tariffId).sort()).toEqual(['009', '010', '011', '012', '013', '014', '015', '016', '017'].flatMap((n) => [`OPT-${n}`, `OPT-${n}`]));
+    expect(new Set(unpriced.map((p) => p.sourceId))).toEqual(new Set([inner.id, metal.id]));
+    expect(all.filter((p) => p.origin === 'price_list' && p.price === 0)).toEqual([]);
+    const db = (await ctx.deps.kb.prices.listByOrigin(ACCOUNT_ID, 'price_list')).filter((r) => r.tariffId === 'OPT-012');
+    expect(db.map((r) => r.price)).toEqual([null, null]);
+    // Заявка с позициями без цены у алюминиевой двери ALU-005 и у межкомнатной INT-018: «уточнить у менеджера», не 0 ₽, в итог не входят.
+    letter.request_items = [
+      { raw: 'ДПГ CPL 910×2100 — 1 шт', name: 'ДПГ CPL', width_mm: 910, height_mm: 2100, qty: 1 },
+      { raw: 'СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери — 1 шт', name: 'СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери', width_mm: null, height_mm: null, qty: 1 },
+      { raw: 'Санузловой МДФ: влагостойкое исполнение и порог — 2 шт', name: 'Санузловой МДФ: влагостойкое исполнение и порог', width_mm: null, height_mm: null, qty: 2 },
+      { raw: 'Петля IN4000U SN 100×70×2 — 3 шт', name: 'Петля IN4000U SN 100×70×2', width_mm: null, height_mm: null, qty: 3 },
+    ] as unknown as typeof letter.request_items;
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d5 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    // По словам «СПД40 …» и «Санузловой МДФ …» — без ключевых слов фурнитуры (черновик считает их дверями); категорию даёт строка прайса при поиске цены.
+    expect(d5.items.map((l: { category: string }) => l.category)).toEqual(['door', 'door', 'door', 'hardware']);
+    const s5 = g.searches();
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d5.id } });
+    expect(g.searches()).toBe(s5);
+    const d6 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const l6 = d6.items as { price: number | null; priceOutcome?: string; priceSource?: string; category: string }[];
+    expect(l6.map((l) => [l.price, l.priceOutcome, l.priceSource, l.category])).toEqual([[23_900, 'priced', 'kb', 'door'], [null, 'not_priced', 'kb', 'hardware'], [null, 'not_priced', 'kb', 'hardware'], [123.54, 'priced', 'kb', 'hardware']]);
+    const n6 = (d6.needsManager as { request_index: number; reason: string }[]).filter((n) => n.request_index === 1 || n.request_index === 2).map((n) => n.reason);
+    expect(n6.some((n) => n.startsWith('уточнить у менеджера: цены на СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери (OPT-012) в прайсе нет'))).toBe(true);
+    expect(n6.some((n) => n.startsWith('уточнить у менеджера: цены на Санузловой МДФ: влагостойкое исполнение и порог (OPT-017) в прайсе нет'))).toBe(true);
+    expect(n6).not.toContain('цена не задана');
+    // Петля IN4000U в прайсе — для INT-016/018/008, дверь заявки INT-013: цена из прайса с пометкой, без веб-поиска.
+    expect((d6.needsManager as { request_index: number; reason: string }[]).filter((n) => n.request_index === 3).map((n) => n.reason)).toContain('уточнить у менеджера: Петля IN4000U SN 100×70×2 в прайсе для моделей INT-016, INT-018, INT-008, а дверь в заявке — INT-013');
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d5.id } })).json()).toMatchObject({ draft: { status: 'built' } });
+    const doc6 = await ctx.deps.kp.byId(ACCOUNT_ID, d5.id);
+    const text6 = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc6!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
+    // В шаблоне теста — только {{sum}}: строки без цены — «—», не «0 ₽»; итог 23 900 + 3 × 123,54 = 24 270,62 → «24 271 ₽».
+    expect(text6).toContain('СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери — —;');
+    expect(text6).toContain('Санузловой МДФ: влагостойкое исполнение и порог — —;');
+    expect(text6).not.toMatch(/(^|[^\d ])0 ₽/);
+    expect(text6).toContain('итого 24 271 ₽');
+    // Черновик, где цена 0 записана из базы до миграции 011, в документе — тоже «уточнить», не 0 ₽.
+    const legacy = (await ctx.deps.kp.byId(ACCOUNT_ID, d5.id))!;
+    const lp = legacy.payload as unknown as { items: Record<string, unknown>[] };
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const d7 = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
+    const p7 = (await ctx.deps.kp.byId(ACCOUNT_ID, d7.id))!.payload as unknown as { items: Record<string, unknown>[] };
+    await ctx.deps.kp.setPayload(d7.id, { ...p7, items: lp.items.map((l, i) => (i === 1 ? { ...l, price: 0, priceOutcome: undefined } : l)) } as unknown as Record<string, unknown>);
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d7.id } })).json()).toMatchObject({ draft: { status: 'built' } });
+    const text7 = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, (await ctx.deps.kp.byId(ACCOUNT_ID, d7.id))!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, '');
+    expect(text7).toContain('СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери — —;');
+    expect(text7).toContain('итого 24 271 ₽');
+    // Два файла заказчика, четыре поиска и три сборки документа — дольше 5 с по умолчанию.
+  }, 30_000);
 });

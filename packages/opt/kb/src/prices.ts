@@ -49,7 +49,8 @@ export interface KbPrice {
   baseSize: string | null;
   widthMm: number | null;
   heightMm: number | null;
-  price: number;
+  /** Цена за единицу; null — в прайсе цены нет (фурнитура «Дополнений» со статусом not_priced, KB-HW-NULL). */
+  price: number | null;
   vat: PriceVat;
   currency: string;
   validAt: Date;
@@ -102,7 +103,8 @@ export interface NewKbPrice {
   unit?: string;
   widthMm?: number | null;
   heightMm?: number | null;
-  price: number;
+  /** null — цены нет (тариф «Дополнений» без цены); у прайса 0 не записывается. */
+  price: number | null;
   vat?: PriceVat;
   validAt?: Date;
   confidence?: number;
@@ -569,8 +571,8 @@ export interface PriceQuery {
 
 export interface PriceHit {
   row: KbPrice;
-  /** Цена за единицу позиции после правил. */
-  price: number;
+  /** Цена за единицу позиции после правил; null — только при outcome = not_priced (в прайсе цены нет, KB-HW-NULL). */
+  price: number | null;
   /** exact — модель и размер совпали; rules — правила нестандарта; area — пересчёт по площади; base — размер в прайсе не указан. */
   basis: 'exact' | 'rules' | 'area' | 'base';
   /** Совпадение: по признакам (KB-MATCH), точное (ключ модели, сокращения или назначения), по синониму, по вхождению слов, по похожести, по общим словам. */
@@ -622,8 +624,16 @@ const FINISH_WORDS = new Set(['белый', 'белая', 'белое', 'сер�
 const sameSize = (a: number | null, b: number | null | undefined, tol = 5) => a !== null && b !== null && b !== undefined && Math.abs(a - b) <= tol;
 const round2 = (v: number) => Math.round(v * 100) / 100;
 
-/** Цена строки по правилам нестандарта относительно базового размера записи прайса. */
-export function applyRules(row: KbPrice, q: PriceQuery): { price: number; basis: PriceHit['basis']; notes: string[] } {
+/** У записи есть цена (KB-HW-NULL: тариф «Дополнений» без цены хранится как NULL, а не 0). */
+export const hasPrice = <T extends { price: number | null }>(row: T): row is T & { price: number } => row.price !== null && row.price > 0;
+
+/** Цена строки по правилам нестандарта относительно базового размера записи прайса; у записи без цены — null. */
+export function applyRules(row: KbPrice, q: PriceQuery): { price: number | null; basis: PriceHit['basis']; notes: string[] } {
+  if (!hasPrice(row)) return { price: null, basis: 'base', notes: [] };
+  return applyRulesPriced({ ...row, price: row.price }, q);
+}
+
+function applyRulesPriced(row: KbPrice & { price: number }, q: PriceQuery): { price: number; basis: PriceHit['basis']; notes: string[] } {
   const notes: string[] = [];
   const rules = row.nonstandard ?? {};
   const w = q.widthMm ?? null;
@@ -750,7 +760,8 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   const byId = new Map(found.map((f) => [f.row.id, f]));
   // Статусы прайса: inactive / estimate_only — только в смете или когда позиция названа прямо (точный ключ или синоним);
   // фурнитура без цены (price 0) остаётся видимой — менеджер увидит «уточнить», а не веб-цену.
-  const allowed = (row: KbPrice, match: PriceHit['match'] | null) => row.status === 'active' || Boolean(q.estimate) || (row.category === 'hardware' && row.price === 0) || match === 'exact' || match === 'alias';
+  // Тариф без цены (price NULL) остаётся видимым — менеджер увидит «уточнить у менеджера», а не веб-цену и не 0 ₽.
+  const allowed = (row: KbPrice, match: PriceHit['match'] | null) => row.status === 'active' || Boolean(q.estimate) || (row.category === 'hardware' && !hasPrice(row)) || match === 'exact' || match === 'alias';
   // Семейство (п. 7б): деревянная дверь письма не подбирается к стальной или алюминиевой строке и наоборот; покрытие письма (п. 7в) —
   // обязательный признак: строка двери с другим покрытием в колонке прайса не подходит. Названная синонимом модель — вне этих правил.
   const qFamily = category === 'door' ? familyOfText(text) : null;
@@ -768,7 +779,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // признаки прилагаются (ранжирование: подходит по признакам › точный ключ › балл признаков).
   if (hasFeatures(qf) || category === 'component') {
     for (const row of priceList) {
-      if (!forDoor(row) || !fits(row)) continue;
+      if (!fits(row)) continue;
       const fm = matchFeatures(qf, rowFeatures(row));
       // Комплектующее того же вида (добор, коробка…) подходит и без общих признаков двери: лишь бы обязательные не расходились.
       const ok = category === 'component' ? fm.conflict === null && Boolean(componentKind) && row.componentKind === componentKind : fm.ok;
@@ -781,7 +792,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     }
   }
   for (const { row, similarity } of found) {
-    if (seen.has(row.id) || !forDoor(row) || !fits(row)) continue;
+    if (seen.has(row.id) || !fits(row)) continue;
     const m = keyMatch(row, key, alias, itemTokens, qSet, similarity);
     if (!m || !allowed(row, m.match)) continue;
     const rf = rowFeatures(row);
@@ -799,12 +810,17 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     }
   }
   if (!cands.length) return null;
+  // «Для моделей»: при известной двери — только подходящая ей фурнитура; подходящей нет, а позиция в прайсе есть — строка прайса с
+  // пометкой менеджеру, а не веб-поиск (KB-HW-NULL: «Петля IN4000U» для INT-016/018/008 при двери INT-013).
+  const fitting = cands.filter((c) => forDoor(c.row));
+  const otherModels = fitting.length === 0 && category === 'hardware' && Boolean(q.doorProductId);
+  if (fitting.length) cands.splice(0, cands.length, ...fitting);
   // Комплектующее к известной двери: строки её модели («Коробка (ДВ CPL)») в приоритете перед остальными (п. 6 задания).
   const own = door && category === 'component' ? cands.filter((c) => c.row.productId === door.productId) : [];
   const pool = own.length ? own : cands;
   // Порядок источников; веб-цены сверяются с медианой прайса по группе позиции (KB-COMPONENTS: внутри категории).
   const median = categoryMedian(priceList, { category, features: qf, componentKind, tokens: queryTokens });
-  const realistic = (c: Candidate) => c.row.origin !== 'web' || webPriceRealistic(c.row.price, median);
+  const realistic = (c: Candidate) => c.row.origin !== 'web' || (hasPrice(c.row) && webPriceRealistic(c.row.price, median));
   const group = (['price_list', 'purchase', 'manager', 'web'] as PriceOrigin[]).map((o) => pool.filter((c) => c.row.origin === o && realistic(c))).find((g) => g.length);
   if (!group) return null;
   const MATCH_RANK: Record<PriceHit['match'], number> = { exact: 0, alias: 1, tokens: 2, similar: 3, words: 4, features: 5 };
@@ -817,8 +833,8 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
   // Цена строки по размеру: строки многолистового прайса — по сетке размеров модели и правилу файла; прочие — по правилам записи.
   const sizesCache = new Map<string, Promise<KbSize[]>>();
   const rulesCache = new Map<string, Promise<BookRule>>();
-  const appliedOf = async (row: KbPrice): Promise<{ price: number; basis: PriceHit['basis']; notes: string[] }> => {
-    if (!row.productId || row.category !== 'door') {
+  const appliedOf = async (row: KbPrice): Promise<{ price: number | null; basis: PriceHit['basis']; notes: string[] }> => {
+    if (!row.productId || row.category !== 'door' || !hasPrice(row)) {
       const r = applyRules(row, { ...q, ...size, leaves });
       // Фурнитура и комплектующие без размера — обычное дело, пометка «размер не указан» нужна только дверям.
       return row.category === 'door' ? r : { ...r, notes: r.notes.filter((n) => n !== 'размер позиции не указан — базовая цена') };
@@ -836,12 +852,12 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (size.widthMm !== null && size.heightMm !== null && sizes.length) {
       if (q.sizeBasis && card?.sizeBasis && q.sizeBasis !== card.sizeBasis) {
         notes.push(`размер в заявке по ${BASIS_NAME[q.sizeBasis]}, в прайсе по ${BASIS_NAME[card.sizeBasis]} — пересчёт не делается, уточнить у менеджера`);
-        return { price: row.price, basis: 'base', notes };
+        return { price: row.price as number, basis: 'base', notes };
       }
       if (!card?.sizeBasis) notes.push('основание размера в прайсе не указано (проём / полотно / блок) — уточнить у менеджера');
     }
     const ns = nonstandardBySizes(sizes, size, rule, card?.geometry ?? null, Boolean(rowFeatures(row).fire || qf.fire));
-    return { price: round2(row.price * ns.factor), basis: ns.basis, notes: [...notes, ...ns.notes] };
+    return { price: round2((row.price as number) * ns.factor), basis: ns.basis, notes: [...notes, ...ns.notes] };
   };
   const applied = new Map<number, Awaited<ReturnType<typeof appliedOf>>>();
   for (const c of group) applied.set(c.row.id, await appliedOf(c.row));
@@ -858,7 +874,9 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
         b.words - a.words ||
         b.row.confidence - a.row.confidence ||
         closeness(a.row) - closeness(b.row) ||
-        (category === 'component' ? a.row.price - b.row.price : 0) ||
+        (category === 'component' ? (a.row.price ?? Number.MAX_SAFE_INTEGER) - (b.row.price ?? Number.MAX_SAFE_INTEGER) : 0) ||
+        // При полностью равном совпадении строка с ценой — раньше строки без цены.
+        Number(!hasPrice(a.row)) - Number(!hasPrice(b.row)) ||
         b.row.validAt.getTime() - a.row.validAt.getTime(),
     );
   let best = ranked[0] as (typeof ranked)[number];
@@ -921,9 +939,11 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     price = 0;
     includedIn = door.productId ?? door.model;
     notes.push(`${best.row.model} входит в цену блока ${door.model}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`);
-  } else if (best.row.category === 'hardware' && best.row.price === 0 && best.row.tariffId) {
+  } else if (price === null || price <= 0) {
+    // KB-HW-NULL: цены в прайсе нет (NULL; 0 у записей до миграции 011 — так же) — «уточнить у менеджера», цена пустая, не 0 ₽.
     outcome = 'not_priced';
-    notes.push(`уточнить у менеджера: цены на ${best.row.model} (${best.row.tariffId}) в прайсе нет${best.row.card?.clarify ? ` — ${best.row.card.clarify}` : ''}`);
+    price = null;
+    notes.push(`уточнить у менеджера: цены на ${best.row.model}${best.row.tariffId ? ` (${best.row.tariffId})` : ''} в прайсе нет${best.row.card?.clarify ? ` — ${best.row.card.clarify}` : ''}`);
   } else if (best.row.estimate || best.row.status !== 'active') {
     outcome = 'estimate';
     if (best.row.estimate) notes.push(`сметная цена${best.row.card?.estimateFormula ? `: ${best.row.card.estimateFormula}` : ''} — для сметы, уточнить у менеджера`);
@@ -931,6 +951,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     else if (best.row.status === 'estimate_only' && !best.row.estimate) notes.push(`позиция ${best.row.productId ?? best.row.model} в прайсе только для сметы — уточнить у менеджера`);
   }
   if (best.row.category === 'hardware' && best.row.appliesTo.length && !q.doorProductId) notes.push(`фурнитура для моделей ${best.row.appliesTo.join(', ')} — модель двери в заявке не определена`);
+  if (otherModels) notes.push(`уточнить у менеджера: ${best.row.model} в прайсе для моделей ${best.row.appliesTo.join(', ')}, а дверь в заявке — ${q.doorProductId}`);
   if (best.row.card?.clarify && outcome === 'priced') notes.push(`уточнить: ${best.row.card.clarify}`);
   const quoteNotes = best.row.card?.quoteNotes ?? [];
   return { row: best.row, price, basis: bestApplied.basis, match: best.match, similarity: best.match === 'words' ? best.words : best.similarity, confidence, stale, validityDays, notes, label, features: best.features ? { matched: best.features.matched, query: qf } : null, outcome, quoteNotes, includedIn };
@@ -942,7 +963,7 @@ const BASIS_NAME: Record<UnitBasis, string> = { leaf: 'полотну', block: '
 function doorOutcome(door: KbPrice, outcome: 'included' | 'not_priced', notes: string[], now: Date): PriceHit {
   const validityDays = validityDaysOf(door);
   const where = door.sourceRow ? ` (строка ${door.sourceRow})` : '';
-  return { row: door, price: 0, basis: 'base', match: 'exact', similarity: 1, confidence: door.confidence, stale: now.getTime() - door.validAt.getTime() > validityDays * 86_400_000, validityDays, notes, label: `по прайсу: ${door.model}${where}`, features: null, outcome, quoteNotes: [], includedIn: outcome === 'included' ? door.productId ?? door.model : null };
+  return { row: door, price: outcome === 'included' ? 0 : null, basis: 'base', match: 'exact', similarity: 1, confidence: door.confidence, stale: now.getTime() - door.validAt.getTime() > validityDays * 86_400_000, validityDays, notes, label: `по прайсу: ${door.model}${where}`, features: null, outcome, quoteNotes: [], includedIn: outcome === 'included' ? door.productId ?? door.model : null };
 }
 
 /** Фурнитура уже в базе двери: тариф или название упомянуты в «Входит в базу» / комментарии / комплектации двери (ALU-005 — фрамуга, MET-012 — вентиляция). */
@@ -961,16 +982,17 @@ export function hardwareIncluded(hw: Pick<KbPrice, 'tariffId' | 'model' | 'model
  * («ручка», «петля»). Группы нет — null, фильтр не применяется.
  */
 export function categoryMedian(rows: Pick<KbPrice, 'category' | 'componentKind' | 'featureKey' | 'price' | 'modelKey'>[], q: { category: PositionCategory; features: DoorFeatures; componentKind: ComponentKind | null; tokens: string[] }): number | null {
-  const same = rows.filter((r) => r.category === q.category);
-  if (q.category === 'door') return priceListMedian(same, featureKeyOf(q.features));
+  // KB-HW-NULL: строки без цены в медиану не входят — иначе тариф без цены тянул медиану к нулю и веб-цены отбрасывались.
+  const priced = rows.filter((r) => r.category === q.category).filter(hasPrice);
+  if (q.category === 'door') return priceListMedian(priced, featureKeyOf(q.features));
   let group: number[] = [];
-  if (q.category === 'component') group = same.filter((r) => q.componentKind && r.componentKind === q.componentKind).map((r) => r.price);
+  if (q.category === 'component') group = priced.filter((r) => q.componentKind && r.componentKind === q.componentKind).map((r) => r.price);
   if (q.category === 'hardware') {
     const head = q.tokens[0];
-    group = head ? same.filter((r) => r.modelKey.split(' ')[0] === head).map((r) => r.price) : [];
+    group = head ? priced.filter((r) => r.modelKey.split(' ')[0] === head).map((r) => r.price) : [];
     // KB-PRICE-SHEETS-FIX, п. 5: своей группы по первому слову нет («автопорог») — медиана всей фурнитуры прайса с ценой,
     // чтобы веб-цена 27 295 ₽ за автопорог не прошла как реальная.
-    if (!group.length) group = same.map((r) => r.price).filter((p) => p > 0);
+    if (!group.length) group = priced.map((r) => r.price);
   }
   if (!group.length) return null;
   const sorted = [...group].sort((a, b) => a - b);
@@ -1044,7 +1066,7 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     baseSize: (r.base_size ?? null) as string | null,
     widthMm: r.width_mm === null || r.width_mm === undefined ? null : Number(r.width_mm),
     heightMm: r.height_mm === null || r.height_mm === undefined ? null : Number(r.height_mm),
-    price: Number(r.price),
+    price: r.price === null || r.price === undefined ? null : Number(r.price),
     vat: r.vat as PriceVat,
     currency: String(r.currency ?? 'RUB'),
     validAt: r.valid_at instanceof Date ? r.valid_at : new Date(String(r.valid_at)),

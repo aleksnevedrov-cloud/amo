@@ -9,7 +9,8 @@ import type { ColumnMappingInfo, KbPriceInfo, KbSourceInfo, KpApi, PriceListPrev
 const ORIGIN: Record<KbPriceInfo['origin'], string> = { price_list: 'прайс', web: 'веб-поиск', manager: 'менеджер', purchase: 'закупка' };
 const VAT: Record<KbPriceInfo['vat'], string> = { included: 'с НДС', no_vat: 'без НДС', unknown: 'НДС ?' };
 const date = (iso: string) => new Date(iso).toLocaleDateString('ru-RU');
-const rub = (n: number) => `${n.toLocaleString('ru-RU')} ₽`;
+/** KB-HW-NULL: тариф без цены — «нет цены», а не «0 ₽». */
+const rub = (n: number | null) => (n === null ? 'нет цены' : `${n.toLocaleString('ru-RU')} ₽`);
 const today = () => new Date().toISOString().slice(0, 10);
 
 export function isXlsxSource(src: KbSourceInfo): boolean {

@@ -387,7 +387,9 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     const replaceIds = sameKey.map((x) => x.id);
     // Фурнитура: один тариф на аккаунт — расхождение цены с другим файлом (не того же ключа) — ошибка импорта.
     const foreign = (await prices.listByOrigin(accountId, 'price_list')).filter((r) => r.tariffId && r.sourceId !== sourceId && !replaceIds.includes(r.sourceId ?? -1));
-    const conflicts = book.hardware.filter((h) => foreign.some((r) => r.tariffId === h.tariffId && (r.price !== (h.price ?? 0) || (h.price === null) !== (r.price === 0)))).map((h) => h.tariffId);
+    // Сверка «нет цены» с «нет цены» (NULL; у записей до миграции 011 — 0) — совпадение.
+    const priceOf = (v: number | null) => (v === null || v <= 0 ? null : v);
+    const conflicts = book.hardware.filter((h) => foreign.some((r) => r.tariffId === h.tariffId && priceOf(r.price) !== priceOf(h.price))).map((h) => h.tariffId);
     if (conflicts.length) return fail(`вкладка «Дополнения»: цена тарифа ${conflicts.join(', ')} расходится с уже загруженным прайсом «${foreign.find((r) => conflicts.includes(r.tariffId ?? ''))?.priceTitle ?? ''}»`, conflicts.map((id) => ({ sheet: 'Дополнения', row: null, column: 'Цена', message: `тариф ${id}: цена расходится с другим файлом` })));
     const vat = input.vat ?? 'unknown';
     const validAt = input.validAt ?? new Date();
@@ -421,7 +423,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     let hardwareUnpriced = 0;
     for (const h of book.hardware) {
       if (h.price === null) hardwareUnpriced += 1;
-      rows.push({ model: h.name, factory: input.factory ?? null, unit: h.unit, widthMm: null, heightMm: null, price: h.price ?? 0, vat, validAt, confidence: input.confidence, origin: 'price_list', nonstandard: {}, note: `вкладка «Дополнения», строка ${h.row}${h.price === null ? '; цены нет' : ''}`, sourceRow: h.row, category: 'hardware', tariffId: h.tariffId, status: h.price === null ? 'estimate_only' : h.status, appliesTo: h.forModels === '*' ? [] : h.forModels, card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: [], leafCount: null, colors: [], baseIncludes: null, note: h.type, technical: null, quoteNotes: [], priceConditions: null, hardwareUnit: h.unit, includes: h.includes, clarify: h.clarify }, description: h.type });
+      rows.push({ model: h.name, factory: input.factory ?? null, unit: h.unit, widthMm: null, heightMm: null, price: h.price, vat, validAt, confidence: input.confidence, origin: 'price_list', nonstandard: {}, note: `вкладка «Дополнения», строка ${h.row}${h.price === null ? '; цены нет' : ''}`, sourceRow: h.row, category: 'hardware', tariffId: h.tariffId, status: h.price === null ? 'estimate_only' : h.status, appliesTo: h.forModels === '*' ? [] : h.forModels, card: { unit: null, sizeBasis: null, geometry: null, fill: null, comment: null, gosts: [], leafCount: null, colors: [], baseIncludes: null, note: h.type, technical: null, quoteNotes: [], priceConditions: null, hardwareUnit: h.unit, includes: h.includes, clarify: h.clarify }, description: h.type });
     }
     const aliases = [
       ...book.products.flatMap((p) => (p.productId ? [...p.aliases, ...(p.abbr ? [p.abbr] : [])].map((a) => ({ productId: p.productId as string, canonical: p.model, alias: a })) : [])),

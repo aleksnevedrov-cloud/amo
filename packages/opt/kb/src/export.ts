@@ -40,7 +40,7 @@ export async function exportPricesXlsx(rows: KbPrice[], exportedAt = new Date())
       width: p.widthMm ?? '',
       height: p.heightMm ?? '',
       unit: p.unit,
-      price: p.price,
+      price: p.price ?? 'нет цены',
       vat: VAT[p.vat],
       validAt: p.validAt,
       confidence: p.confidence,

@@ -107,7 +107,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
       }
       if (hit) {
         const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
-        const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.outcome === 'not_priced' ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
+        const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.outcome === 'not_priced' || hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
         await core.journal.add({
           accountId,
           leadId: draft.leadId,
@@ -115,7 +115,7 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
           summary: `Цена по позиции «${lineLabel}»: ${priceText} из базы знаний (${hit.label}), веб-поиск не вызывался${hit.stale ? ' — цена устарела' : ''}${applied.keptManagerPrice ? ' — цена менеджера сохранена' : ''}`,
           details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, outcome: hit.outcome ?? 'priced', doorProductId, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
         });
-        const price = hit.outcome === 'not_priced' ? null : hit.price;
+        const price = hit.outcome === 'not_priced' ? null : hit.price;  // null — «уточнить у менеджера», не 0 ₽ (KB-HW-NULL)
         return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
       }
     }
@@ -235,7 +235,9 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       next.productId = hit.row.category === 'door' ? hit.row.productId : null;
       next.includedIn = outcome === 'included' ? hit.includedIn ?? null : null;
       // Синоним прайса увёл позицию в другую категорию («Фрамуга» — фурнитура): плитка и таблица КП следуют за строкой базы.
-      if (hit.row.category !== 'service' && hit.row.category !== (next.category ?? 'door') && outcome !== 'included' && outcome !== 'not_priced') next.category = hit.row.category;
+      // Строка двери-контекста («входит в блок» / «нет цены» у комплектующего) категорию позиции не меняет; тариф «Дополнений» без цены —
+      // меняет (KB-HW-NULL: «СПД40 …» — фурнитура, а не дверь).
+      if (hit.row.category !== 'service' && hit.row.category !== 'door' && hit.row.category !== (next.category ?? 'door')) next.category = hit.row.category;
       delete next.coefficient;
       // KP-NAME: модель и покрытие строки прайса — в наименование КП, комплектация — строкой под позицией; у веб-записей и правок — нет.
       const own = hit.row.origin === 'price_list' && (outcome === 'priced' || outcome === 'estimate');

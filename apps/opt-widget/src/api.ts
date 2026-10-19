@@ -312,7 +312,8 @@ export interface KbPriceInfo {
   baseSize: string | null;
   widthMm: number | null;
   heightMm: number | null;
-  price: number;
+  /** null — в прайсе цены нет (тариф «Дополнений», KB-HW-NULL). */
+  price: number | null;
   vat: 'included' | 'no_vat' | 'unknown';
   validAt: string;
   confidence: number;

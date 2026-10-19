@@ -9,6 +9,18 @@ import { freshKbDb } from './setup.ts';
 const ACCOUNT = 555;
 const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, category: 'door', componentKind: null, productId: null, tariffId: null, status: 'active', estimate: false, family: null, appliesTo: [], componentStatus: null, card: null, ...over });
 
+describe('цена нет — не 0 (KB-HW-NULL)', () => {
+  it('строка без цены: applyRules → null; медиана фурнитуры не учитывает строки без цены (своя группа и запасная по всей фурнитуре)', () => {
+    expect(applyRules(row({ price: null, category: 'hardware', widthMm: null, heightMm: null, baseSize: null }), { name: 'x' })).toEqual({ price: null, basis: 'base', notes: [] });
+    const hw = (model: string, price: number | null) => row({ model, modelKey: modelKeyOf(model), price, category: 'hardware', featureKey: null });
+    const rows = [hw('Стекло СМ4 в противопожарном блоке', null), hw('Стекло СМ4 EIW60 резерв', 9900), hw('Алюминиевый блок импост', null), hw('Алюминиевый блок порог', null), hw('Цилиндр Apecs', 1210), hw('Петля IN4000U', 123.54)];
+    // Группа «стекло»: 9 900, а не (0 + 9 900) / 2.
+    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['стекло', 'см4'] })).toBe(9900);
+    // Группа «алюминиевый» — только строки без цены: медиана не 0 (все веб-цены отбрасывались бы), а по всей фурнитуре с ценой.
+    expect(categoryMedian(rows, { category: 'hardware', features: EMPTY_FEATURES, componentKind: null, tokens: ['алюминиевый', 'блок'] })).toBe(1210);
+  });
+});
+
 describe('ключ модели и правила нестандарта', () => {
   it('ключ без размера, количества и общих слов; размер и створки из текста', () => {
     expect(modelKeyOf('Дверь ДПГ сота 800×2000 мм — 12 шт')).toBe('дпг сота');
