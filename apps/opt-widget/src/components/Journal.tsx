@@ -17,10 +17,10 @@ const KIND_LABEL: Record<string, string> = { kp_draft: 'черновик', kp_bu
 
 const dateTime = (iso: string) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-/** Журнал сборок: что опт делал по сделкам и сколько это стоило. */
-export function Journal({ api }: { api: KpApi }) {
+/** Журнал сборок: что опт делал по сделкам и сколько это стоило; leadId — только эта сделка (окно КП). */
+export function Journal({ api, leadId }: { api: KpApi; leadId?: number }) {
   const [kind, setKind] = useState('');
-  const load = useCallback(() => api.journal({ kind: kind || undefined, limit: 100 }), [api, kind]);
+  const load = useCallback(() => api.journal({ leadId, kind: kind || undefined, limit: 100 }), [api, kind, leadId]);
   const [state, reload] = useLoad(load);
   return (
     <div style={s.block}>

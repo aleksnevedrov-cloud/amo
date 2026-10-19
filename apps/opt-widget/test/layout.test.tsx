@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Раскладка блока «Агент опт — КП» в узкой колонке amoCRM (RFD-AI-AGENT-OPT-WIDGET-DESIGN-FIX): jsdom вёрстку не считает,
+// Раскладка блока «Агент опт — КП» в узкой колонке amoCRM и окна КП на 88 % (KP-AGENT-V2, п. 6а): jsdom вёрстку не считает,
 // поэтому разметка отрисовывается React-ом, а замер идёт в headless Chromium (тот же, что у Playwright) по file://-странице с styles.css.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,8 +26,8 @@ const draft = {
   source: { from: 'mailbox', mails: 1, letterAt: '2026-10-13T08:06:00Z', attachments: ['photo.jpg'], documents: [501], skipped: [], mail: { status: 'found', searchedFrom: 'stoptpostavka@yandex.ru', from: 'stoptpostavka@yandex.ru', fromName: null, subject: 'Запрос', date: '2026-10-13T08:06:00Z', folder: 'INBOX', matchedBy: 'address', attachments: 1, taken: ['photo.jpg'], uploaded: ['photo.jpg'], skipped: [], files: [{ name: 'photo.jpg', size: 1_300_000, inline: false, status: 'uploaded', reason: null }], error: null, retryAt: null, diag: null } },
 };
 
-/** Разметка блока после отрисовки React-ом в jsdom. */
-async function renderBlock(): Promise<string> {
+/** Разметка блока после отрисовки React-ом в jsdom; open — с окном КП («Развернуть ⤢», окно — порталом в body). */
+async function renderBlock(open = false): Promise<string> {
   document.body.innerHTML = '';
   window.APP = { data: { current_card: { id: 30013995 } } };
   const self: AmoWidgetSelf = {
@@ -40,21 +40,12 @@ async function renderBlock(): Promise<string> {
   const cbs = createCallbacks(self, 'https://opt.test.ru');
   await act(async () => cbs.render!());
   await act(async () => new Promise((r) => setTimeout(r, 20)));
+  if (open) await act(async () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Развернуть ⤢')!.click());
   return document.body.innerHTML;
 }
 
-interface Measured {
-  overflow: boolean;
-  titles: { text: string; lines: number }[];
-  labels: { text: string; lines: number }[];
-  inputs: { placeholder: string; width: number; top: number; textFits: boolean }[];
-  badges: { text: string; sameLineAsTitle: boolean }[];
-  sizes: { title: number; text: number; button: number; input: number; badge: number };
-  tile: number;
-}
-
-/** Страница с колонкой заданной ширины (как в amoCRM: отступы 8/10 px вокруг виджета) и замер в Chromium. */
-function measure(html: string, columnPx: number): Measured {
+/** Страница со стилями виджета: колонка заданной ширины (как в amoCRM: отступы 8/10 px) и замер скриптом в Chromium. */
+function measure<T>(html: string, columnPx: number, script: string, win = { w: columnPx + 40, h: 3000 }): T {
   const dir = mkdtempSync(join(tmpdir(), 'opt-widget-layout-'));
   try {
     const page = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body style="margin:0">
@@ -62,84 +53,86 @@ function measure(html: string, columnPx: number): Measured {
 <script>
 const lines = (el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight));
 const col = document.getElementById('col');
-const out = {
-  overflow: col.scrollWidth > col.clientWidth,
-  titles: [...document.querySelectorAll('.opt-kp-title')].map((t) => ({ text: t.textContent, lines: lines(t) })),
-  labels: [...document.querySelectorAll('.opt-kp-field .opt-kp-label')].map((l) => ({ text: l.textContent, lines: lines(l) })),
-  inputs: [...document.querySelectorAll('.opt-kp-field input')].map((i) => {
-    const r = i.getBoundingClientRect();
-    // Ширина текста плейсхолдера/значения в шрифте поля против ширины поля без отступов.
-    const c = document.createElement('canvas').getContext('2d');
-    const st = getComputedStyle(i);
-    c.font = st.fontWeight + ' ' + st.fontSize + ' ' + st.fontFamily;
-    const text = i.value || i.placeholder || '';
-    const inner = r.width - parseFloat(st.paddingLeft) - parseFloat(st.paddingRight);
-    return { placeholder: i.placeholder, width: r.width, top: r.top, textFits: c.measureText(text).width <= inner };
-  }),
-  badges: [...document.querySelectorAll('.opt-kp-badge')].map((b) => {
-    const t = b.parentElement.querySelector('.opt-kp-title');
-    return { text: b.textContent, sameLineAsTitle: Math.abs(b.getBoundingClientRect().top + b.getBoundingClientRect().height / 2 - (t.getBoundingClientRect().top + t.getBoundingClientRect().height / 2)) < 4 };
-  }),
-  sizes: {
-    title: parseFloat(getComputedStyle(document.querySelector('.opt-kp-title')).fontSize),
-    text: parseFloat(getComputedStyle(document.querySelector('.opt-kp-questions li')).fontSize),
-    button: Math.round(document.querySelector('.opt-actions .opt-btn').getBoundingClientRect().height),
-    input: Math.round(document.querySelector('.opt-kp-field input').getBoundingClientRect().height),
-    badge: Math.round(document.querySelector('.opt-kp-badge').getBoundingClientRect().height),
-  },
-  tile: document.querySelector('.opt-kp-tile').getBoundingClientRect().width,
-};
+const out = (() => { ${script} })();
 document.body.appendChild(Object.assign(document.createElement('pre'), { id: 'result', textContent: JSON.stringify(out) }));
 </script></body></html>`;
     const file = join(dir, 'page.html');
     writeFileSync(file, page);
-    const dom = execFileSync(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', `--window-size=${columnPx + 40},3000`, '--dump-dom', `file://${file}`], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const dom = execFileSync(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', `--window-size=${win.w},${win.h}`, '--dump-dom', `file://${file}`], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] });
     const m = /<pre id="result">([\s\S]*?)<\/pre>/.exec(dom);
     if (!m) throw new Error('Chromium не вернул результат замера');
-    return JSON.parse(m[1]!.replace(/&quot;/g, '"').replace(/&amp;/g, '&')) as Measured;
+    return JSON.parse(m[1]!.replace(/&quot;/g, '"').replace(/&amp;/g, '&')) as T;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-describe('раскладка блока в колонке amoCRM', () => {
-  it('«цена не задана» под размером не показывается — состояние видно в поле «Цена»', async () => {
+const NARROW = `
+  const narrow = document.querySelector('.opt-kp-narrow');
+  const t = narrow.querySelector('.opt-kp-title');
+  const b = narrow.querySelector('.opt-kp-badge');
+  const mid = (el) => el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2;
+  return {
+    overflow: col.scrollWidth > col.clientWidth,
+    title: { text: t.textContent, lines: lines(t) },
+    badgeSameLine: Math.abs(mid(b) - mid(t)) < 4,
+    counters: lines(narrow.querySelector('.opt-kp-counters')),
+    buttons: [...narrow.querySelectorAll('.opt-actions .opt-btn')].map((x) => ({ text: x.textContent, h: Math.round(x.getBoundingClientRect().height), w: Math.round(x.getBoundingClientRect().width) })),
+    card: Math.round(narrow.getBoundingClientRect().width),
+    sizes: { title: parseFloat(getComputedStyle(t).fontSize), badge: Math.round(b.getBoundingClientRect().height) },
+  };`;
+
+const WINDOW = `
+  const m = document.querySelector('.opt-kp-modal').getBoundingClientRect();
+  const panel = document.querySelector('.opt-kp-panel').getBoundingClientRect();
+  const main = document.querySelector('.opt-kp-main');
+  const table = document.querySelector('.opt-kp-table').getBoundingClientRect();
+  return {
+    vw: window.innerWidth, vh: window.innerHeight,
+    modal: { w: Math.round(m.width), h: Math.round(m.height), left: Math.round(m.left), top: Math.round(m.top) },
+    panel: Math.round(panel.width),
+    panelRight: panel.left > table.right - 1,
+    tableFits: main.scrollWidth <= main.clientWidth + 1,
+    tabs: [...document.querySelectorAll('.opt-kp-tab')].map((x) => { const st = getComputedStyle(x); return Math.round((x.getBoundingClientRect().height - parseFloat(st.paddingTop) - parseFloat(st.paddingBottom) - parseFloat(st.borderBottomWidth)) / parseFloat(st.lineHeight)); }),
+    footer: Math.round(document.querySelector('.opt-kp-modal-foot').getBoundingClientRect().bottom),
+  };`;
+
+describe('раскладка блока в колонке amoCRM (KP-AGENT-V2, п. 6а)', () => {
+  it('узкая колонка — сводка без таблицы и полей: «цена не задана» не показывается, «Развернуть ⤢» и «Собрать документ»', async () => {
     const html = await renderBlock();
     expect(html).not.toContain('цена не задана');
-    expect(html).toContain('placeholder="Нет цены"');
+    expect(html).not.toContain('opt-kp-table');
+    expect(html).toContain('Развернуть ⤢');
   });
 
-  it.skipIf(!hasChrome)('320, 340 и 400 px: заголовки и подписи в одну строку, бейдж в строке заголовка, «Количество» и «Скидка» в ряд, «Цена» ниже во всю ширину, «Нет цены» целиком, без прокрутки', async () => {
+  it.skipIf(!hasChrome)('320, 340, 400 и 550 px: заголовок в одну строку, бейдж в его строке, кнопки во всю ширину карточки, без прокрутки; ширину колонки виджет не меняет', async () => {
     const html = await renderBlock();
-    for (const width of [320, 340, 400]) {
-      const m = measure(html, width);
+    for (const width of [320, 340, 400, 550]) {
+      const m = measure<{ overflow: boolean; title: { text: string; lines: number }; badgeSameLine: boolean; counters: number; buttons: { text: string; h: number; w: number }[]; card: number; sizes: { title: number; badge: number } }>(html, width, NARROW);
       expect(m.overflow, `${width}: прокрутка`).toBe(false);
-      expect(m.titles.map((t) => t.text)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Ответ из базы знаний', 'Действия с КП']);
-      expect(m.titles.map((t) => t.lines), `${width}: заголовки`).toEqual([1, 1, 1, 1, 1]);
-      expect(m.badges.every((b) => b.sameLineAsTitle), `${width}: бейдж в строке заголовка`).toBe(true);
-      expect(m.labels.map((l) => [l.text, l.lines]), `${width}: подписи`).toEqual([['Количество', 1], ['Цена', 1], ['Скидка', 1]]);
-      const [qty, price, discount] = m.inputs;
-      expect(m.inputs.every((i) => i.width >= 72), `${width}: поля ≥ 72 px: ${m.inputs.map((i) => Math.round(i.width))}`).toBe(true);
-      expect(Math.abs(qty!.top - discount!.top), `${width}: количество и скидка в одной строке`).toBeLessThan(1);
-      expect(price!.top, `${width}: цена второй строкой`).toBeGreaterThan(qty!.top + 20);
-      expect(price!.width, `${width}: цена во всю ширину плитки`).toBeGreaterThan(m.tile - 30);
-      expect(price!.textFits, `${width}: «Нет цены» обрезано`).toBe(true);
-      // Масштаб как у розницы: заголовок 13 px, текст 12 px, кнопки 28 px, поля 24 px, бейдж 20 px.
-      expect(m.sizes, `${width}: размеры`).toEqual({ title: 13, text: 12, button: 28, input: 24, badge: 20 });
+      expect(m.title, `${width}: заголовок`).toEqual({ text: 'Черновик КП', lines: 1 });
+      expect(m.badgeSameLine, `${width}: бейдж в строке заголовка`).toBe(true);
+      expect(m.counters, `${width}: счётчики`).toBeLessThanOrEqual(2);
+      expect(m.buttons.map((b) => [b.text, b.h]), `${width}: кнопки`).toEqual([['Развернуть ⤢', 28], ['Собрать документ', 28]]);
+      expect(m.buttons.every((b) => b.w >= m.card - 30), `${width}: кнопки во всю ширину`).toBe(true);
+      // Колонка amoCRM: карточка не шире колонки за вычетом отступов.
+      expect(m.card, `${width}: карточка`).toBeLessThanOrEqual(width - 20);
+      expect(m.sizes, `${width}: размеры`).toEqual({ title: 13, badge: 20 });
     }
   }, 120_000);
 
-  it.skipIf(!hasChrome)('500 и 550 px: плитка ≥ 420 — три поля в ряд, цена шире остальных', async () => {
-    const html = await renderBlock();
-    for (const width of [500, 550]) {
-      const m = measure(html, width);
-      expect(m.overflow, `${width}: прокрутка`).toBe(false);
-      expect(m.tile, `${width}: плитка`).toBeGreaterThanOrEqual(420);
-      const [qty, price, discount] = m.inputs;
-      expect(Math.abs(qty!.top - price!.top), `${width}: ряд`).toBeLessThan(1);
-      expect(Math.abs(qty!.top - discount!.top), `${width}: ряд`).toBeLessThan(1);
-      expect(price!.width, `${width}: цена шире`).toBeGreaterThan(qty!.width * 1.8);
-      expect(price!.textFits).toBe(true);
+  it.skipIf(!hasChrome)('окно КП — 88 % экрана по центру: опросник справа 360 px, таблица без прокрутки по ширине, вкладки в одну строку', async () => {
+    const html = await renderBlock(true);
+    for (const win of [{ w: 1440, h: 900 }, { w: 1280, h: 800 }]) {
+      const m = measure<{ vw: number; vh: number; modal: { w: number; h: number; left: number; top: number }; panel: number; panelRight: boolean; tableFits: boolean; tabs: number[]; footer: number }>(html, 340, WINDOW, win);
+      expect(Math.abs(m.modal.w - m.vw * 0.88), `${win.w}: ширина окна`).toBeLessThan(2);
+      expect(Math.abs(m.modal.h - m.vh * 0.88), `${win.w}: высота окна`).toBeLessThan(2);
+      expect(Math.abs(m.modal.left - (m.vw - m.modal.w) / 2), `${win.w}: по центру`).toBeLessThan(2);
+      expect(m.panel, `${win.w}: опросник`).toBe(360);
+      expect(m.panelRight, `${win.w}: опросник справа от таблицы`).toBe(true);
+      expect(m.tableFits, `${win.w}: таблица по ширине`).toBe(true);
+      expect(m.tabs, `${win.w}: вкладки`).toEqual([1, 1, 1, 1, 1]);
+      expect(m.footer, `${win.w}: итог внутри окна`).toBeLessThanOrEqual(m.modal.top + m.modal.h + 1);
     }
   }, 60_000);
 });

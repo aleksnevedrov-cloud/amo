@@ -324,3 +324,73 @@
 .opt-kp-door-change { background: none; border: 0; padding: 0; color: #1a73e8; text-decoration: underline; cursor: pointer; font: inherit; }
 .opt-kp-door-change:disabled { color: var(--kp-muted, #8a949f); cursor: default; }
 .opt-kp-door-line-option { text-align: left; white-space: normal; }
+
+/*
+ * KP-AGENT-V2, п. 6а. Узкая колонка: счётчики и две кнопки; ширину колонки amoCRM не меняем. Окно КП — 88 % экрана поверх
+ * страницы: шапка со счётчиками и кнопками, вкладки, таблица позиций и справа опросник 360 px, итог внизу.
+ */
+.opt-kp .opt-kp-counters { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--kp-muted); }
+.opt-kp .opt-kp-counter b { color: var(--kp-text); font-weight: 600; }
+.opt-kp .opt-kp-counter-block, .opt-kp .opt-kp-counter-block b { color: #b02a2a; }
+.opt-kp .opt-kp-counter-warn, .opt-kp .opt-kp-counter-warn b { color: #8a5a00; }
+.opt-kp .opt-kp-why { color: #b02a2a; }
+
+.opt-root.opt-kp.opt-kp-overlay { position: fixed; inset: 0; z-index: 10000; padding: 0; background: rgba(20, 28, 36, .45); display: flex; align-items: center; justify-content: center; }
+.opt-kp .opt-kp-modal { width: 88vw; height: 88vh; background: #fff; border-radius: var(--kp-radius); box-shadow: 0 12px 40px rgba(0, 0, 0, .25); display: flex; flex-direction: column; overflow: hidden; }
+.opt-kp .opt-kp-modal-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 14px; border-bottom: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-modal-head .opt-kp-head { justify-content: flex-start; gap: 6px 12px; }
+.opt-kp .opt-kp-modal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.opt-kp .opt-kp-modal-actions .opt-btn { min-height: 28px; font-size: 12px; font-weight: 600; border-radius: var(--kp-radius-sm); }
+.opt-kp .opt-kp-modal-actions .opt-kp-downloads { margin-left: 0; }
+.opt-kp .opt-kp-tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 10px; line-height: 1.3; white-space: nowrap; font: inherit; font-size: 12px; font-weight: 600; color: var(--kp-muted); cursor: pointer; }
+.opt-kp .opt-kp-tab-active { color: var(--kp-text); border-bottom-color: var(--kp-accent); }
+.opt-kp .opt-kp-modal-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; }
+.opt-kp .opt-kp-modal-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 8px 14px; border-top: 1px solid var(--kp-line); background: var(--kp-soft); }
+.opt-kp .opt-kp-modal-foot .opt-kp-total { gap: 6px; }
+.opt-kp .opt-kp-split { display: flex; gap: 12px; min-height: 100%; align-items: flex-start; }
+.opt-kp .opt-kp-main { flex: 1; min-width: 0; }
+.opt-kp .opt-kp-panel { flex: 0 0 360px; width: 360px; position: sticky; top: 0; max-height: 100%; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.opt-kp .opt-kp-panel-title { font-weight: 600; font-size: 13px; }
+
+/* Таблица позиций: ГОСТ-профиль серой строкой, метка источника цены цветом. */
+.opt-kp .opt-kp-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.opt-kp .opt-kp-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--kp-muted); padding: 4px 6px; border-bottom: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-table td { vertical-align: top; padding: 6px; border-bottom: 1px solid var(--kp-line); overflow-wrap: anywhere; }
+.opt-kp .opt-kp-col-n { width: 32px; }
+.opt-kp .opt-kp-col-size { width: 110px; }
+.opt-kp .opt-kp-col-qty { width: 70px; }
+.opt-kp .opt-kp-col-price { width: 170px; }
+.opt-kp .opt-kp-col-disc { width: 70px; }
+.opt-kp .opt-kp-col-sum { width: 100px; text-align: right; }
+.opt-kp .opt-kp-table input { width: 100%; height: 24px; padding: 0 6px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); font: inherit; font-size: 12px; }
+.opt-kp .opt-kp-row-name { font-weight: 600; }
+.opt-kp .opt-kp-row-gost { color: #8995a3; }
+.opt-kp .opt-kp-row-excluded td { opacity: .55; }
+.opt-kp .opt-kp-row-delivery td { background: var(--kp-soft); }
+.opt-kp .opt-kp-group-row td { border-bottom: 0; padding-top: 10px; }
+.opt-kp .opt-kp-src { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.opt-kp .opt-kp-src-price { background: #edf9e4; color: #238600; }
+.opt-kp .opt-kp-src-web { background: #e6f2fb; color: #0768a8; }
+.opt-kp .opt-kp-src-manager { background: #f1eafb; color: #6b3fb0; }
+.opt-kp .opt-kp-src-pending { background: #fff4d6; color: #8a5a00; }
+.opt-kp .opt-kp-src-none, .opt-kp .opt-kp-src-stale { background: #fde8e8; color: #b02a2a; }
+.opt-kp .opt-kp-src-included { background: var(--kp-soft); color: var(--kp-muted); }
+
+/* Опросник: полоса слева — красная (блокирует), жёлтая (не блокирует), серая (отвечено). */
+.opt-kp .opt-kp-survey { display: flex; flex-direction: column; gap: 8px; }
+.opt-kp .opt-kp-q { border: 1px solid var(--kp-line); border-left-width: 4px; border-radius: var(--kp-radius-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; background: #fff; }
+.opt-kp .opt-kp-q-block { border-left-color: #d93a3a; }
+.opt-kp .opt-kp-q-warn { border-left-color: #f0b400; }
+.opt-kp .opt-kp-q-done { border-left-color: #c7cfd6; background: var(--kp-soft); }
+.opt-kp .opt-kp-q-head { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+.opt-kp .opt-kp-q-title { font-weight: 600; }
+.opt-kp .opt-kp-q-flag { font-size: 11px; color: #8a5a00; }
+.opt-kp .opt-kp-q-flag-block { color: #b02a2a; }
+.opt-kp .opt-kp-q-options { display: flex; flex-direction: column; gap: 2px; }
+.opt-kp .opt-kp-q-option { display: flex; gap: 6px; align-items: flex-start; }
+.opt-kp .opt-kp-q-form { display: flex; flex-direction: column; gap: 6px; }
+.opt-kp .opt-kp-q-form .opt-kp-field input { width: 100%; height: 24px; padding: 0 6px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); font: inherit; font-size: 12px; }
+.opt-kp .opt-kp-q-sources { margin: 2px 0 0; padding-left: 16px; }
+.opt-kp .opt-kp-q-client-text { width: 100%; min-height: 54px; font: inherit; font-size: 12px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); padding: 4px 6px; }
+.opt-kp .opt-kp-letter { background: var(--kp-soft); border-radius: var(--kp-radius-sm); padding: 8px 10px; max-height: 320px; overflow: auto; }

@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -175,7 +175,10 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   // Путь шаблона в базе — относительно KP_FILES_ROOT (дефект 2а); абсолютный собирается при чтении.
   const templatePath = (accountId: number) => resolveKpPath(deps.filesRoot, kpTemplateRel(accountId));
   /** Черновик для виджета с опросником: срок действия цены — из настроек КП. */
-  const viewOf = async (accountId: number, d: KpDraft) => view(d, (await repo.getSettings(accountId)).constants.priceValidity?.trim() || null);
+  const viewOf = async (accountId: number, d: KpDraft) => {
+    const { constants } = await repo.getSettings(accountId);
+    return view(d, constants.priceValidity?.trim() || null, constants.vatRate ?? DEFAULT_VAT_RATE);
+  };
 
   api.get('/kp/settings', async (req) => {
     const s = await repo.getSettings(principal(req).accountId);
@@ -620,7 +623,7 @@ export function verifyFileLink(secret: string, token: string, draftId: number, k
   return Number(acc);
 }
 
-function view(d: KpDraft, priceValidity: string | null = null) {
+function view(d: KpDraft, priceValidity: string | null = null, vatRate = DEFAULT_VAT_RATE) {
   const p = d.payload as unknown as Partial<KpPayload>;
   // KP-AGENT-V2, п. 5: опросник выводится из состояния черновика; ответы — в payload.answers.
   const survey = buildQuestions(p, { priceValidity });
@@ -644,7 +647,9 @@ function view(d: KpDraft, priceValidity: string | null = null) {
     survey,
     counters: draftCounters(p, survey),
     delivery: p.delivery ?? null,
-    priceValidity: priceValidity || p.priceValidity || null,
+    priceValidity: p.priceValidity || priceValidity || null,
+    // Ставка НДС для итога в окне КП (цены с НДС, «в т.ч. НДС 22 %»).
+    vatRate,
     requirements: p.requirements ?? [],
     photos: p.photos ?? [],
     letterText: p.letterText ?? null,

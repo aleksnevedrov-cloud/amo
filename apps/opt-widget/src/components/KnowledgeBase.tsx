@@ -3,6 +3,7 @@ import { errorMessage, Field, s } from '@core/widget-core';
 import type { KbBookCounts, KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
 import { KbAnswer } from './KbAnswer.tsx';
 import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
+import { CandidatesSection, isSite, SiteMeta, SitesSection } from './KbSites.tsx';
 
 /**
  * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
@@ -100,6 +101,14 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
         const r = await api.kbAddUrl(url, days, crawl);
         return r.existed ? 'Ссылка уже была в базе — поставлена на переиндексацию' : `Ссылка добавлена, скачивается${crawl ? ', раздел будет обойдён (до 50 страниц)' : ''}`;
       })} />
+      <SitesSection
+        api={api}
+        busy={busy}
+        onDone={(m) => {
+          setMsg(m);
+          void reload();
+        }}
+      />
       <AddText busy={busy} onAdd={(title, content) => void run(async () => (await api.kbAddText(title, content), 'Текст добавлен, индексируется'))} />
       <Search api={api} />
       <Field label="Вопрос покупателя" hint="Ответ только по фрагментам базы со ссылками на источники; так же агент отвечает на вопросы покупателя">
@@ -123,6 +132,10 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
             // KB-PRICE-SHEETS-FIX: счётчики и итог импорта в карточке файла — перечитать список источников.
             void reload();
           }}
+          onSiteSaved={(m) => {
+            setMsg(m);
+            void reload();
+          }}
           onReindex={() => void run(async () => (await api.kbReindex(src.id), null))}
           onRemove={() => {
             if (!window.confirm(`Удалить источник «${src.title}» и его фрагменты?`)) return;
@@ -133,6 +146,7 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
       {/* Сводка и список цен перечитываются после загрузки/удаления источника и импорта прайса, без перезагрузки (KB-PRICES-UI, п. 4). */}
       <PricesSection api={api} version={pricesKey} />
       <AliasesSection api={api} />
+      <CandidatesSection api={api} version={pricesKey} />
     </div>
   );
 }
@@ -271,7 +285,7 @@ function Search({ api }: { api: KpApi }) {
   );
 }
 
-function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { src: KbSourceInfo; api: KpApi; busy: boolean; onReindex: () => void; onRemove: () => void; onPricesImported: (msg: string) => void }) {
+function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported, onSiteSaved }: { src: KbSourceInfo; api: KpApi; busy: boolean; onReindex: () => void; onRemove: () => void; onPricesImported: (msg: string) => void; onSiteSaved?: (msg: string) => void }) {
   const [chunks, setChunks] = useState<KbChunkInfo[] | null>(null);
   const [open, setOpen] = useState(false);
   const [prices, setPrices] = useState(false);
@@ -319,6 +333,7 @@ function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported }: { 
         </div>
         {status}
       </div>
+      {isSite(src) && <SiteMeta api={api} src={src} onSaved={(m) => onSiteSaved?.(m)} />}
       <div style={{ ...s.row, marginTop: 6 }}>
         <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => void toggle()}>
           {open ? 'Скрыть фрагменты' : 'Фрагменты'}

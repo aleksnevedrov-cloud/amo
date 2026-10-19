@@ -21,7 +21,92 @@ export type KpConstants = CoreKpConstants & {
   maxSearchCalls?: number;
   webSearchDailyUsd?: number;
   skipKnowledgeBase?: boolean;
+  // KP-AGENT-V2: ставка НДС (по умолчанию 22) и срок действия цены; пусто — вопрос в опроснике.
+  vatRate?: number;
+  priceValidity?: string;
 };
+
+/** ГОСТ-профиль двери (KP-AGENT-V2, п. 3): поля разбора обозначения; null — не указано. */
+export interface GostProfileInfo {
+  gost: string | null;
+  kind: string | null;
+  leaves: number | null;
+  unequal: boolean;
+  opening: 'left' | 'right' | null;
+  fill: 'Г' | 'О' | null;
+  threshold: string | null;
+  strength: string | null;
+  fire: string | null;
+  heightMm: number | null;
+  widthMm: number | null;
+  basis: 'leaf' | 'frame' | 'opening' | null;
+  material: string | null;
+  cover: string | null;
+  brand: string | null;
+}
+
+/** Цены интернета по позиции (п. 4.2): min / медиана / max, источники; в КП сами не ставятся — выбирает менеджер. */
+export interface KpLineWebInfo {
+  query: string;
+  researchedAt: string;
+  min: number;
+  median: number;
+  max: number;
+  count: number;
+  factorySources: number;
+  spreadPct: number;
+  enough: boolean;
+  sources: { url: string; seller: string; price: number; unitPrice: number | null; foundAt: string; manufacturer: boolean; site: string | null }[];
+  excludedSites: string[];
+}
+
+export type QuestionType = 'incomplete' | 'model_choice' | 'analog' | 'web_price' | 'enter_price' | 'nonstandard' | 'component_door' | 'photo' | 'delivery' | 'price_validity';
+
+export interface KpAnswerInfo {
+  option: string | null;
+  price?: number | null;
+  fields?: Record<string, string>;
+  at: string;
+  by: number | null;
+}
+
+/** Вопрос опросника менеджеру (п. 5): выводится сервером из черновика; blocking — без ответа КП не собирается. */
+export interface KpQuestionInfo {
+  key: string;
+  type: QuestionType;
+  blocking: boolean;
+  title: string;
+  text: string;
+  requestIndexes: number[];
+  options: { id: string; label: string; detail?: string | null; price?: number | null }[];
+  fields?: { name: string; label: string; value: string | null }[];
+  customPrice?: boolean;
+  web?: KpLineWebInfo | null;
+  /** Текст уточнения для клиента — менеджер отправляет сам. */
+  askClient: string | null;
+  answer: KpAnswerInfo | null;
+}
+
+export interface KpAnswerBody {
+  key: string;
+  option?: string | null;
+  price?: number | null;
+  fields?: Record<string, string>;
+}
+
+/** Кандидат в прайс (п. 4.4): цена, подтверждённая менеджером в КП; в подбор не идёт. */
+export interface KbCandidateInfo {
+  id: number;
+  leadId: number | null;
+  draftId: number | null;
+  model: string;
+  size: string | null;
+  price: number;
+  source: 'web_confirmed' | 'manager';
+  url: string | null;
+  note: string | null;
+  createdAt: string;
+}
 
 export interface Status {
   accountId: number;
@@ -82,6 +167,11 @@ export interface KpDraftLine {
   /** KB-COMPONENT-DOOR-GROUP: дверь выбрана для этой строки (line) или ответом на группу (group). */
   componentDoorBy?: 'line' | 'group' | null;
   componentDoorGroup?: string | null;
+  /** KP-AGENT-V2: ГОСТ-профиль двери и обозначение по ГОСТ; цены интернета; исключена в опроснике. */
+  gostProfile?: GostProfileInfo | null;
+  gostDesignation?: string | null;
+  web?: KpLineWebInfo | null;
+  excluded?: boolean;
   /** Вопрос «К какой двери считать …?» со списком дверей заявки; пока он есть — без цены, документ не собирается. */
   question?: { kind: 'component_door'; text: string; reason: 'many' | 'none'; group?: string; groupTitle?: string; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null;
 }
@@ -156,6 +246,15 @@ export interface KpDraftInfo {
     /** Чтение письма из ящика (вариант А); нет — ящик не настроен. */
     mail?: MailSourceInfo;
   } | null;
+  /** KP-AGENT-V2: опросник, счётчики для узкой колонки и шапки окна, доставка, срок действия цены, требования, фото, текст письма. */
+  survey?: KpQuestionInfo[];
+  counters?: { positions: number; open: number; blocking: number; unpriced: number };
+  delivery?: { mode: 'delivery' | 'pickup'; address: string | null; sum: number | null } | null;
+  priceValidity?: string | null;
+  vatRate?: number;
+  requirements?: string[];
+  photos?: { name: string; requestIndex?: number | null; ignored?: boolean }[];
+  letterText?: string | null;
 }
 
 /** Чтение письма из ящика — как сохранено в payload черновика (те же данные, что в событии mail_fetch журнала). */
@@ -267,6 +366,9 @@ export interface KbSourceInfo {
   priceImport?: { title: string; updated: boolean; was: number; imported: number; removed: number; added: number; at: string; book?: KbBookCounts | null; error?: string | null } | null;
   /** KB-PRICE-SHEETS: счётчики многолистового прайса для карточки файла; null — старый одностраничный прайс или не прайс. */
   counts?: { doors: number; components: number; hardware: number; sizes: number; aliases: number; comments: number; dictionary: number } | null;
+  /** KP-AGENT-V2, п. 4а: у сайта — комментарий (что на нём есть / чего нет) и отметка «фабрика». */
+  comment?: string | null;
+  isFactory?: boolean;
 }
 
 /** Итог импорта многолистового прайса (KB-PRICE-SHEETS): по вкладкам. */
@@ -426,7 +528,9 @@ export class KpApi extends ApiClient {
   buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[]; files?: { kind: 'docx' | 'pdf'; name: string; bytes: number }[] }>('POST', '/widget/v1/kp/build', { draftId });
   /** Подписанная ссылка на файл КП (10 минут): по ней браузер скачивает PDF/DOCX как вложение (RFD-AI-AGENT-OPT-KP-DOWNLOAD). */
   fileLink = (draftId: number, kind: 'pdf' | 'docx') => this.call<{ url: string; filename: string; expiresAt: string }>('GET', `/widget/v1/kp/file/link?draftId=${draftId}&kind=${kind}`);
-  /** Цены из прайса: все позиции без цены ('all') или явный список (KB-WEB-ROWS: веб-поиска нет). */
+  /** Ответ на вопрос опросника (KP-AGENT-V2, п. 5): вариант, своя цена или поля. */
+  answer = (draftId: number, body: KpAnswerBody) => this.call<{ draft: KpDraftInfo | null }>('POST', `/widget/v1/kp/draft/${draftId}/answer`, body);
+  /** Цены: прайс → интернет по правилам → вопрос; все позиции без цены ('all') или явный список. */
   research = (draftId: number, requestIndexes: number[] | 'all' = 'all') => this.call<{ queued: number[]; total?: number; batches?: number; reason?: string }>('POST', '/widget/v1/kp/research', { draftId, requestIndexes });
   researchState = (draftId: number) => this.call<ResearchState>('GET', `/widget/v1/kp/research?draftId=${draftId}`);
   sendPreview = (draftId: number) => this.call<SendPreviewInfo>('GET', `/widget/v1/kp/send/preview?draftId=${draftId}`);
@@ -455,6 +559,13 @@ export class KpApi extends ApiClient {
   kbPricesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/prices/export');
   /** Ответ на вопрос покупателя из базы знаний (этап 4): top-5 фрагментов, модель отвечает со ссылками [n]. */
   kbAnswer = (question: string, leadId?: number) => this.call<KbAnswerInfo>('POST', '/widget/v1/kb/answer', { question, ...(leadId ? { leadId } : {}) });
+  /** Сайты (п. 4а): комментарий и «фабрика»; выгрузка и загрузка списка xlsx. Кандидаты в прайс (п. 4.4). */
+  kbSetSite = (id: number, body: { comment?: string | null; isFactory?: boolean }) => this.call<{ source: KbSourceInfo }>('PUT', `/widget/v1/kb/sources/${id}/site`, body);
+  kbSitesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/sites/export');
+  kbSitesImport = (contentBase64: string) => this.call<{ added: number; updated: number; rows: number }>('POST', '/widget/v1/kb/sites/import', { contentBase64 });
+  kbCandidates = () => this.call<{ items: KbCandidateInfo[] }>('GET', '/widget/v1/kb/candidates');
+  kbCandidatesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/candidates/export');
+  kbRemoveCandidate = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/candidates/${id}`);
   kbAliases = () => this.call<{ aliases: KbAliasInfo[] }>('GET', '/widget/v1/kb/aliases');
   kbAddAliases = (lines: string) => this.call<{ added: number; aliases: KbAliasInfo[] }>('POST', '/widget/v1/kb/aliases', { lines });
   kbRemoveAlias = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/aliases/${id}`);

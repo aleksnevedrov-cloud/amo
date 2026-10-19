@@ -57,8 +57,28 @@ beforeEach(() => {
   window.APP = { data: { current_card: { id: 555 } } };
 });
 
+/** KP-AGENT-V2, п. 6а: работа с КП — в окне «Развернуть ⤢»; кнопки окна ищутся внутри него (в узкой колонке есть свои). */
+const expand = () => click('Развернуть ⤢');
+const modal = () => document.querySelector('.opt-kp-modal');
+const modalButton = (text: string) => [...(modal()?.querySelectorAll('button') ?? [])].find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
+const clickIn = (text: string) =>
+  act(async () => {
+    const b = modalButton(text);
+    if (!b) throw new Error(`Нет кнопки «${text}» в окне КП`);
+    b.click();
+  });
+const tab = (prefix: string) =>
+  act(async () => {
+    const b = [...document.querySelectorAll<HTMLButtonElement>('.opt-kp-tab')].find((x) => x.textContent?.startsWith(prefix));
+    if (!b) throw new Error(`Нет вкладки «${prefix}»`);
+    b.click();
+  });
+const plainText = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
+const priceInputs = () => [...document.querySelectorAll<HTMLInputElement>('.opt-kp-table input[aria-label="Цена"]')];
+const badges = () => [...document.querySelectorAll('.opt-kp-table .opt-kp-src')].map((b) => [b.className.replace('opt-kp-src opt-kp-src-', ''), b.textContent]);
+
 describe('виджет «Агент опт»: карточка сделки', () => {
-  it('«Собрать КП» ставит задание, блок показывает очередь, потом черновик с источником и позициями без цены', async () => {
+  it('«Собрать КП» ставит задание, блок показывает очередь, потом сводку в узкой колонке; «Развернуть ⤢» — окно с вкладками, таблицей и строкой доставки', async () => {
     let stage: 'none' | 'queued' | 'done' = 'none';
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': () => (stage === 'none' ? { draft: null, job: null } : stage === 'queued' ? { draft: null, job: { state: 'queued' } } : { draft, job: null }),
@@ -76,56 +96,64 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await flush();
     expect(document.body.textContent).toContain('В очереди…');
     expect(button('Собрать КП')?.disabled).toBe(true);
-    // Воркер закончил — следующий опрос приносит черновик.
     stage = 'done';
     await act(async () => cbs.render!());
     await flush();
-    // Карточка «Черновик КП» по макету: бейдж статуса, подпись про номер, покупатель меткой капсом (CSS), название, e-mail.
+    // Узкая колонка: бейдж статуса, номер, счётчики и две кнопки; таблицы и полей в колонке нет.
     expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Черновик');
     expect(document.body.textContent).toContain('Номер появится после сборки документа');
+    expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(1);
+    expect(document.querySelector('.opt-kp-counters')?.textContent).toBe('позиций 1вопросов 0без цены 1');
+    expect([...document.querySelectorAll('.opt-kp-narrow .opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Развернуть ⤢', 'Собрать документ']);
+    expect(button('Собрать документ')?.disabled).toBe(true);
+    expect(button('Собрать документ')?.title).toBe('Ни у одной позиции нет цены');
+    expect(document.querySelector('.opt-kp-table')).toBeNull();
+    expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
+    // Окно на 88 %: шапка с кнопками, вкладки, таблица и опросник справа.
+    await expand();
+    expect(modal()).not.toBeNull();
+    expect(modal()?.getAttribute('aria-label')).toBe('КП по сделке');
+    expect([...document.querySelectorAll('.opt-kp-tab')].map((t) => t.textContent)).toEqual(['Позиции', 'Опросник (0)', 'Письмо и файлы', 'База знаний', 'Журнал']);
+    expect([...document.querySelectorAll('.opt-kp-modal-actions > .opt-btn')].map((b) => b.textContent)).toEqual(['Найти цены', 'Сохранить правки', 'Собрать заново', 'Собрать документ', 'Отправить клиенту', '✕']);
+    expect(modalButton('Найти цены')?.disabled).toBe(false);
+    expect(modalButton('Сохранить правки')?.disabled).toBe(true);
+    expect(modalButton('Отправить клиенту')?.disabled).toBe(true);
+    expect([...document.querySelectorAll('.opt-kp-table th')].map((t) => t.textContent)).toEqual(['№', 'Позиция', 'Размер', 'Кол-во', 'Цена с НДС', 'Скидка, %', 'Сумма']);
+    const row = document.querySelector('.opt-kp-row')!;
+    expect(row.querySelector('.opt-kp-row-name')?.textContent).toBe('Дверь ДПС 01');
+    expect(row.querySelector('.opt-kp-col-size')?.textContent).toBe('2100 × 900 мм');
+    // KP-NAME: без строки прайса под названием нет «по прайсу» и комплектации.
+    expect(row.querySelector('.opt-kp-row-model')).toBeNull();
+    expect(row.querySelector('.opt-kp-row-equipment')).toBeNull();
+    expect(badges()).toEqual([['none', 'нет цены']]);
+    // Последняя строка — доставка; ответа ещё нет.
+    expect(document.querySelector('.opt-kp-row-delivery')?.textContent).toContain('Доставкане указана — вопрос в опроснике');
+    expect(document.querySelector('.opt-kp-panel-title')?.textContent).toBe('Опросник (0)');
+    expect(plainText()).toContain('Итого с НДС 0 ₽ · в т.ч. НДС 22 % — 0 ₽');
+    expect(plainText()).toContain('Срок действия цены: не задан — вопрос в опроснике');
+    expect(plainText()).toContain('Документ не собирается: Ни у одной позиции нет цены');
+    // «Письмо и файлы»: покупатель, письмо, что уточнить у клиента.
+    await tab('Письмо и файлы');
     expect(document.querySelector('.opt-kp-buyer')?.textContent).toBe('ПокупательООО Ромашка · Иванов Иванivanov@romashka.ru');
-    // Ящик не настроен: строка-статус по письму из карточки; ошибки файлов — только в раскрытии, в черновике красных строк нет.
     expect(document.body.textContent).toContain('Письмо: 09.10.2026 (из карточки, ящик не настроен) ›');
     expect(document.body.textContent).not.toContain('big.pdf');
-    expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
     await click('Письмо: 09.10.2026 (из карточки, ящик не настроен) ›');
     expect(document.body.textContent).toContain('Разобрано файлов: 1 · писем в карточке: 1');
     expect(document.body.textContent).toContain('«big.pdf»: файл больше 20 МБ');
-    expect(document.body.textContent).toContain('Дверь ДПС 01');
-    expect(document.body.textContent).toContain('Сторона открывания?');
-    expect(button('Собрать документ')?.disabled).toBe(true);
-    expect(button('Отправить клиенту')?.disabled).toBe(true);
-    // Макет Figma: карточки черновик, позиции, вопросы, ответ из базы знаний (RFD-AI-AGENT-OPT-KB, этап 4), действия, примечание;
-    // позиция — плитка с полями под названием, кнопки столбиком.
-    expect(document.querySelectorAll('.opt-root.opt-kp')).toHaveLength(1);
-    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toEqual(['Черновик КП', 'Позиции КП', 'Уточнить у клиента', 'Ответ из базы знаний', 'Действия с КП']);
-    expect(document.querySelectorAll('.opt-kp-card')).toHaveLength(6);
-    const tile = document.querySelector('.opt-kp-tile')!;
-    const tileHas = (sel: string, text: string) => tile.querySelector(sel)?.textContent === text;
-    expect([...document.querySelectorAll('.opt-kp-badge')].map((b) => b.textContent)).toEqual(['Черновик', '1']);
-    expect(document.querySelectorAll('.opt-kp-badge')[1]?.getAttribute('title')).toBe('1 позиция');
-    expect(tileHas('.opt-kp-suffix > span', '%')).toBe(true);
-    expect(tile.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверь ДПС 01');
-    expect(tile.querySelector('.opt-kp-sub')?.textContent).toBe('2100 × 900 мм');
-    // KP-NAME: без строки прайса под названием нет «по прайсу» и комплектации.
-    expect(tile.querySelector('.opt-kp-tile-model')).toBeNull();
-    expect(tile.querySelector('.opt-kp-tile-equipment')).toBeNull();
-    expect([...tile.querySelectorAll('.opt-kp-label')].map((l) => l.textContent)).toEqual(['Количество', 'Цена', 'Скидка']);
     expect([...document.querySelectorAll('.opt-kp-questions li')].map((l) => l.textContent)).toEqual(['Сторона открывания?']);
-    const actions = [...document.querySelectorAll('.opt-kp-card')].find((c) => c.querySelector('.opt-kp-title')?.textContent === 'Действия с КП')!;
-    expect([...actions.querySelectorAll('.opt-actions .opt-btn')].map((b) => b.textContent)).toEqual(['Собрать заново', 'Сохранить правки', 'Собрать документ', 'Отправить клиенту']);
-    // Кнопка поиска цен — в карточке позиций (этап 6).
-    expect(button('Найти цены')?.disabled).toBe(false);
-    expect(button('Сохранить правки')?.disabled).toBe(true);
-    expect(document.body.textContent).toContain('Документ можно отправить после сборки и проверки цены, состава комплекта и данных покупателя.');
-    expect(document.querySelector('.opt-table')).toBeNull();
+    // ✕ закрывает окно.
+    await clickIn('✕');
+    expect(modal()).toBeNull();
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
   });
 
-  it('раздел «Письмо»: строка-статус с датой по МСК и числом вложений, по клику — отправитель, тема, папка, вложения со статусом; e-mail покупателя не дублируется', async () => {
+  it('вкладка «Письмо и файлы»: строка-статус с датой по МСК и числом вложений, по клику — отправитель, тема, папка, вложения со статусом; e-mail покупателя не дублируется', async () => {
     const mailDraft = {
       ...draft,
       client: { org: '', fio: 'stoptpostavka@yandex.ru', email: 'StOptPostavka@yandex.ru', phone: '' },
+      letterText: 'Добрый день! Прошу КП на двери по ТЗ.',
+      requirements: ['Место поставки: г. Москва, ул. Строителей, 1'],
+      photos: [{ name: 'IMG_01.jpg' }],
       source: {
         from: 'mailbox', mails: 1, letterAt: '2026-10-13T08:06:00Z', attachments: ['Карточка (1).doc', 'photo.jpg'], documents: [501], skipped: [{ name: 'Карточка (1).doc', reason: 'LibreOffice: .doc → .docx не удалось: пусто' }],
         mail: {
@@ -144,11 +172,17 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
+    await expand();
+    await tab('Письмо и файлы');
     const text = () => document.body.textContent ?? '';
     // Дубль e-mail убран: имя контакта в amo — тот же адрес.
     expect(document.querySelector('.opt-kp-buyer')?.textContent).toBe('ПокупательStOptPostavka@yandex.ru');
     expect(text().match(/stoptpostavka@yandex\.ru/gi)).toHaveLength(1);
-    // Свёрнуто: только строка-статус, 08:06 UTC = 11:06 МСК; служебных сведений и красных строк в черновике нет.
+    // Текст письма, требования заявки и фото-образец без позиции.
+    expect(document.querySelector('.opt-kp-letter')?.textContent).toBe('Добрый день! Прошу КП на двери по ТЗ.');
+    expect(text()).toContain('Требования заявкиМесто поставки: г. Москва, ул. Строителей, 1');
+    expect(text()).toContain('IMG_01.jpg — вопрос в опроснике');
+    // Свёрнуто: только строка-статус, 08:06 UTC = 11:06 МСК; служебных сведений и красных строк нет.
     expect(text()).toContain('Письмо: 13.10.2026 11:06 · 3 вложения ›');
     expect(text()).not.toContain('Отправитель');
     expect(text()).not.toContain('HTTP 405');
@@ -184,6 +218,8 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
+    await expand();
+    await tab('Письмо и файлы');
     expect(document.body.textContent).toContain('Письмо: не найдено ›');
     expect(document.querySelectorAll('.opt-error')).toHaveLength(0);
     await click('Письмо: не найдено ›');
@@ -193,7 +229,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Spam: SEARCH по дате прерван по таймауту');
   });
 
-  it('поиск цен (KB-WEB-ROWS — только прайс): «Найти цены» ставит задание, строка показывает ход поиска, затем цену из прайса; «Найти цену» у позиции — без force и без источников из интернета', async () => {
+  it('поиск цен: «Найти цены» ставит задание, строка показывает ход поиска, затем цену из прайса с зелёной меткой; работа — под заголовком, без цены и поиска; «Найти цену» у позиции — по одной строке', async () => {
     // Вторая строка — работа (XLSX-2): после товаров под заголовком «Работы и услуги», без размера и без кнопки поиска цены.
     const service = { request_index: 1, page_id: null, name: 'Врезка замка на производстве', size: '', qty: 21, price: null, lead_time: '', discount: 0, kind: 'service' as const };
     let current = { ...draft, items: [...draft.items, service], needsManager: [{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }] };
@@ -211,49 +247,51 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    const text = () => document.body.textContent ?? '';
-    expect(button('Найти цены')?.disabled).toBe(false);
+    await expand();
+    expect(modalButton('Найти цены')?.disabled).toBe(false);
     expect([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === 'Найти цену')).toHaveLength(1);
-    expect([...document.querySelectorAll('.opt-kp-group')].map((g) => g.textContent)).toEqual(['Работы и услуги']);
-    expect(document.querySelector('.opt-kp-tile-service')?.textContent).toContain('Врезка замка на производстве');
-    await click('Найти цены');
+    expect([...document.querySelectorAll('.opt-kp-group')].map((g) => g.textContent)).toEqual(['Работы и услуги — по замеру, в таблицу и итог КП не входят']);
+    expect(document.querySelector('.opt-kp-row-service')?.textContent).toContain('Врезка замка на производстве');
+    expect(document.querySelector('.opt-kp-row-service .opt-kp-col-price')?.textContent).toBe('по замеру');
+    await clickIn('Найти цены');
     await flush();
     expect(JSON.parse(posts[0]!)).toEqual({ draftId: 7, requestIndexes: 'all' });
-    expect(text()).toContain('идёт поиск цены в прайсе…');
+    expect(plainText()).toContain('идёт поиск цены…');
     // KB-COMPONENTS, п. 6: на кнопке прогресс «обработано / поставлено».
     const searching = [...document.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Ищу цены…'));
     expect(searching?.disabled).toBe(true);
     expect(searching?.textContent).toBe('Ищу цены… 0 / 1');
-    // Работа: пометка «по замеру», поле цены с подсказкой «по замеру», без кнопки поиска.
-    expect(document.querySelector('.opt-kp-tile-service .opt-kp-service-note')?.textContent).toContain('работы — по замеру');
-    expect((document.querySelector('.opt-kp-tile-service input[placeholder="по замеру"]') as HTMLInputElement | null)?.value).toBe('');
     // Воркер закончил: цена из прайса легла в черновик, следующий опрос перечитывает черновик.
     stage = 'done';
-    current = { ...current, items: [{ ...current.items[0]!, price: 108_900, priceSource: 'kb', priceLabel: 'по прайсу: Лиственница 2П (строка 3)', priceOutcome: 'priced', kbPriceId: 3 }], needsManager: [{ request_index: 0, reason: 'цена из базы: пересчёт по площади с 1000×2700' }] } as unknown as typeof current;
+    current = { ...current, items: [{ ...current.items[0]!, price: 108_900, priceSource: 'price_file', priceLabel: 'по прайсу: Лиственница 2П (строка 3)', priceOutcome: 'priced', kbPriceId: 3 }, service], needsManager: [{ request_index: 0, reason: 'цена из базы: пересчёт по площади с 1000×2700' }] } as unknown as typeof current;
     await act(async () => cbs.render!());
     await flush();
     await act(async () => new Promise((r) => setTimeout(r, 30)));
-    expect(text()).toContain('из прайса: по прайсу: Лиственница 2П (строка 3)');
-    expect((document.querySelector('input[placeholder="Нет цены"]') as HTMLInputElement).value).toBe('108900');
-    expect(text()).toContain('Цена · по прайсу: Лиственница 2П (строка 3)');
-    expect(text()).not.toContain('Источники');
-    expect(text()).not.toContain('Искать в интернете');
-    // Работа без цены не мешает сборке и не входит в итог (108 900 × 2 шт).
-    expect(button('Собрать документ')?.disabled).toBe(false);
-    expect(text().replace(/\u00a0/g, ' ')).toContain('Итого1 197 900 ₽');
-    // «Найти цену» у позиции — заново по прайсу, без force.
+    // Повторная отрисовка amoCRM монтирует блок заново — окно снова по кнопке.
+    await expand();
+    expect(priceInputs().map((i) => i.value)).toEqual(['108900']);
+    expect(badges()).toEqual([['price', 'по прайсу: Лиственница 2П (строка 3)']]);
+    expect(plainText()).toContain('цена из базы: пересчёт по площади с 1000×2700');
+    // Работа без цены не мешает сборке и не входит в итог (108 900 × 11 шт = 1 197 900).
+    expect(modalButton('Собрать документ')?.disabled).toBe(false);
+    expect(plainText()).toContain('Итого с НДС 1 197 900 ₽ · в т.ч. НДС 22 % — 216 015 ₽');
+    expect(document.querySelector('.opt-kp-row .opt-kp-col-sum')?.textContent?.replace(/\u00a0/g, ' ')).toBe('1 197 900 ₽');
+    // «Найти цену» у позиции — только эта строка.
     await click('Найти цену');
     expect(JSON.parse(posts[1]!)).toEqual({ draftId: 7, requestIndexes: [0] });
-    // Правка цены руками помечает её как ручную.
     stage = 'done';
     await act(async () => cbs.render!());
     await flush();
-    await setInput(document.querySelector('input[placeholder="Нет цены"]'), '100000');
-    expect(text()).toContain('Цена · изменено менеджером');
+    await expand();
+    // Правка цены руками — метка «изменено менеджером», сохранение включается.
+    await setInput(priceInputs()[0]!, '100000');
+    expect(badges()).toEqual([['manager', 'изменено менеджером']]);
+    expect(modalButton('Сохранить правки')?.disabled).toBe(false);
+    expect(modalButton('Собрать документ')?.title).toBe('Сначала сохраните правки');
   });
 
-  it('KP-WIDGET-REFRESH: поиск завершился мгновенно (цены из базы) — после POST research виджет перечитывает черновик и показывает цены без F5; правки во время поиска сбрасываются', async () => {
-    const item = (i: number, price: number | null) => ({ request_index: i, page_id: null, name: `Дверной блок ${i + 1}`, size: '910×2100 мм', qty: 1, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'kb' as const, priceLabel: 'по прайсу: ДВ CPL (строка 5)', priceStale: false, kbPriceId: 5 } : {}) });
+  it('KP-WIDGET-REFRESH: поиск завершился мгновенно (цены из прайса) — после POST research виджет перечитывает черновик и показывает цены без F5', async () => {
+    const item = (i: number, price: number | null) => ({ request_index: i, page_id: null, name: `Дверной блок ${i + 1}`, size: '910×2100 мм', qty: 1, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'price_file' as const, priceLabel: 'по прайсу: ДВ CPL (строка 5)', priceStale: false, kbPriceId: 5 } : {}) });
     let current = { ...draft, id: 54, items: [item(0, null), item(1, null), item(2, null)], needsManager: [0, 1, 2].map((i) => ({ request_index: i, reason: 'цена не задана' })) };
     const calls: string[] = [];
     const { self } = fakeSelf('lcard', {
@@ -261,7 +299,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
         calls.push('draft');
         return { draft: current, job: null };
       },
-      // Задания из базы знаний выполняются мгновенно: к первому опросу ни queued, ни running уже нет.
+      // Задания по прайсу выполняются мгновенно: к первому опросу ни queued, ни running уже нет.
       'GET /widget/v1/kp/research': () => {
         calls.push('research');
         return { draftId: 54, pending: false, positions: [0, 1, 2].map((i) => ({ requestIndex: i, job: null, research: null })) };
@@ -275,63 +313,151 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    const text = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
-    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="Нет цены"]')].map((i) => i.value)).toEqual(['', '', '']);
+    await expand();
+    expect(priceInputs().map((i) => i.value)).toEqual(['', '', '']);
     expect(button('Собрать документ')?.disabled).toBe(true);
     calls.length = 0;
-    await click('Найти цены');
+    await clickIn('Найти цены');
     await flush();
     await act(async () => new Promise((r) => setTimeout(r, 30)));
     // POST → один GET research (поиск уже завершён) → GET draft: цены на месте, итог и кнопка сборки доступны без F5.
     expect(calls).toEqual(['post', 'research', 'draft']);
-    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="Нет цены"]')].map((i) => i.value)).toEqual(['23900', '23900', '23900']);
-    expect(text()).toContain('Цена · по прайсу: ДВ CPL (строка 5)');
-    expect(text()).toContain('Итого71 700 ₽');
+    expect(priceInputs().map((i) => i.value)).toEqual(['23900', '23900', '23900']);
+    expect(badges().map((b) => b[1])).toEqual(['по прайсу: ДВ CPL (строка 5)', 'по прайсу: ДВ CPL (строка 5)', 'по прайсу: ДВ CPL (строка 5)']);
+    expect(plainText()).toContain('Итого с НДС 71 700 ₽');
     expect(button('Собрать документ')?.disabled).toBe(false);
-    expect(button('Найти цены')?.disabled).toBe(false);
+    expect(document.querySelector('.opt-kp-counters')?.textContent).toBe('позиций 3вопросов 0без цены 0');
   });
 
-  it('KB-COMPONENT-DOOR-GROUP: блок «Вопросы по комплектующим» над позициями — один вопрос на группу (3 строки, 37 шт), ответ — ко всем строкам группы; у строки «изменить дверь» меняет только её; «Собрать документ» — когда отвечены все группы', async () => {
-    const doorLine = (i: number, name: string, size: string, qty: number, price: number, productId: string) => ({ request_index: i, page_id: null, name, size, qty, price, lead_time: '', discount: 0, category: 'door' as const, priceSource: 'kb' as const, priceLabel: `по прайсу: ${name}`, productId });
-    const options = [{ requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 }, { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 }];
-    const q = (text: string) => ({ kind: 'component_door' as const, text, reason: 'many' as const, group: 'коробка|сэндвич|телескоп', groupTitle: 'Коробка ТЕЛЕСКОП, сэндвич', options });
-    type L = Record<string, unknown> & { request_index: number };
-    const box = (i: number, size: string, qty: number): L => ({ request_index: i, page_id: null, name: `Коробка ТЕЛЕСКОП, сэндвич ${size}`, size: '', qty, price: null, lead_time: '', discount: 0, category: 'component', priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q(`К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич ${size}, ${qty} шт»?`) });
-    const doors = [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013')];
-    let items: L[] = [...doors, box(2, '74×2150', 20), box(3, '74×2400', 10), box(4, '92×2150', 7)];
-    const priced = (l: L, door: number, by: 'group' | 'line', price: number | null, label: string): L => ({ ...l, price, priceOutcome: price ? 'priced' : 'included', question: null, componentDoor: door, componentDoorBy: by, componentDoorGroup: by === 'group' ? 'коробка|сэндвич|телескоп' : null, priceLabel: label });
-    const posted: unknown[] = [];
+  it('опросник (KP-AGENT-V2, п. 5): счётчики и блокировка сборки; порядок — блокирующие, не блокирующие, отвеченные; цена из интернета с источниками — медиана или своя цена; доставка с суммой; «Спросить у клиента» — текст для менеджера', async () => {
+    const web = { query: 'Лиственница 2П 1400×2700', researchedAt: '2026-10-19T10:00:00Z', min: 84_000, median: 86_000, max: 90_000, count: 3, factorySources: 1, spreadPct: 7, enough: true, excludedSites: ['dveri-c.ru'], sources: [{ url: 'https://fabrika-l.ru/p3', seller: 'fabrika-l.ru', price: 90_000, unitPrice: 90_000, foundAt: '2026-10-19T10:00:00Z', manufacturer: true, site: 'фабрика; по комментарию: «Двери из массива лиственницы»' }, { url: 'https://dveri-a.ru/p1', seller: 'dveri-a.ru', price: 84_000, unitPrice: 84_000, foundAt: '2026-10-19T10:00:00Z', manufacturer: false, site: null }] };
+    const door = { request_index: 0, page_id: null, name: 'Дверь двупольная лиственница', size: '1400×2700 мм', qty: 2, price: null, lead_time: '', discount: 0, category: 'door' as const, priceLabel: 'цены из интернета — выбор менеджера', priceOutcome: 'not_priced' as const, web, gostProfile: { gost: '475-2016', kind: 'ДВ', leaves: 2, unequal: false, opening: null, fill: 'Г', threshold: null, strength: null, fire: null, heightMm: 2700, widthMm: 1400, basis: null, material: 'wood', cover: null, brand: null }, gostDesignation: null };
+    const handle = { request_index: 1, page_id: null, name: 'Ручка дверная', size: '', qty: 2, price: 1250, lead_time: '', discount: 0, category: 'hardware' as const, priceSource: 'manager' as const, priceLabel: 'введена менеджером', priceOutcome: 'priced' as const };
+    const webQ = { key: 'web_price:дверь двупольная лиственница|1400×2700 мм', type: 'web_price', blocking: true, title: 'Цена из интернета', text: '«Дверь двупольная лиственница», 1400×2700 мм: цены интернета 84 000 ₽ – 90 000 ₽, медиана 86 000 ₽ (3 источн.). Итоговая цена?', requestIndexes: [0], options: [{ id: 'median', label: 'Медиана 86 000 ₽', price: 86_000 }, { id: 'min', label: 'Минимум 84 000 ₽', price: 84_000 }, { id: 'max', label: 'Максимум 90 000 ₽', price: 90_000 }, { id: 'no_price', label: 'Оставить без цены («уточнить у менеджера» в КП)' }], customPrice: true, web, askClient: null, answer: null };
+    const incQ = { key: 'incomplete:дверь двупольная лиственница|1400×2700 мм', type: 'incomplete', blocking: false, title: 'Неполная позиция', text: '«Дверь двупольная лиственница», 1400×2700 мм: не указано — открывание.', requestIndexes: [0], options: [], fields: [{ name: 'opening', label: 'Открывание', value: null }], askClient: 'Добрый день! Уточните, пожалуйста, по позиции «Дверь двупольная лиственница» (1400×2700 мм): открывание.', answer: null };
+    const deliveryQ = { key: 'delivery', type: 'delivery', blocking: true, title: 'Доставка', text: 'Доставка по адресу: г. Москва, ул. Строителей, 1 — сумма или самовывоз?', requestIndexes: [], options: [{ id: 'delivery', label: 'Доставка (адрес и сумма)' }, { id: 'pickup', label: 'Самовывоз' }], fields: [{ name: 'address', label: 'Адрес', value: 'г. Москва, ул. Строителей, 1' }, { name: 'sum', label: 'Сумма доставки с НДС, ₽', value: null }], askClient: null, answer: null };
+    const handleQ = { key: 'enter_price:ручка дверная|', type: 'enter_price', blocking: true, title: 'Введите цену', text: '«Ручка дверная»: цены нет ни в прайсе, ни в интернете.', requestIndexes: [1], options: [{ id: 'no_price', label: 'Оставить без цены («уточнить у менеджера» в КП)' }], customPrice: true, askClient: null, answer: { option: 'custom', price: 1250, at: '2026-10-19T10:00:00Z', by: 1 } };
+    let current: Record<string, unknown> = { ...draft, id: 81, items: [door, handle], needsManager: [], survey: [handleQ, incQ, webQ, deliveryQ], counters: { positions: 2, open: 3, blocking: 2, unpriced: 1 }, delivery: null, priceValidity: '30 календарных дней', vatRate: 22 };
+    const answers: unknown[] = [];
     const { self } = fakeSelf('lcard', {
-      'GET /widget/v1/kp/draft': () => ({ draft: { ...draft, id: 66, items, needsManager: [] }, job: null }),
-      'POST /widget/v1/kp/draft/66/component-door': (data?: string) => {
-        const b = JSON.parse(data ?? '{}') as { groupKey?: string; requestIndex?: number; doorRequestIndex: number };
-        posted.push(b);
-        if (b.groupKey) items = items.map((l) => (l.category === 'component' ? priced(l, b.doorRequestIndex, 'group', 1910, 'по двери INT-002, ДПГ усиленная') : l));
-        else items = items.map((l) => (l.request_index === b.requestIndex ? priced(l, b.doorRequestIndex, 'line', null, 'по двери INT-013, ДПГ CPL') : l));
-        return { draft: { ...draft, id: 66, items, needsManager: [] }, applied: b.groupKey ? 3 : 1 };
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'POST /widget/v1/kp/draft/81/answer': (data?: string) => {
+        const b = JSON.parse(data ?? '{}') as { key: string; option?: string; price?: number; fields?: Record<string, string> };
+        answers.push(b);
+        const survey = (current.survey as { key: string }[]).map((q) => (q.key === b.key ? { ...q, answer: { option: b.option ?? 'custom', price: b.price ?? (b.option === 'median' ? 86_000 : null), fields: b.fields, at: '2026-10-19T10:05:00Z', by: 1 } } : q));
+        const items = b.key === webQ.key ? [{ ...door, price: b.price ?? 86_000, priceSource: b.price ? 'manager' : 'web_confirmed', priceLabel: b.price ? 'введена менеджером' : 'из интернета (3 источн.), выбрал менеджер', priceOutcome: 'priced' }, handle] : (current.items as unknown[]);
+        const delivery = b.key === 'delivery' ? { mode: b.option, address: b.fields?.address ?? null, sum: Number(b.fields?.sum) || null } : current.delivery;
+        const open = survey.filter((q) => !(q as { answer: unknown }).answer);
+        current = { ...current, survey, items, delivery, counters: { positions: 2, open: open.length, blocking: open.filter((q) => (q as unknown as { blocking: boolean }).blocking).length, unpriced: b.key === webQ.key ? 0 : 1 } };
+        return { draft: current };
       },
     });
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    const text = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
-    // Один вопрос на группу — над позициями; у строк — ссылка на блок, без своих кнопок.
-    expect(document.querySelectorAll('.opt-kp-questions-block .opt-kp-question')).toHaveLength(1);
-    expect(text()).toContain('Вопросы по комплектующим (1)');
-    expect(text()).toContain('К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич» (3 строки, 37 шт)?');
-    expect([...document.querySelectorAll('.opt-kp-door-option')].map((b) => b.textContent?.replace(/\u00a0/g, ' '))).toEqual(['INT-002 · ДПГ усиленная · 800 × 2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910 × 2100 мм · 3 шт']);
-    expect(document.querySelectorAll('.opt-kp-question-ref')).toHaveLength(3);
+    // Узкая колонка: «вопросов 3 (блокируют 2)» красным, сборка заблокирована с причиной.
+    expect(document.querySelector('.opt-kp-counters')?.textContent).toBe('позиций 2вопросов 3 (блокируют 2)без цены 1');
+    expect(document.querySelector('.opt-kp-counter-block')).not.toBeNull();
     expect(button('Собрать документ')?.disabled).toBe(true);
-    expect(button('Собрать документ')?.title).toBe('Ответьте на вопросы по комплектующим');
-    expect(text()).toContain('Ответьте на вопросы по комплектующим (1): в блоке над позициями выберите дверь для каждой группы');
-    // Ответ на группу — один запрос, цена во всех трёх строках.
-    await act(async () => (document.querySelector('.opt-kp-door-option') as HTMLButtonElement).click());
+    expect(button('Собрать документ')?.title).toBe('Ответьте на вопросы опросника, которые блокируют КП: 2');
+    expect(document.body.textContent).toContain('Документ не собирается: Ответьте на вопросы опросника, которые блокируют КП: 2.');
+    await expand();
+    expect([...document.querySelectorAll('.opt-kp-tab')].map((t) => t.textContent)[1]).toBe('Опросник (3)');
+    // ГОСТ-профиль серой строкой; метки цены: интернет ждёт выбора, ручная цена.
+    expect(document.querySelector('.opt-kp-row-gost')?.textContent).toBe('ГОСТ 475-2016 · ДВ · 2 створки · Г · 2700×1400');
+    expect(badges()).toEqual([['pending', 'цены из интернета — выберите в опроснике'], ['manager', 'введена менеджером']]);
+    expect(plainText()).toContain('цены из интернета 84 000 ₽ – 90 000 ₽ — выберите в опроснике');
+    // Порядок карточек: блокирующие (красные), не блокирующие (жёлтые), отвеченные (серые).
+    const cards = () => [...document.querySelectorAll('.opt-kp-panel .opt-kp-q')].map((c) => [c.className.replace('opt-kp-q opt-kp-q-', ''), c.querySelector('.opt-kp-q-title')?.textContent]);
+    expect(cards()).toEqual([['block', 'Цена из интернета'], ['block', 'Доставка'], ['warn', 'Неполная позиция'], ['done', 'Введите цену']]);
+    const panel = document.querySelector('.opt-kp-panel')!;
+    expect(panel.textContent?.replace(/\u00a0/g, ' ')).toContain('Ответ: своя цена · 1 250 ₽');
+    // Источники интернета: фабрика первой, «выбран по комментарию», исключённый сайт.
+    const webCard = panel.querySelector('.opt-kp-q')!;
+    expect(webCard.textContent?.replace(/\u00a0/g, ' ')).toContain('84 000 ₽ · медиана 86 000 ₽ · 90 000 ₽ — источников 3, с фабрики 1');
+    await act(async () => ([...webCard.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Источники')) as HTMLButtonElement).click());
+    expect([...webCard.querySelectorAll('.opt-kp-q-sources li')].map((l) => l.textContent?.replace(/\u00a0/g, ' '))).toEqual(['fabrika-l.ru — 90 000 ₽ · фабрика · выбран: фабрика; по комментарию: «Двери из массива лиственницы»', 'dveri-a.ru — 84 000 ₽', 'Не использовались (по комментарию «… нет»): dveri-c.ru']);
+    // «Ответить» — только после выбора варианта; медиана → web_confirmed.
+    const answerBtn = () => [...webCard.querySelectorAll('button')].find((b) => b.textContent === 'Ответить') as HTMLButtonElement;
+    expect(answerBtn().disabled).toBe(true);
+    await act(async () => (webCard.querySelector('input[value="median"]') as HTMLInputElement).click());
+    expect(answerBtn().disabled).toBe(false);
+    await act(async () => answerBtn().click());
     await flush();
-    expect(posted).toEqual([{ groupKey: 'коробка|сэндвич|телескоп', doorRequestIndex: 0 }]);
-    expect(document.querySelector('.opt-kp-questions-block')).toBeNull();
-    expect(text().match(/Цена · по двери INT-002, ДПГ усиленная/g)).toHaveLength(3);
-    expect(text().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(3);
+    expect(answers[0]).toEqual({ key: webQ.key, option: 'median' });
+    expect(badges()[0]).toEqual(['web', 'из интернета (3 источн.), выбрал менеджер']);
+    expect(cards().map((c) => c[0])).toEqual(['block', 'warn', 'done', 'done']);
+    // Доставка: вариант «доставка» с адресом и суммой.
+    const delivery = [...document.querySelectorAll('.opt-kp-panel .opt-kp-q')].find((c) => c.querySelector('.opt-kp-q-title')?.textContent === 'Доставка')!;
+    await act(async () => (delivery.querySelector('input[value="delivery"]') as HTMLInputElement).click());
+    const sum = [...delivery.querySelectorAll('.opt-kp-field')].find((f) => f.textContent?.startsWith('Сумма'))!.querySelector('input')!;
+    await setInput(sum, '4500');
+    await act(async () => ([...delivery.querySelectorAll('button')].find((b) => b.textContent === 'Ответить') as HTMLButtonElement).click());
+    await flush();
+    expect(answers[1]).toEqual({ key: 'delivery', option: 'delivery', fields: { address: 'г. Москва, ул. Строителей, 1', sum: '4500' } });
+    expect(document.querySelector('.opt-kp-row-delivery')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Доставкаг. Москва, ул. Строителей, 11 усл.4 500 ₽4 500 ₽');
+    // Итог: 86 000 × 2 + 1 250 × 2 + 4 500 = 179 000, НДС из суммы.
+    expect(plainText()).toContain('Итого с НДС 179 000 ₽ · в т.ч. НДС 22 % — 32 279 ₽');
+    expect(plainText()).toContain('Срок действия цены: 30 календарных дней');
+    // «Спросить у клиента» — готовый текст, клиенту агент не пишет.
+    const inc = [...document.querySelectorAll('.opt-kp-panel .opt-kp-q')].find((c) => c.querySelector('.opt-kp-q-title')?.textContent === 'Неполная позиция')!;
+    await act(async () => ([...inc.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Спросить у клиента')) as HTMLButtonElement).click());
+    expect((inc.querySelector('.opt-kp-q-client-text') as HTMLTextAreaElement).value).toBe('Добрый день! Уточните, пожалуйста, по позиции «Дверь двупольная лиственница» (1400×2700 мм): открывание.');
+    // Блокирующих не осталось — сборка доступна (неполная позиция не блокирует).
     expect(button('Собрать документ')?.disabled).toBe(false);
+    // Вкладка «Опросник» — тот же список; своя цена отправляется числом.
+    await tab('Опросник');
+    expect(document.querySelectorAll('.opt-kp-modal-body .opt-kp-q')).toHaveLength(4);
+  });
+
+  it('KB-COMPONENT-DOOR-GROUP в опроснике: «к какой двери» — один вопрос на группу, ответ — ко всем строкам группы; у строки «изменить дверь» меняет только её', async () => {
+    const doorLine = (i: number, name: string, size: string, qty: number, price: number, productId: string) => ({ request_index: i, page_id: null, name, size, qty, price, lead_time: '', discount: 0, category: 'door' as const, priceSource: 'price_file' as const, priceLabel: `по прайсу: ${name}`, productId });
+    const options = [{ requestIndex: 0, productId: 'INT-002', model: 'ДПГ усиленная', size: '800×2000 мм', qty: 5 }, { requestIndex: 1, productId: 'INT-013', model: 'ДПГ CPL', size: '910×2100 мм', qty: 3 }];
+    const q = (text: string) => ({ kind: 'component_door' as const, text, reason: 'many' as const, group: 'коробка|сэндвич|телескоп', groupTitle: 'Коробка ТЕЛЕСКОП, сэндвич', options });
+    type L = Record<string, unknown> & { request_index: number };
+    const box = (i: number, size: string, qty: number): L => ({ request_index: i, page_id: null, name: `Коробка ТЕЛЕСКОП, сэндвич ${size}`, size: '', qty, price: null, lead_time: '', discount: 0, category: 'component', priceSource: 'price_file', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q(`К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич ${size}, ${qty} шт»?`) });
+    const doors = [doorLine(0, 'ДПГ усиленная ПВХ', '800×2000 мм', 5, 6800, 'INT-002'), doorLine(1, 'ДПГ CPL', '910×2100 мм', 3, 23_900, 'INT-013')];
+    let items: L[] = [...doors, box(2, '74×2150', 20), box(3, '74×2400', 10), box(4, '92×2150', 7)];
+    const doorQ = { key: 'component_door:коробка|сэндвич|телескоп', type: 'component_door', blocking: true, title: 'Комплектующие — к какой двери', text: 'К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич» (строк 3, 37 шт)?', requestIndexes: [2, 3, 4], options: [{ id: '0', label: 'INT-002 · ДПГ усиленная · 800×2000 мм · 5 шт' }, { id: '1', label: 'INT-013 · ДПГ CPL · 910×2100 мм · 3 шт' }], askClient: null, answer: null };
+    let survey: unknown[] = [doorQ];
+    const view = () => ({ ...draft, id: 66, items, needsManager: [], survey, counters: { positions: 5, open: survey.length, blocking: survey.length, unpriced: items.filter((l) => l.price === null && l.priceOutcome !== 'included').length }, delivery: { mode: 'pickup', address: null, sum: null } });
+    const priced = (l: L, door: number, by: 'group' | 'line', price: number | null, label: string): L => ({ ...l, price, priceOutcome: price ? 'priced' : 'included', question: null, componentDoor: door, componentDoorBy: by, componentDoorGroup: by === 'group' ? 'коробка|сэндвич|телескоп' : null, priceLabel: label });
+    const posted: unknown[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: view(), job: null }),
+      // Ответ «к какой двери» через опросник: сервер передаёт его в component-door для группы.
+      'POST /widget/v1/kp/draft/66/answer': (data?: string) => {
+        const b = JSON.parse(data ?? '{}') as { key: string; option: string };
+        posted.push(b);
+        items = items.map((l) => (l.category === 'component' ? priced(l, Number(b.option), 'group', 1910, 'по двери INT-002, ДПГ усиленная') : l));
+        survey = [];
+        return { draft: view(), applied: 3 };
+      },
+      'POST /widget/v1/kp/draft/66/component-door': (data?: string) => {
+        const b = JSON.parse(data ?? '{}') as { requestIndex: number; doorRequestIndex: number };
+        posted.push(b);
+        items = items.map((l) => (l.request_index === b.requestIndex ? priced(l, b.doorRequestIndex, 'line', null, 'по двери INT-013, ДПГ CPL') : l));
+        return { draft: view() };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect(button('Собрать документ')?.disabled).toBe(true);
+    await expand();
+    // Один вопрос на группу — в опроснике; у строк — ссылка на него.
+    const card = document.querySelector('.opt-kp-panel .opt-kp-q')!;
+    expect(card.textContent).toContain('К какой двери считать «Коробка ТЕЛЕСКОП, сэндвич» (строк 3, 37 шт)?');
+    expect([...card.querySelectorAll('.opt-kp-q-option')].map((o) => o.textContent)).toEqual(['INT-002 · ДПГ усиленная · 800×2000 мм · 5 шт', 'INT-013 · ДПГ CPL · 910×2100 мм · 3 шт']);
+    expect(document.querySelectorAll('.opt-kp-question-ref')).toHaveLength(3);
+    await act(async () => (card.querySelector('input[value="0"]') as HTMLInputElement).click());
+    await act(async () => ([...card.querySelectorAll('button')].find((b) => b.textContent === 'Ответить') as HTMLButtonElement).click());
+    await flush();
+    expect(posted).toEqual([{ key: 'component_door:коробка|сэндвич|телескоп', option: '0' }]);
+    expect(badges().filter((b) => b[1] === 'по двери INT-002, ДПГ усиленная')).toHaveLength(3);
+    expect(plainText().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(3);
+    expect(document.querySelector('.opt-kp-row-delivery')?.textContent).toContain('самовывоз — строки в КП нет');
+    expect(modalButton('Собрать документ')?.disabled).toBe(false);
     // «Изменить дверь» у второй строки → INT-013: только эта строка.
     await act(async () => ([...document.querySelectorAll('.opt-kp-door-change')][1] as HTMLButtonElement).click());
     await flush();
@@ -340,17 +466,17 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await act(async () => (lineOptions[1] as HTMLButtonElement).click());
     await flush();
     expect(posted[1]).toEqual({ requestIndex: 3, doorRequestIndex: 1 });
-    expect(text()).toContain('дверь: поз. 2 — выбрана для этой строки');
-    expect(text().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(2);
+    expect(plainText()).toContain('дверь: поз. 2 — выбрана для этой строки');
+    expect(plainText().match(/дверь: поз\. 1 — по ответу на группу/g)).toHaveLength(2);
     // KB-DOOR-MATCH-2, п. 5: коробка входит в цену блока INT-013 — в поле цены подсказка, не 0.
-    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="входит в цену блока"]')].map((i) => i.value)).toEqual(['']);
+    expect([...document.querySelectorAll<HTMLInputElement>('input[placeholder="в цене блока"]')].map((i) => i.value)).toEqual(['']);
   });
 
-  it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела»; цена прежнего веб-поиска — «в КП не идёт» (KB-WEB-ROWS); «Найти цену» без force', async () => {
+  it('подписи и цвет источника цены: прайс, «цена устарела», прежний веб-поиск — «в КП не идёт»; полное название, обозначение по прайсу, комплектация, комплектация по ТЗ и ГОСТ-обозначение под ним', async () => {
     const kbDraft = { ...draft, items: [
-      { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', tzEquipment: 'раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри' },
+      { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'price_file', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', tzEquipment: 'раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри', gostProfile: { gost: '475-2016', kind: 'ДВ', leaves: 1, unequal: false, opening: 'right', fill: 'Г', threshold: 'ПрБ', strength: null, fire: null, heightMm: 2000, widthMm: 800, basis: 'frame', material: 'wood', cover: 'CPL', brand: null }, gostDesignation: 'ДВ 1Рп 20×8 Г ПрБ ГОСТ 475-2016' },
       { request_index: 1, page_id: null, name: 'Турин', size: '800×2000 мм', qty: 3, price: 8000, lead_time: '', discount: 0, priceSource: 'research', priceLabel: 'по рынку (01.08.2026)', market: { median: 8000, min: 7800, max: 8200, count: 3, unit: 'piece', researchId: 9, researchedAt: '2026-08-01T10:00:00Z' } },
-      { request_index: 2, page_id: null, name: 'ДПО сота', size: '800×2000 мм', qty: 1, price: 4100, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'изменено менеджером', priceStale: true },
+      { request_index: 2, page_id: null, name: 'ДПО сота', size: '800×2000 мм', qty: 1, price: 4100, lead_time: '', discount: 0, priceSource: 'price_file', priceLabel: 'по прайсу: ДПО сота (строка 4)', priceStale: true },
     ], needsManager: [{ request_index: 2, reason: 'цена устарела: актуальна на 01.01.2026, срок 90 дн.' }] };
     const posted: unknown[] = [];
     const { self } = fakeSelf('lcard', {
@@ -364,19 +490,18 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    const labels = [...document.querySelectorAll('.opt-kp-field-price .opt-kp-label')].map((l) => l.textContent);
-    expect(labels).toEqual(['Цена · по базе: прайс Текона.xlsx (01.10.2026)', 'Цена · из интернета — в КП не идёт, нажмите «Найти цену»', 'Цена · изменено менеджером · цена устарела']);
-    expect(document.body.textContent).toContain('из прайса: по базе: прайс Текона.xlsx (01.10.2026)');
-    expect(document.body.textContent).toContain('цена из интернета — в КП не идёт');
-    // KP-NAME: полное название без обрезания, под ним модель с покрытием из прайса и комплектация.
-    const first = document.querySelector('.opt-kp-tile')!;
-    expect(first.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый');
-    expect(first.querySelector('.opt-kp-tile-model')?.textContent).toBe('Обозначение по прайсу: ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)');
-    expect(first.querySelector('.opt-kp-tile-equipment')?.textContent).toBe('Комплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик');
-    // KP-DOCX-APPENDIX: комплектация из ТЗ клиента — своей строкой в плитке.
-    expect(first.querySelector('.opt-kp-tile-tz')?.textContent).toBe('Комплектация по ТЗ: раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри');
-    expect(document.querySelectorAll('.opt-kp-tile-tz')).toHaveLength(1);
-    expect([...document.querySelectorAll('button')].filter((b) => b.textContent === 'Искать в интернете')).toHaveLength(0);
+    await expand();
+    expect(badges()).toEqual([['price', 'по базе: прайс Текона.xlsx (01.10.2026)'], ['stale', 'прежний поиск — в КП не идёт'], ['price', 'по прайсу: ДПО сота (строка 4)']]);
+    expect(document.querySelectorAll('.opt-kp-table .opt-kp-stale')).toHaveLength(1);
+    expect(document.body.textContent).toContain('цена прежнего поиска — в КП не идёт');
+    const first = document.querySelector('.opt-kp-row')!;
+    expect(first.querySelector('.opt-kp-row-name')?.textContent).toBe('Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый');
+    expect(first.querySelector('.opt-kp-row-gost')?.textContent).toBe('ГОСТ 475-2016 · ДВ · 1 створка · правая · Г · ПрБ · 2000×800 (по коробке) · по ГОСТ: ДВ 1Рп 20×8 Г ПрБ ГОСТ 475-2016');
+    expect(first.querySelector('.opt-kp-row-model')?.textContent).toBe('Обозначение по прайсу: ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)');
+    expect(first.querySelector('.opt-kp-row-equipment')?.textContent).toBe('Комплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик');
+    // KP-DOCX-APPENDIX: комплектация из ТЗ клиента — своей строкой.
+    expect(first.querySelector('.opt-kp-row-tz')?.textContent).toBe('Комплектация по ТЗ: раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри');
+    expect(document.querySelectorAll('.opt-kp-row-tz')).toHaveLength(1);
     const buttons = [...document.querySelectorAll('button')].filter((b) => b.textContent === 'Найти цену');
     expect(buttons).toHaveLength(3);
     await act(async () => buttons[0]!.click());
@@ -384,10 +509,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(posted).toEqual([{ draftId: 7, requestIndexes: [0] }]);
   });
 
-  it('ответ из базы знаний в карточке сделки (этап 4): вопрос → POST /kb/answer с leadId, ответ и источники', async () => {
+  it('вкладка «База знаний» в окне КП: вопрос → POST /kb/answer с leadId, ответ и источники; «Журнал» — события этой сделки', async () => {
     const posted: unknown[] = [];
-    const { self } = fakeSelf('lcard', {
+    const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': { draft, job: null },
+      'GET /widget/v1/journal': { items: [{ id: 1, leadId: 555, kind: 'note', summary: 'Опросник: «Доставка» (КП) — самовывоз', details: {}, costRub: 0, createdAt: '2026-10-19T10:00:00Z' }] },
       'POST /widget/v1/kb/answer': (data?: string) => {
         posted.push(JSON.parse(data ?? '{}'));
         return { question: 'какая скидка от 50 полотен', answer: 'Скидка опт от 50 полотен — 12 % [1].', sources: [{ n: 1, chunkId: 10, sourceId: 1, label: 'заметка «Скидки» (15.10.2026)', excerpt: 'Скидка опт от 50 полотен — 12 %' }], reason: null, cost: { inputTokens: 400, outputTokens: 30, usd: 0.0012 }, provider: 'openai', model: 'gpt-5.5', ms: 900 };
@@ -396,7 +522,8 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-title')].map((h) => h.textContent)).toContain('Ответ из базы знаний');
+    await expand();
+    await tab('База знаний');
     expect(button('Ответить из базы')?.disabled).toBe(true);
     await setInput(document.querySelector('.opt-kb-answer-input'), 'какая скидка от 50 полотен');
     expect(button('Ответить из базы')?.disabled).toBe(false);
@@ -406,6 +533,10 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Скидка опт от 50 полотен — 12 % [1].');
     expect(document.body.textContent).toContain('[1] заметка «Скидки» (15.10.2026): Скидка опт от 50 полотен — 12 %');
     expect(document.body.textContent).toContain('gpt-5.5, $0.0012, 900 мс');
+    await tab('Журнал');
+    await flush();
+    expect(calls.some((c) => c.url.includes('/widget/v1/journal?leadId=555'))).toBe(true);
+    expect(document.body.textContent).toContain('Опросник: «Доставка» (КП) — самовывоз');
   });
 
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
@@ -441,17 +572,19 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
-    await setInput(document.querySelector('input[placeholder="Нет цены"]'), '14900');
-    expect(button('Собрать документ')?.disabled).toBe(true);
-    await click('Сохранить правки');
+    await expand();
+    await setInput(priceInputs()[0]!, '14900');
+    expect(modalButton('Собрать документ')?.disabled).toBe(true);
+    await clickIn('Сохранить правки');
     await flush();
-    expect(document.querySelector('.opt-kp-total')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Итого163 900 ₽');
-    await click('Собрать документ');
+    expect(document.querySelector('.opt-kp-modal-foot .opt-kp-total')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Итого с НДС 163 900 ₽ · в т.ч. НДС 22 % — 29 556 ₽');
+    await clickIn('Собрать документ');
     await flush();
-    expect(document.querySelector('.opt-kp-sub')?.textContent).toBe('КП-2026-1');
+    expect(document.querySelector('.opt-kp-modal .opt-kp-title')?.textContent).toBe('КП КП-2026-1');
+    expect(document.querySelector('.opt-kp-narrow .opt-kp-sub')?.textContent).toBe('КП-2026-1');
     expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Документ собран');
     expect(document.body.textContent).toContain('Документ собран (DOCX и PDF) — файлы в карточке сделки');
-    // Скачивание (KP-DOWNLOAD): кнопки рядом с бейджем, клик берёт подписанную ссылку и открывает её как вложение.
+    // Скачивание (KP-DOWNLOAD): кнопки в колонке и в окне, клик берёт подписанную ссылку и открывает её как вложение.
     expect(button('Скачать PDF')).toBeDefined();
     expect(button('Скачать DOCX')).toBeDefined();
     const clicked: string[] = [];
@@ -467,7 +600,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     }
     expect(calls.some((c) => c.method === 'GET' && c.url.endsWith('/widget/v1/kp/file/link?draftId=7&kind=pdf'))).toBe(true);
     expect(clicked).toEqual(['KP-КП-2026-1.pdf ← https://opt.test.ru/kp/file?draftId=7&kind=pdf&t=abc']);
-    await click('Отправить клиенту');
+    await clickIn('Отправить клиенту');
     await flush();
     expect(document.body.textContent).toContain('Вложение: KP-КП-2026-1.pdf (117 КБ)');
     expect(sent).toHaveLength(0);
@@ -824,5 +957,70 @@ describe('виджет «Агент опт»: вкладка «База знан
     await click('Скрыть');
     await flush();
     expect(document.querySelector('.opt-kb-prices-table')).toBeNull();
+  });
+});
+
+describe('виджет «Агент опт»: сайты и кандидаты в прайс (KP-AGENT-V2, п. 4а, 4.4)', () => {
+  it('у сайта — комментарий до 2000 знаков и «фабрика» (PUT /kb/sources/:id/site); выгрузка сайтов xlsx; кандидаты в прайс — список, выгрузка, удаление', async () => {
+    const site = { id: 5, kind: 'url', title: 'aqua-door.ru', original: 'https://aqua-door.ru', mime: 'text/html', status: 'indexed', sizeBytes: 2000, chunks: 2, embeddedChunks: 2, refreshDays: 30, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', crawl: false, parentId: null, httpStatus: 200, job: null, comment: null, isFactory: false };
+    const page = { ...site, id: 6, title: 'aqua-door.ru/catalog', parentId: 5 };
+    let candidates = [{ id: 1, leadId: 89813, draftId: 69, model: 'Аква 01 ПГ + УПД', size: '600×2000 мм', price: 14_453, source: 'web_confirmed', url: 'https://aqua-door.ru/p/1', note: null, createdAt: '2026-10-19T10:00:00Z' }];
+    const put: unknown[] = [];
+    const downloads: string[] = [];
+    const { self } = fakeSelf('settings', {
+      'GET /widget/v1/kb/sources': () => ({ sources: [site, page], usage: { sources: 2, bytes: 4000, chunks: 4, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
+      'PUT /widget/v1/kb/sources/5/site': (data?: string) => {
+        put.push(JSON.parse(data ?? '{}'));
+        return { source: { ...site, ...JSON.parse(data ?? '{}') } };
+      },
+      'GET /widget/v1/kb/sites/export': { filename: 'kb-sites-2026-10-19.xlsx', rows: 1, contentBase64: Buffer.from('PK').toString('base64') },
+      'GET /widget/v1/kb/candidates': () => ({ items: candidates }),
+      'GET /widget/v1/kb/candidates/export': { filename: 'kb-candidates-2026-10-19.xlsx', rows: 1, contentBase64: Buffer.from('PK').toString('base64') },
+      'DELETE /widget/v1/kb/candidates/1': () => {
+        candidates = [];
+        return { ok: true };
+      },
+      'GET /widget/v1/kb/prices': { items: [], total: 0 },
+      'GET /widget/v1/kb/aliases': { aliases: [] },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    // Комментарий и «фабрика» — только у сайта, не у страницы раздела.
+    expect(document.querySelectorAll('.opt-kb-site')).toHaveLength(1);
+    await setInput(document.querySelector('.opt-kb-site-comment'), 'ДПК Аква, межкомнатные. Стальных нет');
+    await act(async () => (document.querySelector('.opt-kb-site-factory') as HTMLInputElement).click());
+    expect((document.querySelector('.opt-kb-site-comment') as HTMLTextAreaElement).maxLength).toBe(2000);
+    const origCreate = URL.createObjectURL;
+    const origClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = () => 'blob:x';
+    HTMLAnchorElement.prototype.click = function () {
+      downloads.push(this.getAttribute('download') ?? '');
+    };
+    try {
+      await click('Сохранить комментарий');
+      await flush();
+      expect(put).toEqual([{ comment: 'ДПК Аква, межкомнатные. Стальных нет', isFactory: true }]);
+      expect(document.body.textContent).toContain('Сайт «aqua-door.ru»: комментарий и отметка «фабрика» сохранены');
+      await click('Выгрузить сайты (xlsx)');
+      await flush();
+      expect(document.body.textContent).toContain('Выгружено сайтов: 1');
+      // Кандидаты в прайс: цена из интернета, выбранная менеджером, с источником.
+      expect(document.querySelector('.opt-kb-candidate')!.textContent?.replace(/\u00a0/g, ' ')).toContain('Аква 01 ПГ + УПД, 600×2000 мм — 14 453 ₽');
+      expect(document.querySelector('.opt-kb-candidate')!.textContent).toContain('из интернета, выбрал менеджер · сделка 89813');
+      await click('Выгрузить xlsx');
+      await flush();
+      expect(downloads).toEqual(['kb-sites-2026-10-19.xlsx', 'kb-candidates-2026-10-19.xlsx']);
+    } finally {
+      URL.createObjectURL = origCreate;
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+    await act(async () => ([...document.querySelector('.opt-kb-candidate')!.querySelectorAll('button')].find((b) => b.textContent === 'Удалить') as HTMLButtonElement).click());
+    await flush();
+    expect(document.querySelectorAll('.opt-kb-candidate')).toHaveLength(0);
+    expect(document.body.textContent).toContain('Кандидатов пока нет');
   });
 });
