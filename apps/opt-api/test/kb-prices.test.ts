@@ -968,7 +968,7 @@ describe('база знаний опта: цены и синонимы → по�
     expect(g.searches()).toBe(searches);
     // Цена прежнего веб-поиска, оставшаяся в черновике (ДПГУЧ 40 029,67 ₽ «по рынку»), при сборке снимается — «уточнить у менеджера».
     const p2 = (await ctx.deps.kp.byId(ACCOUNT_ID, d0.id))!.payload as unknown as { items: Record<string, unknown>[] };
-    await ctx.deps.kp.setPayload(d0.id, { ...p2, items: p2.items.map((l, i) => (i === 3 ? { ...l, price: 40_029.67, priceSource: 'research', priceLabel: 'по рынку (19.10.2026)', priceOutcome: undefined } : l)) } as unknown as Record<string, unknown>);
+    await ctx.deps.kp.setPayload(d0.id, { ...p2, items: p2.items.map((l, i) => (i === 3 ? { ...l, price: 40_029.67, priceSource: 'research', priceLabel: 'по рынку (19.10.2026)', priceOutcome: undefined } : i === 7 ? { ...l, tzEquipment: 'раздел «15. Базовая комплектация»: коробка, 3 петли, доводчик' } : l)) } as unknown as Record<string, unknown>);
     // Документ: ДПГ/ДПГУЧ/Аква без цены, коробка — примечанием под своей дверью, ни одного «0 ₽».
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d0.id } })).json()).toMatchObject({ draft: { status: 'built' } });
     const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, (await ctx.deps.kp.byId(ACCOUNT_ID, d0.id))!.docxPath!))).file('word/document.xml')!.asText().replace(/\u00a0/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
@@ -979,6 +979,8 @@ describe('база знаний опта: цены и синонимы → по�
     expect(text).toContain(`итого ${(5 * 6800 + 23_426 + 2 * 24_100).toLocaleString('ru-RU').replace(/\u00a0/g, ' ')} ₽`);
     expect(text).toMatch(/Дверь техническая ДМ-1.*В цену блока входит: Коробка стальная/);
     expect(text).not.toContain('40 029');
+    // KP-DOCX-APPENDIX: комплектация из ТЗ — примечанием под позицией.
+    expect(text).toMatch(/Дверь техническая ДМ-1.*Комплектация по ТЗ: раздел «15\. Базовая комплектация»: коробка, 3 петли, доводчик/);
     expect(((await ctx.deps.kp.byId(ACCOUNT_ID, d0.id))!.payload as unknown as { items: Record<string, unknown>[] }).items[3]).toMatchObject({ price: null, priceOutcome: 'not_priced', priceLabel: 'цена не из прайса' });
   }, 30_000);
 });

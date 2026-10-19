@@ -117,7 +117,8 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
     if (d) includedBy.set(d.request_index, [...(includedBy.get(d.request_index) ?? []), c]);
   }
   const notesOf = (l: KpLine): string[] => {
-    const own = l.quoteNotes ?? [];
+    // KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента — первым примечанием под позицией.
+    const own = [...(l.tzEquipment ? [`Комплектация по ТЗ: ${l.tzEquipment}`] : []), ...(l.quoteNotes ?? [])];
     if (lineCategory(l) !== 'door') return own;
     const group = includedBy.get(l.request_index) ?? [];
     const inBlock = group.filter((c) => !c.includedIn || c.includedIn === l.productId).map((c) => tidyName(c.name));

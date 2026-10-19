@@ -586,6 +586,7 @@ function KpLinesTiles({ lines, needsManager, research, locked, onEdit, onFind, o
             {firstService && <div className="opt-kp-group">Работы и услуги</div>}
             <div className="opt-kp-tile-name">{l.name || '—'}</div>
             {l.equipment && <div className="opt-kp-sub opt-kp-tile-equipment">Комплектация: {l.equipment}</div>}
+            {l.tzEquipment && <div className="opt-kp-sub opt-kp-tile-tz">Комплектация по ТЗ: {l.tzEquipment}</div>}
             {l.priceModel && <div className="opt-kp-sub opt-kp-tile-model">Обозначение по прайсу: {l.priceModel}{l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? ` (${l.priceAbbr})` : ''}</div>}
             {l.size && <div className="opt-kp-sub">{sizeLabel(l.size)}</div>}
             {service && <div className="opt-kp-sub opt-kp-service-note">работы — по замеру: в таблицу и итог КП не входят, под таблицей фраза о расчёте после замера</div>}

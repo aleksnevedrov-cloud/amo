@@ -24,7 +24,11 @@ import { parseSizeMm } from './market-research.ts';
 export const TABLE_CHUNK_ROWS = 20;
 
 /** Позиция опта: product — изделие/комплектующие, service — работы (врезка, монтаж, доставка…), без размера и без поиска цен. */
-export type OptPosition = Position & { kind?: 'product' | 'service' };
+export type OptPosition = Position & {
+  kind?: 'product' | 'service';
+  /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ («15. Базовая комплектация …»), приложенная к позиции спецификации. */
+  tzEquipment?: string | null;
+};
 
 /** Документ с позициями опта (kind у позиции). */
 export type OptDocumentData = Omit<DocumentData, 'positions'> & { positions: OptPosition[] };
@@ -443,7 +447,11 @@ const addCost = (a: CostResult, b: CostResult): CostResult => ({ inputTokens: a.
 
 /** Разбор xlsx: по колонкам с нормализацией порциями, иначе моделью порциями. */
 export async function parseTable(bytes: Uint8Array, opts: TableParseOptions): Promise<TableParsed> {
-  const rows = await readSheetRows(bytes);
+  return parseRows(await readSheetRows(bytes), opts);
+}
+
+/** Разбор строк таблицы (листы xlsx или таблица Word, KP-DOCX-APPENDIX): по колонкам с нормализацией, иначе моделью порциями. */
+export async function parseRows(rows: SheetRow[], opts: TableParseOptions): Promise<TableParsed> {
   if (!rows.length) throw new Error('в таблице нет заполненных строк');
   const chunkRows = Math.max(1, opts.chunkRows ?? TABLE_CHUNK_ROWS);
   const progress = opts.onProgress ?? (() => undefined);

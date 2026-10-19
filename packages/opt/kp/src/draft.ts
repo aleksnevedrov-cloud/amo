@@ -25,6 +25,8 @@ export interface KpRequestItem {
   category?: PositionCategory;
   /** Признаки двери, названные в письме явно (KB-MATCH): дополняют извлечённые кодом из текста позиции при подборе по прайсу. */
   features?: Partial<DoorFeatures> | null;
+  /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ, приложенная к позиции («Раздел «15. Базовая комплектация»: …»). */
+  tzEquipment?: string | null;
 }
 
 /** Рыночная цена по позиции (RFD-AI-AGENT-OPT-PRICE, этап 5): статистика и ссылка на запись kp_price_research. */
@@ -67,6 +69,8 @@ export interface KpLine {
   priceModel?: string | null;
   /** Комплектация из строки прайса — отдельной строкой под позицией в КП. */
   equipment?: string | null;
+  /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента (Word-файл заявки) — в плитке и примечанием под позицией в КП. */
+  tzEquipment?: string | null;
   /** Сокращение по ГОСТ из строки прайса («ДВ 1Рп Г ПрБ») — в строку «Обозначение» КП (KP-LAYOUT). */
   priceAbbr?: string | null;
   /**
@@ -287,6 +291,8 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const requestItems = [...all.filter((it) => it.kind !== 'service'), ...all.filter((it) => it.kind === 'service')];
   const items = requestItems.map(toLine);
   const needs = items.map((l) => ({ request_index: l.request_index, reason: NO_PRICE }));
+  // KP-DOCX-APPENDIX: к позиции приложена комплектация из ТЗ — менеджеру сверить её с ценой.
+  for (const l of items) if (l.tzEquipment) needs.push({ request_index: l.request_index, reason: `комплектация по ТЗ: ${l.tzEquipment.slice(0, 120)}${l.tzEquipment.length > 120 ? '…' : ''} — сверьте с ценой` });
   if (!requestItems.length) {
     needs.push({ request_index: -1, reason: card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
   }
@@ -694,12 +700,13 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     qty,
     category,
     ...(service ? { kind: 'service' as const } : {}),
+    ...(p.tzEquipment ? { tzEquipment: p.tzEquipment } : {}),
   };
 }
 
 function toLine(it: KpRequestItem, i: number): KpLine {
   const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}) };
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}) };
 }
 
 /** Размер в строке позиции — ширина × высота (RFD-AI-AGENT-OPT-MAIL-READ-6, п. 3). */

@@ -348,7 +348,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
 
   it('цена из базы знаний (этап 3): подпись источника в плитке, «цена устарела»; цена прежнего веб-поиска — «в КП не идёт» (KB-WEB-ROWS); «Найти цену» без force', async () => {
     const kbDraft = { ...draft, items: [
-      { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик' },
+      { request_index: 0, page_id: null, name: 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый', size: '800×2000 мм', qty: 10, price: 3450, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'по базе: прайс Текона.xlsx (01.10.2026)', priceStale: false, kbPriceId: 5, priceModel: 'ДВ CPL 0,2 мм', priceAbbr: 'ДВ 1Рп Г ПрБ', equipment: 'коробка, 3 петли, уплотнитель, замок, ручки, доводчик', tzEquipment: 'раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри' },
       { request_index: 1, page_id: null, name: 'Турин', size: '800×2000 мм', qty: 3, price: 8000, lead_time: '', discount: 0, priceSource: 'research', priceLabel: 'по рынку (01.08.2026)', market: { median: 8000, min: 7800, max: 8200, count: 3, unit: 'piece', researchId: 9, researchedAt: '2026-08-01T10:00:00Z' } },
       { request_index: 2, page_id: null, name: 'ДПО сота', size: '800×2000 мм', qty: 1, price: 4100, lead_time: '', discount: 0, priceSource: 'kb', priceLabel: 'изменено менеджером', priceStale: true },
     ], needsManager: [{ request_index: 2, reason: 'цена устарела: актуальна на 01.01.2026, срок 90 дн.' }] };
@@ -373,6 +373,9 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(first.querySelector('.opt-kp-tile-name')?.textContent).toBe('Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый');
     expect(first.querySelector('.opt-kp-tile-model')?.textContent).toBe('Обозначение по прайсу: ДВ CPL 0,2 мм (ДВ 1Рп Г ПрБ)');
     expect(first.querySelector('.opt-kp-tile-equipment')?.textContent).toBe('Комплектация: коробка, 3 петли, уплотнитель, замок, ручки, доводчик');
+    // KP-DOCX-APPENDIX: комплектация из ТЗ клиента — своей строкой в плитке.
+    expect(first.querySelector('.opt-kp-tile-tz')?.textContent).toBe('Комплектация по ТЗ: раздел «15. Базовая комплектация»: доводчик, противосъёмные штыри');
+    expect(document.querySelectorAll('.opt-kp-tile-tz')).toHaveLength(1);
     expect([...document.querySelectorAll('button')].filter((b) => b.textContent === 'Искать в интернете')).toHaveLength(0);
     const buttons = [...document.querySelectorAll('button')].filter((b) => b.textContent === 'Найти цену');
     expect(buttons).toHaveLength(3);

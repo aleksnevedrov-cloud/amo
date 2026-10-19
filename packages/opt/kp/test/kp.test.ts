@@ -251,6 +251,18 @@ describe('черновик КП опта: источник — карточка 
     expect(r).toMatchObject({ provider: 'openai', model: 'gpt-5.5' });
   });
 
+  it('KP-DOCX-APPENDIX: комплектация из ТЗ, приложенная к позиции спецификации, идёт в строку черновика и в пометку менеджеру', async () => {
+    const { gateway } = fakeGateway(modelAnswer);
+    const amo = fakeAmo({ files: [file('u1', '№ 204 68 двери и комп-ющие_ТЗ.docx')], mails: [letter] });
+    const eq = 'раздел «15. Базовая комплектация»: коробка, 3 петли, противопожарный замок, доводчик';
+    const analyze: KpDraftDeps['analyze'] = async (f) => ({ id: 801, filename: f.filename, kind: 'request', positions: [{ ...position('Дверь ДПС 01 EI60', 900, 2100, 1), tzEquipment: eq }, position('Блок ДСН двупольный', 1430, 2300, 1)], questions: [], requirements: [] });
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 90091, route, pricing: {} }, { amo, analyze });
+    expect(r.payload.items.map((l) => l.tzEquipment ?? null)).toEqual([eq, null]);
+    expect(r.payload.request_items[0]?.tzEquipment).toBe(eq);
+    expect(r.payload.needs_manager).toContainEqual({ request_index: 0, reason: `комплектация по ТЗ: ${eq} — сверьте с ценой` });
+    expect(r.payload.needs_manager.filter((n) => n.request_index === 1).map((n) => n.reason)).toEqual(['цена не задана']);
+  });
+
   it('аналог — только пометка менеджеру с критерием; строка без цены и без замены; требования ГОСТ из письма', async () => {
     const { gateway } = fakeGateway(JSON.stringify({ client: { org: 'ООО Ромашка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Дверь шпон венге 2000*800 по ГОСТ 6629-88', name: 'дверь шпон венге', width_mm: 800, height_mm: 2000, qty: 1 }, { raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 }], required_blocks: [], questions: [] }));
     const asked: string[] = [];
