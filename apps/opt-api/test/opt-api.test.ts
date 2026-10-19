@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { signFileLink, verifyFileLink } from '../src/routes/kp.ts';
 import { decodeTokenClaims } from '../src/routes/widget.ts';
 import { resolveKpPath } from '@opt/kp';
-import { ACCOUNT_ID, CLIENT_ID, fakeGateway, LEAD_ID, setup, widgetToken } from './helpers.ts';
+import { ACCOUNT_ID, answerSurvey, CLIENT_ID, fakeGateway, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 /** Минимальный DOCX с плейсхолдерами: номер, покупатель, строки и итог. */
 function templateDocx(): string {
@@ -105,6 +105,9 @@ describe('opt-api: от подключения интеграции до пис�
       { request_index: 1, page_id: null, name: 'добор', size: '', qty: 4, price: 1_200, lead_time: '', discount: 10 },
     ];
     expect((await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${draftId}`, headers, payload: { items } })).json().draft.items[1].price).toBe(1_200);
+    // KP-AGENT-V2: документ — после ответов на блокирующие вопросы опросника (доставка, срок действия цены).
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } })).json()).toMatchObject({ error: 'open_questions', message: 'ответьте на вопросы опросника, которые блокируют КП: 2 («Доставка», «Срок действия цены»)' });
+    await answerSurvey(ctx.app, headers, LEAD_ID);
     const built = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId } });
     // PDF появляется, если на машине есть LibreOffice; иначе в сделку уходит DOCX.
     expect(built.json()).toMatchObject({ draft: { status: 'built', kpNo: 'КП-2026-1', hasDocx: true }, attached: [expect.stringMatching(/^KP-КП-2026-1\.(pdf|docx)$/)], files: expect.arrayContaining([expect.objectContaining({ kind: 'docx', name: 'KP-КП-2026-1.docx', bytes: expect.any(Number) })]) });
@@ -198,6 +201,7 @@ describe('opt-api: ошибка SMTP не меняет статус; без LLM 
       await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
       const draft = (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft;
       await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${draft.id}`, headers, payload: { items: [{ ...draft.items[0], price: 10_000 }] } });
+      await answerSurvey(ctx.app, headers, LEAD_ID);
       await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: draft.id } });
       const r = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/send', headers, payload: { draftId: draft.id, to: 'ivanov@romashka.ru', subject: 'КП', text: 'Текст' } });
       expect(r.statusCode).toBe(502);

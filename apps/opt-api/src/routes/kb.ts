@@ -1,5 +1,5 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { exportPricesXlsx, isPriceBook, KbLimitError, parsePriceBook, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping, priceListTitleOf } from '@opt/kb';
+import { exportCandidatesXlsx, exportSitesXlsx, exportPricesXlsx, isPriceBook, readSitesXlsx, KbLimitError, parsePriceBook, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping, priceListTitleOf } from '@opt/kb';
 import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -12,6 +12,9 @@ const FILE_BODY_LIMIT = 72 * 1024 * 1024;
 const textBody = z.object({ title: z.string().trim().max(300).default(''), content: z.string().min(1).max(2_000_000) });
 const fileBody = z.object({ filename: z.string().trim().min(1).max(200), mime: z.string().max(200).optional(), contentBase64: z.string().min(1) });
 /** Ссылка: период обновления в днях (по умолчанию 30, 0 — не обновлять), crawl — обойти раздел до 50 страниц. */
+/** Сайт: комментарий (до 2000 знаков, пусто — снять) и «фабрика». */
+const siteBody = z.object({ comment: z.string().max(2000).nullable().optional(), isFactory: z.boolean().optional() });
+
 const urlBody = z.object({ url: z.string().trim().min(8).max(2000), refreshDays: z.number().int().min(0).max(365).optional(), crawl: z.boolean().optional() });
 const searchQuery = z.object({ q: z.string().trim().min(1).max(500), limit: z.coerce.number().int().min(1).max(50).optional() });
 const chunksQuery = z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() });
@@ -272,6 +275,67 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     return { filename: pricesExportFilename(), rows: rows.length, contentBase64: Buffer.from(bytes).toString('base64') };
   });
 
+  /** KP-AGENT-V2, п. 4а: комментарий к сайту («какие двери есть на сайте», до 2000 знаков) и чекбокс «фабрика». */
+  api.put('/kb/sources/:id/site', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const id = idOf(req);
+    if (!id) return reply.code(400).send({ error: 'bad_id' });
+    const b = siteBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body', message: 'комментарий — не длиннее 2000 знаков' });
+    const p = principal(req);
+    const s = await kb.repo.setSiteMeta(p.accountId, id, b.data);
+    if (!s) return reply.code(404).send({ error: 'not_found', message: 'сайт не найден' });
+    await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: сайт ${s.original ?? s.title} — ${s.isFactory ? 'фабрика, ' : ''}комментарий ${s.comment ? `«${s.comment.slice(0, 80)}${s.comment.length > 80 ? '…' : ''}»` : 'пуст'}`, details: { sourceId: id, userId: p.userId, audit: 'kb' } });
+    return { source: view(s) };
+  });
+
+  /** Сайты в xlsx (адрес, название, фабрика, комментарий) и обратно: новые адреса добавляются ссылками, у известных — комментарий и флаг. */
+  api.get('/kb/sites/export', async (req) => {
+    const sites = await kb.repo.sites(principal(req).accountId);
+    return { filename: `kb-sites-${new Date().toISOString().slice(0, 10)}.xlsx`, rows: sites.length, contentBase64: Buffer.from(await exportSitesXlsx(sites)).toString('base64') };
+  });
+
+  api.post('/kb/sites/import', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const b = z.object({ contentBase64: z.string().min(1).max(10_000_000) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const p = principal(req);
+    let rows: Awaited<ReturnType<typeof readSitesXlsx>>;
+    try {
+      rows = await readSitesXlsx(new Uint8Array(Buffer.from(b.data.contentBase64, 'base64')));
+    } catch (err) {
+      return reply.code(422).send({ error: 'bad_file', message: `файл не читается: ${(err as Error).message}` });
+    }
+    let added = 0;
+    let updated = 0;
+    for (const r of rows) {
+      try {
+        const { id, existed } = await kb.addUrl(p.accountId, { url: r.url, refreshDays: 30, crawl: false, userId: p.userId });
+        if (!existed) await deps.kbQueue.enqueue({ accountId: p.accountId, sourceId: id, userId: p.userId });
+        await kb.repo.setSiteMeta(p.accountId, id, { comment: r.comment, isFactory: r.isFactory });
+        if (existed) updated += 1;
+        else added += 1;
+      } catch (err) {
+        req.log.warn({ err: (err as Error).message, url: r.url }, 'kb: сайт из xlsx не добавлен');
+      }
+    }
+    await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: сайты из xlsx — добавлено ${added}, обновлено ${updated}`, details: { added, updated, rows: rows.length, userId: p.userId, audit: 'kb' } });
+    return { added, updated, rows: rows.length };
+  });
+
+  /** П. 4.4: кандидаты в прайс — цены, подтверждённые менеджером в КП; в подбор не идут. */
+  api.get('/kb/candidates', async (req) => ({ items: (await kb.candidates.list(principal(req).accountId)).map((c) => ({ ...c, createdAt: c.createdAt.toISOString() })) }));
+  api.get('/kb/candidates/export', async (req) => {
+    const rows = await kb.candidates.list(principal(req).accountId);
+    return { filename: `kb-candidates-${new Date().toISOString().slice(0, 10)}.xlsx`, rows: rows.length, contentBase64: Buffer.from(await exportCandidatesXlsx(rows)).toString('base64') };
+  });
+  api.delete('/kb/candidates/:id', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const id = idOf(req);
+    if (!id) return reply.code(400).send({ error: 'bad_id' });
+    return (await kb.candidates.remove(principal(req).accountId, id)) ? { ok: true } : reply.code(404).send({ error: 'not_found' });
+  });
+
   /** Ручная запись цены (менеджер): по умолчанию origin manager, доверие 90. */
   api.post('/kb/prices', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
@@ -363,5 +427,8 @@ function view(s: Awaited<ReturnType<Deps['kb']['repo']['get']>>) {
     priceKey: s.priceKey,
     priceTitle: s.priceKey ? priceListTitleOf(s.priceKey) : null,
     priceImport: s.priceImport,
+    // KP-AGENT-V2, п. 4а: комментарий к сайту и флаг «фабрика».
+    comment: s.comment,
+    isFactory: s.isFactory,
   };
 }

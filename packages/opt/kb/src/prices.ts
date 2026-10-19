@@ -649,6 +649,8 @@ export interface PriceHit {
   includedIn?: string | null;
   /** KB-DOOR-MATCH-2: позиция одинаково подходит к нескольким моделям прайса — их ID; строка прайса (row) не выбрана. */
   ambiguous?: string[];
+  /** Те же модели с названиями — варианты вопроса «выбор модели» (KP-AGENT-V2). */
+  ambiguousModels?: { productId: string; model: string }[];
 }
 
 export function validityDaysOf(row: Pick<KbPrice, 'origin' | 'sourceKind'>): number {
@@ -979,7 +981,7 @@ export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, 
     if (models.length >= 2) {
       const list = models.slice(0, 5).map((r) => `${r.productId} «${r.model}»`).join(', ');
       const note = `уточнить у менеджера: «${q.name.trim()}» подходит к нескольким моделям прайса: ${list}${models.length > 5 ? ` и ещё ${models.length - 5}` : ''} — нужен различающий признак (модель, покрытие, исполнение)`;
-      return { row: best.row, price: null, basis: 'base', match: best.match, similarity: best.similarity, confidence: best.row.confidence, stale: false, validityDays: validityDaysOf(best.row), notes: [note], label: 'несколько моделей в прайсе', features: null, outcome: 'not_priced', quoteNotes: [], includedIn: null, ambiguous: models.map((r) => r.productId as string) };
+      return { row: best.row, price: null, basis: 'base', match: best.match, similarity: best.similarity, confidence: best.row.confidence, stale: false, validityDays: validityDaysOf(best.row), notes: [note], label: 'несколько моделей в прайсе', features: null, outcome: 'not_priced', quoteNotes: [], includedIn: null, ambiguous: models.map((r) => r.productId as string), ambiguousModels: models.map((r) => ({ productId: r.productId as string, model: r.model })) };
     }
   }
   // KB-MULTIPRICE, п. 3: одинаково подходящие строки в двух прайсах-файлах — берётся более свежая, менеджеру пометка.

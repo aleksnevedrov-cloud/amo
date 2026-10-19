@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, SERVICE_NOTE, templateData } from './build.ts';
+import { blockingOpen, buildQuestions, hasSourcedPrice } from './questions.ts';
 import { isServiceLine, kpLineParts, lineCategory, tidyName, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
 import type { KpDraft, KpRepo } from './repo.ts';
@@ -17,7 +18,7 @@ import type { KpDraft, KpRepo } from './repo.ts';
  * памяти, а к тому времени по сделке уже был создан новый («Собрать заново»); setBuilt писал в старый. Теперь
  * сборка отвергает черновик, который не последний по сделке (stale_draft), а запись в kp_drafts проверяется.
  */
-export type KpBuildErrorCode = 'not_found' | 'already_sent' | 'no_template' | 'no_priced_lines' | 'stale_draft' | 'build_failed' | 'component_questions';
+export type KpBuildErrorCode = 'not_found' | 'already_sent' | 'no_template' | 'no_priced_lines' | 'stale_draft' | 'build_failed' | 'component_questions' | 'open_questions' | 'no_price_source';
 
 export class KpBuildError extends Error {
   override name = 'KpBuildError';
@@ -83,8 +84,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   // это «в прайсе цены нет»: в таблице «уточнить у менеджера», не 0 ₽, в итог не входит.
   // KB-WEB-ROWS: цена из интернета (по рынку / по аналогу) от прежнего поиска в документ не идёт — «уточнить у менеджера».
   const webPrice = (l: KpLine) => l.priceSource === 'research' || l.priceSource === 'analog';
-  const goods = (payload.items ?? []).filter((l) => !isServiceLine(l)).map((l) => ((l.priceSource === 'kb' && l.price === 0 && l.priceOutcome !== 'included') || (webPrice(l) && l.price !== null) ? { ...l, price: null, priceOutcome: 'not_priced' as const } : l));
-  const hasServices = (payload.items ?? []).length > goods.length;
+  // Исключённые в опроснике позиции в КП не идут.
+  const goods = (payload.items ?? []).filter((l) => !isServiceLine(l) && !l.excluded).map((l) => ((l.price === 0 && l.priceOutcome !== 'included') || (webPrice(l) && l.price !== null) ? { ...l, price: null, priceOutcome: 'not_priced' as const } : l));
+  const hasServices = (payload.items ?? []).some((l) => isServiceLine(l));
   // KB-PRICE-SHEETS: «входит в цену блока» — не строка таблицы, а примечание под ближайшей дверью выше; «в прайсе цены нет» —
   // строка с «уточнить у менеджера» вместо цены, в итог не входит.
   // KB-COMPONENT-DOOR: пока менеджер не ответил, к какой двери считать комплектующее, документ не собирается.
@@ -97,6 +99,12 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   const included = goods.filter((l) => l.priceOutcome === 'included');
   const lines = goods.filter((l): l is KpLine & { price: number } => l.price !== null && l.priceOutcome !== 'included').concat(goods.filter((l) => l.price === null && l.priceOutcome === 'not_priced') as (KpLine & { price: number })[]).sort((a, b) => a.request_index - b.request_index);
   if (!lines.some((l) => l.price !== null)) throw new KpBuildError('no_priced_lines', hasServices ? 'ни у одной позиции (кроме работ) нет цены' : 'ни у одной позиции нет цены');
+  // KP-AGENT-V2, п. 5.5: документ — только при 0 блокирующих вопросов опросника.
+  const blocking = blockingOpen(buildQuestions(payload, { priceValidity: s.constants.priceValidity?.trim() || null }));
+  if (blocking.length) throw new KpBuildError('open_questions', `ответьте на вопросы опросника, которые блокируют КП: ${blocking.length} (${[...new Set(blocking.map((q) => q.title))].slice(0, 4).map((t) => `«${t}»`).join(', ')}${blocking.length > 4 ? ', …' : ''})`);
+  // П. 4.6: цена без источника — ошибка (прайс / интернет, выбранный менеджером / ввод менеджера); 0 ₽ из старой базы — «уточнить».
+  const unsourced = goods.filter((l) => l.price !== null && l.price > 0 && l.priceOutcome !== 'included' && !hasSourcedPrice(l));
+  if (unsourced.length) throw new KpBuildError('no_price_source', `цена без источника: ${unsourced.slice(0, 3).map((l) => `«${tidyName(l.name)}»`).join(', ')}${unsourced.length > 3 ? ', …' : ''} — выберите цену в опроснике или введите вручную`);
   // KB-DOOR-MATCH-2, п. 5: «входит в цену блока» — под своей дверью: выбранной для комплектующего (componentDoor), дверью с этим ID
   // товара (фурнитура, includedIn) или ближайшей дверью выше (как раньше).
   const doorLines = lines.filter((d) => lineCategory(d) === 'door');

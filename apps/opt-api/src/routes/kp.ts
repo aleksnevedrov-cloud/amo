@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -23,6 +23,7 @@ const constantsSchema = z.object({
   coverLetter: z.string().max(3000).optional(),
   signature: z.string().max(500).optional(),
   priceNote: z.string().max(500).optional(),
+  priceValidity: z.string().max(200).optional(),
   /** Допуск цены аналога: заказчик — не более ±10 %. */
   analogPriceTolerancePct: z.number().min(0).max(10).optional(),
   /** Домены производителей, без схемы и пути; пусто по умолчанию. */
@@ -65,7 +66,7 @@ const linesSchema = z.object({
         lead_time: z.string().max(100),
         discount: z.number().min(0).max(100),
         // Поля автозаполнения цен идут сквозь правки менеджера без изменений (сервер решает, что цена стала ручной).
-        priceSource: z.enum(['research', 'analog', 'manager', 'kb']).optional(),
+        priceSource: z.enum(['research', 'analog', 'manager', 'kb', 'price_file', 'web_confirmed']).optional(),
         market: z.object({ median: z.number(), min: z.number(), max: z.number(), count: z.number().int(), unit: z.literal('piece'), researchId: z.number().int(), researchedAt: z.string() }).nullable().optional(),
         coefficient: z.number().optional(),
         priceLabel: z.string().max(200).nullable().optional(),
@@ -74,6 +75,14 @@ const linesSchema = z.object({
       }),
     )
     .max(200),
+});
+
+/** Ответ опросника: вариант, своя цена, поля (неполная позиция, доставка, срок действия цены). */
+const answerBody = z.object({
+  key: z.string().min(1).max(600),
+  option: z.string().max(200).nullable().optional(),
+  price: z.number().positive().max(100_000_000).nullable().optional(),
+  fields: z.record(z.string().max(60), z.string().max(500)).optional(),
 });
 
 /** Кнопка «Найти цены»: все позиции без цены или явный список; force — прежний флаг веб-поиска, не используется (KB-WEB-ROWS). */
@@ -140,7 +149,7 @@ export async function dropNonPriceListPrices(deps: Deps, accountId: number, draf
   for (const l of items) {
     if (l.price === null && l.priceOutcome !== 'included') continue;
     if (l.priceSource === 'research' || l.priceSource === 'analog') foreign.add(l.request_index);
-    else if (l.priceSource === 'kb' && l.kbPriceId) {
+    else if (isPriceFile(l.priceSource) && l.kbPriceId) {
       const row = await deps.kb.prices.byId(accountId, l.kbPriceId);
       if (row && row.origin !== 'price_list') foreign.add(l.request_index);
     }
@@ -150,7 +159,7 @@ export async function dropNonPriceListPrices(deps: Deps, accountId: number, draf
     if (!foreign.has(l.request_index)) return l;
     const rest: KpLine = { ...l };
     delete rest.coefficient;
-    return { ...rest, price: null, priceSource: 'kb', priceLabel: 'цена не из прайса', priceOutcome: 'not_priced', priceStale: false, kbPriceId: null, productId: null, priceModel: null, equipment: null, priceAbbr: null, market: null, includedIn: null };
+    return { ...rest, price: null, priceSource: 'price_file', priceLabel: 'цена не из прайса', priceOutcome: 'not_priced', priceStale: false, kbPriceId: null, productId: null, priceModel: null, equipment: null, priceAbbr: null, market: null, includedIn: null };
   });
   const needs = (payload.needs_manager ?? []).filter((n) => !(foreign.has(n.request_index) && ownNote(n.reason)));
   for (const l of items.filter((x) => foreign.has(x.request_index))) {
@@ -165,6 +174,8 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   const repo = deps.kp;
   // Путь шаблона в базе — относительно KP_FILES_ROOT (дефект 2а); абсолютный собирается при чтении.
   const templatePath = (accountId: number) => resolveKpPath(deps.filesRoot, kpTemplateRel(accountId));
+  /** Черновик для виджета с опросником: срок действия цены — из настроек КП. */
+  const viewOf = async (accountId: number, d: KpDraft) => view(d, (await repo.getSettings(accountId)).constants.priceValidity?.trim() || null);
 
   api.get('/kp/settings', async (req) => {
     const s = await repo.getSettings(principal(req).accountId);
@@ -226,7 +237,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!q.success) return reply.code(400).send({ error: 'bad_query' });
     const accountId = principal(req).accountId;
     const [d, job] = await Promise.all([repo.latestByLead(accountId, q.data.leadId), deps.queue.state(accountId, q.data.leadId)]);
-    return { draft: d ? view(d) : null, job };
+    return { draft: d ? await viewOf(accountId, d) : null, job };
   });
 
   /**
@@ -246,13 +257,9 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
    * KB-COMPONENT-DOOR: ответ менеджера на вопрос «К какой двери считать …?» — дверь (строка заявки) сохраняется в черновике
    * (componentDoor, «Найти цены» её не сбрасывает), вопрос снимается, цена комплектующего пересчитывается по строке прайса этой двери.
    */
-  api.post('/kp/draft/:id/component-door', async (req, reply) => {
-    const p = principal(req);
-    const id = Number((req.params as { id?: string }).id);
-    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
-    // KB-COMPONENT-DOOR-GROUP: ответ на группу похожих строк ({ groupKey }) или дверь для одной строки ({ requestIndex } — «изменить дверь»).
-    const b = z.union([z.object({ groupKey: z.string().min(1).max(300), doorRequestIndex: z.number().int().min(0) }), z.object({ requestIndex: z.number().int().min(0), doorRequestIndex: z.number().int().min(0) })]).safeParse(req.body);
-    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+  /** KB-COMPONENT-DOOR-GROUP: дверь для группы комплектующих или для одной строки; общий ход для кнопки и опросника. */
+  const componentDoor = async (p: { accountId: number; userId: number | null }, id: number, data: { groupKey: string; doorRequestIndex: number } | { requestIndex: number; doorRequestIndex: number }, reply: FastifyReply) => {
+    const b = { data };
     const d = await repo.byId(p.accountId, id);
     if (!d) return reply.code(404).send({ error: 'not_found' });
     if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
@@ -285,7 +292,56 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary, details: { draftId: id, requestIndexes: targets.map((l) => l.request_index), doorRequestIndex: door.request_index, groupKey: 'groupKey' in b.data ? b.data.groupKey : null, userId: p.userId } });
     await deps.researchQueue.enqueue(targets.map((l) => ({ accountId: p.accountId, draftId: id, requestIndex: l.request_index, userId: p.userId, force: false, replace: true })));
     const fresh = await repo.byId(p.accountId, id);
-    return { draft: fresh ? view(fresh) : null, applied: targets.length };
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, applied: targets.length };
+  };
+
+  api.post('/kp/draft/:id/component-door', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    // KB-COMPONENT-DOOR-GROUP: ответ на группу похожих строк ({ groupKey }) или дверь для одной строки ({ requestIndex } — «изменить дверь»).
+    const b = z.union([z.object({ groupKey: z.string().min(1).max(300), doorRequestIndex: z.number().int().min(0) }), z.object({ requestIndex: z.number().int().min(0), doorRequestIndex: z.number().int().min(0) })]).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    return componentDoor(p, id, b.data, reply);
+  });
+
+  /**
+   * KP-AGENT-V2, п. 5: ответ на вопрос опросника. Один ответ — всем одинаковым строкам (ключ вопроса); цена из интернета или своя —
+   * в «кандидаты в прайс»; модель / аналог / интернет / уточнённый профиль — позиции подбираются заново. Вопрос «к какой двери» —
+   * тем же ходом, что кнопка в плитке.
+   */
+  api.post('/kp/draft/:id/answer', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const b = answerBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
+    const payload = d.payload as unknown as KpPayload;
+    const priceValidity = (await repo.getSettings(p.accountId)).constants.priceValidity?.trim() || null;
+    const q = buildQuestions(payload, { priceValidity }).find((x) => x.key === b.data.key);
+    if (!q) return reply.code(404).send({ error: 'no_question', message: 'Такого вопроса в черновике нет — обновите карточку' });
+    if (q.type === 'component_door') {
+      const door = Number(b.data.option);
+      if (!Number.isInteger(door)) return reply.code(400).send({ error: 'bad_option' });
+      return componentDoor(p, id, { groupKey: q.key.slice('component_door:'.length), doorRequestIndex: door }, reply);
+    }
+    const custom = b.data.price !== undefined && b.data.price !== null;
+    if (b.data.option && b.data.option !== 'custom' && !q.options.some((o) => o.id === b.data.option)) return reply.code(400).send({ error: 'bad_option', message: 'Такого варианта ответа нет' });
+    if (['web_price', 'enter_price', 'nonstandard'].includes(q.type) && b.data.option !== 'no_price' && !custom && !q.options.find((o) => o.id === b.data.option)?.price) return reply.code(400).send({ error: 'no_price', message: 'Выберите вариант с ценой или введите цену' });
+    if (q.type === 'delivery' && b.data.option === 'delivery' && !(Number((b.data.fields?.sum ?? '').replace(/\s/g, '').replace(',', '.')) > 0)) return reply.code(400).send({ error: 'no_sum', message: 'Введите сумму доставки' });
+    const applied = applyAnswer(payload, q.key, { option: custom ? 'custom' : b.data.option ?? null, price: b.data.price ?? null, fields: b.data.fields ?? {}, at: new Date().toISOString(), by: p.userId }, q);
+    await repo.setPayload(id, applied.payload as unknown as Record<string, unknown>);
+    for (const c of applied.candidates) {
+      await deps.kb.candidates.upsert({ accountId: p.accountId, leadId: d.leadId, draftId: id, model: c.model, size: c.size || null, price: c.price, source: c.source, url: c.url, note: `сделка ${d.leadId}, поз. ${c.requestIndex + 1}`, createdBy: p.userId }).catch((err: Error) => req.log.warn({ err: err.message }, 'kb: кандидат в прайс не записан'));
+    }
+    const choice = custom ? `своя цена ${b.data.price}` : q.options.find((o) => o.id === b.data.option)?.label ?? (b.data.fields ? Object.entries(b.data.fields).map(([k, v]) => `${k}: ${v}`).join(', ') : '');
+    await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary: `Опросник: «${q.title}» (${q.requestIndexes.length ? `поз. ${q.requestIndexes.map((i) => i + 1).join(', ')}` : 'КП'}) — ${choice}`, details: { draftId: id, key: q.key, type: q.type, option: b.data.option ?? null, price: b.data.price ?? null, fields: b.data.fields ?? null, userId: p.userId } });
+    if (applied.research.length) await deps.researchQueue.enqueue(applied.research.map((requestIndex) => ({ accountId: p.accountId, draftId: id, requestIndex, userId: p.userId, force: false, replace: true })));
+    const fresh = await repo.byId(p.accountId, id);
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, research: applied.research };
   });
 
   /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */
@@ -311,7 +367,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
     // KB-WEB-ROWS: правка менеджера остаётся в этом черновике и в базу знаний не пишется — цены других КП только из прайсов.
     const fresh = await repo.byId(p.accountId, id);
-    return { draft: fresh ? view(fresh) : null };
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null };
   });
 
   /**
@@ -393,7 +449,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       const before = await repo.byId(p.accountId, b.data.draftId);
       if (before && before.status === 'draft') await dropNonPriceListPrices(deps, p.accountId, before);
       const r = await buildDraftDocument(deps, { accountId: p.accountId, draftId: b.data.draftId, userId: p.userId });
-      return { draft: view(r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })) };
+      return { draft: await viewOf(p.accountId, r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })) };
     } catch (err) {
       if (err instanceof KpBuildError) {
         const status = err.code === 'not_found' ? 404 : err.code === 'build_failed' ? 502 : 409;
@@ -502,7 +558,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       .then((amo) => amo.addLeadNote(draft.leadId, `[Агент опт] КП${kpNo ? ` ${kpNo}` : ''} отправлено на ${mail.to}.`))
       .catch((err: Error) => req.log.warn({ err: err.message }, 'kp: примечание в сделку не записано'));
     const fresh = await repo.byId(p.accountId, draft.id);
-    return { draft: fresh ? view(fresh) : null, to: mail.to };
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, to: mail.to };
   });
 }
 
@@ -564,8 +620,10 @@ export function verifyFileLink(secret: string, token: string, draftId: number, k
   return Number(acc);
 }
 
-function view(d: KpDraft) {
+function view(d: KpDraft, priceValidity: string | null = null) {
   const p = d.payload as unknown as Partial<KpPayload>;
+  // KP-AGENT-V2, п. 5: опросник выводится из состояния черновика; ответы — в payload.answers.
+  const survey = buildQuestions(p, { priceValidity });
   return {
     id: d.id,
     leadId: d.leadId,
@@ -583,5 +641,12 @@ function view(d: KpDraft) {
     questions: p.questions ?? [],
     needsManager: p.needs_manager ?? [],
     source: p.source ?? null,
+    survey,
+    counters: draftCounters(p, survey),
+    delivery: p.delivery ?? null,
+    priceValidity: priceValidity || p.priceValidity || null,
+    requirements: p.requirements ?? [],
+    photos: p.photos ?? [],
+    letterText: p.letterText ?? null,
   };
 }

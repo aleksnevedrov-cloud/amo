@@ -30,7 +30,7 @@ function priceSourceLabel(l: KpDraftLine): string {
   if (l.priceSource === 'research' || l.priceSource === 'analog') return 'из интернета — в КП не идёт, нажмите «Найти цену»';
   if (l.priceSource === 'manager') return 'изменено менеджером';
   if (l.priceLabel) return l.priceLabel;
-  return l.priceSource === 'kb' ? 'по прайсу' : '';
+  return l.priceSource === 'kb' || l.priceSource === 'price_file' ? 'по прайсу' : l.priceSource === 'web_confirmed' ? 'из интернета, выбрал менеджер' : '';
 }
 function priceIsStale(l: KpDraftLine): boolean {
   return l.price !== null && Boolean(l.priceStale);
@@ -638,7 +638,7 @@ function PriceState({ line, pos, locked, onFind }: { line: KpDraftLine; pos: Res
   else if (job?.state === 'failed') status = `поиск не выполнен: ${job.error}`;
   else if (line.priceSource === 'research' || line.priceSource === 'analog') status = 'цена из интернета — в КП не идёт';
   else if (line.priceOutcome === 'not_priced') status = `${line.priceLabel ?? 'в прайсе нет'} — уточнить у менеджера`;
-  else if (line.priceSource === 'kb' && (line.price !== null || line.priceOutcome === 'included')) status = `из прайса: ${line.priceLabel ?? 'по прайсу'}`;
+  else if ((line.priceSource === 'kb' || line.priceSource === 'price_file') && (line.price !== null || line.priceOutcome === 'included')) status = `из прайса: ${line.priceLabel ?? 'по прайсу'}`;
   else status = '';
   const isError = job?.state === 'failed';
   return (

@@ -37,6 +37,9 @@ export interface KbSource {
   priceKey: string | null;
   /** Итог последнего импорта цен из этого файла. */
   priceImport: PriceImportSummary | null;
+  /** KP-AGENT-V2, п. 4а: сайт — комментарий менеджера «какие двери есть на сайте» и флаг «фабрика». */
+  comment: string | null;
+  isFactory: boolean;
 }
 
 export interface PriceImportSummary {
@@ -167,6 +170,23 @@ export class KbRepo {
     );
     for (const r of rows) await this.db.query('UPDATE kb_sources SET price_key = $2 WHERE id = $1', [Number(r.id), keyOf(r.original ?? r.title)]);
     return rows.length;
+  }
+
+  /** Комментарий и флаг «фабрика» сайта (п. 4а); пустой комментарий — NULL. */
+  async setSiteMeta(accountId: number, id: number, meta: { comment?: string | null; isFactory?: boolean }): Promise<KbSource | null> {
+    const comment = meta.comment === undefined ? undefined : meta.comment?.trim().slice(0, 2000) || null;
+    const { rows } = await this.db.query(
+      `UPDATE kb_sources SET comment = CASE WHEN $3::boolean THEN $4::text ELSE comment END, is_factory = COALESCE($5::boolean, is_factory), updated_at = now()
+       WHERE account_id = $1 AND id = $2 AND kind = 'url' RETURNING *`,
+      [accountId, id, comment !== undefined, comment ?? null, meta.isFactory ?? null],
+    );
+    return rows[0] ? mapSource(rows[0]) : null;
+  }
+
+  /** Сайты-источники (ссылки верхнего уровня, без страниц-детей раздела) — для выбора, где искать цену. */
+  async sites(accountId: number): Promise<KbSource[]> {
+    const { rows } = await this.db.query("SELECT * FROM kb_sources WHERE account_id = $1 AND kind = 'url' AND parent_id IS NULL ORDER BY is_factory DESC, id", [accountId]);
+    return rows.map(mapSource);
   }
 
   async list(accountId: number): Promise<KbSource[]> {
@@ -300,6 +320,8 @@ function mapSource(r: Record<string, unknown>): KbSource {
     contentHash: (r.content_hash ?? null) as string | null,
     priceKey: (r.price_key ?? null) as string | null,
     priceImport: (r.price_import ?? null) as PriceImportSummary | null,
+    comment: (r.comment ?? null) as string | null,
+    isFactory: Boolean(r.is_factory),
   };
 }
 

@@ -1,10 +1,13 @@
 import type { JournalKind } from '@core/db';
-import { completeProfile, componentOfDoor, doorTitleOf, gostDesignation, profileOfRow, specialModelOf, lookupPrice, priceModelOf, type ComponentKind, type KbPrice, type PriceHit } from '@opt/kb';
+import { BRANDS, completeProfile, componentOfDoor, doorTitleOf, gostDesignation, profileOfRow, lookupPrice, priceModelOf, type ComponentKind, type GostProfile, type KbPrice, type PriceHit } from '@opt/kb';
 import type { OptCore } from './deps.ts';
-import { lineCategory, NO_PRICE, requestProfile, tidyName, type KpLine, type KpPayload, type KpRequestItem } from './draft.ts';
+import { lineCategory, NO_PRICE, requestProfile, tidyName, type KpLine, type KpLineWeb, type KpPayload, type KpRequestItem } from './draft.ts';
 import { doorComponentKind, matchComponentDoor, type ComponentDoorMatch } from './component-door.ts';
 import { VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
-import { sizeOfInput } from './research-repo.ts';
+import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
+import { resolveOptRoute } from './settings.ts';
+import { planSites, siteWhy, type SitePlan } from './site-rank.ts';
+import { hostMatches } from './market-research.ts';
 
 /**
  * Цена позиции черновика как задание воркера. Очередь kp-research (Redis опта, база 1), jobId research-{accountId}-{draftId}-{requestIndex} —
@@ -89,23 +92,33 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     // вопрос менеджеру; чужие двери не используются.
     const componentKind = doorComponentKind(payload, line);
     if (componentKind) return await priceComponentByDoor(core, job, draft.leadId, payload, line, componentKind, lineLabel);
-    // KB-WEB-ROWS: цена — только из прайсов (kb_prices, origin = price_list); веб-поиска нет. Модель и размер → базовая цена ×
-    // правила нестандарта. KB-MATCH: подбор по признакам (тип, материал, Г/О, покрытие, огнестойкость, створки, порог, …).
+    // KP-AGENT-V2, п. 4: 1) прайс заказчика по ГОСТ-профилю; 2) нет строки — интернет (сайты по комментариям), цену выбирает
+    // менеджер; бренд клиента вне прайса — сначала вопрос «аналог по ГОСТ»; 3) ничего — вопрос «введите цену».
     // KB-PRICE-SHEETS: комплектующее / фурнитура ищутся в контексте ближайшей двери заявки выше (её ID товара в прайсе).
     const category = lineCategory(line);
+    if (line.excluded) return { researchId: 0, status: 'none', cached: true, price: null, keptManagerPrice: false, notes: ['позиция исключена менеджером'], fromKb: true };
+    // Цена подтверждена в опроснике (интернет / своя) — подбор её не трогает.
+    if (line.price !== null && (line.priceSource === 'web_confirmed' || line.priceSource === 'manager') && !job.replace) return { researchId: 0, status: 'ok', cached: true, price: line.price, keptManagerPrice: true, notes: [], fromKb: true };
     const doorProductId = category === 'component' || category === 'hardware' ? await doorContextOf(core, accountId, payload, line) : null;
     // KB-DOOR-MATCH-2, п. 4: такая же строка заявки (то же название двери) уже получила ID товара — эта получает тот же.
     // При замене цен (replace) ID соседних строк мог остаться от прежнего подбора — тогда каждая строка подбирается заново.
+    // Ответ опросника «модель» / «аналог» — ID товара, выбранный менеджером.
     const sibling = category === 'door' && !job.replace ? siblingProductOf(payload, line) : null;
-    let hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { name: input.item.name || line.name, raw: input.item.raw, widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category, doorProductId, productId: sibling });
+    const productId = line.chosenProductId ?? sibling;
+    // Поля профиля, уточнённые в опроснике, — дописываются к тексту позиции для подбора по ГОСТ-профилю.
+    const fixText = profileFixText(line.profileFix);
+    const query = { name: input.item.name || line.name, raw: [input.item.raw, input.item.details ?? '', fixText].filter(Boolean).join(' | '), widthMm: size.widthMm, heightMm: size.heightMm, features: input.item.features ?? null, category, doorProductId, productId };
+    let hit = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, query);
     // Комплект фурнитуры (OPT-025 = 2×OPT-029 + 2×OPT-030 + OPT-031): входящие тарифы, названные в заявке отдельно, не удваиваются.
     if (hit && category === 'hardware' && hit.outcome === 'priced' && hit.row.tariffId) {
       const set = await hardwareSetOf(core, accountId, payload, line, hit.row.tariffId, doorProductId);
       if (set) hit = { ...hit, price: null, outcome: 'included', includedIn: set, notes: [...hit.notes, `${hit.row.model} (${hit.row.tariffId}) входит в комплект «${set}» той же позиции — отдельно не считается`] };
     }
-    if (hit) {
+    // Тариф «Дополнений» без цены — дальше интернет (п. 4.5), как и позиция без строки прайса.
+    const noPriceTariff = hit && (category === 'hardware' || hit.row.category === 'hardware') && hit.outcome === 'not_priced' && !hit.ambiguous;
+    if (hit && !noPriceTariff) {
       const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
-      const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.outcome === 'not_priced' || hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
+      const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.ambiguous ? 'несколько моделей в прайсе — вопрос менеджеру' : hit.outcome === 'not_priced' || hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
       await core.journal.add({
         accountId,
         leadId: draft.leadId,
@@ -116,19 +129,24 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
       const price = hit.outcome === 'not_priced' ? null : hit.price;  // null — «уточнить у менеджера», не 0 ₽ (KB-HW-NULL)
       return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
     }
-    // Строки прайса нет — «уточнить у менеджера», без цены; похожая модель и интернет не подставляются (KB-WEB-ROWS).
-    // П. 2–3 KB-DOOR-MATCH-2: особое исполнение (ДПГУЧ, Аква) — своей фразой.
-    const special = category === 'door' ? specialModelOf(`${input.item.name || line.name} ${input.item.raw}`) : null;
-    const note = special
-      ? `уточнить у менеджера: «${special.title}» в прайсе нет — особое исполнение похожей моделью не заменяется`
-      : `уточнить у менеджера: «${tidyName(input.item.name || line.name)}» в прайсе нет — введите цену вручную`;
-    // Ручная цена менеджера остаётся и при «Найти цену» по строке (replace): заменить её нечем.
+    // Тариф «Дополнений» без цены: позиция — фурнитура (категорию даёт строка прайса), дальше — интернет.
+    if (noPriceTariff && category !== 'hardware') await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, category: 'hardware' }), null);
+    // Ручная цена менеджера остаётся: заменить её нечем.
     const keptManagerPrice = line.priceSource === 'manager' && line.price !== null;
-    if (!keptManagerPrice) {
-      await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'нет в прайсе', priceOutcome: 'not_priced', priceStale: false, kbPriceId: null, productId: null, priceModel: null, equipment: null, priceAbbr: null, market: null, includedIn: null }), [note]);
+    if (keptManagerPrice) return { researchId: 0, status: 'ok', cached: true, price: line.price, keptManagerPrice: true, notes: [], fromKb: true };
+    const text = `${input.item.name || line.name} | ${input.item.raw} | ${input.item.details ?? ''}`;
+    const profile = line.gostProfile ?? (category === 'door' ? requestProfile({ name: input.item.name || line.name, raw: input.item.raw, details: input.item.details ?? null }) : null);
+    // П. 3.4: бренд клиента вне прайса (Аква, Ставерн, Pleskovdoor) — сначала вопрос «аналог по ГОСТ допустим?» с подходящими
+    // строками прайса по профилю (без бренда); «искать бренд в интернете» — по ответу менеджера.
+    if (category === 'door' && profile?.brand && !line.askWeb && !line.chosenProductId) {
+      const plain = stripBrand(query.name);
+      const analog = await lookupPrice(core.kb.prices, core.kb.aliases, accountId, { ...query, name: plain, raw: stripBrand(query.raw ?? ''), productId: null });
+      const options = analog ? (analog.ambiguousModels?.length ? analog.ambiguousModels.map((m) => ({ ...m, price: null })) : analog.row.productId ? [{ productId: analog.row.productId, model: analog.row.model, price: analog.price }] : []) : [];
+      await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, ...EMPTY_PRICE, priceLabel: `бренд «${profile.brand}» вне прайса — вопрос «аналог»`, analogOptions: options, web: null }), [`уточнить у менеджера: «${profile.brand}» в прайсе нет — аналог по ГОСТ${options.length ? `: ${options.map((o) => o.productId).join(', ')}` : ' не найден'}, или искать в интернете`]);
+      await core.journal.add({ accountId, leadId: draft.leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: бренд «${profile.brand}» в прайсе нет — вопрос «аналог по ГОСТ»${options.length ? ` (варианты: ${options.map((o) => o.productId).join(', ')})` : ''}`, details: { draftId, requestIndex, source: 'kb', outcome: 'analog_question', brand: profile.brand, options: options.map((o) => o.productId), webSearchCalls: 0, costUsd: 0, userId: job.userId } });
+      return { researchId: 0, status: 'none', cached: true, price: null, keptManagerPrice: false, notes: [], fromKb: true };
     }
-    await core.journal.add({ accountId, leadId: draft.leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: в прайсе нет — уточнить у менеджера${keptManagerPrice ? ' — цена менеджера сохранена' : ''}`, details: { draftId, requestIndex, source: 'kb', outcome: 'not_priced', special: special?.title ?? null, doorProductId, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice } });
-    return { researchId: 0, status: 'none', cached: true, price: keptManagerPrice ? line.price : null, keptManagerPrice, notes: [note], fromKb: true };
+    return await priceFromWeb(core, job, draft.leadId, payload, line, input, profile, text, lineLabel);
   } catch (err) {
     await core.journal.add({ accountId, leadId: draft.leadId, kind: KP_PRICE_ERROR_KIND, summary: `Поиск цены не выполнен: ${lineLabel} — ${(err as Error).message}`, details: { draftId, requestIndex, userId: job.userId } }).catch(() => undefined);
     throw err;
@@ -159,7 +177,7 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       // KB-PRICE-SHEETS: «в прайсе цены нет» — цена остаётся пустой (не 0 ₽), «входит в блок» — 0 без строки в таблице КП.
       // KB-DOOR-MATCH-2, п. 5: «входит в цену блока» и «нет цены» — без цены (не 0 ₽).
       next.price = outcome === 'not_priced' || outcome === 'included' ? null : hit.price;
-      next.priceSource = 'kb';
+      next.priceSource = 'price_file';
       next.priceLabel = hit.label;
       next.priceStale = hit.stale;
       // Несколько моделей прайса подошли одинаково — строка прайса не выбрана: ни ID записи, ни ID товара.
@@ -168,6 +186,14 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       delete next.question;
       next.productId = hit.row.category === 'door' && lineCategory(line) === 'door' && (outcome === 'priced' || outcome === 'estimate') ? hit.row.productId : null;
       next.includedIn = outcome === 'included' ? hit.includedIn ?? null : null;
+      // KP-AGENT-V2, п. 5: несколько моделей прайса — варианты вопроса «выбор модели»; нестандарт (правила / площадь) — вопрос
+      // «нестандарт»; цена из прайса снимает прежние цены интернета и варианты аналога.
+      next.modelOptions = hit.ambiguousModels?.length ? hit.ambiguousModels : null;
+      next.nonstandard = lineCategory(line) === 'door' && (outcome === 'priced' || outcome === 'estimate') && (hit.basis === 'rules' || hit.basis === 'area') ? { basis: hit.basis, basePrice: hit.row.price, note: hit.notes.find((n) => /^нестандарт|пересчёт по площади/.test(n)) ?? (hit.basis === 'area' ? 'пересчёт по площади' : 'нестандартный размер по правилам прайса') } : null;
+      if (outcome === 'priced' || outcome === 'estimate' || outcome === 'included') {
+        next.web = null;
+        next.analogOptions = null;
+      }
       // Синоним прайса увёл позицию в другую категорию («Фрамуга» — фурнитура): плитка и таблица КП следуют за строкой базы.
       // Строка двери-контекста («входит в блок» / «нет цены» у комплектующего) категорию позиции не меняет; тариф «Дополнений» без цены —
       // меняет (KB-HW-NULL: «СПД40 …» — фурнитура, а не дверь).
@@ -321,7 +347,7 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   const journal = (summary: string, details: Record<string, unknown>) => core.journal.add({ accountId, leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: ${summary}`, details: { draftId, requestIndex, source: 'kb_component_door', componentKind: kind, webSearchCalls: 0, costUsd: 0, userId: job.userId, ...details } });
   if (match.kind === 'no_doors') {
     const note = `уточнить у менеджера: в заявке нет дверей — ${kind} не к чему привязать, цену из прайса другой двери агент не берёт`;
-    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'нет двери в заявке', priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'price_file', priceLabel: 'нет двери в заявке', priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
     await journal('в заявке нет дверей — цена не поставлена, уточнить у менеджера', { outcome: 'not_priced' });
     return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
   }
@@ -329,7 +355,7 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
     const q = match.question;
     const variants = q.options.map((o) => `${o.productId ? `${o.productId} ` : ''}${o.model}${o.size ? ` ${o.size}` : ''} × ${o.qty.toLocaleString('ru-RU')}`).join('; ');
     const note = `вопрос по комплектующему: группа «${q.groupTitle}» — ${q.reason === 'many' ? 'подходит несколько дверей заявки' : 'ни одна дверь заявки не подходит однозначно'}: ${variants}; ответ — в блоке «Вопросы по комплектующим»`;
-    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q, componentDoorGroup: q.group, componentDoorBy: l.componentDoorBy === 'line' ? 'line' : null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'price_file', priceLabel: 'вопрос: к какой двери', priceOutcome: 'question', question: q, componentDoorGroup: q.group, componentDoorBy: l.componentDoorBy === 'line' ? 'line' : null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
     await journal(`вопрос менеджеру — ${q.text} (вариантов ${q.options.length})`, { outcome: 'question', options: q.options });
     return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
   }
@@ -338,7 +364,7 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   const doorName = tidyName(door.name);
   if (!row || row.origin !== 'price_list') {
     const note = `уточнить у менеджера: дверь «${doorName}» (поз. ${door.request_index + 1}) не подобрана в прайсе — цены на ${kind} к ней в прайсе нет`;
-    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'kb', priceLabel: `по двери «${doorName}»`, priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, price: null, priceSource: 'price_file', priceLabel: `по двери «${doorName}»`, priceOutcome: 'not_priced', question: null, kbPriceId: null, priceModel: null, equipment: null, priceAbbr: null }), [note]);
     await journal(`дверь «${doorName}» не подобрана в прайсе — цена не поставлена`, { outcome: 'not_priced', doorRequestIndex: door.request_index });
     return { researchId: 0, status: 'ok', cached: true, price: null, keptManagerPrice: false, notes: [note], fromKb: true };
   }
@@ -362,3 +388,103 @@ export function siblingProductOf(payload: Partial<KpPayload>, line: KpLine): str
   const same = (payload.items ?? []).filter((l) => l.request_index !== line.request_index && lineCategory(l) === 'door' && l.productId && (l.priceOutcome === 'priced' || l.priceOutcome === 'estimate') && doorNameKey(payload, l) === key);
   return same[0]?.productId ?? null;
 }
+
+/** Строка без цены: прайсовые поля сброшены (не 0 ₽). */
+const EMPTY_PRICE: Partial<KpLine> = { price: null, priceSource: undefined, priceOutcome: 'not_priced', priceStale: false, kbPriceId: null, productId: null, priceModel: null, equipment: null, priceAbbr: null, market: null, includedIn: null, nonstandard: null, modelOptions: null };
+
+/** Поля профиля из опросника — текстом к позиции для подбора («двупольная», «ДПС», «EI60», «ГОСТ 475-2016»). */
+function profileFixText(fix: Record<string, string> | null | undefined): string {
+  if (!fix) return '';
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(fix)) {
+    const val = String(v ?? '').trim();
+    if (!val) continue;
+    if (k === 'leaves') out.push(val === '2' ? 'двупольная' : val === '1' ? 'однопольная' : val);
+    else if (k === 'fill') out.push(/^г/i.test(val) ? 'глухая' : /^о/i.test(val) ? 'остеклённая' : val);
+    else if (k === 'gost') out.push(/гост/i.test(val) ? val : `ГОСТ ${val}`);
+    else if (k !== 'qty' && k !== 'size') out.push(val);
+  }
+  return out.join(' ');
+}
+
+/** Название без бренда клиента — для подбора аналога по ГОСТ-профилю. */
+function stripBrand(text: string): string {
+  let t = text;
+  for (const b of BRANDS) t = t.replace(new RegExp(b.rx.source, 'gi'), ' ');
+  return t.replace(/\(\s*\)/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Засчитанные источники интернета → цены позиции: min / медиана / max, фабрики, разброс, сайты (п. 4.2). */
+export function webOf(r: CachedResearch, plan: SitePlan | null): KpLineWeb | null {
+  const accepted = r.result.offers.filter((j) => j.accepted && !(plan?.excluded ?? []).some((x) => hostMatches(j.offer.url, x.host)));
+  if (!accepted.length) return null;
+  const prices = accepted.map((j) => j.unitPrice ?? j.offer.price).filter((p) => p > 0).sort((a, b) => a - b);
+  if (!prices.length) return null;
+  const mid = Math.floor(prices.length / 2);
+  const median = prices.length % 2 ? (prices[mid] as number) : Math.round((((prices[mid - 1] as number) + (prices[mid] as number)) / 2) * 100) / 100;
+  const min = prices[0] as number;
+  const max = prices[prices.length - 1] as number;
+  const factory = accepted.filter((j) => j.manufacturer).length;
+  const order = (url: string) => {
+    const i = plan?.prefer.findIndex((x) => hostMatches(url, x.host)) ?? -1;
+    return i < 0 ? 1000 : i;
+  };
+  const sources = [...accepted]
+    .sort((a, b) => Number(b.manufacturer) - Number(a.manufacturer) || order(a.offer.url) - order(b.offer.url))
+    .slice(0, 12)
+    .map((j) => ({ url: j.offer.url, seller: j.offer.seller, price: j.offer.price, unitPrice: j.unitPrice, foundAt: j.offer.foundAt, manufacturer: j.manufacturer, site: siteWhy(j.offer.url, plan) }));
+  return { query: r.result.query, researchedAt: r.createdAt.toISOString(), researchId: r.researchId, min, median, max, count: prices.length, factorySources: factory, spreadPct: median ? Math.round(((max - min) / median) * 100) : 0, enough: prices.length >= 3 || factory >= 1, sources, excludedSites: (plan?.excluded ?? []).map((x) => x.host) };
+}
+
+/**
+ * П. 4.2: строки прайса нет — интернет. Сайты по комментариям из «Базы знаний» (фабрики → подходящие → без комментария →
+ * любые; «… нет» — не используется); источник засчитывается при совпадении модели и размера (market-research). В КП цена
+ * автоматически не ставится — вопрос «цена из интернета» в опроснике; нет ни одного источника — вопрос «введите цену».
+ */
+async function priceFromWeb(core: OptCore, job: ResearchJob, leadId: number, payload: Partial<KpPayload>, line: KpLine, input: MarketResearchInput, profile: GostProfile | null, text: string, lineLabel: string): Promise<ResearchJobResult> {
+  const { accountId, draftId, requestIndex } = job;
+  const noPrice = async (why: string, details: Record<string, unknown> = {}): Promise<ResearchJobResult> => {
+    const note = `уточнить у менеджера: «${tidyName(input.item.name || line.name)}» — ${why}; введите цену`;
+    await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, ...EMPTY_PRICE, priceLabel: 'нет в прайсе и в интернете', web: null }), [note]);
+    await core.journal.add({ accountId, leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цена по позиции «${lineLabel}»: ${why} — вопрос «введите цену»`, details: { draftId, requestIndex, source: 'web', outcome: 'not_priced', userId: job.userId, ...details } });
+    return { researchId: 0, status: 'none', cached: true, price: null, keptManagerPrice: false, notes: [note] };
+  };
+  const ai = await core.ai(accountId);
+  if (!ai) return noPrice('в прайсе нет, интернет не проверялся: модель не настроена');
+  const { settings } = await core.settings.get(accountId);
+  const route = resolveOptRoute(settings);
+  const { constants } = await core.kp.getSettings(accountId);
+  const dailyLimit = constants.webSearchDailyUsd ?? DEFAULT_WEB_SEARCH_DAILY_USD;
+  const spent = await core.research.spentTodayUsd(accountId);
+  if (spent >= dailyLimit) return noPrice(`в прайсе нет; дневной лимит веб-поиска $${dailyLimit} исчерпан`, { limitUsd: dailyLimit, spentUsd: spent });
+  const sites = await core.kb.repo.sites(accountId).catch(() => []);
+  const plan = planSites(sites, profile, text);
+  const factoryHosts = plan.prefer.filter((x) => x.factory).map((x) => x.host);
+  const r = await researchWithCache(core.research, ai.llm, route, input, {
+    accountId,
+    draftId,
+    requestIndex,
+    force: job.force,
+    cacheDays: constants.researchCacheDays ?? DEFAULT_CACHE_DAYS,
+    manufacturerDomains: [...(constants.manufacturerDomains ?? []), ...factoryHosts],
+    pricing: settings.billing.pricing,
+    ...(constants.searchContext ? { searchContext: constants.searchContext } : {}),
+    maxSearchCalls: constants.maxSearchCalls ?? DEFAULT_MAX_SEARCH_CALLS,
+    sites: { prefer: plan.prefer.map((x) => ({ host: x.host, why: x.why })), exclude: plan.excluded.map((x) => x.host) },
+  });
+  const costRub = r.result.cost.usd * settings.billing.usdRubRate;
+  const web = r.result.status === 'failed' ? null : webOf(r, plan);
+  const cost = { inputTokens: r.result.cost.inputTokens, outputTokens: r.result.cost.outputTokens, costUsd: r.result.cost.usd, costRub };
+  if (!web) {
+    const why = r.result.status === 'failed' ? `в прайсе нет; поиск в интернете не выполнен: ${r.result.error}` : 'нет ни в прайсе, ни в интернете';
+    const res = await noPrice(why, { researchId: r.researchId, webSearchCalls: r.result.webSearchCalls, costUsd: r.result.cost.usd });
+    await core.journal.add({ accountId, leadId, kind: r.result.status === 'failed' ? KP_PRICE_ERROR_KIND : KP_PRICE_RESEARCH_KIND, summary: `Поиск в интернете: ${lineLabel} — ${r.result.status === 'failed' ? r.result.error : 'подходящих предложений нет'}`, details: { draftId, requestIndex, researchId: r.researchId, query: r.result.query, sites: plan.prefer.map((x) => x.host), excluded: plan.excluded.map((x) => x.host), webSearchCalls: r.result.webSearchCalls, userId: job.userId }, ...cost });
+    return { ...res, researchId: r.researchId, cached: r.cached };
+  }
+  const warn = [!web.enough ? `источников ${web.count}, фабрики нет` : '', web.spreadPct > 30 ? `разброс ${web.spreadPct} %` : ''].filter(Boolean).join('; ');
+  const note = `цены из интернета: ${web.min.toLocaleString('ru-RU')} – ${web.max.toLocaleString('ru-RU')} ₽, медиана ${web.median.toLocaleString('ru-RU')} ₽ (${web.count} источн.${web.factorySources ? `, с фабрики ${web.factorySources}` : ''})${warn ? ` — ${warn}` : ''}; итоговую цену выберите в опроснике`;
+  await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, ...EMPTY_PRICE, priceLabel: 'цены из интернета — выбор менеджера', web, analogOptions: l.analogOptions ?? null }), [`уточнить у менеджера: ${note}`]);
+  await core.journal.add({ accountId, leadId, kind: KP_PRICE_RESEARCH_KIND, summary: `Цены из интернета по позиции «${lineLabel}»: ${note}`, details: { draftId, requestIndex, source: 'web', researchId: r.researchId, cached: r.cached, query: r.result.query, min: web.min, median: web.median, max: web.max, count: web.count, factory: web.factorySources, spreadPct: web.spreadPct, sites: plan.prefer.map((x) => ({ host: x.host, why: x.why })), excluded: plan.excluded.map((x) => x.host), webSearchCalls: r.result.webSearchCalls, userId: job.userId }, ...cost });
+  return { researchId: r.researchId, status: 'ok', cached: r.cached, price: null, keptManagerPrice: false, notes: [note] };
+}
+

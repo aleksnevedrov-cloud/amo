@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { KbPriceCandidatesRepo } from './candidates.ts';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Db, JournalKind, JournalRepo } from '@core/db';
@@ -115,6 +116,8 @@ export interface KbCore {
   /** Структурные цены и синонимы (этап 3). */
   prices: KbPricesRepo;
   aliases: KbAliasesRepo;
+  /** KP-AGENT-V2, п. 4.4: цены, подтверждённые менеджером, — кандидаты в прайс (в подбор не идут). */
+  candidates: KbPriceCandidatesRepo;
   filesRoot: string;
   embedderFor: EmbedderFor;
   /** Заметка менеджера: сохраняется файлом на томе и ждёт индексации (статус new). */
@@ -168,6 +171,7 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     repo,
     prices,
     aliases: new KbAliasesRepo(d.db),
+    candidates: new KbPriceCandidatesRepo(d.db),
     filesRoot: d.filesRoot,
     embedderFor: d.embedderFor,
 

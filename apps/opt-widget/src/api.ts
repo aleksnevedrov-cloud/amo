@@ -47,7 +47,7 @@ export interface KpDraftLine {
   lead_time: string;
   discount: number;
   /** Откуда цена: поиск по точной модели, аналог, менеджер руками или база знаний (kb). */
-  priceSource?: 'research' | 'analog' | 'manager' | 'kb';
+  priceSource?: 'research' | 'analog' | 'manager' | 'kb' | 'price_file' | 'web_confirmed';
   market?: { median: number; min: number; max: number; count: number; unit: 'piece'; researchId: number; researchedAt: string } | null;
   coefficient?: number;
   /** Подпись источника цены в плитке: «по базе: прайс Текона (01.10.2026)», «по закупке», «по рынку», «изменено менеджером». */

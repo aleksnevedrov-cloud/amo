@@ -8,6 +8,7 @@ export * from './features.ts';
 export * from './gost-profile.ts';
 export * from './price-key.ts';
 export * from './category.ts';
+export * from './candidates.ts';
 export * from './price-book.ts';
 export * from './book-pricing.ts';
 export * from './fetch-url.ts';

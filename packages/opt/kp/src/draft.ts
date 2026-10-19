@@ -55,7 +55,12 @@ export interface KpLine {
   lead_time: string;
   discount: number;
   /** Откуда цена: поиск по точной модели, аналог, менеджер руками или база знаний (kb); нет поля — цены ещё не было. */
-  priceSource?: 'research' | 'analog' | 'manager' | 'kb';
+  /**
+   * Источник цены (KP-AGENT-V2, п. 4.6): price_file — строка прайса заказчика; web_confirmed — цена из интернета, выбранная
+   * менеджером; manager — введена менеджером. kb — то же, что price_file (черновики до V2); research / analog — прежний веб-поиск,
+   * в КП не идёт (KB-WEB-ROWS).
+   */
+  priceSource?: 'research' | 'analog' | 'manager' | 'kb' | 'price_file' | 'web_confirmed';
   market?: KpLineMarket | null;
   /** Подпись источника для плитки (RFD-AI-AGENT-OPT-KB): «по базе: прайс Текона (01.10.2026)», «по закупке», «по рынку», «изменено менеджером». */
   priceLabel?: string | null;
@@ -108,6 +113,51 @@ export interface KpLine {
   componentDoorGroup?: string | null;
   /** Вопрос менеджеру «К какой двери считать …?» со списком дверей заявки; пока он есть — цены нет, документ не собирается. */
   question?: ComponentDoorQuestionInfo | null;
+  /** KP-AGENT-V2, п. 4.2: цены из интернета — показываются менеджеру, в КП автоматически не ставятся. */
+  web?: KpLineWeb | null;
+  /** Подходит несколько моделей прайса — выбор менеджера (вопрос «выбор модели»). */
+  modelOptions?: { productId: string; model: string }[] | null;
+  /** Бренд клиента вне прайса — аналоги по ГОСТ-профилю (вопрос «аналог»). */
+  analogOptions?: { productId: string; model: string; price: number | null }[] | null;
+  /** Ответ менеджера: модель прайса (ID товара) для этой позиции — подбор берёт её. */
+  chosenProductId?: string | null;
+  /** Ответ «искать бренд в интернете». */
+  askWeb?: boolean;
+  /** Ответ «исключить»: позиции нет в КП. */
+  excluded?: boolean;
+  /** Цена посчитана по правилам нестандарта или по площади — решение человека (вопрос «нестандарт»). */
+  nonstandard?: { basis: 'rules' | 'area'; basePrice: number | null; note: string } | null;
+  /** Поля профиля, уточнённые менеджером в опроснике (вопрос «неполная позиция»). */
+  profileFix?: Record<string, string> | null;
+}
+
+/** Цены интернета по позиции (KP-AGENT-V2, п. 4.2): засчитанные источники, min / медиана / max, сайты и почему выбраны. */
+export interface KpLineWeb {
+  query: string;
+  researchedAt: string;
+  researchId: number;
+  min: number;
+  median: number;
+  max: number;
+  count: number;
+  /** Источников с сайтов фабрик (с фабрики достаточно одного). */
+  factorySources: number;
+  /** Разброс (max − min) / медиана, %. */
+  spreadPct: number;
+  /** Источников достаточно: ≥ 3 или 1 с фабрики. */
+  enough: boolean;
+  sources: { url: string; seller: string; price: number; unitPrice: number | null; foundAt: string; manufacturer: boolean; site: string | null }[];
+  /** Сайты, не использованные по комментарию («Стальных нет»). */
+  excludedSites: string[];
+}
+
+/** Ответ менеджера в опроснике (KP-AGENT-V2, п. 5). Цена хранится уже вычисленной — ответ переносится на «Собрать заново». */
+export interface KpAnswer {
+  option: string | null;
+  price?: number | null;
+  fields?: Record<string, string>;
+  at: string;
+  by: number | null;
 }
 
 /** Вопрос по комплектующему в черновике (тип повторён здесь, чтобы draft.ts не зависел от component-door.ts). */
@@ -133,6 +183,12 @@ export interface KpPayload {
   needs_manager: { request_index: number; reason: string }[];
   /** KB-COMPONENT-DOOR-GROUP: ответы менеджера на группы комплектующих — ключ группы → строка двери заявки (request_index). */
   componentDoorGroups?: Record<string, number>;
+  /** KP-AGENT-V2, п. 5: ответы опросника — ключ вопроса (тип + позиция) → ответ; одинаковые строки — один ключ. */
+  answers?: Record<string, KpAnswer>;
+  /** Доставка (вопрос «доставка»): адрес и сумма — строкой КП; самовывоз — строки нет. */
+  delivery?: { mode: 'delivery' | 'pickup'; address: string | null; sum: number | null } | null;
+  /** Срок действия цены (настройка; пусто — ответ опросника). */
+  priceValidity?: string | null;
   source: {
     from: 'amo_card' | 'mailbox' | 'none';
     mails: number;
@@ -149,7 +205,7 @@ export interface KpPayload {
   /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
   requirements: string[];
   /** KP-AGENT-V2, п. 2.5: фото без текста — образец; к какой позиции, решает менеджер в опроснике. */
-  photos?: { name: string }[];
+  photos?: { name: string; requestIndex?: number | null; ignored?: boolean }[];
   /** Текст письма заявки (п. 2.4) — во вкладке «Письмо и файлы» большого окна. */
   letterText?: string | null;
 }
@@ -738,6 +794,9 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     ...(!service && !(p.qty && p.qty > 0) ? { qtyUnknown: true } : {}),
   };
 }
+
+/** Цена из прайса заказчика (price_file; kb — прежнее название). */
+export const isPriceFile = (src: KpLine['priceSource']): boolean => src === 'price_file' || src === 'kb';
 
 /** ГОСТ-профиль позиции заявки по её тексту: наименование, исходная строка, остальные колонки спецификации (KP-AGENT-V2). */
 export const requestProfile = (it: Pick<KpRequestItem, 'name' | 'raw' | 'details'>): GostProfile => profileOf([it.name, it.raw, it.details ?? ''].filter(Boolean).join(' | '));

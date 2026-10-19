@@ -141,7 +141,7 @@ export interface MarketResearchResult {
 
 export interface MarketResearchInput {
   line: Pick<KpLine, 'name' | 'size' | 'qty' | 'price'>;
-  item: Pick<KpRequestItem, 'raw' | 'name' | 'width_mm' | 'height_mm' | 'features'>;
+  item: Pick<KpRequestItem, 'raw' | 'name' | 'width_mm' | 'height_mm' | 'features'> & Partial<Pick<KpRequestItem, 'details'>>;
   /** Категория позиции (KB-PRICE-SHEETS-FIX, п. 5): у фурнитуры и комплектующих пересчёт по площади не делается. */
   category?: PositionCategory | null;
   /** ГОСТ, ТУ и прочие требования заявки. */
@@ -166,6 +166,11 @@ export interface MarketResearchOptions {
   searchContext?: 'low' | 'medium' | 'high';
   /** Не больше N вызовов веб-поиска за ответ (max_tool_calls); не задан — без ограничения. */
   maxSearchCalls?: number;
+  /**
+   * KP-AGENT-V2, п. 4а: сайты из «Базы знаний» — где искать сначала (по порядку: фабрики, подходящие по комментарию, без
+   * комментария) и какие не использовать для этой позиции (в комментарии «… нет»). Предложения с исключённых сайтов отбрасываются.
+   */
+  sites?: { prefer: { host: string; why: string }[]; exclude: string[] };
 }
 
 const KINDS: ItemKind[] = ['door', 'leaf', 'block', 'set', 'hardware', 'other'];
@@ -396,7 +401,18 @@ export function cleanName(name: string): string {
 
 /** Поиск предложений: один вызов модели с веб-поиском; foundAt ставит код. */
 export async function searchOffers(llm: LlmGateway, route: ChatRoute, query: string, card: ItemCard, opts: MarketResearchOptions = {}): Promise<{ offers: MarketOffer[]; sources: WebSource[]; res: RoutedResponse; invalid: number }> {
-  const content = [`Поисковый запрос: ${query}`, `Тип товара: ${KIND_TITLE[card.kind]}`, card.factory ? `Фабрика: ${card.factory}` : '', card.model ? `Модель: ${card.model}` : '', card.heightMm && card.widthMm ? `Размер: ${card.heightMm}×${card.widthMm} мм` : '', card.standards.length ? `Требования: ${card.standards.join(', ')}` : ''].filter(Boolean).join('\n');
+  const prefer = opts.sites?.prefer ?? [];
+  const exclude = opts.sites?.exclude ?? [];
+  const content = [
+    `Поисковый запрос: ${query}`,
+    `Тип товара: ${KIND_TITLE[card.kind]}`,
+    card.factory ? `Фабрика: ${card.factory}` : '',
+    card.model ? `Модель: ${card.model}` : '',
+    card.heightMm && card.widthMm ? `Размер: ${card.heightMm}×${card.widthMm} мм` : '',
+    card.standards.length ? `Требования: ${card.standards.join(', ')}` : '',
+    prefer.length ? `Сначала проверьте эти сайты (по порядку), затем любые магазины:\n${prefer.map((x) => `- ${x.host} — ${x.why}`).join('\n')}` : '',
+    exclude.length ? `Не используйте сайты: ${exclude.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
   const res = await llm.chat(
     {
       system: SEARCH_PROMPT,
@@ -419,10 +435,21 @@ export async function searchOffers(llm: LlmGateway, route: ChatRoute, query: str
   let invalid = 0;
   for (const o of raw.success ? raw.data.offers : []) {
     const p = offerSchema.safeParse(o);
-    if (p.success) offers.push({ ...p.data, foundAt });
-    else invalid += 1;
+    if (!p.success) invalid += 1;
+    else if (!exclude.some((h) => hostMatches(p.data.url, h))) offers.push({ ...p.data, foundAt });
   }
   return { offers, sources: res.sources ?? [], res, invalid };
+}
+
+/** Адрес относится к сайту (тот же домен или поддомен), «www.» не учитывается. */
+export function hostMatches(url: string, host: string): boolean {
+  try {
+    const h = new URL(url).host.toLowerCase().replace(/^www\./, '');
+    const want = host.toLowerCase().replace(/^www\./, '');
+    return h === want || h.endsWith(`.${want}`);
+  } catch {
+    return false;
+  }
 }
 
 /** Ссылка подтверждена поиском: точно такой url среди источников или тот же адрес без завершающего слэша. */

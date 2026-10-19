@@ -174,3 +174,33 @@ export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_S
     .setExpirationTime('30m')
     .sign(new TextEncoder().encode(key));
 }
+
+type SurveyQ = { key: string; type: string; blocking: boolean; answer: unknown; options: { id: string; price?: number | null }[]; fields?: { name: string }[]; requestIndexes: number[] };
+type SurveyAnswer = { option?: string | null; price?: number | null; fields?: Record<string, string> };
+
+/**
+ * KP-AGENT-V2: ответить на открытые блокирующие вопросы опросника, чтобы собрать документ. По умолчанию: самовывоз, срок цены
+ * «30 календарных дней», «без цены» для «введите цену» и «выбор модели», медиана для цены из интернета, «как посчитано» для
+ * нестандарта, «исключить» для аналога; неполная позиция — текущее количество. Свой ответ по типу — в over.
+ */
+export async function answerSurvey(app: Awaited<ReturnType<typeof setup>>['app'], headers: Record<string, string>, leadId: number, over: Record<string, SurveyAnswer | ((q: SurveyQ) => SurveyAnswer)> = {}) {
+  for (let round = 0; round < 6; round += 1) {
+    const d = (await app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${leadId}`, headers })).json().draft as { id: number; survey: SurveyQ[]; items: { request_index: number; qty: number }[] };
+    const open = d.survey.filter((q) => q.blocking && !q.answer && q.type !== 'component_door');
+    if (!open.length) return d;
+    for (const q of open) {
+      const o = over[q.type];
+      const a: SurveyAnswer = typeof o === 'function' ? o(q) : o
+        ?? (q.type === 'delivery' ? { option: 'pickup' }
+          : q.type === 'price_validity' ? { fields: { text: '30 календарных дней' } }
+          : q.type === 'enter_price' || q.type === 'model_choice' ? { option: 'no_price' }
+          : q.type === 'web_price' ? { option: 'median' }
+          : q.type === 'nonstandard' ? (q.options[0] ? { option: q.options[0].id } : { price: 1000 })
+          : q.type === 'analog' ? { option: 'exclude' }
+          : { fields: Object.fromEntries((q.fields ?? []).map((f) => [f.name, f.name === 'qty' ? String(d.items.find((l) => l.request_index === q.requestIndexes[0])?.qty ?? 1) : '—'])) });
+      const r = await app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d.id}/answer`, headers, payload: { key: q.key, ...a } });
+      if (r.statusCode !== 200) throw new Error(`ответ на «${q.key}»: ${r.statusCode} ${r.body}`);
+    }
+  }
+  throw new Error('опросник не закрылся за 6 кругов');
+}
