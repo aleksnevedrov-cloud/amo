@@ -6,8 +6,9 @@ import type { KpApi, KpConstants, KpSettingsInfo } from '../api.ts';
 const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; kind: 'input' | 'textarea' | 'number' | 'lines' | 'bool' | 'pairs' }[] = [
   { key: 'sellerName', label: 'Продавец', kind: 'input' },
   { key: 'sellerRequisites', label: 'Реквизиты продавца', hint: 'Попадают в шапку предложения', kind: 'textarea' },
-  { key: 'vatRate', label: 'Ставка НДС, %', hint: 'Берётся отсюда, в коде не зашита', kind: 'number' },
+  { key: 'vatRate', label: 'Ставка НДС, %', hint: 'Цены КП — с НДС, в документе «в т.ч. НДС …». Пусто — 22 %; 0 — «НДС не облагается»', kind: 'number' },
   { key: 'validDays', label: 'Срок действия КП, дней', kind: 'number' },
+  { key: 'priceValidity', label: 'Срок действия цены', hint: 'Печатается в каждом КП («Срок действия цены: …»), плейсхолдер {{price_validity}}. Пусто — вопрос в опроснике каждого КП', kind: 'input' },
   { key: 'paymentTerms', label: 'Условия оплаты', kind: 'textarea' },
   { key: 'warranty', label: 'Гарантия', kind: 'textarea' },
   { key: 'delivery', label: 'Доставка', kind: 'textarea' },
@@ -15,8 +16,8 @@ const CONSTANT_FIELDS: { key: keyof KpConstants; label: string; hint?: string; k
   { key: 'analogPriceTolerancePct', label: 'Допуск цены аналога, %', hint: 'Аналог по цене — не дальше этого от цены заявки; не больше 10', kind: 'number' },
   { key: 'manufacturerDomains', label: 'Домены производителей', hint: 'По одному в строке, без http и пути; источник с таким доменом всегда считается сайтом производителя. Пусто — вид источника определяет модель', kind: 'lines' },
   { key: 'priceNote', label: 'Фраза о ценах', hint: 'Печатается в каждом КП под итогом — плейсхолдер {{price_note}} в шаблоне; пусто — без фразы', kind: 'textarea' },
-  // Цены позиций (KB-WEB-ROWS): только из прайсов базы знаний, веб-поиска нет.
-  { key: 'autoResearch', label: 'Искать цены автоматически при сборке черновика', hint: 'Выключено — цены из прайса только по кнопке «Найти цены» в карточке сделки. Позиция без строки прайса — «уточнить у менеджера»', kind: 'bool' },
+  // Цены позиций (KP-AGENT-V2, п. 4): прайс → интернет по сайтам из «Базы знаний» (цену выбирает менеджер) → «введите цену».
+  { key: 'autoResearch', label: 'Искать цены автоматически при сборке черновика', hint: 'Выключено — цены только по кнопке «Найти цены». Строки прайса нет — цены интернета в опросник, в КП сама не ставится', kind: 'bool' },
   { key: 'maxPositionsPerRun', label: 'Позиций за одно нажатие «Найти цены»', hint: 'Не больше 200', kind: 'number' },
   { key: 'signature', label: 'Подпись', kind: 'input' },
 ];
