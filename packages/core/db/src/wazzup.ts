@@ -37,6 +37,19 @@ export interface WazzupHistoryItem {
   chatType: string | null;
 }
 
+/** Сообщение переписки сделки для окна виджета: с каналом и чатом Wazzup. */
+export interface WazzupChatItem {
+  messageId: string;
+  channelId: string | null;
+  chatId: string;
+  chatType: string | null;
+  phone: string | null;
+  direction: 'in' | 'out';
+  author: string;
+  text: string;
+  sentAt: Date;
+}
+
 export interface WazzupState {
   webhookUri: string | null;
   subscribedAt: Date | null;
@@ -138,6 +151,24 @@ export class WazzupRepo {
 
   async setStatus(accountId: number, messageId: string, status: string): Promise<void> {
     await this.db.query('UPDATE wazzup_messages SET status = $3 WHERE account_id = $1 AND message_id = $2', [accountId, messageId, status]);
+  }
+
+  /**
+   * Переписка сделки для окна виджета (RETAIL-WIDGET-WINDOW): чаты, связанные со сделкой (lead_id), и по телефонам её
+   * контактов; без групповых чатов и системных сообщений Wazzup. Последние limit в хронологическом порядке, с каналом и чатом —
+   * по последнему входящему виджет отвечает клиенту в тот же чат.
+   */
+  async chatForLead(accountId: number, leadId: number, phones: string[], limit = 200): Promise<WazzupChatItem[]> {
+    const { rows } = await this.db.query(
+      `SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at FROM (
+         SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at FROM wazzup_messages
+          WHERE account_id = $1 AND NOT is_system AND text <> '' AND text NOT LIKE '%=== SYSTEM WZ ===%'
+            AND (chat_type IS NULL OR chat_type NOT LIKE '%group')
+            AND (phone = ANY($3::text[]) OR chat_id IN (SELECT chat_id FROM wazzup_messages WHERE account_id = $1 AND lead_id = $2))
+          ORDER BY sent_at DESC LIMIT $4) t ORDER BY sent_at ASC`,
+      [accountId, leadId, phones, limit],
+    );
+    return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at }));
   }
 
   /** История по телефону — последние limit сообщений в хронологическом порядке, без системных. */

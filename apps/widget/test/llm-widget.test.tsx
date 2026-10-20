@@ -3,6 +3,7 @@ import { act } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { defaultSettings } from '@core/db';
 import type { AmoWidgetSelf } from '../src/amo.ts';
+import { RETRY } from '../src/api.ts';
 import { createCallbacks } from '../src/index.tsx';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -51,6 +52,7 @@ const status = { accountId: 1, isAdmin: true, connected: true, tokenExpiresAt: n
 const model = (id: string, provider: string, extra: Record<string, unknown> = {}) => ({ id, name: id, provider, vision: true, tools: true, reasoning: true, temperature: false, maxOutputTokens: null, createdAt: null, price: { input: 1, output: 5, cachedInput: 0.1 }, recommended: 1, ...extra });
 
 beforeEach(() => {
+  RETRY.delaysMs = [0, 0];
   document.body.innerHTML = '<div id="work-area-ai_door"></div>';
   window.APP = { data: { current_card: { id: 555 } } };
   localStorage.clear();
@@ -234,45 +236,81 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     costRub: 12.4,
   });
 
-  it('блоки по порядку, модель со сменой для сделки, файлы из чата с кнопкой «Разобрать», сворачивание запоминается', async () => {
-    const { self, calls } = fakeSelf('lcard', {
-      'GET /widget/v1/leads/555/panel': panel,
-      'GET /widget/v1/llm/models': (_d?: string, u?: URL) => ({ provider: u?.searchParams.get('provider'), models: [model(u?.searchParams.get('provider') === 'openai' ? 'gpt-5' : 'claude-sonnet-5', u?.searchParams.get('provider') ?? '')], fetchedAt: null, fromCache: false, source: 'api', noKey: false }),
-      'PUT /widget/v1/leads/555/llm': { ok: true },
-      'POST /widget/v1/leads/555/files/11/analyze': { id: 4, kind: 'photo', data: { kind: 'photo', title: 'Фото двери', summary: 'Дверь белая.', customer_type: 'b2c', openings: [], positions: [], requirements: [], questions: [], photo: { subject: 'дверь', door_type: null, color: 'белый', style: null, note: null } }, matches: [], kit: null, note: '', noted: true, ocr: null, piiRemoved: 0, costRub: 1 },
-    });
-    const cb = createCallbacks(self, 'https://ai.test.ru');
-    await act(async () => void cb.render!());
-    await flush();
-    const t = (document.body.textContent ?? '').replace(/\s/g, ' ');
-    const order = ['AI-агент', 'Полуавтоматический', 'Claude · claude-sonnet-5', '12,4 ₽ по сделке', 'Черновики на одобрение (1)', 'Ницца 2 эмаль', 'Найденные товары (4)', 'Ницца 2', '14 900 ₽', 'в наличии', 'Ещё 1', 'Расчёт', '58 700 ₽', 'В примечание', 'Файлы клиента (2)', 'замер.pdf', 'разобран: Замерный лист', 'фото.jpg', 'не разобран', 'Задачи AI (1)', 'Замер в субботу', 'Резюме диалога', 'Потребность: 3 двери.', 'Журнал AI', 'Возврат AI', 'claude-sonnet-5'];
+  const dialog = {
+    leadId: 555,
+    items: [
+      { id: 'w-1', at: '2026-10-02T09:00:00Z', who: 'client', channel: 'whatsapp', channelLabel: 'WhatsApp', text: 'Интересует Валенсия ПГ' },
+      { id: 'd-2', at: '2026-10-02T09:01:00Z', who: 'agent', channel: 'whatsapp', channelLabel: 'WhatsApp', text: 'Валенсия ПГ — 12 900 ₽', provider: 'openai', model: 'gpt-5.5' },
+      { id: 'w-3', at: '2026-10-02T09:05:00Z', who: 'manager', channel: 'whatsapp', channelLabel: 'WhatsApp', text: 'Юрист по рамкам свяжется с вами', managerName: 'Анна Петрова' },
+      { id: 's-1', at: '2026-10-02T09:06:00Z', who: 'hint', channel: null, channelLabel: null, text: 'Добрый день! Дверь Ницца 2 эмаль…', notSent: true, suggestionId: 1 },
+    ],
+    send: { available: true, channel: 'whatsapp', channelLabel: 'WhatsApp', reason: null },
+  };
+  const inOrder = (text: string, order: string[]) => {
+    const t = text.replace(/\s/g, ' ');
     let pos = -1;
     for (const x of order) {
       const i = t.indexOf(x, pos + 1);
       expect(i, `«${x}» после позиции ${pos}`).toBeGreaterThan(pos);
       pos = i;
     }
+  };
+
+  it('узкая колонка — режим, модель, расход, счётчики, кнопки; окно — шапка, вкладки, правая панель; смена модели и режима, «Разобрать», Esc', async () => {
+    const { self, calls } = fakeSelf('lcard', {
+      'GET /widget/v1/leads/555/panel': panel,
+      'GET /widget/v1/leads/555/dialog': dialog,
+      'GET /widget/v1/llm/models': (_d?: string, u?: URL) => ({ provider: u?.searchParams.get('provider'), models: [model(u?.searchParams.get('provider') === 'openai' ? 'gpt-5' : 'claude-sonnet-5', u?.searchParams.get('provider') ?? '')], fetchedAt: null, fromCache: false, source: 'api', noKey: false }),
+      'PUT /widget/v1/leads/555/llm': { ok: true },
+      'PUT /widget/v1/settings/mode': (d?: string) => JSON.parse(d ?? '{}'),
+      'POST /widget/v1/leads/555/files/11/analyze': { id: 4, kind: 'photo', data: { kind: 'photo', title: 'Фото двери', summary: 'Дверь белая.', customer_type: 'b2c', openings: [], positions: [], requirements: [], questions: [], photo: { subject: 'дверь', door_type: null, color: 'белый', style: null, note: null } }, matches: [], kit: null, note: '', noted: true, ocr: null, piiRemoved: 0, costRub: 1 },
+    });
+    const cb = createCallbacks(self, 'https://ai.test.ru');
+    await act(async () => void cb.render!());
+    await flush();
+    const narrow = document.querySelector('.ai-door-root')!.textContent ?? '';
+    inOrder(narrow, ['AI-агент', 'Полуавтоматический', 'Claude · claude-sonnet-5', '12,4 ₽ по сделке', 'Задач AI 1 · Файлов 2 · Товаров 4', 'Черновик на одобрение (1)', 'Пауза', 'Развернуть ⤢']);
+    for (const gone of ['Ницца 2', 'Резюме диалога', 'Журнал AI', 'замер.pdf']) expect(narrow).not.toContain(gone);
     expect(document.querySelector('img[src$="/images/logo_min.png"]')).not.toBeNull();
     expect(document.querySelector('a[href$="/settings/widgets/ai_door/"]')).not.toBeNull();
 
-    // Смена модели для этой сделки.
-    await click('Claude · claude-sonnet-5 ▾');
+    await click('Развернуть ⤢');
+    await flush();
+    const modal = () => document.querySelector('.ai-door-modal')?.textContent ?? '';
+    inOrder(modal(), ['Агент розница · сделка 555', 'Claude · claude-sonnet-5', '12,4 ₽ по сделке', 'Задач AI 1', 'Пауза', 'Диалог', 'Товары и расчёт', 'Файлы клиента (2)', 'Задачи AI (1)', 'Журнал',
+      'Клиент · WhatsApp', 'Интересует Валенсия ПГ', 'Агент · ChatGPT · gpt-5.5', 'Менеджер · Анна Петрова', 'Юрист по рамкам', 'Черновик ответа · не отправлен',
+      'Найденные товары (4)', 'Ницца 2', '14 900 ₽', 'в наличии', 'Ещё 1', 'Расчёт', '58 700 ₽', 'Резюме диалога', 'Потребность: 3 двери.', 'Задачи AI (1)', 'Замер в субботу']);
+    expect(document.querySelector<HTMLTextAreaElement>('.ai-door-composer textarea')?.placeholder).toBe('Ответ клиенту от менеджера или правка подсказки…');
+    // Режим — выпадающий список администратора: Автоматический / Полуавтоматический / Выключен.
+    const mode = document.querySelector<HTMLSelectElement>('select[aria-label="Режим агента"]')!;
+    expect([...mode.options].map((o) => o.textContent)).toEqual(['Автоматический', 'Полуавтоматический', 'Выключен']);
+    expect(mode.value).toBe('semi');
+    await choose(mode, 'auto');
+    await flush();
+    expect(JSON.parse(calls.find((c) => c.method === 'PUT' && c.url.endsWith('/settings/mode'))!.data!)).toEqual({ mode: 'auto' });
+
+    // Смена модели для этой сделки — из шапки окна.
+    await click('Claude · claude-sonnet-5 ▾', 1);
     await flush();
     const picker = [...document.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.value === 'openai:gpt-5'))!;
     await choose(picker, 'openai:gpt-5');
     await flush();
     expect(JSON.parse(calls.find((c) => c.method === 'PUT' && c.url.endsWith('/leads/555/llm'))!.data!)).toEqual({ model: { provider: 'openai', model: 'gpt-5' } });
 
-    // «Разобрать» у файла из чата.
+    // «Файлы клиента»: «Разобрать» у файла из чата.
+    await click('Файлы клиента (2)');
+    inOrder(modal(), ['замер.pdf', 'разобран: Замерный лист', 'фото.jpg', 'не разобран']);
     await click('Разобрать');
     await flush();
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/files/11/analyze'))).toBe(true);
-    expect(document.body.textContent).toContain('Фото: дверь, белый');
+    expect(modal()).toContain('Фото: дверь, белый');
 
-    // Сворачивание блока запоминается.
-    await click('Найденные товары (4) ▾');
-    expect(document.body.textContent).not.toContain('Ницца 3');
-    expect(JSON.parse(localStorage.getItem('ai-door-panel-collapsed') ?? '{}')).toEqual({ products: true });
+    await click('Журнал');
+    inOrder(modal(), ['Журнал AI', 'Весь журнал', 'Возврат AI', 'claude-sonnet-5']);
+
+    // Esc закрывает окно.
+    await act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
+    expect(document.querySelector('.ai-door-modal')).toBeNull();
     await act(async () => void cb.destroy!());
   });
 
@@ -303,6 +341,12 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     expect(document.body.textContent).not.toContain('по сделке');
     expect(document.querySelector('select')).toBeNull();
     expect(calls.some((c) => c.method === 'PUT' && c.url.endsWith('/leads/555/llm'))).toBe(false);
+    // В окне режим — подпись, без выпадающего списка; модели и расхода тоже нет.
+    await click('Развернуть ⤢');
+    await flush();
+    expect(document.querySelector('.ai-door-modal')?.textContent).toContain('Полуавтоматический');
+    expect(document.querySelector('.ai-door-modal select')).toBeNull();
+    expect(document.querySelector('.ai-door-modal')?.textContent).not.toContain('по сделке');
     await act(async () => void cb.destroy!());
   });
 
@@ -310,20 +354,24 @@ describe('панель сделки 1.1.0 (раздел 11 ТЗ)', () => {
     let fail = true;
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': () => {
-        if (fail) throw { status: 0 };
+        if (fail) throw { status: 0, statusText: 'timeout' };
         return { ...panel(), health: { llmConfigured: false, dailyLimitExhausted: false, lastError: null } };
       },
+      'POST /widget/v1/client-errors': { ok: true },
       'GET /widget/v1/llm/models': { provider: 'anthropic', models: [], fetchedAt: null, fromCache: false, source: 'tariff', noKey: true },
     });
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
-    expect(document.body.textContent).toContain('Сервер AI-агента недоступен');
+    // Автоповтор (п. 4): три попытки, затем ошибка с причиной; сбой — в журнал API.
+    expect(document.body.textContent).toContain('Сервер AI-агента недоступен (таймаут, после повторов).');
     expect(document.body.textContent).toContain('Повторить');
+    expect(calls.filter((c) => c.url.endsWith('/panel'))).toHaveLength(3);
+    expect(JSON.parse(calls.find((c) => c.url.endsWith('/client-errors'))!.data!)).toEqual({ method: 'GET', path: '/widget/v1/leads/555/panel', reason: 'таймаут', status: null, attempts: 3, recovered: false, leadId: 555 });
     fail = false;
     await click('Повторить');
     await flush();
-    expect(calls.filter((c) => c.url.endsWith('/panel'))).toHaveLength(2);
+    expect(calls.filter((c) => c.url.endsWith('/panel'))).toHaveLength(4);
     expect(document.body.textContent).toContain('Ключ провайдера не задан или недействителен');
     const dot = document.querySelector<HTMLElement>('.ai-door-dot')!;
     expect(dot.style.background).toMatch(/rgb\(208, 52, 44\)|#d0342c/);

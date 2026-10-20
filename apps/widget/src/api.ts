@@ -339,6 +339,51 @@ export interface WazzupDumpInfo {
   createdAt: string; finishedAt: string | null;
 }
 
+/** Лента переписки по сделке для окна виджета (RETAIL-WIDGET-WINDOW). */
+export interface DialogItem {
+  id: string;
+  at: string;
+  who: 'client' | 'agent' | 'manager' | 'hint' | 'system';
+  channel: string | null;
+  channelLabel: string | null;
+  text: string;
+  provider?: string | null;
+  model?: string | null;
+  managerName?: string | null;
+  notSent?: boolean;
+  suggestionId?: number;
+}
+
+export interface LeadDialog {
+  leadId: number;
+  items: DialogItem[];
+  /** Можно ли ответить клиенту из окна: да — в чат Wazzup (канал); нет — причина, запасной вариант «Скопировать / Открыть чат». */
+  send: { available: true; channel: string; channelLabel: string; reason: null } | { available: false; reason: string };
+}
+
+/**
+ * Автоповтор запросов (RETAIL-WIDGET-WINDOW, п. 4): нет ответа, таймаут, 408 / 429 / 5xx — ещё две попытки с паузой, затем
+ * ошибка с причиной. Сбой и «повтор помог» уходят в журнал API (POST /client-errors, без повтора). Тесты обнуляют паузы.
+ */
+export const RETRY = { delaysMs: [1000, 2000], timeoutMs: 30_000 };
+const CLIENT_ERRORS = '/widget/v1/client-errors';
+
+/** Причина сбоя запроса словами: «таймаут», «нет соединения», «401», «HTTP 502». */
+export function failureReason(err: unknown): string {
+  const e = err as { status?: number; statusText?: string } | null;
+  if (e?.statusText === 'timeout') return 'таймаут';
+  const status = e?.status ?? 0;
+  if (!status) return 'нет соединения';
+  return status === 401 ? '401' : `HTTP ${status}`;
+}
+
+/** Повторяется только ответ сети (jqXHR со status): 0 — нет ответа или таймаут, 408, 429, 5xx. Исключение в коде — не повторяется. */
+const retryable = (err: unknown) => {
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === 'number' && (status === 0 || status === 408 || status === 429 || status >= 500);
+};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export class WidgetApi {
   constructor(
     private readonly self: AmoWidgetSelf,
@@ -447,14 +492,49 @@ export class WidgetApi {
   wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
   testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.self.$authorizedAjax({
+  /** Окно виджета: лента переписки, ответ клиенту (только по кнопке), режим агента (администратор). */
+  leadDialog = (leadId: number) => this.call<LeadDialog>('GET', `/widget/v1/leads/${leadId}/dialog`);
+  sendReply = (leadId: number, text: string) => this.call<{ ok: true; channel: string; channelLabel: string; userName: string; at: string }>('POST', `/widget/v1/leads/${leadId}/send`, { text });
+  setMode = (mode: Mode) => this.call<{ mode: Mode; version?: number }>('PUT', '/widget/v1/settings/mode', { mode });
+
+  private request(method: string, path: string, body?: unknown) {
+    return this.self.$authorizedAjax({
       url: new URL(path, this.baseUrl).toString(),
       method,
       type: method,
       dataType: 'json',
+      timeout: RETRY.timeoutMs,
       ...(body === undefined ? {} : { data: JSON.stringify(body), contentType: 'application/json' }),
     });
-    return res as T;
+  }
+
+  /** Сбой загрузки — в журнал API; сам отчёт не повторяется и ошибок не показывает. */
+  private report(e: { method: string; path: string; reason: string; status: number | null; attempts: number; recovered: boolean }) {
+    const leadId = Number(/\/leads\/(\d+)/.exec(e.path)?.[1] ?? 0) || null;
+    void Promise.resolve(this.request('POST', CLIENT_ERRORS, { ...e, leadId })).catch(() => undefined);
+  }
+
+  /**
+   * Запрос с автоповтором (п. 4): чтение (GET) и идемпотентная запись (PUT). POST не повторяется — повтор мог бы
+   * выполнить действие дважды (одобрение черновика, отправка ответа клиенту). Ошибка — исходная (status, responseJSON) с полем reason.
+   */
+  private async call<T>(method: string, path: string, body?: unknown, retry = method === 'GET' || method === 'PUT'): Promise<T> {
+    let first: string | null = null;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const res = await this.request(method, path, body);
+        if (attempt > 0 && first) this.report({ method, path, reason: first, status: null, attempts: attempt + 1, recovered: true });
+        return res as T;
+      } catch (err) {
+        const reason = failureReason(err);
+        if (err && typeof err === 'object' && typeof (err as { status?: unknown }).status === 'number') Object.assign(err, { reason, attempts: attempt + 1 });
+        if (!retry || !retryable(err) || attempt >= RETRY.delaysMs.length || path === CLIENT_ERRORS) {
+          if (retry && retryable(err) && path !== CLIENT_ERRORS) this.report({ method, path, reason, status: (err as { status?: number } | null)?.status || null, attempts: attempt + 1, recovered: false });
+          throw err;
+        }
+        first ??= reason;
+        await sleep(RETRY.delaysMs[attempt] ?? 0);
+      }
+    }
   }
 }

@@ -2,6 +2,8 @@ import type { Db } from './pool.ts';
 
 export type JournalKind =
   | 'reply'
+  /** RETAIL-WIDGET-WINDOW: ответ менеджера клиенту из окна виджета (кто, канал, текст). */
+  | 'manager_send'
   | 'handoff'
   | 'pause'
   | 'resume'

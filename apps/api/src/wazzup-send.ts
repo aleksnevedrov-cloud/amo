@@ -7,6 +7,8 @@ export interface WazzupOutgoing {
   chatId: string;
   chatType: string;
   text: string;
+  /** Пользователь amo, от имени которого уходит сообщение (ответ менеджера из окна виджета); у ответов в группы — нет. */
+  crmUserId?: string;
 }
 
 /**
@@ -28,6 +30,7 @@ export async function sendWazzupMessage(
       chatId: msg.chatId,
       chatType: msg.chatType,
       text: msg.text.slice(0, 4000),
+      ...(msg.crmUserId ? { crmUserId: msg.crmUserId } : {}),
     }),
     signal: AbortSignal.timeout(20_000),
   });

@@ -55,10 +55,17 @@ beforeEach(() => {
 });
 
 describe('панель сделки: черновики, подсказки, расчёт', () => {
-  it('черновик можно поправить и отправить', async () => {
+  const dialogOf = (hints: { id: number; text: string }[]) => ({
+    leadId: 555,
+    items: hints.map((h) => ({ id: `s-${h.id}`, at: '2026-09-24T10:00:00Z', who: 'hint', channel: null, channelLabel: null, text: h.text, notSent: true, suggestionId: h.id })),
+    send: { available: false, reason: 'Wazzup не подключён — ответ из окна недоступен; скопируйте текст и отправьте в чате amo' },
+  });
+
+  it('черновик: «В поле», правка, «Одобрить черновик» — уходит ботом-отправщиком с правкой', async () => {
     let hints = [suggestion(1, 'draft', 'Здравствуйте!')];
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': () => panel(hints),
+      'GET /widget/v1/leads/555/dialog': () => dialogOf(hints),
       'POST /widget/v1/suggestions/1/approve': () => {
         hints = [];
         return { ok: true };
@@ -67,35 +74,55 @@ describe('панель сделки: черновики, подсказки, р�
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
-    expect(document.body.textContent).toContain('Черновик ответа');
-    expect(document.body.textContent).toContain('Порта 21 80*200');
-    expect(document.body.textContent).toContain('15');
+    await click('Черновик на одобрение (1) →');
+    await flush();
+    const modal = () => (document.querySelector('.ai-door-modal')?.textContent ?? '').replace(/\s/g, ' ');
+    expect(modal()).toContain('Черновик ответа · не отправлен');
+    expect(modal()).toContain('Итого: 15 800 ₽');
+    await click('Товары и расчёт');
+    expect(modal()).toContain('Порта 21 80*200');
+    await click('Диалог');
+    await flush();
 
-    const ta = document.querySelector<HTMLTextAreaElement>('textarea')!;
+    await click('В поле');
+    const ta = document.querySelector<HTMLTextAreaElement>('.ai-door-composer textarea')!;
+    expect(ta.value).toBe('Здравствуйте!');
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(ta, 'Здравствуйте! Чем помочь?');
       ta.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await click('Отправить');
+    await click('Одобрить черновик');
     await flush();
     const approve = calls.find((c) => c.url.endsWith('/approve'));
     expect(JSON.parse(approve!.data!)).toEqual({ text: 'Здравствуйте! Чем помочь?' });
-    expect(document.body.textContent).not.toContain('Черновик ответа');
+    expect(modal()).not.toContain('Черновик ответа');
+    await act(async () => void cb.destroy!());
   });
 
-  it('подсказка вставляется в поле чата', async () => {
+  it('подсказка: «В поле» → «Открыть чат» вставляет её в поле чата amo и закрывает окно', async () => {
     document.body.innerHTML = '<div class="feed-compose"><div contenteditable="true"></div></div>';
+    const hints = [suggestion(2, 'hint', 'Предложите Турин 1')];
     const { self, calls } = fakeSelf('lcard', {
-      'GET /widget/v1/leads/555/panel': () => panel([suggestion(2, 'hint', 'Предложите Турин 1')]),
+      'GET /widget/v1/leads/555/panel': () => panel(hints),
+      'GET /widget/v1/leads/555/dialog': () => dialogOf(hints),
       'POST /widget/v1/suggestions/2/used': { ok: true },
     });
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
-    await click('Вставить в чат');
+    await click('Развернуть ⤢');
+    await flush();
+    expect(document.querySelector('.ai-door-modal')?.textContent).toContain('Подсказка менеджеру · не отправлена');
+    // Отправить из окна нельзя (нет Wazzup) — причина и запасной вариант.
+    expect([...document.querySelectorAll('button')].some((b) => b.textContent === 'Отправить')).toBe(false);
+    expect(document.querySelector('.ai-door-modal')?.textContent).toContain('Wazzup не подключён');
+    await click('В поле');
+    await click('Открыть чат');
     await flush();
     expect(document.querySelector<HTMLElement>('.feed-compose [contenteditable]')!.innerText).toBe('Предложите Турин 1');
     expect(calls.some((c) => c.url.endsWith('/suggestions/2/used'))).toBe(true);
+    expect(document.querySelector('.ai-door-modal')).toBeNull();
+    await act(async () => void cb.destroy!());
   });
 });
 

@@ -47,5 +47,6 @@ const KIND_LABEL: Record<string, string> = {
   summary: 'Резюме',
   task: 'Задача',
   document: 'Разбор файла',
+  manager_send: 'Ответ менеджера',
 };
 export const kindLabel = (k: string) => KIND_LABEL[k] ?? k;

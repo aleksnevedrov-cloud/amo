@@ -17,6 +17,8 @@ export interface AmoWidgetSelf {
     data?: string;
     contentType?: string;
     dataType?: string;
+    /** Таймаут запроса, мс (jQuery.ajax): без ответа — ошибка statusText «timeout». */
+    timeout?: number;
   }): PromiseLike<unknown>;
 }
 

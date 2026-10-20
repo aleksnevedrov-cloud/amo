@@ -23,6 +23,13 @@ function fakeSelf(area: string, responses: Record<string, unknown | ((data?: str
   return { self, calls };
 }
 const flush = () => act(async () => new Promise((r) => setTimeout(r, 20)));
+/** Файлы клиента — вкладка большого окна (RETAIL-WIDGET-WINDOW): «Развернуть ⤢» → «Файлы клиента (N)». */
+const openFiles = async () => {
+  const button = (start: string) => [...document.querySelectorAll('button')].find((x) => x.textContent?.trim().startsWith(start));
+  await act(async () => button('Развернуть')!.click());
+  await flush();
+  await act(async () => button('Файлы клиента')!.click());
+};
 
 const panel = {
   leadId: 555,
@@ -76,6 +83,7 @@ describe('панель сделки: файлы клиента', () => {
     let listed: unknown[] = [];
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': panel,
+      'GET /widget/v1/leads/555/dialog': { leadId: 555, items: [], send: { available: false, reason: 'нет чата' } },
       'GET /widget/v1/leads/555/documents': () => ({ items: listed }),
       'POST /widget/v1/leads/555/documents': () => {
         listed = [{ id: 1, filename: 'замер.jpg', kind: 'measurement', source: 'widget', title: 'Замерный лист', summary: 'Два проёма.', openings: 2, positions: 0, createdAt: '2026-09-25T10:00:00Z' }];
@@ -85,6 +93,7 @@ describe('панель сделки: файлы клиента', () => {
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
+    await openFiles();
     expect(document.body.textContent).toContain('Разобрать файл');
 
     const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -112,6 +121,7 @@ describe('панель сделки: файлы клиента', () => {
   it('ошибка сервера показывается менеджеру', async () => {
     const { self } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': panel,
+      'GET /widget/v1/leads/555/dialog': { leadId: 555, items: [], send: { available: false, reason: 'нет чата' } },
       'GET /widget/v1/leads/555/documents': { items: [] },
       'POST /widget/v1/leads/555/documents': () => {
         throw { responseJSON: { message: 'Формат не поддерживается: план.dwg' } };
@@ -120,6 +130,7 @@ describe('панель сделки: файлы клиента', () => {
     const cb = createCallbacks(self, 'https://ai.test.ru');
     await act(async () => void cb.render!());
     await flush();
+    await openFiles();
     const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
     Object.defineProperty(input, 'files', { value: [new File(['x'], 'план.dwg')] });
     await act(async () => void input.dispatchEvent(new Event('change', { bubbles: true })));

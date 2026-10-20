@@ -160,3 +160,52 @@
 .ai-door-skel { height: 11px; border-radius: 4px; background: #eef0f2; margin: 7px 0; }
 
 @keyframes ai-door-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/*
+ * Большое окно «Агент розница · сделка N» (RETAIL-WIDGET-WINDOW): слой поверх карточки amo, окно 88 % × 88 %,
+ * шапка, вкладки, слева содержимое вкладки, справа панель 360 px. Окно монтируется в body (portal),
+ * поэтому корень — тот же .ai-door-root с переменными, но без отступов колонки.
+ */
+.ai-door-root.ai-door-overlay {
+  position: fixed; inset: 0; z-index: 10000; margin: 0; padding: 0;
+  background: rgba(20, 28, 36, .45);
+  display: flex; align-items: center; justify-content: center;
+}
+.ai-door-modal {
+  position: relative; width: 88vw; height: 88vh;
+  background: #fff; border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.ai-door-modal-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 14px; border-bottom: 1px solid var(--ad-line); flex: none; }
+.ai-door-modal-title { font-size: 15px; font-weight: 700; white-space: nowrap; }
+.ai-door-modal-actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ai-door-modal-alert { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 6px 14px; background: #fff7f5; border-bottom: 1px solid var(--ad-line); flex: none; }
+.ai-door-select { height: 28px; padding: 0 6px; border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm); background: #fff; color: var(--ad-text); font: inherit; font-weight: 600; }
+.ai-door-tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--ad-line); flex: none; overflow-x: auto; }
+.ai-door-tab { padding: 9px 12px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ad-text); font: inherit; font-size: 13px; line-height: 1.3; cursor: pointer; white-space: nowrap; }
+.ai-door-tab[aria-selected='true'] { border-bottom-color: var(--ad-green); color: var(--ad-green-ink); font-weight: 600; }
+.ai-door-split { flex: 1; min-height: 0; display: flex; }
+.ai-door-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--ad-bg); }
+.ai-door-main-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.ai-door-side { width: 360px; flex: none; overflow: auto; padding: 12px; border-left: 1px solid var(--ad-line); background: var(--ad-bg); }
+.ai-door-dialog { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* Лента: клиент слева, агент и менеджер справа, неотправленная подсказка — жёлтая с пунктиром. */
+.ai-door-feed { display: flex; flex-direction: column; gap: 8px; }
+.ai-door-msg { max-width: 78%; padding: 8px 10px; border: 1px solid var(--ad-line); border-radius: 10px; background: #fff; overflow-wrap: anywhere; }
+.ai-door-msg-client { align-self: flex-start; }
+.ai-door-msg-agent { align-self: flex-end; background: #eef6fd; border-color: #cfe3f5; }
+.ai-door-msg-manager { align-self: flex-end; background: #edf9e4; border-color: #cfe9b8; }
+.ai-door-msg-hint { align-self: flex-end; background: #fff8db; border: 1px dashed #e2b93b; }
+.ai-door-msg-system { align-self: center; background: var(--ad-soft); }
+.ai-door-msg-meta { font-size: 11px; color: var(--ad-muted); margin-bottom: 3px; }
+.ai-door-composer { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--ad-line); background: #fff; }
+.ai-door-composer textarea { width: 100%; min-height: 64px; max-height: 30vh; resize: vertical; padding: 8px; border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm); font: inherit; color: var(--ad-text); }
+.ai-door-composer textarea:focus { outline: none; border-color: var(--ad-green); }
+
+.ai-door-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ai-door-btn-solid { background: var(--ad-green); border-color: var(--ad-green); color: #fff; }
+.ai-door-btn-solid:hover { background: #57ad00; border-color: #57ad00; }
+.ai-door-plain { display: block; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-family: inherit; }
+.ai-door-ok { color: var(--ad-green-ink); font-size: 12px; }
+.ai-door-counters { font-size: 12px; }
