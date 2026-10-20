@@ -26,8 +26,8 @@ const draft = {
   source: { from: 'mailbox', mails: 1, letterAt: '2026-10-13T08:06:00Z', attachments: ['photo.jpg'], documents: [501], skipped: [], mail: { status: 'found', searchedFrom: 'stoptpostavka@yandex.ru', from: 'stoptpostavka@yandex.ru', fromName: null, subject: 'Запрос', date: '2026-10-13T08:06:00Z', folder: 'INBOX', matchedBy: 'address', attachments: 1, taken: ['photo.jpg'], uploaded: ['photo.jpg'], skipped: [], files: [{ name: 'photo.jpg', size: 1_300_000, inline: false, status: 'uploaded', reason: null }], error: null, retryAt: null, diag: null } },
 };
 
-/** Разметка блока после отрисовки React-ом в jsdom; open — с окном КП («Развернуть ⤢», окно — порталом в body). */
-async function renderBlock(open = false): Promise<string> {
+/** Разметка блока после отрисовки React-ом в jsdom; open — с окном КП («Развернуть ⤢», окно — порталом в body); send — и с окном письма. */
+async function renderBlock(open = false, send = false): Promise<string> {
   document.body.innerHTML = '';
   window.APP = { data: { current_card: { id: 30013995 } } };
   const self: AmoWidgetSelf = {
@@ -35,12 +35,21 @@ async function renderBlock(open = false): Promise<string> {
     system: () => ({ area: 'lcard' }),
     i18n: () => '',
     render_template: ({ render }) => document.body.insertAdjacentHTML('beforeend', render),
-    $authorizedAjax: async (opts) => (opts.url.includes('/kp/research') ? { draftId: 17, pending: false, positions: [{ requestIndex: 0, job: null, research: null }] } : { draft, job: null }),
+    $authorizedAjax: async (opts) =>
+      opts.url.includes('/kp/research')
+        ? { draftId: 17, pending: false, positions: [{ requestIndex: 0, job: null, research: null }] }
+        : opts.url.includes('/kp/send/preview')
+          ? { to: 'stoptpostavka@yandex.ru', cc: '', subject: 'Коммерческое предложение КП-2026-13', text: 'Здравствуйте!', signature: '', attachment: { name: 'KP-КП-2026-13.pdf', bytes: 120_000 }, blockers: [], warnings: [], alreadySent: false }
+          : { draft: send ? { ...draft, status: 'built', kpNo: 'КП-2026-13', hasPdf: true, hasDocx: true, items: [{ ...draft.items[0], price: 23_900 }] } : draft, job: null },
   };
   const cbs = createCallbacks(self, 'https://opt.test.ru');
   await act(async () => cbs.render!());
   await act(async () => new Promise((r) => setTimeout(r, 20)));
   if (open) await act(async () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Развернуть ⤢')!.click());
+  if (send) {
+    await act(async () => ([...document.querySelectorAll('.opt-kp-modal button')].find((b) => b.textContent === 'Отправить клиенту') as HTMLButtonElement).click());
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+  }
   return document.body.innerHTML;
 }
 
@@ -97,6 +106,14 @@ const WINDOW = `
     footer: Math.round(document.querySelector('.opt-kp-modal-foot').getBoundingClientRect().bottom),
   };`;
 
+const SEND = `
+  const btn = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Проверено, отправить');
+  const r = btn.getBoundingClientRect();
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const layer = document.querySelector('.opt-kp-send-layer').getBoundingClientRect();
+  const m = document.querySelector('.opt-kp-modal').getBoundingClientRect();
+  return { onTop: top === btn || btn.contains(top), visible: r.width > 0 && r.top >= 0 && r.bottom <= window.innerHeight, insideModal: layer.left >= m.left - 1 && layer.right <= m.right + 1 };`;
+
 describe('раскладка блока в колонке amoCRM (KP-AGENT-V2, п. 6а)', () => {
   it('узкая колонка — сводка без таблицы и полей: «цена не задана» не показывается, «Развернуть ⤢» и «Собрать документ»', async () => {
     const html = await renderBlock();
@@ -134,5 +151,12 @@ describe('раскладка блока в колонке amoCRM (KP-AGENT-V2, �
       expect(m.tabs, `${win.w}: вкладки`).toEqual([1, 1, 1, 1, 1]);
       expect(m.footer, `${win.w}: итог внутри окна`).toBeLessThanOrEqual(m.modal.top + m.modal.h + 1);
     }
+  }, 60_000);
+
+  it.skipIf(!hasChrome)('«Отправить клиенту» из окна КП: окно письма поверх окна на 88 %, кнопка «Проверено, отправить» видна и нажимается (не перекрыта)', async () => {
+    const html = await renderBlock(true, true);
+    expect(html).toContain('Проверено, отправить');
+    const m = measure<{ onTop: boolean; visible: boolean; insideModal: boolean }>(html, 340, SEND, { w: 1440, h: 900 });
+    expect(m).toEqual({ onTop: true, visible: true, insideModal: true });
   }, 60_000);
 });

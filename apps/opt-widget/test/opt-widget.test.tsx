@@ -602,7 +602,16 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(clicked).toEqual(['KP-КП-2026-1.pdf ← https://opt.test.ru/kp/file?draftId=7&kind=pdf&t=abc']);
     await clickIn('Отправить клиенту');
     await flush();
-    expect(document.body.textContent).toContain('Вложение: KP-КП-2026-1.pdf (117 КБ)');
+    // Окно письма — слоем внутри окна КП (а не в колонке amoCRM под ним); Esc закрывает только письмо.
+    const layer = () => document.querySelector('.opt-kp-modal .opt-kp-send-layer');
+    expect(layer()?.textContent).toContain('Письмо с КП');
+    expect(document.querySelector('.opt-kp-narrow')?.textContent).not.toContain('Письмо с КП');
+    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
+    expect(layer()).toBeNull();
+    expect(modal()).not.toBeNull();
+    await clickIn('Отправить клиенту');
+    await flush();
+    expect(layer()?.textContent).toContain('Вложение: KP-КП-2026-1.pdf (117 КБ)');
     expect(sent).toHaveLength(0);
     // Адрес правится в окне; кривой адрес блокирует кнопку.
     const to = [...document.querySelectorAll('input')].find((i) => i.value === 'ivanov@romashka.ru')!;

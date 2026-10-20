@@ -394,3 +394,10 @@
 .opt-kp .opt-kp-q-sources { margin: 2px 0 0; padding-left: 16px; }
 .opt-kp .opt-kp-q-client-text { width: 100%; min-height: 54px; font: inherit; font-size: 12px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); padding: 4px 6px; }
 .opt-kp .opt-kp-letter { background: var(--kp-soft); border-radius: var(--kp-radius-sm); padding: 8px 10px; max-height: 320px; overflow: auto; }
+
+/* Окно письма «Отправить клиенту» — слоем поверх содержимого окна КП (раньше оказывалось под ним, в колонке amoCRM). */
+.opt-kp .opt-kp-modal { position: relative; }
+.opt-kp .opt-kp-send-layer { position: absolute; inset: 0; z-index: 5; background: rgba(20, 28, 36, .35); display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 24px 16px; }
+.opt-kp .opt-kp-send { width: min(640px, 100%); border-radius: var(--kp-radius); box-shadow: 0 12px 40px rgba(0, 0, 0, .25); background: #fff; }
+.opt-kp .opt-kp-send .opt-card { margin: 0; padding: 14px 16px; gap: 8px; }
+.opt-kp .opt-kp-send input, .opt-kp .opt-kp-send textarea { width: 100%; padding: 4px 8px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); font: inherit; font-size: 12px; }

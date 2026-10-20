@@ -275,6 +275,17 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
     }
   };
   const kpStatus = STATUS[draft.status] ?? draft.status;
+  const sendPreview = (
+    <SendPreview
+      api={api}
+      draft={draft}
+      onClose={() => setPreview(false)}
+      onSent={(d) => {
+        setPreview(false);
+        take(d);
+      }}
+    />
+  );
   const downloads = (draft.status === 'built' || draft.status === 'sent') && (draft.hasPdf || draft.hasDocx) && (
     <span className="opt-kp-downloads">
       {draft.hasPdf && (
@@ -331,20 +342,13 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           onBuild={build}
           onSend={() => setPreview(true)}
           onClose={() => setOpen(false)}
+          // Окно письма — слоем поверх окна КП: отдельно (в колонке amoCRM) его закрывало окно на 88 %, «Отправить» было не нажать.
+          sendLayer={preview ? sendPreview : null}
+          onSendClose={() => setPreview(false)}
         />
       )}
 
-      {preview && (
-        <SendPreview
-          api={api}
-          draft={draft}
-          onClose={() => setPreview(false)}
-          onSent={(d) => {
-            setPreview(false);
-            take(d);
-          }}
-        />
-      )}
+      {preview && !open && sendPreview}
     </div>
   );
 }
@@ -358,15 +362,23 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number][0];
 
-/** Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть. */
-function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onBuild, onSend, onClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onBuild: () => void; onSend: () => void; onClose: () => void }) {
+/**
+ * Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть.
+ * sendLayer — окно письма «Отправить клиенту» слоем поверх содержимого окна; Esc при нём закрывает только письмо.
+ */
+function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onBuild, onSend, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onBuild: () => void; onSend: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
   const { draft, lines, dirty, busy, error, pending, act, edit, research, researching, progress, findPrices } = k;
   const [tab, setTab] = useState<Tab>('lines');
+  const sending = Boolean(sendLayer);
   useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (sending) onSendClose?.();
+      else onClose();
+    };
     document.addEventListener('keydown', esc);
     return () => document.removeEventListener('keydown', esc);
-  }, [onClose]);
+  }, [onClose, onSendClose, sending]);
   if (!draft) return null;
   const locked = draft.status !== 'draft' || busy || pending || dirty;
   const survey = draft.survey ?? [];
@@ -439,6 +451,11 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           <span className="opt-kp-sub">Срок действия цены: {draft.priceValidity ?? 'не задан — вопрос в опроснике'}</span>
           {why && <span className="opt-kp-why">Документ не собирается: {why}</span>}
         </div>
+        {sendLayer && (
+          <div className="opt-kp-send-layer" role="dialog" aria-modal="true" aria-label="Письмо с КП">
+            <div className="opt-kp-send">{sendLayer}</div>
+          </div>
+        )}
       </div>
     </div>,
     document.body,
