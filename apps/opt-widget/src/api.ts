@@ -172,6 +172,9 @@ export interface KpDraftLine {
   gostDesignation?: string | null;
   web?: KpLineWebInfo | null;
   excluded?: boolean;
+  /** KP-LETTER-SCOPE: марка проекта и требования письма к позиции. */
+  mark?: string | null;
+  letterSpec?: string | null;
   /** Вопрос «К какой двери считать …?» со списком дверей заявки; пока он есть — без цены, документ не собирается. */
   question?: { kind: 'component_door'; text: string; reason: 'many' | 'none'; group?: string; groupTitle?: string; options: { requestIndex: number; productId: string | null; model: string; size: string; qty: number }[] } | null;
 }
@@ -252,6 +255,9 @@ export interface KpDraftInfo {
   delivery?: { mode: 'delivery' | 'pickup'; address: string | null; sum: number | null } | null;
   priceValidity?: string | null;
   vatRate?: number;
+  /** KP-LETTER-SCOPE: письмо задаёт объём — сколько позиций в КП из скольких в проекте; остальные строки проекта. */
+  scope?: { by: 'marks' | 'numbers'; selected: number; project: number; missing: string[] } | null;
+  projectRest?: { raw: string; name: string; width_mm: number | null; height_mm: number | null; qty: number; mark?: string | null; sourceFiles?: string[] }[];
   requirements?: string[];
   photos?: { name: string; requestIndex?: number | null; ignored?: boolean }[];
   letterText?: string | null;
@@ -528,6 +534,8 @@ export class KpApi extends ApiClient {
   buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[]; files?: { kind: 'docx' | 'pdf'; name: string; bytes: number }[] }>('POST', '/widget/v1/kp/build', { draftId });
   /** Подписанная ссылка на файл КП (10 минут): по ней браузер скачивает PDF/DOCX как вложение (RFD-AI-AGENT-OPT-KP-DOWNLOAD). */
   fileLink = (draftId: number, kind: 'pdf' | 'docx') => this.call<{ url: string; filename: string; expiresAt: string }>('GET', `/widget/v1/kp/file/link?draftId=${draftId}&kind=${kind}`);
+  /** «Добавить» из «Ещё в проекте» (KP-LETTER-SCOPE): строка проекта — позицией КП. */
+  addProjectItem = (draftId: number, index: number) => this.call<{ draft: KpDraftInfo | null; requestIndex: number }>('POST', `/widget/v1/kp/draft/${draftId}/project-item`, { index });
   /** Ответ на вопрос опросника (KP-AGENT-V2, п. 5): вариант, своя цена или поля. */
   answer = (draftId: number, body: KpAnswerBody) => this.call<{ draft: KpDraftInfo | null }>('POST', `/widget/v1/kp/draft/${draftId}/answer`, body);
   /** Цены: прайс → интернет по правилам → вопрос; все позиции без цены ('all') или явный список. */

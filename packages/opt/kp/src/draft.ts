@@ -3,6 +3,7 @@ import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
+import { letterScope, markOf, type DocItem } from './letter-select.ts';
 import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, profileOf, type DoorFeatures, type GostProfile, type PositionCategory } from '@opt/kb';
 
 /**
@@ -27,6 +28,10 @@ export interface KpRequestItem {
   features?: Partial<DoorFeatures> | null;
   /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ, приложенная к позиции («Раздел «15. Базовая комплектация»: …»). */
   tzEquipment?: string | null;
+  /** KP-LETTER-SCOPE: марка проекта в каноническом виде («ДНО1»), файлы, где она есть, требования письма к позиции. */
+  mark?: string | null;
+  sourceFiles?: string[];
+  letterSpec?: string | null;
   /** KP-AGENT-V2: остальные колонки строки спецификации («ГОСТ, ТУ: …; Технические характеристики: …») — для ГОСТ-профиля. */
   details?: string | null;
   /** П. 2.3: количества в заявке нет (матрица характеристик) — qty = 1 до ответа менеджера, вопрос в опросник. */
@@ -80,6 +85,10 @@ export interface KpLine {
   equipment?: string | null;
   /** KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента (Word-файл заявки) — в плитке и примечанием под позицией в КП. */
   tzEquipment?: string | null;
+  /** KP-LETTER-SCOPE: требования письма к позиции («каркас металлический, филёнка дуб / ламинация под дуб»). */
+  letterSpec?: string | null;
+  /** Марка проекта (ДНО-1, Д12) — по ней позиция связана со строками вложений. */
+  mark?: string | null;
   /** П. 2.3: количество в заявке не указано — «уточнить» (вопрос в опросник). */
   qtyUnknown?: boolean;
   /** KP-AGENT-V2, п. 3: ГОСТ-профиль двери (из текста позиции, дополненный выбранной строкой прайса). */
@@ -208,6 +217,13 @@ export interface KpPayload {
   photos?: { name: string; requestIndex?: number | null; ignored?: boolean }[];
   /** Текст письма заявки (п. 2.4) — во вкладке «Письмо и файлы» большого окна. */
   letterText?: string | null;
+  /**
+   * KP-LETTER-SCOPE: письмо задаёт объём (марки или номера позиций) — в позициях только названное, остальные строки проекта —
+   * «Ещё в проекте» (добавляются кнопкой); projectAdded — ключи добавленных менеджером (переносятся на «Собрать заново»).
+   */
+  scope?: { by: 'marks' | 'numbers'; selected: number; project: number; missing: string[] } | null;
+  projectRest?: KpRequestItem[];
+  projectAdded?: string[];
 }
 
 /** Итог чтения ящика для черновика и журнала (mail_fetch). */
@@ -357,9 +373,13 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
   // Работы и услуги — после товаров (XLSX-2, п. 3), внутри групп порядок как в файле; одинаковые названия не склеиваются (п. 4).
-  const fromDocs = files.parsed.flatMap((f) => f.positions).map(positionToRequest);
+  // KP-LETTER-SCOPE: одна марка в нескольких файлах проекта — одна позиция; письмо называет марки или номера — только они.
+  const docRows: DocItem[] = files.parsed.flatMap((f, file) => f.positions.map((p, i) => ({ item: { ...positionToRequest(p), sourceFiles: [f.filename] }, file, no: i + 1 })));
   const fromLetter = letter?.parsed.request_items ?? [];
-  const all = fromDocs.length ? fromDocs : fromLetter;
+  const scope = docRows.length ? letterScope(card.letter?.text ?? '', docRows) : null;
+  // Работы письма («доставка», «установка») при выборе по письму — тоже в позиции (после товаров).
+  const letterServices = scope?.by ? fromLetter.filter((it) => (it.category ?? categoryOf(`${it.name} | ${it.raw}`)) === 'service').map((it) => ({ ...it, category: 'service' as const, kind: 'service' as const })) : [];
+  const all = scope ? [...scope.selected, ...letterServices] : fromLetter;
   const requestItems = [...all.filter((it) => it.kind !== 'service'), ...all.filter((it) => it.kind === 'service')];
   const items = requestItems.map(toLine);
   const needs = items.map((l) => ({ request_index: l.request_index, reason: NO_PRICE }));
@@ -367,6 +387,11 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   for (const l of items) if (l.tzEquipment) needs.push({ request_index: l.request_index, reason: `комплектация по ТЗ: ${l.tzEquipment.slice(0, 120)}${l.tzEquipment.length > 120 ? '…' : ''} — сверьте с ценой` });
   if (!requestItems.length) {
     needs.push({ request_index: -1, reason: card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
+  }
+  if (scope?.by) {
+    const what = scope.by === 'marks' ? `марки ${scope.selected.map((it) => it.mark).filter(Boolean).join(', ')}` : 'номера позиций';
+    needs.push({ request_index: -1, reason: `письмо задаёт объём (${what}): в КП ${scope.selected.length} поз. из ${scope.selected.length + scope.rest.length} в проекте; остальные — «Ещё в проекте»` });
+    if (scope.missing.length) needs.push({ request_index: -1, reason: `в письме названы ${scope.missing.join(', ')}, во вложениях их нет — уточните у клиента` });
   }
   const client = letter?.parsed.client ?? { org: '', fio: '', email: '', phone: '' };
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
@@ -376,7 +401,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   if (mail.source?.status === 'found' && mail.source.matchedBy === 'domain') {
     needs.push({ request_index: -1, reason: `письмо найдено по домену ${mail.source.diag?.criteria.domain ?? ''}, не по адресу ${mail.source.searchedFrom} (папка ${mail.source.folder ?? '?'}, «${mail.source.subject}») — проверьте, что это та заявка; вложения в сделку не загружены` });
   }
-  const requirements = uniq([...files.parsed.flatMap((f) => f.requirements), ...extractRequirements([card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n'))]);
+  const requirements = uniq([...files.parsed.flatMap((f) => f.requirements), ...extractRequirements([card.letter?.text ?? '', ...requestItems.map((r) => r.raw)].join('\n')), ...(scope?.specs.all ?? [])]);
   // Аналог — только предложение менеджеру с критерием подбора; строка КП остаётся без цены и без замены.
   if (d.analogs) {
     for (const [i, it] of requestItems.entries()) {
@@ -417,6 +442,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
       requirements,
       ...(files.parsed.some((f) => f.photo) ? { photos: files.parsed.filter((f) => f.photo).map((f) => ({ name: f.filename })) } : {}),
       letterText: card.letter ? clip(card.letter.text, 20_000) : null,
+      ...(scope?.by ? { scope: { by: scope.by, selected: scope.selected.length, project: scope.selected.length + scope.rest.length, missing: scope.missing }, projectRest: scope.rest } : {}),
     },
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,
@@ -791,6 +817,7 @@ export function positionToRequest(p: OptPosition): KpRequestItem {
     ...(service ? { kind: 'service' as const } : {}),
     ...(p.tzEquipment ? { tzEquipment: p.tzEquipment } : {}),
     ...(p.note ? { details: p.note.slice(0, 1000) } : {}),
+    ...(!service && markOf(p) ? { mark: markOf(p) } : {}),
     ...(!service && !(p.qty && p.qty > 0) ? { qtyUnknown: true } : {}),
   };
 }
@@ -803,7 +830,46 @@ export const requestProfile = (it: Pick<KpRequestItem, 'name' | 'raw' | 'details
 
 function toLine(it: KpRequestItem, i: number): KpLine {
   const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
-  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(it.qtyUnknown ? { qtyUnknown: true } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
+  return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(it.qtyUnknown ? { qtyUnknown: true } : {}), ...(it.mark ? { mark: it.mark } : {}), ...(it.letterSpec ? { letterSpec: it.letterSpec } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
+}
+
+/** Ключ строки «Ещё в проекте»: марка, без неё — строка позиции. */
+export const projectKey = (it: KpRequestItem): string => it.mark ?? tidyName(it.raw).toLowerCase();
+
+/**
+ * KP-LETTER-SCOPE, п. 2: «добавить» из «Ещё в проекте» — строка проекта становится позицией (в конец, request_index — новый),
+ * с пометкой «цена не задана»; ключ запоминается, чтобы «Собрать заново» добавил её снова.
+ */
+export function addProjectItem(payload: Partial<KpPayload>, index: number): { payload: Partial<KpPayload>; requestIndex: number | null } {
+  const rest = [...(payload.projectRest ?? [])];
+  const it = rest[index];
+  if (!it) return { payload, requestIndex: null };
+  rest.splice(index, 1);
+  const requestItems = [...(payload.request_items ?? []), it];
+  const requestIndex = requestItems.length - 1;
+  const scope = payload.scope ? { ...payload.scope, selected: payload.scope.selected + 1 } : payload.scope;
+  return {
+    payload: {
+      ...payload,
+      request_items: requestItems,
+      items: [...(payload.items ?? []), toLine(it, requestIndex)],
+      needs_manager: [...(payload.needs_manager ?? []), { request_index: requestIndex, reason: NO_PRICE }],
+      projectRest: rest,
+      projectAdded: [...new Set([...(payload.projectAdded ?? []), projectKey(it)])],
+      ...(scope ? { scope } : {}),
+    },
+    requestIndex,
+  };
+}
+
+/** «Собрать заново»: добавленные менеджером строки проекта — снова в позиции (по марке или строке). */
+export function carryProjectAdds(fresh: Partial<KpPayload>, previous: Partial<KpPayload> | null): Partial<KpPayload> {
+  let out = fresh;
+  for (const key of previous?.projectAdded ?? []) {
+    const i = (out.projectRest ?? []).findIndex((it) => projectKey(it) === key);
+    if (i >= 0) out = addProjectItem(out, i).payload;
+  }
+  return out;
 }
 
 /** Профиль строки: из текста, размер — из колонок позиции (они точнее текста). */

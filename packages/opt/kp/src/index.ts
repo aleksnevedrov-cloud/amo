@@ -19,6 +19,7 @@ export * from './research-job.ts';
 export * from './research-repo.ts';
 export * from './research-notes.ts';
 export * from './questions.ts';
+export * from './letter-select.ts';
 export * from './send.ts';
 export * from './settings.ts';
 export * from './table-parse.ts';

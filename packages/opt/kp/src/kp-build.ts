@@ -128,7 +128,9 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   const notesOf = (l: KpLine): string[] => {
     // KP-AGENT-V2, п. 6.3: у двери — обозначение по ГОСТ; KP-DOCX-APPENDIX: комплектация из раздела ТЗ клиента — примечанием.
     const gost = lineCategory(l) === 'door' && l.gostDesignation ? [`Обозначение по ГОСТ: ${l.gostDesignation}`] : [];
-    const own = [...gost, ...(l.tzEquipment ? [`Комплектация по ТЗ: ${l.tzEquipment}`] : []), ...(l.quoteNotes ?? [])];
+    // KP-LETTER-SCOPE, п. 4: требования письма к позиции («каркас металлический, филёнка дуб / ламинация под дуб»).
+    const spec = l.letterSpec ? [`Требования заявки: ${l.letterSpec}`] : [];
+    const own = [...gost, ...spec, ...(l.tzEquipment ? [`Комплектация по ТЗ: ${l.tzEquipment}`] : []), ...(l.quoteNotes ?? [])];
     if (lineCategory(l) !== 'door') return own;
     const group = includedBy.get(l.request_index) ?? [];
     const inBlock = group.filter((c) => !c.includedIn || c.includedIn === l.productId).map((c) => tidyName(c.name));

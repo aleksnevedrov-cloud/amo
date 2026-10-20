@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -313,6 +313,29 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
    * в «кандидаты в прайс»; модель / аналог / интернет / уточнённый профиль — позиции подбираются заново. Вопрос «к какой двери» —
    * тем же ходом, что кнопка в плитке.
    */
+  /**
+   * KP-LETTER-SCOPE, п. 2: «добавить» из «Ещё в проекте» — строка проекта, не названная в письме, становится позицией КП
+   * (цены — «Найти цену»); на «Собрать заново» добавляется снова.
+   */
+  api.post('/kp/draft/:id/project-item', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const b = z.object({ index: z.number().int().min(0) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
+    const payload = d.payload as unknown as KpPayload;
+    const it = payload.projectRest?.[b.data.index];
+    const r = addProjectItem(payload, b.data.index);
+    if (r.requestIndex === null || !it) return reply.code(404).send({ error: 'no_item', message: 'Такой строки в «Ещё в проекте» нет — обновите карточку' });
+    if (!(await repo.setPayloadIfVersion(id, d.version, r.payload as unknown as Record<string, unknown>))) return reply.code(409).send({ error: 'conflict', message: 'Черновик изменился — обновите карточку' });
+    await deps.journal.add({ accountId: p.accountId, leadId: d.leadId, kind: 'note', summary: `Позиция из проекта добавлена в КП: «${it.name}»${it.width_mm || it.height_mm ? `, ${it.width_mm ?? '—'}×${it.height_mm ?? '—'} мм` : ''}, ${it.qty} шт`, details: { draftId: id, requestIndex: r.requestIndex, mark: it.mark ?? null, userId: p.userId } });
+    const fresh = await repo.byId(p.accountId, id);
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, requestIndex: r.requestIndex };
+  });
+
   api.post('/kp/draft/:id/answer', async (req, reply) => {
     const p = principal(req);
     const id = Number((req.params as { id?: string }).id);
@@ -653,5 +676,8 @@ function view(d: KpDraft, priceValidity: string | null = null, vatRate = DEFAULT
     requirements: p.requirements ?? [],
     photos: p.photos ?? [],
     letterText: p.letterText ?? null,
+    // KP-LETTER-SCOPE: объём по письму и «Ещё в проекте».
+    scope: p.scope ?? null,
+    projectRest: p.projectRest ?? [],
   };
 }

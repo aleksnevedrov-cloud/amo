@@ -1,7 +1,7 @@
 import { knownModelNames } from '@opt/kb';
 import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob } from './research-job.ts';
 import type { OptCore } from './deps.ts';
-import { buildKpDraft, type KpDraftDeps, type KpPayload, type ParsedFile } from './draft.ts';
+import { buildKpDraft, carryProjectAdds, type KpDraftDeps, type KpPayload, type ParsedFile } from './draft.ts';
 import { analyzeDraftFile } from './file-analyze.ts';
 import { carryAnswers } from './questions.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
@@ -115,7 +115,7 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
       return { draftId: prev.id };
     }
     // KP-AGENT-V2, п. 5.4: ответы опросника прежнего черновика сделки переносятся на новый (ключи — тип вопроса и позиция).
-    const payload = carryAnswers(r.payload, prev ? prevPayload : null) as KpPayload;
+    const payload = carryAnswers(carryProjectAdds(r.payload, prev ? prevPayload : null), prev ? prevPayload : null) as KpPayload;
     const draftId = await core.kp.createDraft(accountId, leadId, payload as unknown as Record<string, unknown>, job.userId);
     // Поиск цен при сборке — только если включено в настройках КП (по умолчанию выключено: поиск по кнопке «Найти цены»).
     const { constants } = await core.kp.getSettings(accountId);

@@ -13,14 +13,14 @@ import type { OptAiProvider } from '@opt/kp';
 import { resolveKpPath } from '@opt/kp';
 import PizZip from 'pizzip';
 import { afterAll, describe, expect, it } from 'vitest';
-import { matrix89835, tzReal } from '../../../packages/opt/kp/test/fixtures/docx-builder.ts';
+import { matrix89835, plan89518, tzReal, vedomost89518 } from '../../../packages/opt/kp/test/fixtures/docx-builder.ts';
 import { ACCOUNT_ID, answerSurvey, leadFile, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
 const FLOW = fileURLToPath(new URL('../../../tests/fixtures/flow/', import.meta.url));
 const PRICES = fileURLToPath(new URL('../../../packages/opt/kb/test/fixtures/real/', import.meta.url));
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-const SYNTHETIC: Record<string, () => Uint8Array> = { tz90091: tzReal, matrix89835 };
+const SYNTHETIC: Record<string, () => Uint8Array> = { tz90091: tzReal, matrix89835, vedomost89518, plan89518 };
 
 interface Deal {
   deal: number;
@@ -38,6 +38,10 @@ interface Expected {
   positions: { name: string; size: string; qty: number; door: boolean }[];
   prices?: { position: number; price: number; source: string }[];
   tzEquipment?: number[];
+  /** KP-LETTER-SCOPE: письмо задаёт объём — позиций в КП, в проекте, в «Ещё в проекте». */
+  scope?: { by: string; selected: number; project: number; rest: number };
+  /** Требования заявки, которые должны быть (из письма и файлов). */
+  requirements?: string[];
   gostDesignation?: { position: number; contains: string }[];
   mustAsk?: { type: string; position?: number; fields?: string[] }[];
   note?: string;
@@ -117,15 +121,15 @@ function templateDocx(): string {
   return zip.generate({ type: 'base64' });
 }
 
-describe('эталонный набор KP-AGENT-V2 (tests/fixtures/flow, 12 сделок)', () => {
+describe('эталонный набор KP-AGENT-V2 (tests/fixtures/flow, 12 сделок задания и 89518)', () => {
   afterAll(() => {
     if (!process.env.FLOW_REPORT) return;
     const head = '| Сделка | Данные | Эталон | Получено | Цены | Открытые вопросы (блокируют) | Документ |\n|---|---|---|---|---|---|---|\n';
     writeFileSync(process.env.FLOW_REPORT, head + rows.sort((a, b) => a.deal - b.deal).map((r) => `| ${r.deal} | ${r.source} | ${r.etalon} | ${r.got} | ${r.prices} | ${r.questions} | ${r.doc} |`).join('\n') + '\n');
   });
 
-  it('в наборе 12 сделок из задания', () => {
-    expect(deals.map((d) => d.deal.deal)).toEqual([89565, 89682, 89775, 89813, 89835, 89838, 89878, 89933, 90018, 90025, 90066, 90091]);
+  it('в наборе 12 сделок из задания и 89518 (KP-LETTER-SCOPE)', () => {
+    expect(deals.map((d) => d.deal.deal)).toEqual([89518, 89565, 89682, 89775, 89813, 89835, 89838, 89878, 89933, 90018, 90025, 90066, 90091]);
   });
 
   for (const { dir, deal, expected } of deals) {
@@ -154,7 +158,7 @@ describe('эталонный набор KP-AGENT-V2 (tests/fixtures/flow, 12 с�
         });
         ctx.amo.mail = { id: 5, created_at: 1_760_000_000, params: { income: true, subject: deal.letter?.subject ?? 'Заявка', text: deal.letter?.text ?? '', from: 'client@example.ru', attachments: files.map((f) => f.name) } };
         await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
-        const get = async () => (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft as { id: number; items: Line[]; survey: Q[]; counters: { positions: number; open: number; blocking: number; unpriced: number } };
+        const get = async () => (await ctx.app.inject({ method: 'GET', url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft as { id: number; items: Line[]; survey: Q[]; counters: { positions: number; open: number; blocking: number; unpriced: number }; scope: { by: string; selected: number; project: number } | null; projectRest: unknown[]; requirements: string[] };
         const d0 = await get();
         expect(d0, 'черновик собран').toBeTruthy();
         await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/research', headers, payload: { draftId: d0.id } });
@@ -189,6 +193,10 @@ describe('эталонный набор KP-AGENT-V2 (tests/fixtures/flow, 12 с�
         }
         for (const p of expected.prices ?? []) expect([goods[p.position - 1]?.price, goods[p.position - 1]?.priceSource], `${deal.deal}, поз. ${p.position}: цена`).toEqual([p.price, p.source]);
         for (const g of expected.gostDesignation ?? []) expect(goods[g.position - 1]?.gostDesignation ?? '', `${deal.deal}, поз. ${g.position}: обозначение по ГОСТ`).toContain(g.contains);
+        if (expected.scope) {
+          expect({ ...d.scope, rest: d.projectRest.length }, `${deal.deal}: объём по письму`).toMatchObject(expected.scope);
+        }
+        for (const r of expected.requirements ?? []) expect(d.requirements, `${deal.deal}: требование «${r}»`).toContain(r);
         if (expected.tzEquipment) expect(goods.map((l, i) => (l.tzEquipment ? i + 1 : null)).filter(Boolean), `${deal.deal}: комплектация по ТЗ`).toEqual(expected.tzEquipment);
 
         // 4. Обязательные вопросы опросника.

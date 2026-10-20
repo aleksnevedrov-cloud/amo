@@ -539,6 +539,43 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(document.body.textContent).toContain('Опросник: «Доставка» (КП) — самовывоз');
   });
 
+  it('KP-LETTER-SCOPE: письмо задаёт объём — строка «По письму: 3 из 18», у позиции «Из письма: …»; «Ещё в проекте: N поз.» свёрнуто, «добавить» — POST project-item', async () => {
+    const line = (i: number, mark: string, size: string) => ({ request_index: i, page_id: null, name: 'Дверь наружная металлическая остеклённая', size, qty: 1, price: null, lead_time: '', discount: 0, category: 'door' as const, mark, letterSpec: 'Каркас металлический, филёнка дуб/ламинация под дуб' });
+    let current: Record<string, unknown> = {
+      ...draft, id: 74, items: [line(0, 'ДНО1', '1010×2070 мм'), line(1, 'ДНО2', '1310×2070 мм'), line(2, 'ДНО3', '910×2070 мм')], needsManager: [],
+      scope: { by: 'marks', selected: 3, project: 18, missing: [] },
+      projectRest: [{ raw: 'ДН-1 Дверь наружная металлическая глухая', name: 'Дверь наружная металлическая глухая', width_mm: 1010, height_mm: 2070, qty: 2, mark: 'ДН1', sourceFiles: ['28. Ведомость дверей.наружные.pdf', '21.План заполнения проемов.pdf'] }, { raw: 'Д1 Дверь внутренняя', name: 'Дверь внутренняя', width_mm: 800, height_mm: null, qty: 1, mark: 'Д1', sourceFiles: ['21.План заполнения проемов.pdf'] }],
+    };
+    const posted: unknown[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'POST /widget/v1/kp/draft/74/project-item': (data?: string) => {
+        posted.push(JSON.parse(data ?? '{}'));
+        const rest = current.projectRest as { name: string; width_mm: number; height_mm: number; qty: number; mark: string }[];
+        const it = rest[0]!;
+        current = { ...current, items: [...(current.items as unknown[]), { ...line(3, it.mark, '1010×2070 мм'), name: it.name, qty: it.qty, letterSpec: null }], projectRest: rest.slice(1), scope: { by: 'marks', selected: 4, project: 18, missing: [] } };
+        return { draft: current, requestIndex: 3 };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    await expand();
+    expect(document.querySelector('.opt-kp-scope')?.textContent).toBe('По письму: в КП 3 поз. из 18 в проекте (марки из письма)');
+    expect([...document.querySelectorAll('.opt-kp-row-letter')].map((x) => x.textContent)).toEqual(Array(3).fill('Из письма: Каркас металлический, филёнка дуб/ламинация под дуб'));
+    // Свёрнуто: только строка; по клику — строки проекта с размером, количеством и файлами.
+    expect(document.querySelectorAll('.opt-kp-project-row')).toHaveLength(0);
+    await click('Ещё в проекте: 2 поз. ›');
+    const rows = [...document.querySelectorAll('.opt-kp-project-row')];
+    expect(rows.map((r) => r.textContent?.replace(/\u00a0/g, ' '))).toEqual(['Дверь наружная металлическая глухая · 1010 × 2070 мм · 2 шт · 28. Ведомость дверей.наружные.pdf, 21.План заполнения проемов.pdfдобавить', 'Дверь внутренняя · 800 × — мм · 1 шт · 21.План заполнения проемов.pdfдобавить']);
+    await act(async () => (rows[0]!.querySelector('button') as HTMLButtonElement).click());
+    await flush();
+    expect(posted).toEqual([{ index: 0 }]);
+    expect(document.querySelector('.opt-kp-scope')?.textContent).toBe('По письму: в КП 4 поз. из 18 в проекте (марки из письма)');
+    expect(document.querySelectorAll('.opt-kp-table .opt-kp-row:not(.opt-kp-row-delivery)')).toHaveLength(4);
+    expect(document.body.textContent).toContain('Ещё в проекте: 1 поз.');
+  });
+
   it('ошибка задания показывается текстом, кнопка снова доступна', async () => {
     const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: null, job: { state: 'failed', error: 'LLM не настроена' } } });
     const cbs = createCallbacks(self, 'https://opt.test.ru');

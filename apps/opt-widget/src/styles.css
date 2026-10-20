@@ -401,3 +401,10 @@
 .opt-kp .opt-kp-send { width: min(640px, 100%); border-radius: var(--kp-radius); box-shadow: 0 12px 40px rgba(0, 0, 0, .25); background: #fff; }
 .opt-kp .opt-kp-send .opt-card { margin: 0; padding: 14px 16px; gap: 8px; }
 .opt-kp .opt-kp-send input, .opt-kp .opt-kp-send textarea { width: 100%; padding: 4px 8px; border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); font: inherit; font-size: 12px; }
+
+/* KP-LETTER-SCOPE: объём по письму над таблицей, «Ещё в проекте» под ней, требования письма у позиции. */
+.opt-kp .opt-kp-scope { margin-bottom: 6px; }
+.opt-kp .opt-kp-project-rest { margin-top: 8px; }
+.opt-kp .opt-kp-project-row { align-items: flex-start; flex-wrap: nowrap; padding: 3px 0; border-top: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-project-row:first-child { border-top: 0; }
+.opt-kp .opt-kp-row-letter { color: #6b5a2e; }

@@ -430,7 +430,14 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           {tab === 'lines' && (
             <div className="opt-kp-split">
               <div className="opt-kp-main">
+                {draft.scope && (
+                  <div className="opt-kp-sub opt-kp-scope">
+                    По письму: в КП {draft.scope.selected} поз. из {draft.scope.project} в проекте{draft.scope.by === 'marks' ? ' (марки из письма)' : ' (номера позиций из письма)'}
+                    {draft.scope.missing.length ? ` · в письме есть, во вложениях нет: ${draft.scope.missing.join(', ')}` : ''}
+                  </div>
+                )}
                 <KpTable lines={lines} draft={draft} research={research} locked={locked} onEdit={edit} onFind={(i) => void findPrices([i])} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
+                <ProjectRest draft={draft} locked={locked} onAdd={(i) => void act(() => api.addProjectItem(draft.id, i))} />
               </div>
               <aside className="opt-kp-panel">
                 <div className="opt-kp-panel-title">Опросник ({counters.open})</div>
@@ -749,6 +756,7 @@ function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { l
                 {l.priceModel && <div className="opt-kp-sub opt-kp-row-model">Обозначение по прайсу: {l.priceModel}{l.priceAbbr && !l.priceModel.toLowerCase().includes(l.priceAbbr.toLowerCase()) ? ` (${l.priceAbbr})` : ''}</div>}
                 {l.equipment && <div className="opt-kp-sub opt-kp-row-equipment">Комплектация: {l.equipment}</div>}
                 {l.tzEquipment && <div className="opt-kp-sub opt-kp-row-tz">Комплектация по ТЗ: {l.tzEquipment}</div>}
+                {l.letterSpec && <div className="opt-kp-sub opt-kp-row-letter">Из письма: {l.letterSpec}</div>}
                 {l.excluded && <div className="opt-kp-sub opt-kp-stale">исключена в опроснике — в КП не идёт</div>}
                 {l.priceOutcome === 'included' && <div className="opt-kp-sub opt-kp-outcome">входит в цену блока{l.includedIn ? ` (${l.includedIn})` : ''}: в КП — под дверью, не строкой</div>}
                 {l.priceOutcome === 'estimate' && <div className="opt-kp-sub opt-kp-outcome">сметная цена — для сметы, уточнить у менеджера</div>}
@@ -795,6 +803,36 @@ function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { l
         </tr>
       </tbody>
     </table>
+  );
+}
+
+/** «Ещё в проекте» (KP-LETTER-SCOPE, п. 2): строки вложений, не названные в письме, — свёрнутым списком, «добавить» — в позиции. */
+function ProjectRest({ draft, locked, onAdd }: { draft: KpDraftInfo; locked: boolean; onAdd: (index: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const rest = draft.projectRest ?? [];
+  if (!rest.length) return null;
+  return (
+    <div className="opt-col opt-details opt-kp-project-rest">
+      <button type="button" className="opt-details-summary" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        Ещё в проекте: {rest.length} поз. {open ? '⌄' : '›'}
+      </button>
+      {open && (
+        <div className="opt-details-body opt-col">
+          {rest.map((it, i) => (
+            <div key={`${it.mark ?? it.raw}-${i}`} className="opt-row opt-kp-project-row">
+              <span className="opt-grow">
+                {it.name || it.raw}
+                {it.width_mm || it.height_mm ? ` · ${it.width_mm ?? '—'} × ${it.height_mm ?? '—'} мм` : ''} · {it.qty.toLocaleString('ru-RU')} шт
+                {it.sourceFiles?.length ? <span className="opt-kp-sub"> · {it.sourceFiles.join(', ')}</span> : null}
+              </span>
+              <button type="button" className="opt-btn opt-btn-small" disabled={locked} onClick={() => onAdd(i)}>
+                добавить
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
