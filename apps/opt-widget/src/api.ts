@@ -544,7 +544,8 @@ export class KpApi extends ApiClient {
   kbAddText = (title: string, content: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/text', { title, content });
   kbAddFile = (filename: string, mime: string, contentBase64: string) => this.call<{ source: KbSourceInfo }>('POST', '/widget/v1/kb/sources/file', { filename, mime, contentBase64 });
   /** Ссылка на страницу или файл: refreshDays — период обновления (0 — не обновлять), crawl — обойти раздел до 50 страниц. */
-  kbAddUrl = (url: string, refreshDays: number, crawl: boolean) => this.call<{ source: KbSourceInfo; existed: boolean }>('POST', '/widget/v1/kb/sources/url', { url, refreshDays, crawl });
+  /** KP-AGENT-V2, п. 4а: комментарий сайта (до 2000 знаков) и «фабрика» — вместе со ссылкой. */
+  kbAddUrl = (url: string, refreshDays: number, crawl: boolean, site: { comment?: string | null; isFactory?: boolean } = {}) => this.call<{ source: KbSourceInfo; existed: boolean }>('POST', '/widget/v1/kb/sources/url', { url, refreshDays, crawl, ...site });
   kbReindex = (id: number) => this.call<{ source: KbSourceInfo }>('POST', `/widget/v1/kb/sources/${id}/reindex`);
   kbRemove = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/sources/${id}`);
   kbChunks = (id: number, limit = 100) => this.call<{ source: KbSourceInfo; chunks: KbChunkInfo[] }>('GET', `/widget/v1/kb/sources/${id}/chunks?limit=${limit}`);

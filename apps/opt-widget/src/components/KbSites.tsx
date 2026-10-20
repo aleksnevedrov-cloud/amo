@@ -8,17 +8,22 @@ import { downloadBase64 } from './KbPrices.tsx';
  * «ДПК Аква», «Стальных нет») и отметка «фабрика»: агент ищет цены сначала на фабриках, затем на сайтах, подходящих по
  * комментарию, затем на любых; сайт с «… нет» для этого вида двери не используется. Список сайтов — выгрузка и загрузка xlsx.
  */
-const COMMENT_MAX = 2000;
+export const COMMENT_MAX = 2000;
 
 /** Сайт верхнего уровня (не страница раздела) — у него есть комментарий и «фабрика». */
 export const isSite = (src: KbSourceInfo) => src.kind === 'url' && !src.parentId;
 
-/** Комментарий и «фабрика» у сайта в списке источников. */
+/** Комментарий и «фабрика» у сайта в карточке источника: подписанные поля с сохранённым значением, правка — «Сохранить». */
 export function SiteMeta({ api, src, onSaved }: { api: KpApi; src: KbSourceInfo; onSaved: (msg: string) => void }) {
   const [comment, setComment] = useState(src.comment ?? '');
   const [factory, setFactory] = useState(Boolean(src.isFactory));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Список перечитан (загрузка xlsx, сохранение) — поля показывают сохранённое значение.
+  useEffect(() => {
+    setComment(src.comment ?? '');
+    setFactory(Boolean(src.isFactory));
+  }, [src.comment, src.isFactory]);
   const changed = comment !== (src.comment ?? '') || factory !== Boolean(src.isFactory);
   const save = async () => {
     setBusy(true);
@@ -34,11 +39,12 @@ export function SiteMeta({ api, src, onSaved }: { api: KpApi; src: KbSourceInfo;
   };
   return (
     <div className="opt-kb-site" style={{ marginTop: 6 }}>
+      <label style={{ ...s.small, display: 'block', marginBottom: 2 }}>Комментарий</label>
       <textarea
         className="opt-kb-site-comment"
         style={{ ...s.input, width: '100%', minHeight: 48, boxSizing: 'border-box' }}
         maxLength={COMMENT_MAX}
-        placeholder="Комментарий: что на сайте есть и чего нет — «ДПК Аква, межкомнатные», «Стальных нет»"
+        placeholder="Что на сайте есть и чего нет: «ДПК Аква, межкомнатные», «Стальных нет»"
         value={comment}
         disabled={busy}
         onChange={(e) => setComment(e.target.value)}
@@ -46,11 +52,11 @@ export function SiteMeta({ api, src, onSaved }: { api: KpApi; src: KbSourceInfo;
       <div style={{ ...s.row, marginTop: 4 }}>
         <label style={{ ...s.small, display: 'flex', alignItems: 'center', gap: 4 }}>
           <input type="checkbox" className="opt-kb-site-factory" checked={factory} disabled={busy} onChange={(e) => setFactory(e.target.checked)} />
-          фабрика
+          Фабрика
         </label>
         <span style={{ ...s.small, ...s.muted }}>{comment.length} / {COMMENT_MAX}</span>
         <button type="button" style={s.buttonGhost} disabled={busy || !changed} onClick={() => void save()}>
-          Сохранить комментарий
+          Сохранить
         </button>
       </div>
       {err && <div style={s.error}>{err}</div>}

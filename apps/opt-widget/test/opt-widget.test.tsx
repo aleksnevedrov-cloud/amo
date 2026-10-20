@@ -740,7 +740,7 @@ describe('виджет «Агент опт»: вкладка «База знан
     expect(document.body.textContent).toContain('Занято: 1 КБ из 500.0 МБ');
     // Текст менеджера: кнопка активна только с содержимым; после отправки — источник в очереди.
     expect(button('Добавить текст')?.disabled).toBe(true);
-    await setInput([...document.querySelectorAll('textarea')][0]!, 'Скидка опт от 50 полотен — 12 %');
+    await setInput(document.querySelector('textarea:not(.opt-kb-url-comment):not(.opt-kb-site-comment)')!, 'Скидка опт от 50 полотен — 12 %');
     expect(button('Добавить текст')?.disabled).toBe(false);
     await click('Добавить текст');
     await flush();
@@ -783,10 +783,18 @@ describe('виджет «Агент опт»: вкладка «База знан
     await setInput([...document.querySelectorAll('input')].find((i) => i.placeholder === 'https://rf-dveri.ru/ceny/')!, 'https://rf-dveri.ru/ceny/');
     await setInput([...document.querySelectorAll('input[type=number]')][0]!, '14');
     await act(async () => ([...document.querySelectorAll('input[type=checkbox]')][0] as HTMLInputElement).click());
+    // KP-AGENT-V2, п. 4а: под ссылкой — «Комментарий» (до 2000 знаков) и «Фабрика», уходят вместе со ссылкой.
+    const urlComment = document.querySelector('.opt-kb-url-comment') as HTMLTextAreaElement;
+    expect(urlComment.maxLength).toBe(2000);
+    await setInput(urlComment, 'Межкомнатные CPL и ПВХ. Стальных нет');
+    await act(async () => (document.querySelector('.opt-kb-url-factory') as HTMLInputElement).click());
     expect(button('Добавить ссылку')?.disabled).toBe(false);
     await click('Добавить ссылку');
     await flush();
-    expect(posted.at(-1)).toEqual({ url: 'url', data: { url: 'https://rf-dveri.ru/ceny/', refreshDays: 14, crawl: true } });
+    expect(posted.at(-1)).toEqual({ url: 'url', data: { url: 'https://rf-dveri.ru/ceny/', refreshDays: 14, crawl: true, comment: 'Межкомнатные CPL и ПВХ. Стальных нет', isFactory: true } });
+    // Форма очищается.
+    expect((document.querySelector('.opt-kb-url-comment') as HTMLTextAreaElement).value).toBe('');
+    expect((document.querySelector('.opt-kb-url-factory') as HTMLInputElement).checked).toBe(false);
     expect(document.body.textContent).toContain('Ссылка добавлена, скачивается, раздел будет обойдён (до 50 страниц)');
     expect(document.body.textContent).toContain('ссылка · 1 КБ · фрагментов 3 · добавлен 15.10.2026 · индекс 15.10.2026 · обновление каждые 30 дн., следующее 14.11.2026 · раздел');
     expect(document.body.textContent).toContain('https://rf-dveri.ru/ceny/');
@@ -962,7 +970,7 @@ describe('виджет «Агент опт»: вкладка «База знан
 
 describe('виджет «Агент опт»: сайты и кандидаты в прайс (KP-AGENT-V2, п. 4а, 4.4)', () => {
   it('у сайта — комментарий до 2000 знаков и «фабрика» (PUT /kb/sources/:id/site); выгрузка сайтов xlsx; кандидаты в прайс — список, выгрузка, удаление', async () => {
-    const site = { id: 5, kind: 'url', title: 'aqua-door.ru', original: 'https://aqua-door.ru', mime: 'text/html', status: 'indexed', sizeBytes: 2000, chunks: 2, embeddedChunks: 2, refreshDays: 30, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', crawl: false, parentId: null, httpStatus: 200, job: null, comment: null, isFactory: false };
+    let site = { id: 5, kind: 'url', title: 'aqua-door.ru', original: 'https://aqua-door.ru', mime: 'text/html', status: 'indexed', sizeBytes: 2000, chunks: 2, embeddedChunks: 2, refreshDays: 30, nextRefreshAt: null, error: null, createdAt: '2026-10-15T10:00:00Z', updatedAt: '2026-10-15T10:00:00Z', indexedAt: '2026-10-15T10:00:05Z', crawl: false, parentId: null, httpStatus: 200, job: null, comment: 'Только межкомнатные' as string | null, isFactory: false };
     const page = { ...site, id: 6, title: 'aqua-door.ru/catalog', parentId: 5 };
     let candidates = [{ id: 1, leadId: 89813, draftId: 69, model: 'Аква 01 ПГ + УПД', size: '600×2000 мм', price: 14_453, source: 'web_confirmed', url: 'https://aqua-door.ru/p/1', note: null, createdAt: '2026-10-19T10:00:00Z' }];
     const put: unknown[] = [];
@@ -971,7 +979,8 @@ describe('виджет «Агент опт»: сайты и кандидаты �
       'GET /widget/v1/kb/sources': () => ({ sources: [site, page], usage: { sources: 2, bytes: 4000, chunks: 4, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
       'PUT /widget/v1/kb/sources/5/site': (data?: string) => {
         put.push(JSON.parse(data ?? '{}'));
-        return { source: { ...site, ...JSON.parse(data ?? '{}') } };
+        site = { ...site, ...JSON.parse(data ?? '{}') };
+        return { source: site };
       },
       'GET /widget/v1/kb/sites/export': { filename: 'kb-sites-2026-10-19.xlsx', rows: 1, contentBase64: Buffer.from('PK').toString('base64') },
       'GET /widget/v1/kb/candidates': () => ({ items: candidates }),
@@ -989,8 +998,13 @@ describe('виджет «Агент опт»: сайты и кандидаты �
     await flush();
     await click('База знаний');
     await flush();
-    // Комментарий и «фабрика» — только у сайта, не у страницы раздела.
+    // Комментарий и «фабрика» — только у сайта, не у страницы раздела; сохранённое значение — в полях карточки.
     expect(document.querySelectorAll('.opt-kb-site')).toHaveLength(1);
+    expect(document.querySelector('.opt-kb-site')?.textContent).toContain('Комментарий');
+    expect(document.querySelector('.opt-kb-site')?.textContent).toContain('Фабрика');
+    expect((document.querySelector('.opt-kb-site-comment') as HTMLTextAreaElement).value).toBe('Только межкомнатные');
+    const saveSite = () => [...document.querySelectorAll('.opt-kb-site button')].find((b) => b.textContent === 'Сохранить') as HTMLButtonElement;
+    expect(saveSite().disabled).toBe(true);
     await setInput(document.querySelector('.opt-kb-site-comment'), 'ДПК Аква, межкомнатные. Стальных нет');
     await act(async () => (document.querySelector('.opt-kb-site-factory') as HTMLInputElement).click());
     expect((document.querySelector('.opt-kb-site-comment') as HTMLTextAreaElement).maxLength).toBe(2000);
@@ -1001,10 +1015,15 @@ describe('виджет «Агент опт»: сайты и кандидаты �
       downloads.push(this.getAttribute('download') ?? '');
     };
     try {
-      await click('Сохранить комментарий');
+      expect(saveSite().disabled).toBe(false);
+      await act(async () => saveSite().click());
       await flush();
       expect(put).toEqual([{ comment: 'ДПК Аква, межкомнатные. Стальных нет', isFactory: true }]);
       expect(document.body.textContent).toContain('Сайт «aqua-door.ru»: комментарий и отметка «фабрика» сохранены');
+      // После перечитывания списка — сохранённые значения в полях, «Сохранить» снова неактивна.
+      expect((document.querySelector('.opt-kb-site-comment') as HTMLTextAreaElement).value).toBe('ДПК Аква, межкомнатные. Стальных нет');
+      expect((document.querySelector('.opt-kb-site-factory') as HTMLInputElement).checked).toBe(true);
+      expect(saveSite().disabled).toBe(true);
       await click('Выгрузить сайты (xlsx)');
       await flush();
       expect(document.body.textContent).toContain('Выгружено сайтов: 1');

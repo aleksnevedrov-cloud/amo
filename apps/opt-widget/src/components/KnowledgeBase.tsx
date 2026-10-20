@@ -3,7 +3,7 @@ import { errorMessage, Field, s } from '@core/widget-core';
 import type { KbBookCounts, KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
 import { KbAnswer } from './KbAnswer.tsx';
 import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
-import { CandidatesSection, isSite, SiteMeta, SitesSection } from './KbSites.tsx';
+import { CandidatesSection, COMMENT_MAX, isSite, SiteMeta, SitesSection } from './KbSites.tsx';
 
 /**
  * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
@@ -97,8 +97,8 @@ export function KnowledgeBase({ api }: { api: KpApi }) {
           })
         }
       />
-      <AddUrl busy={busy} onAdd={(url, days, crawl) => void run(async () => {
-        const r = await api.kbAddUrl(url, days, crawl);
+      <AddUrl busy={busy} onAdd={(url, days, crawl, site) => void run(async () => {
+        const r = await api.kbAddUrl(url, days, crawl, site);
         return r.existed ? 'Ссылка уже была в базе — поставлена на переиндексацию' : `Ссылка добавлена, скачивается${crawl ? ', раздел будет обойдён (до 50 страниц)' : ''}`;
       })} />
       <SitesSection
@@ -176,10 +176,13 @@ function AddFile({ busy, onAdd }: { busy: boolean; onAdd: (f: File) => void }) {
   );
 }
 
-function AddUrl({ busy, onAdd }: { busy: boolean; onAdd: (url: string, refreshDays: number, crawl: boolean) => void }) {
+function AddUrl({ busy, onAdd }: { busy: boolean; onAdd: (url: string, refreshDays: number, crawl: boolean, site: { comment: string | null; isFactory: boolean }) => void }) {
   const [url, setUrl] = useState('');
   const [days, setDays] = useState(30);
   const [crawl, setCrawl] = useState(false);
+  // KP-AGENT-V2, п. 4а: что на сайте есть и чего нет («ДПК Аква», «Стальных нет») и «фабрика» — сохраняются вместе со ссылкой.
+  const [comment, setComment] = useState('');
+  const [factory, setFactory] = useState(false);
   const ok = /^https?:\/\/\S+\.\S+/i.test(url.trim());
   return (
     <Field label="Ссылка" hint="Адрес страницы сайта или файла (pdf/xlsx по ссылке). Берётся основной текст без меню и подвала; переиндексация по сроку, по умолчанию раз в 30 дней">
@@ -195,13 +198,31 @@ function AddUrl({ busy, onAdd }: { busy: boolean; onAdd: (url: string, refreshDa
           обойти раздел (до 50 страниц)
         </label>
       </div>
+      <label style={{ ...s.small, display: 'block', marginBottom: 2 }}>Комментарий</label>
+      <textarea
+        className="opt-kb-url-comment"
+        style={{ ...s.input, width: '100%', minHeight: 48, boxSizing: 'border-box', marginBottom: 4 }}
+        maxLength={COMMENT_MAX}
+        placeholder="Что на сайте есть и чего нет: «ДПК Аква, межкомнатные», «Стальных нет» — по нему агент выбирает, где искать цену"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+      />
+      <div style={{ ...s.row, marginBottom: 6 }}>
+        <label style={{ ...s.small, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" className="opt-kb-url-factory" checked={factory} onChange={(e) => setFactory(e.target.checked)} />
+          Фабрика (цены этого сайта — в первую очередь)
+        </label>
+        <span style={{ ...s.small, ...s.muted }}>{comment.length} / {COMMENT_MAX}</span>
+      </div>
       <button
         type="button"
         style={s.button}
         disabled={busy || !ok}
         onClick={() => {
-          onAdd(url.trim(), days, crawl);
+          onAdd(url.trim(), days, crawl, { comment: comment.trim() || null, isFactory: factory });
           setUrl('');
+          setComment('');
+          setFactory(false);
         }}
       >
         Добавить ссылку

@@ -15,7 +15,8 @@ const fileBody = z.object({ filename: z.string().trim().min(1).max(200), mime: z
 /** Сайт: комментарий (до 2000 знаков, пусто — снять) и «фабрика». */
 const siteBody = z.object({ comment: z.string().max(2000).nullable().optional(), isFactory: z.boolean().optional() });
 
-const urlBody = z.object({ url: z.string().trim().min(8).max(2000), refreshDays: z.number().int().min(0).max(365).optional(), crawl: z.boolean().optional() });
+// KP-AGENT-V2, п. 4а: комментарий сайта и «фабрика» — сразу с ссылкой (как в PUT /kb/sources/:id/site).
+const urlBody = z.object({ url: z.string().trim().min(8).max(2000), refreshDays: z.number().int().min(0).max(365).optional(), crawl: z.boolean().optional(), comment: z.string().max(2000).nullable().optional(), isFactory: z.boolean().optional() });
 const searchQuery = z.object({ q: z.string().trim().min(1).max(500), limit: z.coerce.number().int().min(1).max(50).optional() });
 const chunksQuery = z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() });
 
@@ -113,12 +114,13 @@ export function kbRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
   api.post('/kb/sources/url', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
     const b = urlBody.safeParse(req.body);
-    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    if (!b.success) return reply.code(400).send({ error: 'bad_body', message: b.error.issues.some((i) => i.path[0] === 'comment') ? 'комментарий — не длиннее 2000 знаков' : undefined });
     const p = principal(req);
     try {
       const { id, existed } = await kb.addUrl(p.accountId, { url: b.data.url, refreshDays: b.data.refreshDays === 0 ? null : b.data.refreshDays, crawl: b.data.crawl, userId: p.userId });
+      if (b.data.comment !== undefined || b.data.isFactory !== undefined) await kb.repo.setSiteMeta(p.accountId, id, { ...(b.data.comment !== undefined ? { comment: b.data.comment } : {}), ...(b.data.isFactory !== undefined ? { isFactory: b.data.isFactory } : {}) });
       await deps.kbQueue.enqueue({ accountId: p.accountId, sourceId: id, userId: p.userId });
-      if (!existed) await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: добавлена ссылка ${b.data.url}${b.data.crawl ? ' (обход раздела)' : ''}`, details: { sourceId: id, kind: 'url', crawl: Boolean(b.data.crawl), refreshDays: b.data.refreshDays ?? 30, userId: p.userId, audit: 'kb' } });
+      if (!existed) await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: добавлена ссылка ${b.data.url}${b.data.crawl ? ' (обход раздела)' : ''}${b.data.isFactory ? ', фабрика' : ''}${b.data.comment?.trim() ? `, комментарий: «${b.data.comment.trim().slice(0, 100)}»` : ''}`, details: { sourceId: id, kind: 'url', crawl: Boolean(b.data.crawl), refreshDays: b.data.refreshDays ?? 30, userId: p.userId, audit: 'kb' } });
       return reply.code(202).send({ source: view(await kb.repo.get(p.accountId, id)), existed });
     } catch (err) {
       return fail(reply, err);

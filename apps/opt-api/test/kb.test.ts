@@ -105,6 +105,24 @@ describe('opt-api: база знаний — источники, индекса�
     await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${urlId}`, headers });
   });
 
+  it('KP-AGENT-V2, п. 4а: ссылка с комментарием и «фабрикой» — сохраняются вместе со ссылкой; повторная ссылка их меняет; больше 2000 знаков — 400', async () => {
+    const add = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/ceny/', refreshDays: 30, crawl: false, comment: '  ДПК Аква, межкомнатные. Стальных нет  ', isFactory: true } });
+    expect(add.statusCode).toBe(202);
+    expect(add.json().source).toMatchObject({ kind: 'url', status: 'indexed', comment: 'ДПК Аква, межкомнатные. Стальных нет', isFactory: true });
+    const id = add.json().source.id as number;
+    const listed = (await ctx.app.inject({ method: 'GET', url: '/widget/v1/kb/sources', headers })).json().sources.find((x: { id: number }) => x.id === id);
+    expect(listed).toMatchObject({ comment: 'ДПК Аква, межкомнатные. Стальных нет', isFactory: true });
+    // Та же ссылка ещё раз — комментарий и «фабрика» обновлены, источник тот же.
+    const again = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/ceny/', comment: 'Только межкомнатные', isFactory: false } });
+    expect(again.json()).toMatchObject({ existed: true, source: { id, comment: 'Только межкомнатные', isFactory: false } });
+    // Без полей — прежние значения не трогаются.
+    expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/ceny/' } })).json().source).toMatchObject({ comment: 'Только межкомнатные', isFactory: false });
+    const long = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kb/sources/url', headers, payload: { url: 'https://rf-dveri.ru/ceny/', comment: 'x'.repeat(2001) } });
+    expect(long.statusCode).toBe(400);
+    expect(long.json()).toMatchObject({ error: 'bad_body', message: 'комментарий — не длиннее 2000 знаков' });
+    await ctx.app.inject({ method: 'DELETE', url: `/widget/v1/kb/sources/${id}`, headers });
+  });
+
   it('переиндексация возвращает тот же результат; удаление убирает источник; чужой формат и не-админ отклоняются', async () => {
     const re = await ctx.app.inject({ method: 'POST', url: `/widget/v1/kb/sources/${textId}/reindex`, headers });
     expect(re.statusCode).toBe(202);
