@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { loadEnv } from '@core/shared';
 import type { Embedder, KbIndexJob, UrlFetcher } from '@opt/kb';
-import { runDraftJob, runResearchJob, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SmtpConfig } from '@opt/kp';
+import { buildRawMail, pickSentFolder, recipientsOf, runDraftJob, runResearchJob, type ImapConfig, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SentCopier, type SmtpConfig } from '@opt/kp';
 import { SignJWT } from 'jose';
 import { freshKbDb } from '../../../packages/opt/kb/test/setup.ts';
 import { freshOptDb } from '../../../packages/opt/kp/test/setup.ts';
@@ -85,6 +85,8 @@ export function fakeGateway(text: string) {
 export interface SentMail {
   cfg: SmtpConfig;
   mail: KpMail;
+  /** MIME, ушедший по SMTP. */
+  raw: Buffer;
 }
 
 export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null; fetchUrl?: UrlFetcher } = {}) {
@@ -106,7 +108,29 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
   const mailer: KpMailSender = {
     async send(cfg, mail) {
       if (opts.failSend) throw new Error(opts.failSend);
-      sent.push({ cfg, mail });
+      // Как SmtpKpSender: MIME собирается один раз, сервер «принял» всех получателей.
+      const raw = await buildRawMail(mail);
+      sent.push({ cfg, mail, raw });
+      return { messageId: mail.messageId, accepted: recipientsOf(mail), rejected: [], response: '250 2.0.0 Ok: queued', raw };
+    },
+  };
+  // KP-SENT-COPY: ящик по IMAP — папки с признаками, APPEND складывает письма; failAppend — сбой копии.
+  const imap = {
+    folders: [{ path: 'INBOX' }, { path: 'Drafts', specialUse: '\\Drafts' }, { path: 'Отправленные', specialUse: '\\Sent' }] as { path: string; specialUse?: string }[],
+    boxes: new Map<string, { raw: Buffer; flags: string[]; cfg: ImapConfig }[]>(),
+    failAppend: null as string | null,
+  };
+  const sentCopier: SentCopier = {
+    async append(cfg, raw, folder) {
+      if (imap.failAppend) throw new Error(imap.failAppend);
+      const found = pickSentFolder(imap.folders, folder);
+      if (!found.folder) throw new Error('папка отправленных не найдена');
+      imap.boxes.set(found.folder, [...(imap.boxes.get(found.folder) ?? []), { raw, flags: ['\\Seen'], cfg }]);
+      return { folder: found.folder };
+    },
+    async probe(_cfg, folder) {
+      if (imap.failAppend) throw new Error(imap.failAppend);
+      return pickSentFolder(imap.folders, folder);
     },
   };
   // Очередь в тестах выполняет задание сразу, в том же процессе: состояние — как после работы воркера.
@@ -128,6 +152,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
     // Ящик по IMAP в тестах не читаем: письмо «не найдено», сборка идёт по карточке.
     mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } }),
     mailer,
+    sentCopier,
     queue: {
       async enqueue(job) {
         try {
@@ -173,7 +198,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
   });
   core = deps;
   const app = await buildApp(deps);
-  return { app, deps, amo, sent, close: async () => (await app.close(), await drop(), await kb.drop()) };
+  return { app, deps, amo, sent, imap, close: async () => (await app.close(), await drop(), await kb.drop()) };
 }
 
 export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_SECRET) {

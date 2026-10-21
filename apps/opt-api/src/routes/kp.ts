@@ -3,7 +3,8 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, recalcDraftMarkup, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, recalcDraftMarkup, researchablePositions, resolveKpPath, sendBlockers, imapConfigFor, kpLeadDirRel, type KpDraft, type KpLine, type KpPayload, type SendResult, type SentMailRecord } from '@opt/kp';
+import type { JournalKind } from '@core/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -586,23 +587,114 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       attachment: { filename: basename(file), content: await readFile(file) },
     });
     const kpNo = draft.kpNo ?? '';
+    let sent: SendResult;
     try {
-      await deps.mailer.send({ host: m.smtpHost, port: m.smtpPort, secure: m.smtpSecure, username: m.username, password }, mail);
+      sent = await deps.mailer.send({ host: m.smtpHost, port: m.smtpPort, secure: m.smtpSecure, username: m.username, password }, mail);
     } catch (err) {
       // Статус не меняем, ошибку сервера показываем как есть (6.6).
       await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'kp_error', summary: `КП ${kpNo} не отправлено: ${(err as Error).message}`, details: { draftId: draft.id, to: mail.to, userId: p.userId } });
       return reply.code(502).send({ error: 'send_failed', message: (err as Error).message });
     }
+    // KP-SENT-COPY: письмо ушло. Дальше — только запись следов: .eml рядом с КП и копия в «Отправленные». Их сбой
+    // отправку не отменяет и повторного письма клиенту не делает.
+    const attachment = mail.attachments[0] as { filename: string; content: Buffer };
+    const emlRel = `${kpLeadDirRel(p.accountId, draft.leadId)}/${basename(file).replace(/\.(pdf|docx)$/i, '')}.eml`;
+    let eml: string | null = null;
+    try {
+      const abs = resolveKpPath(deps.filesRoot, emlRel);
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, sent.raw);
+      eml = emlRel;
+    } catch (err) {
+      req.log.warn({ err: describeFsError(err, emlRel) }, 'kp: .eml письма не сохранён');
+    }
+    let copy: SentMailRecord['copy'];
+    try {
+      const r = await deps.sentCopier.append(imapConfigFor(m, password), sent.raw, m.sentFolder?.trim() || null);
+      copy = { status: 'saved', folder: r.folder, error: null };
+    } catch (err) {
+      copy = { status: 'failed', folder: m.sentFolder?.trim() || null, error: (err as Error).message };
+    }
+    const record: SentMailRecord = {
+      at: new Date().toISOString(),
+      messageId: sent.messageId,
+      from: mail.from.name ? `${mail.from.name} <${mail.from.address}>` : mail.from.address,
+      to: mail.to,
+      cc: mail.cc ?? null,
+      subject: mail.subject,
+      text: mail.text,
+      attachment: { name: attachment.filename, bytes: attachment.content.length },
+      smtp: { accepted: sent.accepted, rejected: sent.rejected, response: sent.response },
+      eml,
+      copy,
+    };
+    // Письмо уже у клиента: статус «отправлено» ставится, даже если запись следов в черновик не удалась.
+    await setSentMail(p.accountId, draft.id, record).catch((err: Error) => req.log.warn({ err: err.message }, 'kp: запись об отправке в черновик не сохранена'));
     await repo.setStatus(draft.id, 'sent');
-    await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'kp_sent', summary: `КП ${kpNo} отправлено на ${mail.to}`, details: { draftId: draft.id, to: mail.to, cc: mail.cc ?? null, kpNo, userId: p.userId, attachment: basename(file) } });
+    // Текст письма — в черновике и .eml; в журнал не дублируется.
+    const details: Partial<SentMailRecord> = { ...record };
+    delete details.text;
+    await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: 'kp_sent', summary: `КП ${kpNo} отправлено на ${mail.to}${copy.status === 'saved' ? `, копия — в «${copy.folder}»` : ''}`, details: { draftId: draft.id, kpNo, userId: p.userId, ...details } });
+    if (copy.status === 'failed') {
+      await deps.journal.add({ accountId: p.accountId, leadId: draft.leadId, kind: KP_SENT_COPY_FAILED, summary: `КП ${kpNo}: копия в «Отправленные» не сохранена — ${copy.error}`, details: { draftId: draft.id, kpNo, messageId: sent.messageId, folder: copy.folder, error: copy.error, eml, userId: p.userId } });
+    }
     await deps
       .amoFor(p.accountId)
       .then((amo) => amo.addLeadNote(draft.leadId, `[Агент опт] КП${kpNo ? ` ${kpNo}` : ''} отправлено на ${mail.to}.`))
       .catch((err: Error) => req.log.warn({ err: err.message }, 'kp: примечание в сделку не записано'));
     const fresh = await repo.byId(p.accountId, draft.id);
-    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, to: mail.to };
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, to: mail.to, copy };
+  });
+
+  /** Запись об отправке — в payload черновика (с повтором при параллельной правке). */
+  const setSentMail = async (accountId: number, id: number, record: SentMailRecord) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const cur = await repo.byId(accountId, id);
+      if (!cur) return;
+      if (await repo.setPayloadIfVersion(id, cur.version, { ...(cur.payload as Record<string, unknown>), sentMail: record })) return;
+    }
+  };
+
+  /**
+   * KP-SENT-COPY: «Посмотреть письмо» — от кого, кому, копия, тема, дата, текст, вложение, messageId, копия в «Отправленные».
+   * КП, отправленные до сохранения копий, — то, что есть в журнале kp_sent, с пометкой legacy.
+   */
+  api.get('/kp/draft/:id/sent-mail', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    const rec = (d.payload as unknown as Partial<KpPayload>).sentMail ?? null;
+    const attachmentKind = d.pdfPath ? 'pdf' : d.docxPath ? 'docx' : null;
+    if (rec) return { legacy: false, kpNo: d.kpNo, attachmentKind, ...rec };
+    if (d.status !== 'sent' && !d.sentAt) return reply.code(404).send({ error: 'not_sent', message: 'КП ещё не отправлялось' });
+    const entry = (await deps.journal.list(p.accountId, { leadId: d.leadId, kind: 'kp_sent', limit: 100 })).find((e) => Number((e.details as { draftId?: number }).draftId) === d.id) ?? null;
+    const det = (entry?.details ?? {}) as { to?: string; cc?: string | null; attachment?: string | { name: string; bytes: number }; subject?: string; messageId?: string; from?: string };
+    const sentAt = entry?.createdAt ?? d.sentAt ?? null;
+    const att = typeof det.attachment === 'string' ? { name: det.attachment, bytes: null } : det.attachment ?? null;
+    return {
+      legacy: true,
+      note: 'письмо отправлено до сохранения копий',
+      kpNo: d.kpNo,
+      attachmentKind,
+      at: sentAt ? new Date(sentAt).toISOString() : null,
+      messageId: det.messageId ?? null,
+      from: det.from ?? null,
+      to: det.to ?? null,
+      cc: det.cc ?? null,
+      subject: det.subject ?? null,
+      text: null,
+      attachment: att,
+      smtp: null,
+      eml: null,
+      copy: { status: 'unknown', folder: null, error: null },
+    };
   });
 }
+
+/** KP-SENT-COPY: копия письма в «Отправленные» не сохранена (письмо клиенту ушло). */
+const KP_SENT_COPY_FAILED = 'kp_sent_copy_failed' as JournalKind;
 
 /** Открытые маршруты файлов КП: ссылка с подписью из GET /widget/v1/kp/file/link. */
 export function kpPublicRoutes(app: FastifyInstance, deps: Deps) {
@@ -695,5 +787,7 @@ function view(d: KpDraft, priceValidity: string | null = null, vatRate = DEFAULT
     // KP-LETTER-SCOPE: объём по письму и «Ещё в проекте».
     scope: p.scope ?? null,
     projectRest: p.projectRest ?? [],
+    // KP-SENT-COPY: последнее отправленное письмо — дата и судьба копии в «Отправленные» (жёлтая пометка в окне КП).
+    sentMail: p.sentMail ? { at: p.sentMail.at, to: p.sentMail.to, messageId: p.sentMail.messageId, copy: p.sentMail.copy } : null,
   };
 }

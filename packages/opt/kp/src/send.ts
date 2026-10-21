@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import nodemailer from 'nodemailer';
+import MailComposer from 'nodemailer/lib/mail-composer';
 import type { KpDraft } from './repo.ts';
 
 /**
@@ -30,9 +31,66 @@ export interface KpMail {
   attachments: { filename: string; content: Buffer }[];
 }
 
-export interface KpMailSender {
-  send(cfg: SmtpConfig, mail: KpMail): Promise<void>;
+/**
+ * KP-SENT-COPY: итог отправки — messageId, ответ SMTP (кого принял / отверг, строка ответа) и сам MIME письма (raw):
+ * тот же MIME уходит по SMTP, сохраняется .eml рядом с КП и кладётся копией в «Отправленные» по IMAP.
+ */
+export interface SendResult {
+  messageId: string;
+  accepted: string[];
+  rejected: string[];
+  response: string;
+  raw: Buffer;
 }
+
+/**
+ * KP-SENT-COPY: что и как ушло клиенту — в payload черновика (sentMail) и в журнал kp_sent: адреса, тема, текст, вложение,
+ * messageId, ответ SMTP, путь .eml (рядом с КП) и судьба копии в «Отправленные».
+ */
+export interface SentMailRecord {
+  at: string;
+  messageId: string;
+  from: string;
+  to: string;
+  cc: string | null;
+  subject: string;
+  text: string;
+  attachment: { name: string; bytes: number };
+  smtp: { accepted: string[]; rejected: string[]; response: string };
+  /** .eml относительно KP_FILES_ROOT; null — сохранить не удалось. */
+  eml: string | null;
+  copy: { status: 'saved' | 'failed'; folder: string | null; error: string | null };
+}
+
+export interface KpMailSender {
+  send(cfg: SmtpConfig, mail: KpMail): Promise<SendResult>;
+}
+
+/** Получатели конверта SMTP: «Кому» и «Копия» (через запятую). */
+export const recipientsOf = (mail: Pick<KpMail, 'to' | 'cc'>): string[] =>
+  [mail.to, ...(mail.cc ?? '').split(/[,;]/)].map((x) => x.trim()).filter(Boolean);
+
+/** MIME письма (RFC 822) из KpMail — один раз: его отправляет SMTP и его же кладёт IMAP APPEND. */
+export async function buildRawMail(mail: KpMail, date = new Date()): Promise<Buffer> {
+  const raw = await new MailComposer({
+    from: mail.from,
+    to: mail.to,
+    ...(mail.cc ? { cc: mail.cc } : {}),
+    subject: mail.subject,
+    text: mail.text,
+    html: mail.html,
+    messageId: mail.messageId,
+    date,
+    headers: mail.headers,
+    attachments: mail.attachments,
+  })
+    .compile()
+    .build();
+  // Переводы строк — CRLF везде: так письмо уходит по SMTP и так его требует IMAP APPEND (RFC 3501); иначе копия отличалась бы.
+  return Buffer.from(raw.toString('latin1').replace(/\r?\n/g, '\r\n'), 'latin1');
+}
+
+const addressOf = (a: unknown): string => (typeof a === 'string' ? a : String((a as { address?: string } | null)?.address ?? ''));
 
 /** Подстановка {kpNo} и {clientName} в тему и текст из настроек. */
 export function renderMailTemplate(template: string, vars: { kpNo: string; clientName: string }): string {
@@ -89,7 +147,8 @@ export function sendBlockers(args: {
 }
 
 export class SmtpKpSender implements KpMailSender {
-  async send(cfg: SmtpConfig, mail: KpMail): Promise<void> {
+  async send(cfg: SmtpConfig, mail: KpMail): Promise<SendResult> {
+    const raw = await buildRawMail(mail);
     const transport = nodemailer.createTransport({
       host: cfg.host,
       port: cfg.port,
@@ -100,7 +159,9 @@ export class SmtpKpSender implements KpMailSender {
       socketTimeout: 30_000,
     });
     try {
-      await transport.sendMail({ ...mail });
+      // Готовый MIME (raw) с конвертом: по SMTP уходит ровно то, что потом лежит в .eml и в «Отправленных».
+      const info = await transport.sendMail({ envelope: { from: mail.from.address, to: recipientsOf(mail) }, raw });
+      return { messageId: mail.messageId, accepted: (info.accepted ?? []).map(addressOf), rejected: (info.rejected ?? []).map(addressOf), response: String(info.response ?? ''), raw };
     } finally {
       transport.close();
     }

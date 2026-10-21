@@ -22,6 +22,7 @@ export * from './research-notes.ts';
 export * from './questions.ts';
 export * from './letter-select.ts';
 export * from './send.ts';
+export * from './sent-copy.ts';
 export * from './settings.ts';
 export * from './table-parse.ts';
 export * from './docx-spec.ts';

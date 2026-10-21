@@ -4,6 +4,7 @@ import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type Pri
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
 import { letterScope, markOf, type DocItem } from './letter-select.ts';
+import type { SentMailRecord } from './send.ts';
 import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, profileOf, type DoorFeatures, type GostProfile, type PositionCategory } from '@opt/kb';
 
 /**
@@ -188,6 +189,8 @@ export interface ComponentDoorQuestionInfo {
 }
 
 export interface KpPayload {
+  /** KP-SENT-COPY: последнее отправленное письмо с этим КП («Посмотреть письмо»). */
+  sentMail?: SentMailRecord | null;
   client: { org: string; fio: string; email: string; phone: string };
   request_items: KpRequestItem[];
   /** Товары каталога розницы; у опта всегда пусто, поле сохранено ради черновиков, перенесённых из розницы. */

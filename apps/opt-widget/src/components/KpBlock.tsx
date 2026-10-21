@@ -5,6 +5,7 @@ import type { DraftJob, GostProfileInfo, KpAnswerBody, KpApi, KpDraftInfo, KpDra
 import { Journal } from './Journal.tsx';
 import { KbAnswer } from './KbAnswer.tsx';
 import { SendPreview } from './SendPreview.tsx';
+import { SentMailView } from './SentMailView.tsx';
 import { Survey } from './Survey.tsx';
 
 /**
@@ -243,6 +244,8 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const { draft, job, lines, dirty, busy, error, setError, pending, act, take } = k;
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState(false);
+  // KP-SENT-COPY: «Посмотреть письмо» — слоем поверх окна КП, как окно отправки.
+  const [mailView, setMailView] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
 
   // Макет Figma «10 Агент опт — КП»: карточки с рамкой и радиусом 13 px на сером фоне. Шапку с логотипом рисует amoCRM (.opt-caption).
@@ -296,6 +299,11 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
       }}
     />
   );
+  const layer = preview ? sendPreview : mailView ? <SentMailView api={api} draft={draft} onClose={() => setMailView(false)} /> : null;
+  const closeLayer = () => {
+    setPreview(false);
+    setMailView(false);
+  };
   const downloads = (draft.status === 'built' || draft.status === 'sent') && (draft.hasPdf || draft.hasDocx) && (
     <span className="opt-kp-downloads">
       {draft.hasPdf && (
@@ -333,6 +341,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           </button>
         </div>
         {downloads}
+        <CopyFailed draft={draft} />
         <div className="opt-kp-note">
           <KpNote draft={draft} why={why} />
         </div>
@@ -350,15 +359,22 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           downloads={downloads}
           onDraft={start}
           onBuild={build}
-          onSend={() => setPreview(true)}
+          onSend={() => {
+            setMailView(false);
+            setPreview(true);
+          }}
+          onShowMail={() => {
+            setPreview(false);
+            setMailView(true);
+          }}
           onClose={() => setOpen(false)}
           // Окно письма — слоем поверх окна КП: отдельно (в колонке amoCRM) его закрывало окно на 88 %, «Отправить» было не нажать.
-          sendLayer={preview ? sendPreview : null}
-          onSendClose={() => setPreview(false)}
+          sendLayer={layer}
+          onSendClose={closeLayer}
         />
       )}
 
-      {preview && !open && sendPreview}
+      {layer && !open && layer}
     </div>
   );
 }
@@ -376,7 +392,7 @@ type Tab = (typeof TABS)[number][0];
  * Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть.
  * sendLayer — окно письма «Отправить клиенту» слоем поверх содержимого окна; Esc при нём закрывает только письмо.
  */
-function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onBuild, onSend, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onBuild: () => void; onSend: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
+function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onBuild, onSend, onShowMail, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
   const { draft, lines, dirty, busy, error, pending, act, edit, research, researching, progress, findPrices } = k;
   const [tab, setTab] = useState<Tab>('lines');
   const sending = Boolean(sendLayer);
@@ -427,12 +443,18 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
             <button type="button" className="opt-btn" disabled={busy || !canSend} title={canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
               Отправить клиенту
             </button>
+            {(draft.status === 'sent' || draft.sentAt) && onShowMail && (
+              <button type="button" className="opt-btn" title="Что и как ушло клиенту: адреса, тема, текст, вложение, Message-ID, копия в «Отправленные»" onClick={onShowMail}>
+                Посмотреть письмо
+              </button>
+            )}
             {downloads}
             <button type="button" className="opt-btn opt-icon opt-kp-close" aria-label="Закрыть" title="Закрыть (Esc)" onClick={onClose}>
               ✕
             </button>
           </div>
         </div>
+        <CopyFailed draft={draft} />
         <div className="opt-kp-tabs" role="tablist">
           {TABS.map(([id, label]) => (
             <button key={id} type="button" role="tab" aria-selected={tab === id} className={`opt-kp-tab${tab === id ? ' opt-kp-tab-active' : ''}`} onClick={() => setTab(id)}>
@@ -482,6 +504,13 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
     </div>,
     document.body,
   );
+}
+
+/** KP-SENT-COPY: письмо ушло, а копия в «Отправленные» не легла — жёлтая пометка с причиной. */
+function CopyFailed({ draft }: { draft: KpDraftInfo }) {
+  const copy = draft.sentMail?.copy;
+  if (copy?.status !== 'failed') return null;
+  return <div className="opt-kp-copy-failed">Копия в «Отправленные» не сохранена: {copy.error ?? 'причина неизвестна'}</div>;
 }
 
 /** Вкладка «Письмо и файлы»: покупатель, письмо и вложения, текст письма, требования заявки, фото-образцы, что уточнить у клиента. */

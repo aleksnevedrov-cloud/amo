@@ -225,7 +225,40 @@ export interface ResearchState {
   positions: ResearchPosition[];
 }
 
+/** KP-SENT-COPY: «Посмотреть письмо» — что и как ушло клиенту; legacy — КП отправлено до сохранения копий (данные журнала). */
+export interface SentMailInfo {
+  legacy: boolean;
+  note?: string;
+  kpNo: string | null;
+  at: string | null;
+  messageId: string | null;
+  from: string | null;
+  to: string | null;
+  cc: string | null;
+  subject: string | null;
+  text: string | null;
+  attachment: { name: string; bytes: number | null } | null;
+  attachmentKind: 'pdf' | 'docx' | null;
+  smtp: { accepted: string[]; rejected: string[]; response: string } | null;
+  eml: string | null;
+  copy: { status: 'saved' | 'failed' | 'unknown'; folder: string | null; error: string | null };
+}
+
+/** «Проверить IMAP»: вход и папка отправленных. */
+export interface ImapTestInfo {
+  ok: boolean;
+  host: string;
+  username: string;
+  folder?: string | null;
+  how?: 'special_use' | 'name' | 'settings' | null;
+  exists?: boolean;
+  folders?: string[];
+  error?: string;
+}
+
 export interface KpDraftInfo {
+  /** KP-SENT-COPY: последнее отправленное письмо — дата и копия в «Отправленные» (жёлтая пометка при сбое). */
+  sentMail?: { at: string; to: string; messageId: string; copy: { status: 'saved' | 'failed'; folder: string | null; error: string | null } } | null;
   id: number;
   leadId: number;
   status: KpDraftStatus;
@@ -531,6 +564,8 @@ export class KpApi extends ApiClient {
   status = () => this.call<Status>('GET', '/widget/v1/status');
   settings = () => this.call<{ settings: OptSettings; version: number }>('GET', '/widget/v1/settings');
   saveSettings = (settings: OptSettings) => this.call<{ settings: OptSettings; version: number }>('PUT', '/widget/v1/settings', settings);
+  /** «Проверить IMAP»: вход в ящик отправки КП и папка отправленных (sentFolder — ещё не сохранённое значение поля). */
+  imapTest = (sentFolder?: string) => this.call<ImapTestInfo>('POST', '/widget/v1/settings/imap-test', sentFolder === undefined ? {} : { sentFolder });
   saveSmtpPassword = (password: string) => this.call<{ ok: true }>('PUT', '/widget/v1/settings/smtp-password', { password });
   journal = (q: { leadId?: number; kind?: string; before?: number; limit?: number } = {}) => {
     const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]));
@@ -569,7 +604,9 @@ export class KpApi extends ApiClient {
   sendPreview = (draftId: number) => this.call<SendPreviewInfo>('GET', `/widget/v1/kp/send/preview?draftId=${draftId}`);
   /** «Проверено, отправить»: письмо уходит только отсюда. */
   send = (body: { draftId: number; to: string; cc?: string; subject: string; text: string; resendConfirmed?: boolean }) =>
-    this.call<{ draft: KpDraftInfo | null; to: string }>('POST', '/widget/v1/kp/send', body);
+    this.call<{ draft: KpDraftInfo | null; to: string; copy?: SentMailInfo['copy'] }>('POST', '/widget/v1/kp/send', body);
+  /** «Посмотреть письмо» у отправленного КП. */
+  sentMail = (draftId: number) => this.call<SentMailInfo>('GET', `/widget/v1/kp/draft/${draftId}/sent-mail`);
 
 
   /** База знаний: источники, добавление текста и файла (base64 в JSON), переиндексация, удаление, фрагменты, поиск. */

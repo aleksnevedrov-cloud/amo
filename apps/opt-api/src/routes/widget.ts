@@ -1,6 +1,6 @@
 import { disposableTokenAudience, verifyDisposableToken, type WidgetPrincipal } from '@core/amo';
 import { amoRedirectUri } from '@core/shared';
-import { optSettingsSchema, resolveOptRoute } from '@opt/kp';
+import { imapConfigFor, optSettingsSchema, resolveOptRoute } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -139,6 +139,29 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         await deps.secrets.set(p.accountId, 'smtp', b.data.password, p.userId);
         await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: 'Пароль SMTP для отправки КП обновлён', details: { userId: p.userId, audit: 'smtp' } });
         return { ok: true };
+      });
+
+      /**
+       * KP-SENT-COPY: «Проверить IMAP» — вход в ящик отправки КП (IMAP по домену SMTP, логин и пароль SMTP) и папка
+       * отправленных: заданная (sentFolder из тела или настроек) или найденная по признаку \Sent / имени.
+       */
+      api.post('/settings/imap-test', async (req, reply) => {
+        if (!requireAdmin(req, reply)) return;
+        const b = z.object({ sentFolder: z.string().max(200).optional() }).safeParse(req.body ?? {});
+        if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+        const p = principal(req);
+        const m = (await deps.settings.get(p.accountId)).settings.mail;
+        const password = await deps.secrets.get(p.accountId, 'smtp');
+        if (!m.smtpHost || !m.username || !password) return reply.code(409).send({ error: 'mail_off', message: 'Заполните SMTP-сервер, логин и пароль и сохраните' });
+        const cfg = imapConfigFor(m, password);
+        const want = (b.data.sentFolder ?? m.sentFolder).trim() || null;
+        try {
+          const r = await deps.sentCopier.probe(cfg, want);
+          const exists = r.folder !== null && r.folders.some((f) => f.toLowerCase() === r.folder?.toLowerCase());
+          return { ok: Boolean(r.folder) && exists, host: `${cfg.host}:${cfg.port}`, username: cfg.username, folder: r.folder, how: r.how, exists, folders: r.folders };
+        } catch (err) {
+          return { ok: false, host: `${cfg.host}:${cfg.port}`, username: cfg.username, error: (err as Error).message };
+        }
       });
 
       llmRoutes(api, deps, principal, requireAdmin);

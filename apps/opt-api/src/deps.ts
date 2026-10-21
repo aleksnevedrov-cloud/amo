@@ -1,5 +1,5 @@
 import type { Env } from '@core/shared';
-import { createOptCore, DRAFT_JOB, draftJobId, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, SmtpKpSender, type DraftJob, type KpMailSender, type OptCore, type OptCoreOverrides, type ResearchJob } from '@opt/kp';
+import { createOptCore, DRAFT_JOB, ImapSentCopier, type SentCopier, draftJobId, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, SmtpKpSender, type DraftJob, type KpMailSender, type OptCore, type OptCoreOverrides, type ResearchJob } from '@opt/kp';
 import { KB_INDEX_JOB, KB_QUEUE, kbIndexJobId, type KbIndexJob } from '@opt/kb';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -30,12 +30,14 @@ export interface KbQueue {
 export interface Deps extends OptCore {
   redis: Pick<Redis, 'ping'>;
   mailer: KpMailSender;
+  /** KP-SENT-COPY: копия отправленного КП в «Отправленные» по IMAP (в тестах подменяется). */
+  sentCopier: SentCopier;
   queue: DraftQueue;
   researchQueue: ResearchQueue;
   kbQueue: KbQueue;
 }
 
-export type DepsOverrides = OptCoreOverrides & Partial<Pick<Deps, 'redis' | 'mailer' | 'queue' | 'researchQueue' | 'kbQueue'>>;
+export type DepsOverrides = OptCoreOverrides & Partial<Pick<Deps, 'redis' | 'mailer' | 'sentCopier' | 'queue' | 'researchQueue' | 'kbQueue'>>;
 
 export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
   const core = createOptCore(env, overrides);
@@ -49,6 +51,7 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     ...core,
     redis,
     mailer: overrides.mailer ?? new SmtpKpSender(),
+    sentCopier: overrides.sentCopier ?? new ImapSentCopier(),
     queue,
     researchQueue,
     kbQueue,

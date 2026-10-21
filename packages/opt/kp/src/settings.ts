@@ -50,6 +50,8 @@ export const optSettingsSchema = z
         subject: z.string().max(300).default('Коммерческое предложение {kpNo}'),
         text: z.string().max(4000).default('Здравствуйте!\n\nНаправляем коммерческое предложение по вашему запросу — документ во вложении.'),
         signature: z.string().max(1000).default(''),
+        /** KP-SENT-COPY: папка отправленных для копии КП (IMAP APPEND); пусто — по признаку \Sent или имени «Sent» / «Отправленные». */
+        sentFolder: z.string().max(200).default(''),
       })
       .strict()
       .default({}),
