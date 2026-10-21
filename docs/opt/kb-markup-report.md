@@ -61,7 +61,7 @@ ALTER TABLE kb_sources ADD COLUMN IF NOT EXISTS markup_pct numeric NOT NULL DEFA
 ## Развёртывание
 
 ```bash
-cd /opt/agent-opt && git -C src status && git -C src fetch origin claude/opt-kb && git -C src checkout <коммит документации поверх e04c8f7>
+cd /opt/agent-opt && git -C src status && git -C src fetch origin claude/opt-kb && git -C src checkout e04c8f7
 # дамп базы знаний до миграции 014
 docker compose exec -T opt-kb-db pg_dump -U aidoor_opt_kb -d ai_door_opt_kb --no-owner | gzip > /root/kb-$(date +%Y%m%d-%H%M)-before-kb-markup.sql.gz
 docker compose build opt-api opt-worker && docker compose up -d opt-api opt-worker   # миграция 014 — при старте opt-api
