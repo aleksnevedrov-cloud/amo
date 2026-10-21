@@ -3,6 +3,7 @@ import { DEFAULT_MAX_POSITIONS_PER_RUN, researchablePositions, type ResearchJob 
 import type { OptCore } from './deps.ts';
 import { buildKpDraft, carryProjectAdds, type KpDraftDeps, type KpPayload, type ParsedFile } from './draft.ts';
 import { analyzeDraftFile } from './file-analyze.ts';
+import { recordingGateway } from './request-parse.ts';
 import { carryAnswers } from './questions.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
 
@@ -17,6 +18,8 @@ export interface DraftJob {
   accountId: number;
   leadId: number;
   userId: number | null;
+  /** KP-PARSE-RETRY: «Проверить почту заново» — читать ящик, даже если файлы заявки уже в сделке. */
+  checkMail?: boolean;
 }
 
 /** Один черновик на сделку в очереди: повторное нажатие не плодит задания. */
@@ -45,6 +48,9 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const route = resolveOptRoute(settings);
     const amo = await core.amoFor(accountId);
     const widgetSettings = toWidgetSettings(settings);
+    // KP-PARSE-RETRY: сырой ответ модели на разбор документа — в журнал, если ответ не прошёл проверку схемы.
+    const rec = recordingGateway(ai.llm);
+    const docs = core.docsFor(rec.llm);
     // Таблицы xlsx — по колонкам и порциями (file-analyze.ts / table-parse.ts), остальное — @core/docs; старый Office — через LibreOffice.
     const analyze: KpDraftDeps['analyze'] =
       settings.vision.provider === 'off'
@@ -52,9 +58,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
         : (orig) =>
             analyzeDraftFile(
               {
-                docs: core.docs,
+                docs,
                 documents: core.documents,
                 llm: ai.llm,
+                lastRaw: rec.last,
+                resetRaw: rec.reset,
                 settings: widgetSettings,
                 route,
                 pricing: settings.billing.pricing,
@@ -79,10 +87,14 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const mail: KpDraftDeps['mail'] = mailPassword
       ? (search) => core.mailRead({ host: m.imapHost, port: m.imapPort, secure: m.imapSecure, username: m.username, password: mailPassword }, { ...search, ...(known ? { known } : {}) }, { onProgress: hooks.onProgress })
       : null;
+    // KP-PARSE-RETRY, п. 3: письмо прошлой сборки из ящика — полный текст, когда в этот раз ящик не читается.
+    const prevLetter = prevMail?.status === 'found' && prevPayload.letterText ? { text: prevPayload.letterText, subject: prevMail.subject, from: prevMail.from ?? prevMail.searchedFrom, date: prevMail.date } : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing }, { amo, analyze, mail });
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter }, { amo, analyze, mail });
     const ms = r.payload.source.mail;
-    if (ms) {
+    if (ms?.status === 'skipped') {
+      await core.journal.add({ accountId, leadId, kind: 'mail_fetch', summary: `Ящик не читали: ${ms.error}`, details: { userId: job.userId, status: 'skipped' } });
+    } else if (ms) {
       await core.journal.add({
         accountId,
         leadId,
@@ -130,8 +142,10 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
       summary:
         `Черновик КП: позиций ${r.payload.items.length}, документов ${r.payload.source.documents.length}` +
         (r.payload.source.skipped.length ? `, пропущено файлов ${r.payload.source.skipped.length}` : '') +
+        (r.failedFiles.length ? `, не разобрано ${r.failedFiles.length} (${r.failedFiles.map((f) => `«${f.name}»: ${f.reason}`).join('; ')})` : '') +
         (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''}${f.knownFromKb ? `, из базы знаний ${f.knownFromKb}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : ''),
-      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files },
+      // Попытки разбора с сырыми ответами модели (до 4 КБ) — здесь, в черновик не попадают.
+      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files, failedFiles: r.failedFiles, checkMail: Boolean(job.checkMail) },
       inputTokens: r.cost.inputTokens,
       outputTokens: r.cost.outputTokens,
       costUsd: r.cost.usd,

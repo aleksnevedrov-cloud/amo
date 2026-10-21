@@ -5,6 +5,7 @@ export * from './convert.ts';
 export * from './deps.ts';
 export * from './draft.ts';
 export * from './file-analyze.ts';
+export * from './request-parse.ts';
 export * from './job.ts';
 export * from './kp-build.ts';
 export * from './kb-answer.ts';

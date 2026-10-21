@@ -226,10 +226,15 @@ function totalsOf(goods: KpDraftLine[], draft: KpDraftInfo) {
   return { total, vat, rate };
 }
 
-function CountersRow({ c }: { c: Counters }) {
+function CountersRow({ c, draft }: { c: Counters; draft?: KpDraftInfo }) {
+  const files = draft?.source?.files;
   return (
     <div className="opt-kp-counters">
-      <span className="opt-kp-counter">позиций <b>{c.positions}</b></span>
+      {c.positions === 0 && files ? (
+        <span className="opt-kp-counter opt-kp-counter-warn">позиций нет · {filesLine(files)}</span>
+      ) : (
+        <span className="opt-kp-counter">позиций <b>{c.positions}</b></span>
+      )}
       <span className={`opt-kp-counter${c.blocking ? ' opt-kp-counter-block' : c.open ? ' opt-kp-counter-warn' : ''}`}>
         вопросов <b>{c.open}</b>
         {c.blocking ? ` (блокируют ${c.blocking})` : ''}
@@ -247,6 +252,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   // KP-SENT-COPY: «Посмотреть письмо» — слоем поверх окна КП, как окно отправки.
   const [mailView, setMailView] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
+  const checkMail = () => void act(() => api.makeDraft(leadId, { checkMail: true }));
 
   // Макет Figma «10 Агент опт — КП»: карточки с рамкой и радиусом 13 px на сером фоне. Шапку с логотипом рисует amoCRM (.opt-caption).
   if (!draft) {
@@ -328,7 +334,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           <span className={`opt-kp-badge${draft.status === 'draft' || draft.status === 'built' || draft.status === 'sent' ? ' opt-kp-badge-green' : ''}`}>{kpStatus}</span>
         </div>
         <div className="opt-kp-sub">{draft.kpNo ?? 'Номер появится после сборки документа'}</div>
-        <CountersRow c={c} />
+        <CountersRow c={c} draft={draft} />
         {pending && <div className="opt-kp-sub">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
         {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
         {error && !open && <div className="opt-error">{error}</div>}
@@ -342,6 +348,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         </div>
         {downloads}
         <CopyFailed draft={draft} />
+        <SourceNotes draft={draft} compact />
         <div className="opt-kp-note">
           <KpNote draft={draft} why={why} />
         </div>
@@ -358,6 +365,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           kpStatus={kpStatus}
           downloads={downloads}
           onDraft={start}
+          onCheckMail={checkMail}
           onBuild={build}
           onSend={() => {
             setMailView(false);
@@ -392,7 +400,7 @@ type Tab = (typeof TABS)[number][0];
  * Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть.
  * sendLayer — окно письма «Отправить клиенту» слоем поверх содержимого окна; Esc при нём закрывает только письмо.
  */
-function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onBuild, onSend, onShowMail, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
+function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onCheckMail, onBuild, onSend, onShowMail, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onCheckMail?: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
   const { draft, lines, dirty, busy, error, pending, act, edit, research, researching, progress, findPrices } = k;
   const [tab, setTab] = useState<Tab>('lines');
   const sending = Boolean(sendLayer);
@@ -418,7 +426,7 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           <div className="opt-kp-head">
             <h3 className="opt-kp-title">КП {draft.kpNo ?? '— черновик'}</h3>
             <span className="opt-kp-badge opt-kp-badge-green">{kpStatus}</span>
-            <CountersRow c={counters} />
+            <CountersRow c={counters} draft={draft} />
           </div>
           <div className="opt-kp-modal-actions">
             {draft.status === 'draft' && (
@@ -434,7 +442,7 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
             <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={() => void act(() => api.saveDraftItems(draft.id, lines))}>
               Сохранить правки
             </button>
-            <button type="button" className="opt-btn" disabled={busy || pending} onClick={onDraft} title="Прочитать карточку заново; ответы опросника переносятся">
+            <button type="button" className="opt-btn" disabled={busy || pending} onClick={onDraft} title="Прочитать карточку заново; файлы заявки, уже загруженные в сделку, — без чтения ящика; ответы опросника переносятся">
               Собрать заново
             </button>
             <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending || Boolean(why)} title={why ?? 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
@@ -455,6 +463,7 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           </div>
         </div>
         <CopyFailed draft={draft} />
+        <SourceNotes draft={draft} disabled={busy || pending} onRebuild={onDraft} onCheckMail={onCheckMail} />
         <div className="opt-kp-tabs" role="tablist">
           {TABS.map(([id, label]) => (
             <button key={id} type="button" role="tab" aria-selected={tab === id} className={`opt-kp-tab${tab === id ? ' opt-kp-tab-active' : ''}`} onClick={() => setTab(id)}>
@@ -511,6 +520,87 @@ function CopyFailed({ draft }: { draft: KpDraftInfo }) {
   const copy = draft.sentMail?.copy;
   if (copy?.status !== 'failed') return null;
   return <div className="opt-kp-copy-failed">Копия в «Отправленные» не сохранена: {copy.error ?? 'причина неизвестна'}</div>;
+}
+
+/** Сводка по файлам: найдено, взято в разбор, разобрано, пропущено, не разобрано. */
+function filesLine(files: NonNullable<NonNullable<KpDraftInfo['source']>['files']>): string {
+  const n = (st: string) => files.filter((f) => f.status === st).length;
+  const failed = n('failed');
+  return `файлов найдено ${files.length}, взято ${n('parsed') + failed}, разобрано ${n('parsed')}, пропущено ${n('skipped')}${failed ? `, не разобрано ${failed}` : ''}`;
+}
+
+/** Причина сбоя ящика и время следующей попытки (если сервер не написал его в причине). */
+function mailFailure(m: MailSourceInfo): string {
+  const why = m.error ?? 'причина неизвестна';
+  return m.retryAt && !why.includes('следующая попытка') ? `${why}, следующая попытка после ${dateTimeMsk(m.retryAt)}` : why;
+}
+
+/**
+ * KP-PARSE-RETRY: что с источниками заявки — над вкладками окна КП (и коротко в узкой колонке):
+ * жёлтая пометка «Ящик не прочитан: причина, следующая попытка …» и «Проверить почту заново»; «Файл "…" не разобран: причина»
+ * и «Разобрать заново»; при пересборке без чтения ящика — почему ящик не читали; список файлов с причинами пропуска.
+ */
+function SourceNotes({ draft, compact = false, disabled = false, onRebuild, onCheckMail }: { draft: KpDraftInfo; compact?: boolean; disabled?: boolean; onRebuild?: () => void; onCheckMail?: () => void }) {
+  const [open, setOpen] = useState(false);
+  const src = draft.source;
+  if (!src) return null;
+  const m = src.mail;
+  const failed = src.files ? src.files.filter((f) => f.status === 'failed') : src.skipped.filter((f) => f.failed);
+  const files = src.files ?? [];
+  const mailError = m?.status === 'error';
+  if (!mailError && !failed.length && !(m?.status === 'skipped' && !compact) && !(files.length && !compact)) return null;
+  const canAct = draft.status === 'draft';
+  return (
+    <div className="opt-kp-source-notes opt-col">
+      {mailError && (
+        <div className="opt-kp-mail-failed">
+          Ящик не прочитан: {mailFailure(m)}
+          {!compact && ' — черновик собран по файлам и письму из сделки'}
+          {!compact && onCheckMail && canAct && (
+            <button type="button" className="opt-btn opt-btn-small" disabled={disabled} title="Собрать заново с чтением ящика" onClick={onCheckMail}>
+              Проверить почту заново
+            </button>
+          )}
+        </div>
+      )}
+      {failed.map((f) => (
+        <div key={f.name} className="opt-kp-file-failed">
+          Файл «{f.name}» не разобран: {f.reason}
+          {!compact && onRebuild && canAct && (
+            <button type="button" className="opt-btn opt-btn-small" disabled={disabled} title="Собрать черновик заново: файл разбирается ещё раз" onClick={onRebuild}>
+              Разобрать заново
+            </button>
+          )}
+        </div>
+      ))}
+      {!compact && m?.status === 'skipped' && (
+        <div className="opt-kp-sub">
+          Ящик не читали: файлы заявки уже в сделке.
+          {onCheckMail && canAct && (
+            <button type="button" className="opt-btn opt-btn-small" disabled={disabled} title="Собрать заново с чтением ящика: новое письмо и вложения" onClick={onCheckMail}>
+              Проверить почту заново
+            </button>
+          )}
+        </div>
+      )}
+      {!compact && files.length > 0 && (
+        <div className="opt-col opt-details">
+          <button type="button" className="opt-details-summary" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            Файлы: {filesLine(files).replace(/^файлов /, '')} {open ? '⌄' : '›'}
+          </button>
+          {open && (
+            <div className="opt-details-body opt-col opt-kp-files">
+              {files.map((f) => (
+                <div key={`${f.status}:${f.name}`} className={f.status === 'failed' ? 'opt-error' : f.status === 'skipped' ? 'opt-muted' : ''}>
+                  {f.name} — {f.status === 'parsed' ? `разобран, ${plural(f.positions, 'позиция', 'позиции', 'позиций')}${f.reason ? ` (${f.reason})` : ''}` : f.status === 'skipped' ? `пропущен: ${f.reason ?? 'без причины'}` : `не разобран: ${f.reason ?? 'причина неизвестна'}`}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Вкладка «Письмо и файлы»: покупатель, письмо и вложения, текст письма, требования заявки, фото-образцы, что уточнить у клиента. */
@@ -598,10 +688,12 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
           ? 'Письмо: не найдено, ящик просмотрен не полностью'
           : m?.status === 'error'
             ? 'Письмо: ящик не прочитан'
+            : m?.status === 'skipped'
+              ? `Письмо: из прошлой сборки${src.letterAt ? ` (${date(src.letterAt)})` : ''}, ящик не читали`
           : src.letterAt
             ? `Письмо: ${date(src.letterAt)} (из карточки, ящик не настроен)`
             : 'Письмо: в карточке нет';
-  const warn = m?.status !== 'found' || (m.files ?? []).some((f) => f.status === 'not_uploaded' && f.reason) || parseErrors.length > 0 || cardErrors.length > 0;
+  const warn = (m?.status !== 'found' && m?.status !== 'skipped') || (m.files ?? []).some((f) => f.status === 'not_uploaded' && f.reason) || parseErrors.length > 0 || cardErrors.length > 0;
   return (
     <div className="opt-col opt-details">
       <button type="button" className={`opt-details-summary${warn ? ' opt-details-warn' : ''}`} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
@@ -619,11 +711,9 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
           )}
           {(m?.status === 'not_found' || m?.status === 'partial') && <SearchDiag m={m} />}
           {m?.status === 'error' && (
-            <div className="opt-error">
-              Ящик не прочитан: {m.error}
-              {m.retryAt ? ` — следующая попытка после ${dateTimeMsk(m.retryAt)}` : ''}
-            </div>
+            <div className="opt-error">Ящик не прочитан: {mailFailure(m)}</div>
           )}
+          {m?.status === 'skipped' && <div className="opt-muted">{m.error}</div>}
           {!m && <div className="opt-muted">Ящик во вкладке «Письмо» не настроен — черновик по письму и файлам из карточки сделки.</div>}
           <div className="opt-muted">
             {src.documents.length ? `Разобрано файлов: ${src.documents.length}` : src.attachments.length ? 'Файлы не разобраны' : 'Файлов для разбора нет'}

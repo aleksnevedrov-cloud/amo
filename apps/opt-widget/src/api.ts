@@ -280,7 +280,10 @@ export interface KpDraftInfo {
     letterAt: string | null;
     attachments: string[];
     documents: number[];
-    skipped: { name: string; reason: string }[];
+    /** failed — разбор не удался (повторы и разбор по тексту не помогли): «Разобрать заново» в окне КП. */
+    skipped: { name: string; reason: string; failed?: boolean }[];
+    /** KP-PARSE-RETRY: сводка по файлам (разобран / пропущен / не разобран); нет у черновиков до доработки. */
+    files?: { name: string; status: 'parsed' | 'skipped' | 'failed'; positions: number; reason: string | null }[];
     /** Чтение письма из ящика (вариант А); нет — ящик не настроен. */
     mail?: MailSourceInfo;
   } | null;
@@ -300,7 +303,8 @@ export interface KpDraftInfo {
 
 /** Чтение письма из ящика — как сохранено в payload черновика (те же данные, что в событии mail_fetch журнала). */
 export interface MailSourceInfo {
-  status: 'found' | 'not_found' | 'error' | 'partial';
+  /** skipped — при пересборке ящик не читали: файлы заявки уже в сделке (KP-PARSE-RETRY). */
+  status: 'found' | 'not_found' | 'error' | 'partial' | 'skipped';
   searchedFrom: string;
   from?: string | null;
   fromName?: string | null;
@@ -582,7 +586,8 @@ export class KpApi extends ApiClient {
   /** Черновик по сделке и состояние задания воркера. */
   draft = (leadId: number) => this.call<{ draft: KpDraftInfo | null; job: DraftJob }>('GET', `/widget/v1/kp/draft?leadId=${leadId}`);
   /** Кнопка «Собрать КП»: задание в очередь, ответ сразу. */
-  makeDraft = (leadId: number) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', { leadId });
+  /** checkMail — «Проверить почту заново»: при пересборке прочитать ящик, даже если файлы заявки уже в сделке. */
+  makeDraft = (leadId: number, opts: { checkMail?: boolean } = {}) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', opts.checkMail ? { leadId, checkMail: true } : { leadId });
   /** KB-COMPONENT-DOOR: ответ менеджера — к какой двери заявки считать комплектующее. */
   /** KB-COMPONENT-DOOR-GROUP: ответ на группу похожих комплектующих — ко всем её строкам. */
   componentDoorGroup = (draftId: number, groupKey: string, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null; applied: number }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { groupKey, doorRequestIndex });

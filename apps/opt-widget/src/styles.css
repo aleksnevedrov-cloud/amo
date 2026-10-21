@@ -412,6 +412,11 @@
 /* KP-SENT-COPY: пометка «копия в «Отправленные» не сохранена» и окно «Посмотреть письмо». */
 .opt-kp .opt-kp-copy-failed { margin: 6px 0; padding: 6px 10px; border-radius: 6px; background: #fff4d6; color: #8a5a00; font-size: 12px; font-weight: 600; }
 .opt-kp .opt-kp-modal > .opt-kp-copy-failed { margin: 6px 14px 0; }
+.opt-kp .opt-kp-source-notes { gap: 4px; margin: 6px 0; }
+.opt-kp .opt-kp-modal > .opt-kp-source-notes { margin: 6px 14px 0; }
+.opt-kp .opt-kp-mail-failed, .opt-kp .opt-kp-file-failed { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 10px; border-radius: 6px; background: #fff4d6; color: #8a5a00; font-size: 12px; font-weight: 600; }
+.opt-kp .opt-kp-file-failed { background: #fdecea; color: #a12a1f; }
+.opt-kp .opt-kp-files { font-size: 12px; }
 .opt-kp .opt-kp-sent-mail { gap: 6px; }
 .opt-kp .opt-kp-mail-row { display: grid; grid-template-columns: 170px 1fr; gap: 8px; align-items: baseline; font-size: 12px; }
 .opt-kp .opt-kp-mail-value { min-width: 0; overflow-wrap: anywhere; }

@@ -69,6 +69,7 @@ describe('архив виджета «Агент опт»', () => {
     // KB-MARKUP, KB-ALIASES-UI, KP-SENT-COPY (наценка, блок синонимов, «Посмотреть письмо», проверка IMAP) — архив 162 КБ; запас до 180.
     expect(zipBytes).toBeLessThan(180 * 1024);
     // KP-AGENT-V2: окно КП с вкладками, таблица, опросник, сайты и кандидаты — script.js ≈ 392 КБ; запас до 420.
-    expect(files['script.js']!.length).toBeLessThan(420 * 1024); // KB-PRICE-SHEETS: пометки статусов и счётчики прайса, 1.2.1 — 361 КБ
+    // KP-SENT-COPY — 418 КБ; KP-PARSE-RETRY (пометки об источниках, сводка по файлам, «Разобрать заново») — 424 КБ; запас до 450.
+    expect(files['script.js']!.length).toBeLessThan(450 * 1024); // KB-PRICE-SHEETS: пометки статусов и счётчики прайса, 1.2.1 — 361 КБ
   });
 });

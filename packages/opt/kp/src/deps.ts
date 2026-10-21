@@ -1,7 +1,7 @@
 import { AmoApiClient, AmoOAuth, TokenService } from '@core/amo';
 import { AccountsRepo, createPool, DocumentsRepo, JournalRepo, ModelsCacheRepo, PgTokenStore, SecretsRepo, type Db } from '@core/db';
 import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, type OcrProvider } from '@core/docs';
-import type { LLMProvider, ProviderId } from '@core/llm';
+import type { LLMProvider, LlmGateway, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import { createKbCore, createUrlFetcher, DEFAULT_EMBEDDING_MODEL, loadKbEnv, OpenAiEmbedder, type EmbedderFor, type KbCore, type UrlFetcher } from '@opt/kb';
 import { createOptAi, OPT_LLM_TIMEOUT_MS, type OptAiProvider } from './llm.ts';
@@ -28,6 +28,8 @@ export interface OptCore {
   documents: DocumentsRepo;
   /** Разбор спецификаций из файлов сделки. */
   docs: DocumentService;
+  /** KP-PARSE-RETRY: тот же разбор с заданным шлюзом модели (шлюз с записью сырого ответа — для журнала). */
+  docsFor(llm: LlmGateway): DocumentService;
   ai: OptAiProvider;
   kp: KpRepo;
   /** Результаты поиска рыночных цен и кэш (этап 3). */
@@ -139,6 +141,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     modelsCache: new ModelsCacheRepo(db),
     documents,
     docs,
+    docsFor: (llm) => new DocumentService({ llm, catalog: NO_CATALOG, documents, ocr }),
     ai,
     kp: new KpRepo(db),
     research: new KpPriceResearchRepo(db),

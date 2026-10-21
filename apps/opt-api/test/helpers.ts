@@ -89,7 +89,7 @@ export interface SentMail {
   raw: Buffer;
 }
 
-export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null; fetchUrl?: UrlFetcher } = {}) {
+export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embedder?: Embedder | null; fetchUrl?: UrlFetcher; mailRead?: Deps['mailRead'] } = {}) {
   const { db, drop } = await freshOptDb();
   // База знаний — своя схема с миграциями @opt/kb (расширение vector в тестовой БД: образ pgvector/pgvector:pg16).
   const kb = await freshKbDb();
@@ -150,7 +150,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
     // Ссылки базы знаний: без сети — подмена скачивания; по умолчанию любой адрес «недоступен».
     kbFetchUrl: opts.fetchUrl ?? (async (url) => { throw new Error(`HTTP 503 (тест: ${url})`); }),
     // Ящик по IMAP в тестах не читаем: письмо «не найдено», сборка идёт по карточке.
-    mailRead: async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } }),
+    mailRead: opts.mailRead ?? (async () => ({ mail: null, diag: { criteria: { from: '', domain: '', since: '', before: '', subject: null }, folders: [], skippedFolders: [], fallbackWithoutDate: false, errors: [] } })),
     mailer,
     sentCopier,
     queue: {

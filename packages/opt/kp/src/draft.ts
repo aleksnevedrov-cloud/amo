@@ -5,6 +5,8 @@ import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidat
 import { MailAuthError, pickMailAttachments, type MailAttachment, type MailReadResult, type MailSearch, type MailSearchDiag } from './mail-read.ts';
 import { letterScope, markOf, type DocItem } from './letter-select.ts';
 import type { SentMailRecord } from './send.ts';
+import type { ParseAttempt } from './request-parse.ts';
+import { FileParseError } from './file-analyze.ts';
 import { categoryOf, colorOf, featuresFromModel, featuresOf, mergeFeatures, profileOf, type DoorFeatures, type GostProfile, type PositionCategory } from '@opt/kb';
 
 /**
@@ -215,8 +217,13 @@ export interface KpPayload {
     attachments: string[];
     /** id разобранных документов в таблице documents. */
     documents: number[];
-    /** Файлы, которые не разбирались, и почему. */
-    skipped: { name: string; reason: string }[];
+    /** Файлы, которые не разбирались, и почему; failed — разбор не удался (повторы не помогли): «Разобрать заново» в окне КП. */
+    skipped: { name: string; reason: string; failed?: boolean }[];
+    /**
+     * KP-PARSE-RETRY: сводка по файлам для окна КП вместо «позиций 0» — каждый файл: разобран (позиций N), пропущен (почему)
+     * или не разобран (причина); найдено — вместе с вложениями письма, которые не брали (мелкие картинки, подписи).
+     */
+    files?: { name: string; status: 'parsed' | 'skipped' | 'failed'; positions: number; reason: string | null }[];
     /** Чтение письма из ящика по IMAP (вариант А); нет поля — ящик не настроен. */
     mail?: MailSource;
   };
@@ -249,7 +256,7 @@ export interface MailSourceFile {
 
 export interface MailSource {
   /** partial — ящик просмотрен не полностью (лимит времени на FETCH), письмо среди просмотренного не найдено. */
-  status: 'found' | 'not_found' | 'error' | 'partial';
+  status: 'found' | 'not_found' | 'error' | 'partial' | 'skipped';
   messageId: string | null;
   date: string | null;
   subject: string;
@@ -295,6 +302,8 @@ export interface ParsedFile {
   costUsd?: number;
   /** Названий, взятых из базы знаний без модели (этап 4). */
   knownFromKb?: number;
+  /** KP-PARSE-RETRY: попытки разбора (повтор, починка ответа, запасной путь) — в журнал; нет — разобран с первой попытки. */
+  attempts?: ParseAttempt[];
 }
 
 export interface KpDraftDeps {
@@ -325,6 +334,16 @@ export interface KpDraftInput {
   /** Сколько файлов сделки разбирать за один черновик и какого размера. */
   maxFiles?: number;
   maxFileBytes?: number;
+  /**
+   * KP-PARSE-RETRY, п. 3: при пересборке ящик читается, только если в сделке нет файлов заявки или менеджер нажал «Проверить
+   * почту заново» (checkMail). Иначе «Собрать заново» берёт файлы сделки и текст письма — из прошлого черновика (полный текст
+   * из ящика) или из amo; IMAP не трогается.
+   */
+  checkMail?: boolean;
+  /** Пересборка («Собрать заново»): у сделки уже есть черновик. Первая сборка читает ящик как раньше. */
+  rebuild?: boolean;
+  /** Письмо прошлой сборки (полный текст из ящика) — когда ящик в этот раз не читается. */
+  prevLetter?: { text: string; subject: string; from: string; date: string | null } | null;
 }
 
 export interface KpDraftResult {
@@ -333,7 +352,9 @@ export interface KpDraftResult {
   provider: string | null;
   model: string | null;
   /** Разобранные файлы: способ, порции, время — для журнала (без позиций). */
-  files: { name: string; positions: number; ms: number | null; method: ParsedFile['method'] | null; chunks: number | null; model: string | null; warnings: string[]; costUsd: number | null; knownFromKb: number }[];
+  files: { name: string; positions: number; ms: number | null; method: ParsedFile['method'] | null; chunks: number | null; model: string | null; warnings: string[]; costUsd: number | null; knownFromKb: number; attempts?: ParseAttempt[] }[];
+  /** KP-PARSE-RETRY: файлы, которые не разобраны, — причина и попытки (сырые ответы модели) для журнала. */
+  failedFiles: FailedFile[];
 }
 
 /** Блоки, которые клиент может попросить включить в КП. */
@@ -373,7 +394,14 @@ export const NO_PRICE = 'цена не задана';
 export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
   const card = await readCard(d.amo, input.leadId);
   // Письмо из ящика: полный текст вместо первой строки из amo и вложения, которых в файлах сделки нет.
-  const mail = d.mail ? await fetchMail(d.mail, d.amo, input.leadId, card) : { source: null, files: [] as SourceFile[] };
+  // Файлы заявки уже в сделке (загружены прошлой сборкой или менеджером) — ящик не читаем: сбой IMAP не обнуляет черновик,
+  // лишних входов в ящик нет. Текст письма — полный, из прошлой сборки, если она его брала из ящика.
+  const requestFiles = card.files.filter((f) => !notRequestReason(f.name));
+  const readMail = Boolean(d.mail) && (!input.rebuild || input.checkMail || !requestFiles.length);
+  if (!readMail && d.mail && input.prevLetter?.text) {
+    card.letter = { text: input.prevLetter.text, createdAt: input.prevLetter.date ? new Date(input.prevLetter.date) : (card.letter?.createdAt ?? new Date()), from: input.prevLetter.from, subject: input.prevLetter.subject };
+  }
+  const mail = readMail && d.mail ? await fetchMail(d.mail, d.amo, input.leadId, card) : { source: d.mail ? mailSkipped(card, requestFiles.length) : null, files: [] as SourceFile[] };
   const sources: SourceFile[] = [
     ...mail.files,
     ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, load: () => d.amo.downloadFile(f) })),
@@ -406,7 +434,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const client = letter?.parsed.client ?? { org: '', fio: '', email: '', phone: '' };
   const requiredBlocks = letter?.parsed.required_blocks ?? [];
   if (mail.source?.status === 'not_found') needs.push({ request_index: -1, reason: `письмо в ящике не найдено (искали от ${mail.source.searchedFrom}) — черновик по тому, что есть в карточке` });
-  if (mail.source?.status === 'error') needs.push({ request_index: -1, reason: `почта: ${mail.source.error}` });
+  if (mail.source?.status === 'error') needs.push({ request_index: -1, reason: `ящик не прочитан: ${mail.source.error} — черновик собран по файлам и письму из сделки` });
   if (mail.source?.status === 'partial') needs.push({ request_index: -1, reason: `письмо в ящике не найдено среди просмотренного (${mail.source.error}) — черновик по тому, что есть в карточке` });
   if (mail.source?.status === 'found' && mail.source.matchedBy === 'domain') {
     needs.push({ request_index: -1, reason: `письмо найдено по домену ${mail.source.diag?.criteria.domain ?? ''}, не по адресу ${mail.source.searchedFrom} (папка ${mail.source.folder ?? '?'}, «${mail.source.subject}») — проверьте, что это та заявка; вложения в сделку не загружены` });
@@ -446,6 +474,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         attachments: sources.map((f) => f.name),
         documents: files.parsed.map((f) => f.id).filter((id) => id > 0),
         skipped: files.skipped,
+        files: filesSummary(files.parsed, files.skipped, mail.source?.skipped ?? []),
         ...(mail.source ? { mail: mail.source } : {}),
       },
       generatedAt: new Date().toISOString(),
@@ -457,7 +486,8 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     cost: letter?.cost ?? { inputTokens: 0, outputTokens: 0, usd: 0 },
     provider: letter?.provider ?? null,
     model: letter?.model ?? null,
-    files: files.parsed.map((f) => ({ name: f.filename, positions: f.positions.length, ms: f.ms ?? null, method: f.method ?? null, chunks: f.chunks ?? null, model: f.model ?? null, warnings: f.warnings ?? [], costUsd: f.costUsd ?? null, knownFromKb: f.knownFromKb ?? 0 })),
+    files: files.parsed.map((f) => ({ name: f.filename, positions: f.positions.length, ms: f.ms ?? null, method: f.method ?? null, chunks: f.chunks ?? null, model: f.model ?? null, warnings: f.warnings ?? [], costUsd: f.costUsd ?? null, knownFromKb: f.knownFromKb ?? 0, ...(f.attempts ? { attempts: f.attempts } : {}) })),
+    failedFiles: files.failed,
   };
 }
 
@@ -497,6 +527,11 @@ export function senderFromNotes(notes: { params?: { text?: string } & Record<str
     if (found) return found;
   }
   return null;
+}
+
+/** Ящик не читали: в сделке уже есть файлы заявки (KP-PARSE-RETRY, п. 3). */
+function mailSkipped(card: Card, files: number): MailSource {
+  return { status: 'skipped', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: '', from: null, fromName: null, files: [], attachments: 0, taken: [], uploaded: [], skipped: [], error: `в сделке уже есть файлы заявки (${files}) — ящик не читали; новое письмо — кнопка «Проверить почту заново»`, retryAt: null, folder: null, matchedBy: null, diag: null };
 }
 
 /** Файл для разбора: из карточки (скачать) или из письма (байты уже есть). */
@@ -625,9 +660,10 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
 }
 
 /** Файлы сделки и вложения письма → разобранные документы. Что не разобралось — в список skipped с причиной, не молча. */
-async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFiles: number; maxBytes: number }): Promise<{ parsed: ParsedFile[]; skipped: KpPayload['source']['skipped'] }> {
+async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFiles: number; maxBytes: number }): Promise<{ parsed: ParsedFile[]; skipped: KpPayload['source']['skipped']; failed: FailedFile[] }> {
   const parsed: ParsedFile[] = [];
   const skipped: KpPayload['source']['skipped'] = [];
+  const failed: FailedFile[] = [];
   let i = 0;
   for (const f of files) {
     // KP-AGENT-V2, п. 2.1: наши КП и карточки предприятий — не заявка; лимит файлов не занимают.
@@ -652,10 +688,28 @@ async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFile
       const file = await f.load();
       parsed.push(await d.analyze({ filename: f.name, mime: file.mime ?? f.mime ?? 'application/octet-stream', bytes: file.bytes }));
     } catch (err) {
-      skipped.push({ name: f.name, reason: (err as Error).message });
+      // KP-PARSE-RETRY: файл не выбрасывается молча — «не разобран» с причиной и попытками (журнал), в окне «Разобрать заново».
+      skipped.push({ name: f.name, reason: (err as Error).message, failed: true });
+      failed.push({ name: f.name, reason: (err as Error).message, attempts: err instanceof FileParseError ? err.attempts : [] });
     }
   }
-  return { parsed, skipped };
+  return { parsed, skipped, failed };
+}
+
+/** Файл, который не удалось разобрать: причина и попытки (сырые ответы модели — в журнал kp_draft, не в черновик). */
+export interface FailedFile {
+  name: string;
+  reason: string;
+  attempts: ParseAttempt[];
+}
+
+/** Сводка по файлам для окна КП: разобран / пропущен / не разобран; вложения письма, которые не брали, — пропущены. */
+export function filesSummary(parsed: ParsedFile[], skipped: KpPayload['source']['skipped'], mailSkipped: { name: string; reason: string }[] = []): NonNullable<KpPayload['source']['files']> {
+  return [
+    ...parsed.map((f) => (f.method === 'skipped' ? { name: f.filename, status: 'skipped' as const, positions: 0, reason: f.warnings?.[0] ?? 'не заявка' } : { name: f.filename, status: 'parsed' as const, positions: f.positions.length, reason: f.warnings?.length ? f.warnings.join('; ') : null })),
+    ...skipped.map((x) => ({ name: x.name, status: x.failed ? ('failed' as const) : ('skipped' as const), positions: 0, reason: x.reason })),
+    ...mailSkipped.map((x) => ({ name: x.name, status: 'skipped' as const, positions: 0, reason: x.reason })),
+  ];
 }
 
 /** Вложение — не заявка по имени: наше КП (KP-КП-…, kp_dveri…, KP_RUS_DVERI…) или карточка / реквизиты предприятия. «КП 1404.docx» клиента — заявка. */

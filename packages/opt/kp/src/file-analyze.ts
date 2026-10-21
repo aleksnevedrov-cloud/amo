@@ -1,10 +1,12 @@
 import type { DocumentsRepo, WidgetSettings } from '@core/db';
 import type { DocumentService } from '@core/docs';
-import type { ChatRoute, LlmGateway, PricingOverrides } from '@core/llm';
+import { costOfUsage, type ChatRoute, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { categoryOf } from '@opt/kb';
 import { convertLegacyOffice, type OfficeFile } from './convert.ts';
 import { equipmentFor, equipmentSections, looksLikeRequisites, matrixPositions, pickSpecTable, readDocxBlocks, requirementsOf, specCandidates, tableRows, type DocxBlock, type DocxTable, type MatrixPosition, type SpecTable } from './docx-spec.ts';
 import type { ParsedFile } from './draft.ts';
+import { askByText, clipRaw, isRetryableParseError, localText, validateDocument, type AskResult, type ParseAttempt } from './request-parse.ts';
+import type { DocumentData } from '@core/docs';
 import { detectHeader, parseRows, parseTable, tableItems, type TableParsed, type TableParseOptions } from './table-parse.ts';
 
 /**
@@ -27,6 +29,20 @@ export interface DraftFileDeps {
   chunkRows?: number;
   /** Названия из базы знаний (этап 4): известные модели — без вызова модели. */
   known?: TableParseOptions['known'];
+  /** KP-PARSE-RETRY: последний сырой ответ модели на разбор документа @core/docs (шлюз с записью); нет — сырой ответ не виден. */
+  lastRaw?: () => string | null;
+  resetRaw?: () => void;
+}
+
+/** KP-PARSE-RETRY: файл не разобран ни разбором, ни повторами, ни запасным путём — причина и попытки (в окно КП и журнал). */
+export class FileParseError extends Error {
+  override name = 'FileParseError';
+  constructor(
+    message: string,
+    public readonly attempts: ParseAttempt[],
+  ) {
+    super(message);
+  }
 }
 
 /** Таблица Excel (после конвертации старого .xls тоже xlsx). */
@@ -122,12 +138,7 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
   const word = isWordDocx(file) ? findDocxSpec(file) : null;
   // Карточка предприятия — не заявка: без модели и без записи документа.
   if (word?.kind === 'requisites') return { id: 0, filename: orig.filename, kind: 'requisites', positions: [], questions: [], requirements: [], ms: Date.now() - t0, method: 'skipped', chunks: 0, model: null, warnings: ['реквизиты предприятия — не заявка'], costUsd: 0 };
-  if (!isSpreadsheet(file) && !word) {
-    const r = await d.docs.analyze({ accountId: d.accountId, leadId: d.leadId, source: 'widget', filename: file.filename, mime: file.mime, bytes: file.bytes, settings: d.settings, createdBy: d.userId, hint: 'request', route: d.route });
-    // П. 2.5: картинка без позиций — фото-образец; текст скриншота разбирает модель с vision как раньше.
-    const photo = /^image\//i.test(file.mime) && !r.data.positions.length;
-    return { id: r.id, filename: orig.filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}) };
-  }
+  if (!isSpreadsheet(file) && !word) return analyzeWithRetry(d, file, orig.filename, t0);
   // Дневной лимит разбора — тот же, что у @core/docs: таблица тоже считается одним документом.
   if ((await d.documents.countToday(d.accountId)) >= d.settings.vision.maxFilesPerDay) {
     throw new Error(`Достигнут дневной лимит разбора файлов (${d.settings.vision.maxFilesPerDay})`);
@@ -165,4 +176,83 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
     costUsd: t.cost.usd,
     knownFromKb: t.knownFromKb,
   };
+}
+
+/**
+ * KP-PARSE-RETRY: разбор документа @core/docs с повтором и запасным путём.
+ * 1) разбор @core/docs; ответ не по схеме — сырой ответ в журнал и починка без нового запроса (недостающие необязательные
+ *    поля — null / []); 2) повтор того же разбора; 3) запрос по тексту файла с текстом ошибки проверки; 4) запасной путь —
+ *    только список позиций по тексту. Ничего не вышло — FileParseError с причиной: файл не выбрасывается молча.
+ * Ошибки не про ответ модели (распознавание выключено, дневной лимит, файл не читается) — как раньше, без повторов.
+ */
+async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: string, t0: number): Promise<ParsedFile> {
+  const attempts: ParseAttempt[] = [];
+  const input = { accountId: d.accountId, leadId: d.leadId, source: 'widget' as const, filename: file.filename, mime: file.mime, bytes: file.bytes, settings: d.settings, createdBy: d.userId, hint: 'request' as const, route: d.route };
+  let lastError = '';
+  for (const n of [1, 2]) {
+    try {
+      d.resetRaw?.();
+      const r = await d.docs.analyze(input);
+      attempts.push({ n, via: n === 1 ? 'docs' : 'retry', ok: true, error: null, raw: null });
+      // П. 2.5: картинка без позиций — фото-образец; текст скриншота разбирает модель с vision как раньше.
+      const photo = /^image\//i.test(file.mime) && !r.data.positions.length;
+      return { id: r.id, filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: n > 1 ? [`разобран со ${n}-й попытки`] : [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}), ...(n > 1 ? { attempts } : {}) };
+    } catch (err) {
+      if (!isRetryableParseError(err)) throw err;
+      lastError = (err as Error).message;
+      const raw = d.lastRaw?.() ?? null;
+      attempts.push({ n, via: n === 1 ? 'docs' : 'retry', ok: false, error: lastError, raw: raw === null ? null : clipRaw(raw) });
+      d.onProgress?.(`${filename}: попытка ${n} — ${lastError}`);
+      // Ответ есть, но без необязательного поля — дописываем пустое значение, без нового запроса.
+      const fixed = raw ? validateDocument(raw) : null;
+      if (fixed?.ok) {
+        attempts.push({ n, via: 'repair', ok: true, error: null, raw: null, repaired: fixed.repaired });
+        return recordParsed(d, file, filename, t0, fixed.data, attempts, { model: null, costUsd: 0, warnings: [`ответ модели дополнен пустыми полями: ${fixed.repaired.join(', ') || '—'}`] });
+      }
+    }
+  }
+  const lt = await localText(file);
+  if (!lt.text.trim()) throw new FileParseError(`${lastError}; повтор не помог, а текста в файле нет (скан или фото) — нажмите «Разобрать заново» или пришлите файл с текстом`, attempts);
+  let cost = 0;
+  const costOf = (a: AskResult) => (a.res ? costOfUsage({ provider: a.res.provider, model: a.res.model }, a.res.usage, d.pricing).usd : 0);
+  for (const [n, mode] of [[3, 'document'], [4, 'positions']] as const) {
+    d.onProgress?.(`${filename}: попытка ${n} — ${mode === 'document' ? 'по тексту файла с ошибкой проверки' : 'запасной путь: только позиции по тексту'}`);
+    const a = await askByText(d.llm, d.route, { text: lt.text, filename, mode, errorHint: mode === 'document' ? lastError : null });
+    cost += costOf(a);
+    attempts.push({ n, via: mode === 'document' ? 'text+error' : 'positions', ok: Boolean(a.data), error: a.error, raw: a.data ? null : clipRaw(a.raw), ...(a.repaired.length ? { repaired: a.repaired } : {}) });
+    if (a.data) {
+      return recordParsed(d, file, filename, t0, a.data, attempts, {
+        model: a.res ? `${a.res.provider}/${a.res.model}` : null,
+        costUsd: cost,
+        warnings: [mode === 'document' ? `разобран по тексту файла с ${n}-й попытки` : 'разобран запасным путём: только позиции по тексту файла — проверьте характеристики'],
+        format: lt.format,
+        textChars: lt.text.length,
+        piiRemoved: lt.piiRemoved,
+      });
+    }
+    lastError = a.error ?? lastError;
+  }
+  throw new FileParseError(`${lastError}; повторы и разбор по тексту не помогли`, attempts);
+}
+
+/** Разобранное повтором или запасным путём — запись документа (как у таблиц) и ParsedFile с попытками. */
+async function recordParsed(d: DraftFileDeps, file: OfficeFile, filename: string, t0: number, data: DocumentData, attempts: ParseAttempt[], o: { model: string | null; costUsd: number; warnings: string[]; format?: string; textChars?: number; piiRemoved?: number }): Promise<ParsedFile> {
+  const id = await d.documents.add({
+    accountId: d.accountId,
+    leadId: d.leadId,
+    source: 'widget',
+    filename,
+    mime: file.mime,
+    sizeBytes: file.bytes.byteLength,
+    format: o.format ?? 'pdf',
+    ocr: null,
+    kind: data.kind,
+    data: { ...data, matches: [], kit: null, parse: { method: 'retry', attempts: attempts.map((a) => ({ n: a.n, via: a.via, ok: a.ok, error: a.error })) } },
+    textChars: o.textChars ?? 0,
+    piiRemoved: o.piiRemoved ?? 0,
+    model: o.model,
+    costUsd: o.costUsd,
+    createdBy: d.userId,
+  });
+  return { id, filename, kind: data.kind, positions: data.positions, questions: data.questions, requirements: data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: o.model, warnings: o.warnings, costUsd: o.costUsd, attempts };
 }

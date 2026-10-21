@@ -433,7 +433,7 @@ describe('черновик КП опта: источник — карточка 
       },
     });
     expect(r3.payload.source.mail).toMatchObject({ status: 'error', error: 'вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК', retryAt: retryAt.toISOString() });
-    expect(r3.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'почта: вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК' });
+    expect(r3.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'ящик не прочитан: вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК — черновик собран по файлам и письму из сделки' });
     expect(r3.payload.items.map((l) => l.name)).toEqual(['добор']);
   });
 

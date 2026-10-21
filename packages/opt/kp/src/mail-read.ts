@@ -204,6 +204,8 @@ const pauseKey = (c: MailReadConfig) => `${c.username}@${c.host}:${c.port}`;
 /** Сброс пауз после ошибок входа (для тестов). */
 export function resetMailAuthPauses(): void {
   authPause.clear();
+  failures.clear();
+  pauseWhy.clear();
 }
 
 const moscowTime = (ms: number) => new Date(ms).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -219,6 +221,50 @@ const isAuthFailure = (err: unknown) => {
   const e = (err ?? {}) as ImapError;
   return e.authenticationFailed === true || AUTH_RE.test([e.message, e.serverResponseCode, e.responseText].filter(Boolean).join(' '));
 };
+
+/**
+ * KP-PARSE-RETRY, п. 4: imapflow на любой отказ сервера при входе (NO на LOGIN) пишет в message только «Command failed» и
+ * ставит authenticationFailed — даже если это не пароль, а временный отказ (частые входы, лимит соединений). Настоящий текст
+ * ответа — в responseText / serverResponseCode. Неверный пароль — только с кодом AUTHENTICATIONFAILED (или его текстом).
+ */
+export function imapFailureText(err: unknown): string {
+  const e = (err ?? {}) as ImapError;
+  const server = [e.serverResponseCode ? `[${e.serverResponseCode}]` : '', e.responseText ?? ''].filter(Boolean).join(' ').trim();
+  return server ? `${e.message || 'отказ сервера'}: ${server}` : e.message || 'отказ сервера';
+}
+/** Временный отказ: код UNAVAILABLE / LIMIT / INUSE или текст про лимит, повтор позже, временную ошибку. */
+const TEMPORARY_RE = /\b(UNAVAILABLE|LIMIT|INUSE|SERVERBUG|OVERQUOTA)\b|too many|limit|try again|temporar|later|busy|unavailable|подожд|позже|лимит/i;
+const WRONG_PASSWORD_RE = /AUTHENTICATIONFAILED|authentication fail|invalid credentials|invalid user|password|Login denied|\b535\b/i;
+/** Неверный логин или пароль — только по признакам в ответе сервера; безликий отказ («Command failed») — временный. */
+export const isWrongPassword = (err: unknown): boolean => {
+  const e = (err ?? {}) as ImapError;
+  const server = [e.serverResponseCode, e.responseText].filter(Boolean).join(' ');
+  if (TEMPORARY_RE.test(server)) return false;
+  return WRONG_PASSWORD_RE.test(server) || (!server && WRONG_PASSWORD_RE.test(e.message ?? ''));
+};
+
+/** Нарастающая пауза после временного отказа входа: 1, 2, 4, 8, 16, 30 мин; успешный вход — сброс. */
+export const MAIL_BACKOFF_MS = [60_000, 120_000, 240_000, 480_000, 960_000, MAIL_AUTH_PAUSE_MS];
+const failures = new Map<string, number>();
+/** Причина паузы — в текст отказа, пока пауза не прошла (а не безликое «не удался»). */
+const pauseWhy = new Map<string, string>();
+
+/**
+ * Одна сессия IMAP на ящик в процессе: сборки черновиков одной сделки или разных сделок не входят в ящик параллельно
+ * (Яндекс отвечает отказом на частые и одновременные входы); следующая ждёт, пока предыдущая выйдет (LOGOUT).
+ */
+const sessions = new Map<string, Promise<unknown>>();
+export async function withMailboxSession<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessions.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  sessions.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (sessions.get(key) === tail) sessions.delete(key);
+  }
+}
 
 /** Тема без префиксов ответа и пересылки, в нижнем регистре. */
 export function normalizeSubject(s: string | null | undefined): string {
@@ -420,7 +466,7 @@ export class ImapMailReader {
   async findLatest(search: MailSearch, opts: MailReadOptions = {}): Promise<MailReadResult & { readOnly: boolean }> {
     const key = pauseKey(this.cfg);
     const until = authPause.get(key);
-    if (until && Date.now() < until) throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался, следующая попытка не раньше ${moscowTime(until)} МСК`, new Date(until));
+    if (until && Date.now() < until) throw new MailAuthError(`${pauseWhy.get(key) ?? `вход в ящик ${this.cfg.username} не удался`}, следующая попытка не раньше ${moscowTime(until)} МСК`, new Date(until));
 
     const connectMs = opts.connectMs ?? MAIL_CONNECT_MS;
     const commandMs = opts.commandMs ?? MAIL_COMMAND_MS;
@@ -473,13 +519,26 @@ export class ImapMailReader {
         c.close();
         if (err instanceof MailTimeoutError) throw err;
         if (isAuthFailure(err)) {
-          const retry = Date.now() + MAIL_AUTH_PAUSE_MS;
+          const why = imapFailureText(err);
+          // Неверный пароль — 30 мин (Яндекс блокирует IP при частых неверных входах); временный отказ — нарастающая пауза.
+          if (isWrongPassword(err)) {
+            const retry = Date.now() + MAIL_AUTH_PAUSE_MS;
+            authPause.set(key, retry);
+            pauseWhy.set(key, `вход в ящик ${this.cfg.username} не удался (${why})`);
+            throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался (${why}); проверьте логин и пароль приложения во вкладке «Письмо», следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
+          }
+          const n = (failures.get(key) ?? 0) + 1;
+          failures.set(key, n);
+          const retry = Date.now() + (MAIL_BACKOFF_MS[Math.min(n, MAIL_BACKOFF_MS.length) - 1] as number);
           authPause.set(key, retry);
-          throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался (${(err as Error).message}); проверьте логин и пароль во вкладке «Письмо», следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
+          pauseWhy.set(key, `ящик ${this.cfg.username} временно не пускает (${why})`);
+          throw new MailAuthError(`ящик ${this.cfg.username} временно не пускает (${why}) — сервер отказал во входе, хотя пароль не отвергнут (частые входы или лишние соединения); следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
         }
         throw err;
       }
       authPause.delete(key);
+      failures.delete(key);
+      pauseWhy.delete(key);
       return c;
     };
 
@@ -696,6 +755,7 @@ export class ImapMailReader {
 
 /** Удобная обёртка для черновика: письмо (или null) и диагностика поиска. */
 export async function readLatestMail(cfg: MailReadConfig, search: MailSearch, opts: MailReadOptions = {}): Promise<MailReadResult> {
-  const { mail, diag } = await new ImapMailReader(cfg).findLatest(search, opts);
+  // Одна сессия на ящик: параллельные сборки ждут друг друга, а не входят одновременно.
+  const { mail, diag } = await withMailboxSession(pauseKey(cfg), () => new ImapMailReader(cfg).findLatest(search, opts));
   return { mail, diag };
 }

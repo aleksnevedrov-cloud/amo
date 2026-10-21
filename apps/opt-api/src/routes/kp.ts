@@ -250,10 +250,11 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
    */
   api.post('/kp/draft', async (req, reply) => {
     const p = principal(req);
-    const b = leadBody.safeParse(req.body);
+    const b = leadBody.extend({ checkMail: z.boolean().optional() }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body' });
     if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
-    await deps.queue.enqueue({ accountId: p.accountId, leadId: b.data.leadId, userId: p.userId });
+    // KP-PARSE-RETRY: «Проверить почту заново» (checkMail) — читать ящик, даже если файлы заявки уже в сделке.
+    await deps.queue.enqueue({ accountId: p.accountId, leadId: b.data.leadId, userId: p.userId, ...(b.data.checkMail ? { checkMail: true } : {}) });
     return reply.code(202).send({ queued: true });
   });
 
