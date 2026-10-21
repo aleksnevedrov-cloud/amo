@@ -113,7 +113,9 @@ describe('копия отправленного КП в «Отправленны
     expect((await ctx.app.inject({ method: 'POST', url: '/widget/v1/settings/imap-test', headers, payload: {} })).json()).toMatchObject({ ok: false, error: 'IMAP imap.yandex.ru:993: нет соединения' });
     ctx.imap.failAppend = null;
     const s = (await ctx.app.inject({ url: '/widget/v1/settings', headers })).json().settings;
-    expect(s.mail.sentFolder).toBe('');
+    // Поле необязательное: в сохранённых настройках его нет, пока не заполнили.
+    expect(s.mail.sentFolder).toBeUndefined();
+    expect(JSON.stringify((await ctx.deps.settings.get(ACCOUNT_ID)).settings.mail)).not.toContain('sentFolder');
     await ctx.app.inject({ method: 'PUT', url: '/widget/v1/settings', headers, payload: { ...s, mail: { ...s.mail, sentFolder: 'Отправленные' } } });
     const again = (await ctx.app.inject({ url: '/widget/v1/settings', headers }));
     expect(again.json().settings.mail.sentFolder).toBe('Отправленные');

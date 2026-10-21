@@ -154,7 +154,7 @@ export function widgetRoutes(app: FastifyInstance, deps: Deps) {
         const password = await deps.secrets.get(p.accountId, 'smtp');
         if (!m.smtpHost || !m.username || !password) return reply.code(409).send({ error: 'mail_off', message: 'Заполните SMTP-сервер, логин и пароль и сохраните' });
         const cfg = imapConfigFor(m, password);
-        const want = (b.data.sentFolder ?? m.sentFolder).trim() || null;
+        const want = (b.data.sentFolder ?? m.sentFolder ?? '').trim() || null;
         try {
           const r = await deps.sentCopier.probe(cfg, want);
           const exists = r.folder !== null && r.folders.some((f) => f.toLowerCase() === r.folder?.toLowerCase());
