@@ -136,6 +136,13 @@ export interface KpLine {
   excluded?: boolean;
   /** Цена посчитана по правилам нестандарта или по площади — решение человека (вопрос «нестандарт»). */
   nonstandard?: { basis: 'rules' | 'area'; basePrice: number | null; note: string } | null;
+  /**
+   * KB-MARKUP: цена из прайса с наценкой источника — цена фабрики (после надбавки за нестандарт), процент, итог (= price),
+   * источник и ключ прайса (для «Пересчитать»). В письмо и файл КП идёт только price; null — наценки нет.
+   */
+  markup?: { factoryPrice: number; pct: number; price: number; sourceId: number | null; priceKey: string | null } | null;
+  /** KB-MARKUP: выбранный вариант вопроса «нестандарт» — при новом поиске цена считается по нему (а не переносится числом). */
+  nonstandardChoice?: 'computed' | 'p30' | 'p100' | null;
   /** Поля профиля, уточнённые менеджером в опроснике (вопрос «неполная позиция»). */
   profileFix?: Record<string, string> | null;
 }

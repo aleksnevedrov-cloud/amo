@@ -16,6 +16,7 @@ export * from './offer-price.ts';
 export * from './paths.ts';
 export * from './repo.ts';
 export * from './research-job.ts';
+export * from './markup.ts';
 export * from './research-repo.ts';
 export * from './research-notes.ts';
 export * from './questions.ts';

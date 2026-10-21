@@ -158,6 +158,8 @@ export interface KpDraftLine {
   priceOutcome?: 'priced' | 'included' | 'not_priced' | 'estimate' | 'question';
   /** Примечания под позицией в КП (вкладка «Подбор», нестандарт). */
   quoteNotes?: string[];
+  /** KB-MARKUP: цена прайса с наценкой источника — «фабрика X ₽ · наценка N % · цена Y ₽»; в письмо и КП идёт только price. */
+  markup?: { factoryPrice: number; pct: number; price: number; sourceId: number | null; priceKey: string | null } | null;
   /** ID товара прайса двери (INT-013) — контекст для комплектующих и фурнитуры ниже. */
   productId?: string | null;
   /** priceOutcome = included: ID двери или название комплекта, в который входит позиция. */
@@ -375,6 +377,8 @@ export interface KbSourceInfo {
   /** KP-AGENT-V2, п. 4а: у сайта — комментарий (что на нём есть / чего нет) и отметка «фабрика». */
   comment?: string | null;
   isFactory?: boolean;
+  /** KB-MARKUP: наценка прайса, % (цена КП = цена фабрики × (1 + N / 100)); 0 — без наценки. */
+  markupPct?: number;
 }
 
 /** Итог импорта многолистового прайса (KB-PRICE-SHEETS): по вкладкам. */
@@ -529,6 +533,8 @@ export class KpApi extends ApiClient {
   /** KB-COMPONENT-DOOR-GROUP: ответ на группу похожих комплектующих — ко всем её строкам. */
   componentDoorGroup = (draftId: number, groupKey: string, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null; applied: number }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { groupKey, doorRequestIndex });
   componentDoor = (draftId: number, requestIndex: number, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { requestIndex, doorRequestIndex });
+  /** KB-MARKUP: «Пересчитать» — текущая наценка прайсов к ценам из прайса черновика. */
+  recalcMarkup = (id: number) => this.call<{ draft: KpDraftInfo | null; changed: number; skipped: number[] }>('POST', `/widget/v1/kp/draft/${id}/recalc-markup`);
   saveDraftItems = (id: number, items: KpDraftLine[]) => this.call<{ draft: KpDraftInfo | null }>('PUT', `/widget/v1/kp/draft/${id}`, { items });
   /** Кнопка «Собрать документ»: DOCX по шаблону и PDF, файлы уходят в карточку сделки. */
   buildDoc = (draftId: number) => this.call<{ draft: KpDraftInfo | null; pdf: boolean; attached: string[]; files?: { kind: 'docx' | 'pdf'; name: string; bytes: number }[] }>('POST', '/widget/v1/kp/build', { draftId });
@@ -569,6 +575,7 @@ export class KpApi extends ApiClient {
   /** Ответ на вопрос покупателя из базы знаний (этап 4): top-5 фрагментов, модель отвечает со ссылками [n]. */
   kbAnswer = (question: string, leadId?: number) => this.call<KbAnswerInfo>('POST', '/widget/v1/kb/answer', { question, ...(leadId ? { leadId } : {}) });
   /** Сайты (п. 4а): комментарий и «фабрика»; выгрузка и загрузка списка xlsx. Кандидаты в прайс (п. 4.4). */
+  kbSetMarkup = (id: number, markupPct: number | null) => this.call<{ source: KbSourceInfo }>('PUT', `/widget/v1/kb/sources/${id}/markup`, { markupPct });
   kbSetSite = (id: number, body: { comment?: string | null; isFactory?: boolean }) => this.call<{ source: KbSourceInfo }>('PUT', `/widget/v1/kb/sources/${id}/site`, body);
   kbSitesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/sites/export');
   kbSitesImport = (contentBase64: string) => this.call<{ added: number; updated: number; rows: number }>('POST', '/widget/v1/kb/sites/import', { contentBase64 });

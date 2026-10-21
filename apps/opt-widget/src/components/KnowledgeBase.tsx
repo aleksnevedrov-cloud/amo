@@ -4,6 +4,7 @@ import type { KbBookCounts, KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, K
 import { KbAnswer } from './KbAnswer.tsx';
 import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
 import { CandidatesSection, COMMENT_MAX, isSite, SiteMeta, SitesSection } from './KbSites.tsx';
+import { PriceMarkup } from './KbMarkup.tsx';
 
 /**
  * Вкладка «База знаний» (RFD-AI-AGENT-OPT-KB, этап 1): файлы (pdf, docx, xlsx, csv, txt, md, jpg/png) и тексты
@@ -355,6 +356,7 @@ function SourceRow({ src, api, busy, onReindex, onRemove, onPricesImported, onSi
         {status}
       </div>
       {isSite(src) && <SiteMeta api={api} src={src} onSaved={(m) => onSiteSaved?.(m)} />}
+      {src.priceKey && <PriceMarkup api={api} src={src} onSaved={(m) => onSiteSaved?.(m)} />}
       <div style={{ ...s.row, marginTop: 6 }}>
         <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => void toggle()}>
           {open ? 'Скрыть фрагменты' : 'Фрагменты'}

@@ -114,7 +114,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(modal()).not.toBeNull();
     expect(modal()?.getAttribute('aria-label')).toBe('КП по сделке');
     expect([...document.querySelectorAll('.opt-kp-tab')].map((t) => t.textContent)).toEqual(['Позиции', 'Опросник (0)', 'Письмо и файлы', 'База знаний', 'Журнал']);
-    expect([...document.querySelectorAll('.opt-kp-modal-actions > .opt-btn')].map((b) => b.textContent)).toEqual(['Найти цены', 'Сохранить правки', 'Собрать заново', 'Собрать документ', 'Отправить клиенту', '✕']);
+    expect([...document.querySelectorAll('.opt-kp-modal-actions > .opt-btn')].map((b) => b.textContent)).toEqual(['Найти цены', 'Пересчитать', 'Сохранить правки', 'Собрать заново', 'Собрать документ', 'Отправить клиенту', '✕']);
     expect(modalButton('Найти цены')?.disabled).toBe(false);
     expect(modalButton('Сохранить правки')?.disabled).toBe(true);
     expect(modalButton('Отправить клиенту')?.disabled).toBe(true);
@@ -1087,5 +1087,85 @@ describe('виджет «Агент опт»: сайты и кандидаты �
     await flush();
     expect(document.querySelectorAll('.opt-kb-candidate')).toHaveLength(0);
     expect(document.body.textContent).toContain('Кандидатов пока нет');
+  });
+});
+
+describe('виджет «Агент опт»: наценка прайса (KB-MARKUP)', () => {
+  it('в черновике — «фабрика · наценка · цена» у строки прайса; ручная цена — без неё; «Пересчитать» — POST recalc-markup', async () => {
+    const line = (i: number, name: string, factory: number, price: number) => ({ request_index: i, page_id: null, name, size: '', qty: 1, price, lead_time: '', discount: 0, priceSource: 'price_file', priceLabel: 'по двери ONX-0001', markup: price === factory ? null : { factoryPrice: factory, pct: 20, price, sourceId: 3, priceKey: 'оникс прайс' } });
+    let current = { ...draft, items: [line(0, 'Оникс Авангард', 16_400, 16_400), line(1, 'Коробка', 3125, 3125)], needsManager: [] };
+    const posted: string[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'POST /widget/v1/kp/draft/7/recalc-markup': () => {
+        posted.push('recalc');
+        current = { ...current, items: [line(0, 'Оникс Авангард', 16_400, 19_680), line(1, 'Коробка', 3125, 3750)] };
+        return { draft: current, changed: 2, skipped: [] };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    await expand();
+    // Черновик собран при наценке 0 — подписи нет; наценку поменяли в «Базе знаний» — сам черновик не пересчитывается.
+    expect(document.querySelectorAll('.opt-kp-row-markup')).toHaveLength(0);
+    await clickIn('Пересчитать');
+    await flush();
+    expect(posted).toEqual(['recalc']);
+    const marks = () => [...document.querySelectorAll('.opt-kp-row-markup')].map((x) => x.textContent?.replace(/\u00a0/g, ' '));
+    expect(marks()).toEqual(['фабрика 16 400 ₽ · наценка 20 % · цена 19 680 ₽', 'фабрика 3 125 ₽ · наценка 20 % · цена 3 750 ₽']);
+    expect(priceInputs().map((x) => x.value)).toEqual(['19680', '3750']);
+    // Менеджер поменял цену — подпись наценки у строки пропадает (в КП — его цена).
+    await setInput(priceInputs()[0]!, '20000');
+    expect(marks()).toEqual(['фабрика 3 125 ₽ · наценка 20 % · цена 3 750 ₽']);
+  });
+
+  it('«База знаний»: у прайса — «Наценка, %» с подписью «Цены фабрики × (1 + N %)»; −50…300, шаг 0,1; «Сохранить» — PUT /kb/sources/:id/markup; у сайта поля нет', async () => {
+    const base = { kind: 'file', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', status: 'indexed', sizeBytes: 2000, chunks: 2, embeddedChunks: 0, refreshDays: null, nextRefreshAt: null, error: null, createdAt: '2026-10-20T10:00:00Z', updatedAt: '2026-10-20T10:00:00Z', indexedAt: '2026-10-20T10:00:05Z', crawl: false, parentId: null, httpStatus: null, job: null };
+    let onyx = { ...base, id: 3, title: 'Оникс прайс октябрь 2026.xlsx', original: 'Оникс прайс октябрь 2026.xlsx', prices: 6, priceKey: 'оникс прайс', priceTitle: 'Оникс', markupPct: 0 };
+    const site = { ...base, id: 5, kind: 'url', title: 'onyx.ru', original: 'https://onyx.ru', mime: 'text/html', comment: null, isFactory: true, markupPct: 0, priceKey: null };
+    const put: unknown[] = [];
+    const { self } = fakeSelf('settings', {
+      'GET /widget/v1/kb/sources': () => ({ sources: [onyx, site], usage: { sources: 2, bytes: 4000, chunks: 4, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } }),
+      'PUT /widget/v1/kb/sources/3/markup': (data?: string) => {
+        put.push(JSON.parse(data ?? '{}'));
+        onyx = { ...onyx, markupPct: JSON.parse(data ?? '{}').markupPct ?? 0 };
+        return { source: onyx };
+      },
+      'GET /widget/v1/kb/sites/export': { filename: 'x.xlsx', rows: 0, contentBase64: '' },
+      'GET /widget/v1/kb/candidates': { items: [] },
+      'GET /widget/v1/kb/prices': { items: [], total: 0 },
+      'GET /widget/v1/kb/aliases': { aliases: [] },
+    });
+    document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.advancedSettings!());
+    await flush();
+    await click('База знаний');
+    await flush();
+    expect(document.querySelectorAll('.opt-kb-markup')).toHaveLength(1);
+    const box = () => document.querySelector('.opt-kb-markup')!;
+    const save = () => [...box().querySelectorAll('button')].find((b) => b.textContent === 'Сохранить') as HTMLButtonElement;
+    expect(box().textContent).toContain('Наценка, %');
+    expect(box().textContent).toContain('Цены фабрики × (1 + 0 %) при расчёте КП');
+    expect(save().disabled).toBe(true);
+    await setInput(box().querySelector('input'), '301');
+    expect(box().textContent).toContain('число от −50 до 300, шаг 0,1');
+    expect(save().disabled).toBe(true);
+    await setInput(box().querySelector('input'), '12,55');
+    expect(save().disabled).toBe(true);
+    await setInput(box().querySelector('input'), '20');
+    expect(box().textContent).toContain('Цены фабрики × (1 + 20 %) при расчёте КП');
+    await act(async () => save().click());
+    await flush();
+    expect(put).toEqual([{ markupPct: 20 }]);
+    expect(document.body.textContent).toContain('Прайс «Оникс»: наценка 20 % сохранена — применяется к новым черновикам и по кнопке «Пересчитать»');
+    expect((box().querySelector('input') as HTMLInputElement).value).toBe('20');
+    expect(save().disabled).toBe(true);
+    // Пусто — 0.
+    await setInput(box().querySelector('input'), '');
+    await act(async () => save().click());
+    await flush();
+    expect(put).toEqual([{ markupPct: 20 }, { markupPct: null }]);
   });
 });

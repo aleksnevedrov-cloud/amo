@@ -33,6 +33,9 @@ export const kbIndexJobId = (accountId: number, sourceId: number) => `kb-${accou
 
 /** Типы событий журнала опта по базе знаний; в общий JournalKind (packages/core) не добавляются — ядро не меняем. */
 export const KB_INDEX_KIND = 'kb_index' as JournalKind;
+
+/** KB-MARKUP: пометка в журнал импорта — наценка прежнего файла перешла к новому. */
+const markupNote = (pct: number | null) => (pct === null ? '' : `; наценка ${String(pct).replace('.', ',')} % перенесена с прежнего файла`);
 export const KB_SEARCH_KIND = 'kb_search' as JournalKind;
 
 export interface KbIndexJob {
@@ -254,14 +257,15 @@ export function createKbCore(d: KbCoreDeps): KbCore {
       const r = await prices.replacePriceList(accountId, sourceId, draftsToPrices(drafts, defaults).map((x) => ({ ...x, createdBy: input.userId })), sameKey.map((x) => x.id));
       const updated = sameKey.length > 0 || (source.priceKey === priceKey && r.was > 0);
       await repo.setPriceInfo(sourceId, priceKey, { title: priceTitle, updated, was: r.was, imported: r.imported, removed: r.removed, added: r.added, at: new Date().toISOString() });
-      const summary = updated
+      const markup = await repo.inheritMarkup(accountId, sourceId, sameKey.map((x) => x.id));
+      const summary = (updated
         ? `прайс «${priceTitle}» обновлён: было ${r.was}, стало ${r.imported}; удалено ${r.removed}, добавлено ${r.added}${sameKey.length ? ` (прежний файл: ${sameKey.map((x) => `«${x.title}»`).join(', ')})` : ''}`
-        : `из прайса «${source.title}» импортировано цен ${r.imported}${input.auto ? ' автоматически' : ''} (прайс «${priceTitle}»)`;
+        : `из прайса «${source.title}» импортировано цен ${r.imported}${input.auto ? ' автоматически' : ''} (прайс «${priceTitle}»)`) + markupNote(markup);
       await d.journal.add({
         accountId,
         kind: KB_INDEX_KIND,
         summary: `База знаний: ${summary}${skipped ? `, пропущено строк ${skipped}` : ''}`,
-        details: { sourceId, imported: r.imported, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, priceKey, priceTitle, replacedSources: sameKey.map((x) => x.id), skipped, auto: Boolean(input.auto), factory: input.factory ?? null, validAt: input.validAt ?? null, vat: defaults.vat, mapping: preview.mapping, userId: input.userId, audit: 'kb_prices' },
+        details: { sourceId, imported: r.imported, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, priceKey, priceTitle, replacedSources: sameKey.map((x) => x.id), markupInherited: markup, skipped, auto: Boolean(input.auto), factory: input.factory ?? null, validAt: input.validAt ?? null, vat: defaults.vat, mapping: preview.mapping, userId: input.userId, audit: 'kb_prices' },
       });
       return { imported: r.imported, skipped, replaced: r.replaced, headerFound: preview.headerFound, priceKey, priceTitle, updated, was: r.was, removed: r.removed, added: r.added };
     },
@@ -446,8 +450,9 @@ export function createKbCore(d: KbCoreDeps): KbCore {
     const updated = sameKey.length > 0 || (source.priceKey === priceKey && r.was > 0);
     const counts = { doors, components, hardware: book.hardware.length, hardwareUnpriced, estimates, sizes: r.sizes, aliases: r.aliases, comments, dictionary: r.dictionary, skipped: book.skipped.map((x) => `${x.sheet}${x.row ? `:${x.row}` : ''}${x.column ? ` [${x.column}]` : ''} — ${x.message}`) };
     await repo.setPriceInfo(sourceId, priceKey, { title: priceTitle, updated, was: r.was, imported: r.imported, removed: r.removed, added: r.added, at: new Date().toISOString(), book: counts });
-    const summary = `прайс «${priceTitle}» (${doors} ID): цен дверей ${doors}${estimates ? ` (сметных ${estimates})` : ''}, комплектующих ${components}, фурнитуры ${book.hardware.length}${hardwareUnpriced ? ` (без цены ${hardwareUnpriced})` : ''}, размеров ${r.sizes}, синонимов ${r.aliases}, комментариев ${comments}, словарь ${r.dictionary}${updated ? `; прежние данные прайса заменены (было строк ${r.was})` : ''}${book.skipped.length ? `; пропущено: ${book.skipped.length}` : ''}`;
-    await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: ${summary}`, details: { sourceId, priceKey, priceTitle, book: counts, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, replacedSources: replaceIds, skipped: book.skipped, auto: Boolean(input.auto), userId: input.userId, audit: 'kb_prices' } });
+    const markup = await repo.inheritMarkup(accountId, sourceId, replaceIds);
+    const summary = `прайс «${priceTitle}» (${doors} ID): цен дверей ${doors}${estimates ? ` (сметных ${estimates})` : ''}, комплектующих ${components}, фурнитуры ${book.hardware.length}${hardwareUnpriced ? ` (без цены ${hardwareUnpriced})` : ''}, размеров ${r.sizes}, синонимов ${r.aliases}, комментариев ${comments}, словарь ${r.dictionary}${updated ? `; прежние данные прайса заменены (было строк ${r.was})` : ''}${book.skipped.length ? `; пропущено: ${book.skipped.length}` : ''}${markupNote(markup)}`;
+    await d.journal.add({ accountId, kind: KB_INDEX_KIND, summary: `База знаний: ${summary}`, details: { sourceId, priceKey, priceTitle, book: counts, replaced: r.replaced, was: r.was, removed: r.removed, added: r.added, updated, replacedSources: replaceIds, markupInherited: markup, skipped: book.skipped, auto: Boolean(input.auto), userId: input.userId, audit: 'kb_prices' } });
     return { imported: r.imported, skipped: book.skipped.length, replaced: r.replaced, headerFound: true, priceKey, priceTitle, updated, was: r.was, removed: r.removed, added: r.added, book: counts };
   }
 

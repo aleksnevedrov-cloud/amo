@@ -14,6 +14,9 @@ const fileBody = z.object({ filename: z.string().trim().min(1).max(200), mime: z
 /** Ссылка: период обновления в днях (по умолчанию 30, 0 — не обновлять), crawl — обойти раздел до 50 страниц. */
 /** Сайт: комментарий (до 2000 знаков, пусто — снять) и «фабрика». */
 const siteBody = z.object({ comment: z.string().max(2000).nullable().optional(), isFactory: z.boolean().optional() });
+/** KB-MARKUP: наценка прайса, % — от −50 до 300, шаг 0,1; пусто (null) — 0. */
+const markupBody = z.object({ markupPct: z.number().min(-50).max(300).nullable() }).refine((b) => b.markupPct === null || Math.abs(b.markupPct * 10 - Math.round(b.markupPct * 10)) < 1e-6);
+const pctText = (n: number) => `${n.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %`;
 
 // KP-AGENT-V2, п. 4а: комментарий сайта и «фабрика» — сразу с ссылкой (как в PUT /kb/sources/:id/site).
 const urlBody = z.object({ url: z.string().trim().min(8).max(2000), refreshDays: z.number().int().min(0).max(365).optional(), crawl: z.boolean().optional(), comment: z.string().max(2000).nullable().optional(), isFactory: z.boolean().optional() });
@@ -291,6 +294,29 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     return { source: view(s) };
   });
 
+  /**
+   * KB-MARKUP: наценка прайса-источника. Цены kb_prices не меняются — наценка применяется при расчёте КП (новые черновики и
+   * «Пересчитать»). В журнал — кто, когда, источник, было → стало.
+   */
+  api.put('/kb/sources/:id/markup', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const id = idOf(req);
+    if (!id) return reply.code(400).send({ error: 'bad_id' });
+    const b = markupBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body', message: 'наценка — число от −50 до 300 с шагом 0,1' });
+    const p = principal(req);
+    const cur = await kb.repo.get(p.accountId, id);
+    if (!cur) return reply.code(404).send({ error: 'not_found', message: 'источник не найден' });
+    if (!cur.priceKey) return reply.code(409).send({ error: 'not_price', message: 'наценка задаётся только у прайса' });
+    const pct = Math.round((b.data.markupPct ?? 0) * 10) / 10;
+    const r = await kb.repo.setMarkup(p.accountId, id, pct);
+    if (!r) return reply.code(404).send({ error: 'not_found', message: 'источник не найден' });
+    if (r.before !== pct) {
+      await deps.journal.add({ accountId: p.accountId, kind: 'note', summary: `База знаний: наценка прайса «${cur.title}»: ${pctText(r.before)} → ${pctText(pct)} (новые черновики и «Пересчитать»)`, details: { sourceId: id, title: cur.title, priceKey: cur.priceKey, before: r.before, after: pct, userId: p.userId, audit: 'kb_markup' } });
+    }
+    return { source: view(r.source) };
+  });
+
   /** Сайты в xlsx (адрес, название, фабрика, комментарий) и обратно: новые адреса добавляются ссылками, у известных — комментарий и флаг. */
   api.get('/kb/sites/export', async (req) => {
     const sites = await kb.repo.sites(principal(req).accountId);
@@ -432,5 +458,7 @@ function view(s: Awaited<ReturnType<Deps['kb']['repo']['get']>>) {
     // KP-AGENT-V2, п. 4а: комментарий к сайту и флаг «фабрика».
     comment: s.comment,
     isFactory: s.isFactory,
+    // KB-MARKUP: наценка прайса, %.
+    markupPct: s.markupPct,
   };
 }

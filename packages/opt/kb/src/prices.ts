@@ -94,6 +94,8 @@ export interface KbPrice {
   appliesTo: string[];
   componentStatus: Partial<Record<ComponentKind, ComponentStatus>> | null;
   card: ProductCard | null;
+  /** KB-MARKUP: наценка источника (kb_sources.markup_pct), %; price — цена фабрики как в файле, наценка — при расчёте КП. */
+  markupPct: number;
 }
 
 export interface NewKbPrice {
@@ -178,7 +180,7 @@ export interface KbAlias {
   productId: string | null;
 }
 
-const SELECT = `SELECT p.*, s.title AS source_title, s.kind AS source_kind, s.price_key AS price_key FROM kb_prices p LEFT JOIN kb_sources s ON s.id = p.source_id`;
+const SELECT = `SELECT p.*, s.title AS source_title, s.kind AS source_kind, s.price_key AS price_key, coalesce(s.markup_pct, 0) AS markup_pct FROM kb_prices p LEFT JOIN kb_sources s ON s.id = p.source_id`;
 
 export class KbPricesRepo {
   constructor(private readonly db: Db) {}
@@ -651,6 +653,39 @@ export interface PriceHit {
   ambiguous?: string[];
   /** Те же модели с названиями — варианты вопроса «выбор модели» (KP-AGENT-V2). */
   ambiguousModels?: { productId: string; model: string }[];
+  /** KB-MARKUP: цена с наценкой источника — цена фабрики (после надбавки за нестандарт), процент и итог (= price). */
+  markup?: PriceMarkup | null;
+}
+
+export interface PriceMarkup {
+  factoryPrice: number;
+  pct: number;
+  price: number;
+  sourceId: number | null;
+  priceKey: string | null;
+}
+
+/**
+ * KB-MARKUP: цена фабрики × (1 + N / 100), математическое округление до рубля. Считается в целых (копейки × десятые
+ * доли процента), чтобы 0,5 ₽ не терялись на двоичной дроби. N = 0 — цена без изменений (и без округления).
+ */
+export function withMarkup(price: number, pct: number): number {
+  if (!pct) return price;
+  const kop = Math.round(price * 100);
+  const permille = Math.round((100 + pct) * 10);
+  const scaled = kop * permille;
+  return (scaled >= 0 ? Math.floor((scaled + 50_000) / 100_000) : -Math.floor((-scaled + 50_000) / 100_000));
+}
+
+/**
+ * Наценка источника к цене подбора: только строки прайса (origin = price_list) со своей ценой; цены интернета, правки менеджера,
+ * «входит в блок» и «нет цены» — без наценки. Наценка ставится последней — после надбавки фабрики за нестандарт.
+ */
+export function applyMarkup(hit: PriceHit): PriceHit {
+  const pct = hit.row.markupPct;
+  if (!pct || hit.row.origin !== 'price_list' || hit.price === null || hit.price <= 0) return { ...hit, markup: null };
+  const price = withMarkup(hit.price, pct);
+  return { ...hit, price, markup: { factoryPrice: hit.price, pct, price, sourceId: hit.row.sourceId, priceKey: hit.row.priceKey } };
 }
 
 export function validityDaysOf(row: Pick<KbPrice, 'origin' | 'sourceKind'>): number {
@@ -774,6 +809,12 @@ function keyMatch(row: KbPrice, key: string, alias: { keys: string[] } | null, i
  *     близость площади › свежесть.
  */
 export async function lookupPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, query: PriceQuery, now = new Date()): Promise<PriceHit | null> {
+  const hit = await lookupFactoryPrice(prices, aliases, accountId, query, now);
+  return hit ? applyMarkup(hit) : null;
+}
+
+/** Подбор строки прайса и цена фабрики (без наценки источника). */
+async function lookupFactoryPrice(prices: KbPricesRepo, aliases: KbAliasesRepo, accountId: number, query: PriceQuery, now: Date): Promise<PriceHit | null> {
   // KB-DOOR-MATCH-2, п. 1: «кромка ПВХ …» не участвует ни в ключе модели, ни в словах, ни в признаках.
   const q: PriceQuery = { ...query, name: withoutEdge(query.name).replace(/\s+/g, ' ').replace(/[\s,;|/]+$/, '').trim() || query.name, raw: query.raw ? withoutEdge(query.raw) : query.raw };
   const text = `${q.name} ${q.raw ?? ''}`;
@@ -1073,6 +1114,10 @@ export const doorTitleOf = (door: Pick<KbPrice, 'productId' | 'model'>): string 
  * статус компонента в её карточке. included → «входит в цену блока»; not_priced или колонки нет → «уточнить у менеджера», не 0.
  */
 export async function componentOfDoor(prices: KbPricesRepo, accountId: number, door: KbPrice, kind: ComponentKind, now = new Date()): Promise<PriceHit> {
+  return applyMarkup(await componentFactoryPrice(prices, accountId, door, kind, now));
+}
+
+async function componentFactoryPrice(prices: KbPricesRepo, accountId: number, door: KbPrice, kind: ComponentKind, now: Date): Promise<PriceHit> {
   const title = doorTitleOf(door);
   const st = door.componentStatus?.[kind] ?? null;
   if (st === 'included') return { ...doorOutcome(door, 'included', [`${kind} входит в цену блока ${title}${door.card?.baseIncludes ? ` (в базу входит: ${door.card.baseIncludes})` : ''}`], now), label: `по двери ${title}` };
@@ -1232,6 +1277,7 @@ function mapPrice(r: Record<string, unknown>): KbPrice {
     appliesTo: Array.isArray(r.applies_to) ? (r.applies_to as string[]) : [],
     componentStatus: (r.component_status ?? null) as KbPrice['componentStatus'],
     card: (r.card ?? null) as ProductCard | null,
+    markupPct: Number(r.markup_pct ?? 0),
   };
 }
 

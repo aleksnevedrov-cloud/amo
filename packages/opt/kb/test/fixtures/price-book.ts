@@ -138,3 +138,17 @@ export function metalBook(opts: { extrasShift?: number } = {}): Sheets {
 function pickDict(names: string[]): Sheets {
   return Object.fromEntries(names.map((n) => [n, DICTIONARY[n] as unknown[][]]));
 }
+
+/**
+ * KB-MARKUP: прайс «Оникс прайс октябрь 2026» (по строкам приёмки): ONX-0001 «Оникс Авангард наборный шпон» — шпон, гр.1, глухое,
+ * полотно 16 400, коробка 3 125, наличник 5 050, добор 2 525; «Дополнения» — ONX-OPT-001 «Стекло сатинат белый, категория 1» 1 520.
+ */
+export function onyxBook(): Sheets {
+  const list1: unknown[][] = [['Оникс — прайс октябрь 2026, цены фабрики с НДС'], LIST1_HEADER, ['Шпонированные']];
+  list1.push([1, 'Оникс Авангард наборный шпон', 'Авангард Г', 'Полотно глухое шпонированное', 'шпон, гр.1', 'МДФ', '', '600–900×2000', 'полотно', 16_400, 3125, 5050, 2525, '—', 'ГОСТ 475-2016', 1, 'дуб натуральный', 'полотно', '']);
+  const id: unknown[][] = [ID_HEADER, [1, 'ONX-0001', 'leaf', 'opening', 'single', 'interior', 'solid', 'priced', 'priced', 'priced', 'not_priced', 'Оникс Авангард: шпон, гр.1, глухое']];
+  const sizes: unknown[][] = [SIZES_HEADER, ...[600, 700, 800, 900].map((w, i) => [`ONX-0001-S${i + 1}`, 'ONX-0001', w, 2000, 'opening', ''])];
+  const pick: unknown[][] = [PICK_HEADER, ['ONX-0001', 'Оникс Авангард; Авангард наборный шпон', '', '', '']];
+  const extras: unknown[][] = [EXTRAS_HEADER, ['ONX-OPT-001', 'стекло', 'Стекло сатинат белый, категория 1', 'шт', 1520, 'active', '*', '', '', 'стекло сатинат белый; сатинат белый']];
+  return { 'Прайс по ГОСТ': list1, ID: id, Размеры: sizes, Нестандарт: NONSTANDARD, Дополнения: extras, Подбор: pick };
+}

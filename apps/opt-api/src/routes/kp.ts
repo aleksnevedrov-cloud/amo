@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, recalcDraftMarkup, researchablePositions, resolveKpPath, sendBlockers, type KpDraft, type KpLine, type KpPayload } from '@opt/kp';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';
@@ -336,6 +336,22 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     return { draft: fresh ? await viewOf(p.accountId, fresh) : null, requestIndex: r.requestIndex };
   });
 
+  /**
+   * KB-MARKUP: «Пересчитать» — текущая наценка прайсов к ценам из прайса этого черновика (сам черновик при смене наценки не
+   * пересчитывается). Ручные цены и цены интернета не трогаются.
+   */
+  api.post('/kp/draft/:id/recalc-markup', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const d = await repo.byId(p.accountId, id);
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    if (d.status !== 'draft') return reply.code(409).send({ error: 'locked', message: 'КП уже собрано, создайте новый черновик' });
+    const r = await recalcDraftMarkup(deps, p.accountId, id, p.userId);
+    const fresh = await repo.byId(p.accountId, id);
+    return { draft: fresh ? await viewOf(p.accountId, fresh) : null, changed: r.changed.length, skipped: r.skipped };
+  });
+
   api.post('/kp/draft/:id/answer', async (req, reply) => {
     const p = principal(req);
     const id = Number((req.params as { id?: string }).id);
@@ -386,7 +402,7 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       const prev = before.find((x) => x.request_index === l.request_index);
       const changed = l.price !== (prev?.price ?? null);
       if (changed && l.price !== null) {
-        return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null } as KpLine;
+        return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null, markup: null } as KpLine;
       }
       return { ...prev, ...l, priceSource: l.priceSource ?? prev?.priceSource } as KpLine;
     });

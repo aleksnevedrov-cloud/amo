@@ -1,13 +1,13 @@
 import type { Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { leavesOf, modelKeyOf, sizeOf } from '../src/model-key.ts';
-import { applyRules, categoryMedian, componentOfDoor, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, type KbPrice } from '../src/prices.ts';
+import { applyMarkup, applyRules, categoryMedian, componentOfDoor, KbAliasesRepo, KbPricesRepo, lookupPrice, priceLabelOf, withMarkup, type KbPrice } from '../src/prices.ts';
 import { EMPTY_FEATURES, featuresOf } from '../src/features.ts';
 import { KbRepo } from '../src/repo.ts';
 import { freshKbDb } from './setup.ts';
 
 const ACCOUNT = 555;
-const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, category: 'door', componentKind: null, productId: null, tariffId: null, status: 'active', estimate: false, family: null, appliesTo: [], componentStatus: null, card: null, ...over });
+const row = (over: Partial<KbPrice>): KbPrice => ({ id: 1, accountId: ACCOUNT, sourceId: null, model: 'ДПГ сота', modelKey: 'дпг сота', factory: 'Текона', unit: 'шт', baseSize: '800×2000', widthMm: 800, heightMm: 2000, price: 3450, vat: 'included', currency: 'RUB', validAt: new Date('2026-10-01'), confidence: 70, origin: 'price_list', nonstandard: {}, url: null, note: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), sourceTitle: 'прайс Текона.xlsx', sourceKind: 'file', abbr: null, description: null, altKeys: [], searchTokens: ['дпг', 'сота'], sourceRow: null, features: null, featureKey: null, coating: null, equipment: null, priceKey: null, priceTitle: null, category: 'door', componentKind: null, productId: null, tariffId: null, status: 'active', estimate: false, family: null, appliesTo: [], componentStatus: null, card: null, markupPct: 0, ...over });
 
 describe('цена нет — не 0 (KB-HW-NULL)', () => {
   it('строка без цены: applyRules → null; медиана фурнитуры не учитывает строки без цены (своя группа и запасная по всей фурнитуре)', () => {
@@ -441,5 +441,28 @@ describe('категории: комплектующие, фурнитура, р
     // Повторная запись той же строки без категории (как у веб-цен) категорию из импорта не затирает.
     await prices.upsert({ accountId: ACC, model: 'СПД40 6М1зак-12-4М1-12-6Изак для алюминиевой двери', price: null, origin: 'price_list', tariffId: 'OPT-012', productId: 'OPT-012' });
     expect((await prices.byId(ACC, tariff))?.category).toBe('hardware');
+  });
+});
+
+describe('наценка источника (KB-MARKUP)', () => {
+  it('цена × (1 + N %), математическое округление до рубля; 0 — без изменений и без округления', () => {
+    expect(withMarkup(16_400, 20)).toBe(19_680);
+    expect(withMarkup(3125, 20)).toBe(3750);
+    expect(withMarkup(1520, 20)).toBe(1824);
+    expect(withMarkup(21_320, 20)).toBe(25_584);
+    expect(withMarkup(1.25, 20)).toBe(2);
+    expect(withMarkup(10.25, 20)).toBe(12);
+    expect(withMarkup(100.04, 12.5)).toBe(113);
+    expect(withMarkup(100, -50)).toBe(50);
+    expect(withMarkup(12.5, 0)).toBe(12.5);
+  });
+
+  it('только строки прайса с ценой: интернет, правка менеджера, «нет цены» — без наценки', () => {
+    const hit = (over: Partial<KbPrice>, price: number | null) => applyMarkup({ row: row({ markupPct: 20, sourceId: 7, ...over }), price, basis: 'exact', match: 'exact', similarity: 1, confidence: 70, stale: false, validityDays: 90, notes: [], label: '' });
+    expect(hit({}, 16_400)).toMatchObject({ price: 19_680, markup: { factoryPrice: 16_400, pct: 20, price: 19_680, sourceId: 7 } });
+    expect(hit({ origin: 'web' }, 16_400)).toMatchObject({ price: 16_400, markup: null });
+    expect(hit({ origin: 'manager' }, 16_400)).toMatchObject({ price: 16_400, markup: null });
+    expect(hit({}, null)).toMatchObject({ price: null, markup: null });
+    expect(hit({ markupPct: 0 }, 16_400)).toMatchObject({ price: 16_400, markup: null });
   });
 });

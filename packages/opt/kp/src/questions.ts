@@ -1,4 +1,4 @@
-import { missingFields, PROFILE_LABEL, profileLine, type GostProfile } from '@opt/kb';
+import { missingFields, PROFILE_LABEL, profileLine, withMarkup, type GostProfile } from '@opt/kb';
 import { isPriceFile, lineCategory, tidyName, type KpAnswer, type KpLine, type KpPayload } from './draft.ts';
 
 /**
@@ -14,6 +14,16 @@ export interface KpQuestionOption {
   label: string;
   detail?: string | null;
   price?: number | null;
+  /** KB-MARKUP: цена фабрики варианта (до наценки источника) — для «фабрика · наценка · цена» и «Пересчитать». */
+  factoryPrice?: number | null;
+}
+
+export type NonstandardChoice = 'computed' | 'p30' | 'p100';
+
+/** KB-MARKUP: вариант «нестандарт» — сначала надбавка к цене фабрики (+30 % / +100 %), затем наценка источника. */
+export function nonstandardOption(choice: 'p30' | 'p100', factoryBase: number, pct: number): { factoryPrice: number; price: number } {
+  const factoryPrice = choice === 'p30' ? Math.round(factoryBase * 1.3 * 100) / 100 : factoryBase * 2;
+  return { factoryPrice, price: withMarkup(factoryPrice, pct) };
 }
 
 export interface KpQuestion {
@@ -101,9 +111,16 @@ export function buildQuestions(payload: Partial<KpPayload>, opts: QuestionOption
       });
     }
     // 2. Двупольная неравнопольная — решение человека.
+    // KB-MARKUP: проценты — к цене фабрики, наценка источника — после (без наценки варианты те же, что раньше).
+    const pct = l.markup && l.markup.price === l.price ? l.markup.pct : 0;
+    const variant = (id: 'p30' | 'p100', base: number, label: (price: number) => string) => {
+      const o = nonstandardOption(id, base, pct);
+      return { id, label: label(o.price), price: o.price, factoryPrice: o.factoryPrice };
+    };
     if (door && profile?.unequal) {
       const base = l.price;
-      push({ key: questionKey('nonstandard', payload, l), type: 'nonstandard', blocking: true, title: 'Двустворчатая неравнопольная', text: `${what}: двупольная неравнопольная — как считать цену?${base ? ` Сейчас ${rub(base)}.` : ''}`, requestIndexes: idx, options: base ? [{ id: 'p30', label: '+30 % к цене', price: Math.round(base * 1.3 * 100) / 100 }, { id: 'p100', label: '+100 % к цене', price: base * 2 }] : [], customPrice: true, askClient: null });
+      const factory = pct ? (l.markup as NonNullable<KpLine['markup']>).factoryPrice : base;
+      push({ key: questionKey('nonstandard', payload, l), type: 'nonstandard', blocking: true, title: 'Двустворчатая неравнопольная', text: `${what}: двупольная неравнопольная — как считать цену?${base ? ` Сейчас ${rub(base)}.` : ''}`, requestIndexes: idx, options: base && factory ? [variant('p30', factory, () => '+30 % к цене'), variant('p100', factory, () => '+100 % к цене')] : [], customPrice: true, askClient: null });
     } else if (l.nonstandard && l.price !== null && isPriceFile(l.priceSource)) {
       // 3. Нестандарт (правила прайса / по площади) — цена посчитана, решает человек.
       const base = l.nonstandard.basePrice;
@@ -114,7 +131,7 @@ export function buildQuestions(payload: Partial<KpPayload>, opts: QuestionOption
         title: 'Нестандартный размер',
         text: `${what}: ${l.nonstandard.note}. Посчитано ${rub(l.price)}.`,
         requestIndexes: idx,
-        options: [{ id: 'computed', label: `Как посчитано: ${rub(l.price)}`, price: l.price }, ...(base ? [{ id: 'p30', label: `+30 % к базе: ${rub(base * 1.3)}`, price: Math.round(base * 1.3 * 100) / 100 }, { id: 'p100', label: `+100 % к базе: ${rub(base * 2)}`, price: base * 2 }] : [])],
+        options: [{ id: 'computed', label: `Как посчитано: ${rub(l.price)}`, price: l.price }, ...(base ? [variant('p30', base, (p) => `+30 % к базе: ${rub(p)}`), variant('p100', base, (p) => `+100 % к базе: ${rub(p)}`)] : [])],
         customPrice: true,
         askClient: null,
       });
@@ -241,8 +258,12 @@ export function applyAnswer(payload: Partial<KpPayload>, key: string, answer: Kp
       patch((l) => {
         const url = l.web?.sources[0]?.url ?? null;
         if (src !== 'price_file') candidates.push({ requestIndex: l.request_index, model: l.name, size: l.size, price, source: src === 'web_confirmed' ? 'web_confirmed' : 'manager', url: src === 'web_confirmed' ? url : null });
-        const label = src === 'web_confirmed' ? `из интернета (${l.web?.count ?? 0} источн.), выбрал менеджер` : src === 'manager' ? 'введена менеджером' : `по прайсу, нестандарт: ${answer.option === 'computed' ? 'как посчитано' : answer.option === 'p30' ? '+30 %' : '+100 %'}`;
-        return { ...l, price, priceSource: src, priceLabel: label, priceOutcome: 'priced', priceStale: false };
+        const label = src === 'web_confirmed' ? `из интернета (${l.web?.count ?? 0} источн.), выбрал менеджер` : src === 'manager' ? 'введена менеджером' : nonstandardLabel(answer.option as NonstandardChoice);
+        // KB-MARKUP: вариант «нестандарт» из прайса — с наценкой источника (цена фабрики варианта — для «Пересчитать»); своя цена — без.
+        const option = q?.options.find((o) => o.id === answer.option);
+        const markup = src === 'price_file' && l.markup ? (answer.option === 'computed' ? l.markup : option?.factoryPrice ? { ...l.markup, factoryPrice: option.factoryPrice, price } : null) : null;
+        const choice = type === 'nonstandard' && src === 'price_file' ? (answer.option as NonstandardChoice) : null;
+        return { ...l, price, priceSource: src, priceLabel: label, priceOutcome: 'priced', priceStale: false, markup, nonstandardChoice: choice };
       });
       break;
     }
@@ -301,10 +322,26 @@ export function applyAnswer(payload: Partial<KpPayload>, key: string, answer: Kp
   return { payload: next, research: [...new Set(research)], candidates };
 }
 
-/** «Собрать заново»: ответы прежнего черновика той же сделки — на новый (ключи стабильны), с их действием. */
+export const nonstandardLabel = (choice: NonstandardChoice) => `по прайсу, нестандарт: ${choice === 'computed' ? 'как посчитано' : choice === 'p30' ? '+30 %' : '+100 %'}`;
+
+/**
+ * «Собрать заново»: ответы прежнего черновика той же сделки — на новый (ключи стабильны), с их действием.
+ * KB-MARKUP: ответ «нестандарт» вариантом прайса (как посчитано / +30 % / +100 %) переносится выбором, а не ценой — цену поиск
+ * считает заново по текущему прайсу и наценке источника.
+ */
 export function carryAnswers(fresh: Partial<KpPayload>, previous: Partial<KpPayload> | null): Partial<KpPayload> {
   if (!previous?.answers) return fresh;
   let out: Partial<KpPayload> = { ...fresh, componentDoorGroups: { ...(previous.componentDoorGroups ?? {}), ...(fresh.componentDoorGroups ?? {}) } };
-  for (const [key, a] of Object.entries(previous.answers)) out = applyAnswer(out, key, a).payload;
+  for (const [key, a] of Object.entries(previous.answers)) {
+    const choice = key.startsWith('nonstandard:') && (a.option === 'computed' || a.option === 'p30' || a.option === 'p100') ? (a.option as NonstandardChoice) : null;
+    if (!choice) {
+      out = applyAnswer(out, key, a).payload;
+      continue;
+    }
+    out = applyAnswer(out, key, { ...a, price: null }).payload;
+    const rowKey = key.slice(key.indexOf(':') + 1);
+    const base = out;
+    out = { ...out, items: (out.items ?? []).map((l) => (rowKeyOf(base, l) === rowKey && lineCategory(l) !== 'service' ? { ...l, nonstandardChoice: choice } : l)) };
+  }
   return out;
 }

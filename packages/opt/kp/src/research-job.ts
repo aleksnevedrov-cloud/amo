@@ -3,6 +3,7 @@ import { BRANDS, completeProfile, componentOfDoor, doorTitleOf, gostDesignation,
 import type { OptCore } from './deps.ts';
 import { lineCategory, NO_PRICE, requestProfile, tidyName, type KpLine, type KpLineWeb, type KpPayload, type KpRequestItem } from './draft.ts';
 import { doorComponentKind, matchComponentDoor, type ComponentDoorMatch } from './component-door.ts';
+import { nonstandardLabel, nonstandardOption } from './questions.ts';
 import { VAT_ASSUMED_NOTE, type MarketResearchInput } from './market-research.ts';
 import { DEFAULT_CACHE_DAYS, researchWithCache, sizeOfInput, type CachedResearch } from './research-repo.ts';
 import { resolveOptRoute } from './settings.ts';
@@ -118,13 +119,13 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     const noPriceTariff = hit && (category === 'hardware' || hit.row.category === 'hardware') && hit.outcome === 'not_priced' && !hit.ambiguous;
     if (hit && !noPriceTariff) {
       const applied = await applyKbPriceToDraft(core, accountId, draftId, requestIndex, hit, Boolean(job.replace));
-      const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.ambiguous ? 'несколько моделей в прайсе — вопрос менеджеру' : hit.outcome === 'not_priced' || hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
+      const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.ambiguous ? 'несколько моделей в прайсе — вопрос менеджеру' : hit.outcome === 'not_priced' || hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${markupText(hit)}${hit.outcome === 'estimate' ? ' (сметная цена)' : ''}`;
       await core.journal.add({
         accountId,
         leadId: draft.leadId,
         kind: KP_PRICE_RESEARCH_KIND,
         summary: `Цена по позиции «${lineLabel}»: ${priceText} из прайса (${hit.label})${hit.stale ? ' — цена устарела' : ''}${applied.keptManagerPrice ? ' — цена менеджера сохранена' : ''}`,
-        details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, outcome: hit.outcome ?? 'priced', doorProductId, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
+        details: { draftId, requestIndex, source: 'kb', kbPriceId: hit.row.id, basis: hit.basis, match: hit.match, stale: hit.stale, price: hit.price, markup: hit.markup ?? null, outcome: hit.outcome ?? 'priced', doorProductId, notes: hit.notes, webSearchCalls: 0, costUsd: 0, userId: job.userId, keptManagerPrice: applied.keptManagerPrice },
       });
       const price = hit.outcome === 'not_priced' ? null : hit.price;  // null — «уточнить у менеджера», не 0 ₽ (KB-HW-NULL)
       return { researchId: 0, status: 'ok', cached: true, price: applied.keptManagerPrice ? line.price : price, keptManagerPrice: applied.keptManagerPrice, notes: hit.notes, fromKb: true };
@@ -152,6 +153,9 @@ export async function runResearchJob(core: OptCore, job: ResearchJob): Promise<R
     throw err;
   }
 }
+
+/** KB-MARKUP: «(фабрика 16 400 ₽ + наценка 20 %)» — в журнал поиска цены. */
+const markupText = (hit: PriceHit) => (hit.markup ? ` (фабрика ${hit.markup.factoryPrice.toLocaleString('ru-RU')} ₽ + наценка ${hit.markup.pct.toLocaleString('ru-RU')} %)` : '');
 
 /** Пометки позиции, которые ставит сам поиск цен (их мы заменяем при повторе); остальное — слова менеджера или разбора. */
 export const ownNote = (reason: string) => reason === NO_PRICE || reason.startsWith('ограничение расчёта') || reason.startsWith('предварительно, по аналогу') || reason.startsWith('аналог, пересчёт по площади') || reason === VAT_ASSUMED_NOTE || reason === 'цены не найдены' || reason.startsWith('поиск цены:') || reason.startsWith('цена из базы:') || reason.startsWith('цена устарела') || reason.startsWith('цвет уточнить') || reason.startsWith('уточнить у менеджера') || reason.startsWith('вопрос по комплектующему');
@@ -189,6 +193,8 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
       // KP-AGENT-V2, п. 5: несколько моделей прайса — варианты вопроса «выбор модели»; нестандарт (правила / площадь) — вопрос
       // «нестандарт»; цена из прайса снимает прежние цены интернета и варианты аналога.
       next.modelOptions = hit.ambiguousModels?.length ? hit.ambiguousModels : null;
+      // KB-MARKUP: наценка источника — у строки для виджета («фабрика · наценка · цена»); в письмо и КП идёт только price.
+      next.markup = (outcome === 'priced' || outcome === 'estimate') && next.price !== null && hit.markup ? hit.markup : null;
       next.nonstandard = lineCategory(line) === 'door' && (outcome === 'priced' || outcome === 'estimate') && (hit.basis === 'rules' || hit.basis === 'area') ? { basis: hit.basis, basePrice: hit.row.price, note: hit.notes.find((n) => /^нестандарт|пересчёт по площади/.test(n)) ?? (hit.basis === 'area' ? 'пересчёт по площади' : 'нестандартный размер по правилам прайса') } : null;
       if (outcome === 'priced' || outcome === 'estimate' || outcome === 'included') {
         next.web = null;
@@ -211,6 +217,18 @@ export async function applyKbPriceToDraft(core: OptCore, accountId: number, draf
         const full = q ? completeProfile(q, own && !hit.ambiguous ? profileOfRow(hit.row) : null) : null;
         next.gostProfile = full;
         next.gostDesignation = full && own && !hit.ambiguous ? gostDesignation(hit.row.card?.designation ?? null, full) : null;
+      }
+      // KB-MARKUP: вариант «нестандарт», выбранный в прежнем черновике, — по текущей цене фабрики и наценке источника.
+      const choice = line.nonstandardChoice;
+      if (choice && next.price !== null && (outcome === 'priced' || outcome === 'estimate') && (next.nonstandard || next.gostProfile?.unequal)) {
+        const pct = hit.markup?.pct ?? 0;
+        const base = next.gostProfile?.unequal ? (hit.markup?.factoryPrice ?? hit.price) : (next.nonstandard?.basePrice ?? null);
+        if (choice !== 'computed' && base) {
+          const o = nonstandardOption(choice, base, pct);
+          next.price = o.price;
+          next.markup = hit.markup ? { ...hit.markup, factoryPrice: o.factoryPrice, price: o.price } : null;
+        }
+        next.priceLabel = nonstandardLabel(choice);
       }
       // Примечания под позицией в КП: вкладка «Подбор», фразы нестандарта (эталон, производство, огнестойкость).
       const production = hit.notes.filter((n) => /подлежат уточнению на производстве|огнестойкость исполнения|^нестандарт /.test(n));
@@ -374,8 +392,8 @@ export async function priceComponentByDoor(core: OptCore, job: ResearchJob, lead
   await applyKbPriceToDraft(core, accountId, draftId, requestIndex, withWhy, true);
   // Откуда дверь — для плитки («по группе …» / «для этой строки») и для «Найти цены»: строка группы следует за ответом группы.
   await patchLine(core, accountId, draftId, requestIndex, (l) => ({ ...l, componentDoorBy: lineChoice ? 'line' : viaGroup ? 'group' : null, componentDoorGroup: viaGroup ? groupKey : null, componentDoor: lineChoice ? lineChoice.request_index : viaGroup ? (groupDoor as KpLine).request_index : null }), null);
-  const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽`;
-  await journal(`${priceText} ${hit.label}, веб-поиск не вызывался`, { outcome: hit.outcome ?? 'priced', kbPriceId: hit.row.id, price: hit.price, doorRequestIndex: door.request_index, doorProductId: row.productId, notes: withWhy.notes });
+  const priceText = hit.outcome === 'included' ? 'входит в цену блока' : hit.price === null ? 'в прайсе цены нет — уточнить у менеджера' : `${hit.price.toLocaleString('ru-RU')} ₽${markupText(hit)}`;
+  await journal(`${priceText} ${hit.label}, веб-поиск не вызывался`, { outcome: hit.outcome ?? 'priced', kbPriceId: hit.row.id, price: hit.price, markup: hit.markup ?? null, doorRequestIndex: door.request_index, doorProductId: row.productId, notes: withWhy.notes });
   return { researchId: 0, status: 'ok', cached: true, price: hit.price, keptManagerPrice: false, notes: withWhy.notes, fromKb: true };
 }
 

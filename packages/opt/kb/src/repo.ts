@@ -40,6 +40,8 @@ export interface KbSource {
   /** KP-AGENT-V2, п. 4а: сайт — комментарий менеджера «какие двери есть на сайте» и флаг «фабрика». */
   comment: string | null;
   isFactory: boolean;
+  /** KB-MARKUP: наценка прайса в % (−50…300): цена КП = цена фабрики × (1 + N / 100); 0 — без наценки. */
+  markupPct: number;
 }
 
 export interface PriceImportSummary {
@@ -183,6 +185,46 @@ export class KbRepo {
     return rows[0] ? mapSource(rows[0]) : null;
   }
 
+  /** KB-MARKUP: наценка прайса-источника; возвращает прежнее значение и обновлённый источник (для журнала «было → стало»). */
+  async setMarkup(accountId: number, id: number, markupPct: number): Promise<{ before: number; source: KbSource } | null> {
+    const { rows } = await this.db.query(
+      `UPDATE kb_sources s SET markup_pct = $3, updated_at = now() FROM (SELECT id, markup_pct AS before FROM kb_sources WHERE account_id = $1 AND id = $2 FOR UPDATE) o
+        WHERE s.id = o.id RETURNING s.*, o.before`,
+      [accountId, id, markupPct],
+    );
+    return rows[0] ? { before: Number(rows[0].before ?? 0), source: mapSource(rows[0]) } : null;
+  }
+
+  /**
+   * KB-MARKUP: повторная загрузка того же прайса (новый файл с тем же ключом) — наценка прежнего файла переходит к новому,
+   * если у нового она ещё не задана. Возвращает перенесённую наценку или null.
+   */
+  async inheritMarkup(accountId: number, id: number, fromIds: number[]): Promise<number | null> {
+    if (!fromIds.length) return null;
+    const { rows } = await this.db.query<{ markup_pct: string }>(
+      `UPDATE kb_sources SET markup_pct = o.markup_pct
+         FROM (SELECT markup_pct FROM kb_sources WHERE account_id = $1 AND id = ANY($3::bigint[]) AND markup_pct <> 0 ORDER BY created_at DESC, id DESC LIMIT 1) o
+        WHERE kb_sources.account_id = $1 AND kb_sources.id = $2 AND kb_sources.markup_pct = 0
+        RETURNING kb_sources.markup_pct`,
+      [accountId, id, fromIds],
+    );
+    return rows[0] ? Number(rows[0].markup_pct) : null;
+  }
+
+  /**
+   * KB-MARKUP: текущая наценка прайса для пересчёта черновика — по источнику строки; источника уже нет (файл заменён
+   * повторной загрузкой) — по самому свежему файлу с тем же ключом прайса. Ничего не нашлось — null.
+   */
+  async markupOf(accountId: number, sourceId: number | null, priceKey: string | null): Promise<number | null> {
+    if (sourceId !== null) {
+      const { rows } = await this.db.query<{ markup_pct: string }>('SELECT markup_pct FROM kb_sources WHERE account_id = $1 AND id = $2', [accountId, sourceId]);
+      if (rows[0]) return Number(rows[0].markup_pct);
+    }
+    if (!priceKey) return null;
+    const { rows } = await this.db.query<{ markup_pct: string }>('SELECT markup_pct FROM kb_sources WHERE account_id = $1 AND price_key = $2 ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, priceKey]);
+    return rows[0] ? Number(rows[0].markup_pct) : null;
+  }
+
   /** Сайты-источники (ссылки верхнего уровня, без страниц-детей раздела) — для выбора, где искать цену. */
   async sites(accountId: number): Promise<KbSource[]> {
     const { rows } = await this.db.query("SELECT * FROM kb_sources WHERE account_id = $1 AND kind = 'url' AND parent_id IS NULL ORDER BY is_factory DESC, id", [accountId]);
@@ -322,6 +364,7 @@ function mapSource(r: Record<string, unknown>): KbSource {
     priceImport: (r.price_import ?? null) as PriceImportSummary | null,
     comment: (r.comment ?? null) as string | null,
     isFactory: Boolean(r.is_factory),
+    markupPct: Number(r.markup_pct ?? 0),
   };
 }
 

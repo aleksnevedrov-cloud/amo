@@ -41,6 +41,16 @@ export function priceSourceOf(l: KpDraftLine): { kind: 'price' | 'web' | 'manage
   if (l.web) return { kind: 'pending', label: 'цены из интернета — выберите в опроснике' };
   return { kind: 'none', label: l.priceLabel && l.priceOutcome === 'not_priced' ? `${l.priceLabel} — уточнить у менеджера` : 'нет цены' };
 }
+/**
+ * KB-MARKUP: «фабрика 16 400 ₽ · наценка 20 % · цена 19 680 ₽» — у строки с ценой прайса и наценкой источника, пока менеджер
+ * цену не менял. Только в черновике: в письмо и файл КП идёт одна цена.
+ */
+export function markupOf(l: KpDraftLine): string | null {
+  const m = l.markup;
+  if (!m || l.price === null || l.price !== m.price || (l.priceSource !== 'price_file' && l.priceSource !== 'kb')) return null;
+  const money = (n: number) => `${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`;
+  return `фабрика ${money(m.factoryPrice)} · наценка ${m.pct.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} % · цена ${money(m.price)}`;
+}
 function priceIsStale(l: KpDraftLine): boolean {
   return l.price !== null && Boolean(l.priceStale);
 }
@@ -400,6 +410,11 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
                 {researching ? `Ищу цены…${progress ? ` ${progress}` : ''}` : 'Найти цены'}
               </button>
             )}
+            {draft.status === 'draft' && (
+              <button type="button" className="opt-btn" disabled={busy || pending || researching || dirty} title={dirty ? 'Сначала сохраните правки' : 'Применить текущую наценку прайсов из «Базы знаний» к ценам из прайса; ручные цены и цены интернета не меняются'} onClick={() => void act(() => api.recalcMarkup(draft.id))}>
+                Пересчитать
+              </button>
+            )}
             <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={() => void act(() => api.saveDraftItems(draft.id, lines))}>
               Сохранить правки
             </button>
@@ -757,6 +772,7 @@ function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { l
                 {l.equipment && <div className="opt-kp-sub opt-kp-row-equipment">Комплектация: {l.equipment}</div>}
                 {l.tzEquipment && <div className="opt-kp-sub opt-kp-row-tz">Комплектация по ТЗ: {l.tzEquipment}</div>}
                 {l.letterSpec && <div className="opt-kp-sub opt-kp-row-letter">Из письма: {l.letterSpec}</div>}
+                {markupOf(l) && <div className="opt-kp-sub opt-kp-row-markup">{markupOf(l)}</div>}
                 {l.excluded && <div className="opt-kp-sub opt-kp-stale">исключена в опроснике — в КП не идёт</div>}
                 {l.priceOutcome === 'included' && <div className="opt-kp-sub opt-kp-outcome">входит в цену блока{l.includedIn ? ` (${l.includedIn})` : ''}: в КП — под дверью, не строкой</div>}
                 {l.priceOutcome === 'estimate' && <div className="opt-kp-sub opt-kp-outcome">сметная цена — для сметы, уточнить у менеджера</div>}
