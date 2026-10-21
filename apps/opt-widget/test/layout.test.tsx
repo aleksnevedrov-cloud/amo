@@ -160,3 +160,79 @@ describe('раскладка блока в колонке amoCRM (KP-AGENT-V2, �
     expect(m).toEqual({ onTop: true, visible: true, insideModal: true });
   }, 60_000);
 });
+
+/**
+ * KB-ALIASES-UI: «База знаний» с 8 154 синонимами Оникса. open — «Показать», раскрыть группу Оникса и «Ещё 50» (100 строк).
+ * Бэкенд отдаёт по 50 строк и счётчики, как opt-api.
+ */
+async function renderAliases(open: boolean): Promise<string> {
+  document.body.innerHTML = '<div id="work-area-opt_agent"></div>';
+  const rows = Array.from({ length: 8154 }, (_, i) => ({ id: i + 1, alias: `Оникс Авангард наборный шпон — шпон, гр.1 — глухое, синоним с очень длинным названием № ${i + 1}`, canonical: 'Оникс Авангард наборный шпон — шпон, гр.1 — глухое', productId: 'ONX-0001', sourceId: 35 }));
+  const self: AmoWidgetSelf = {
+    get_settings: () => ({ widget_code: 'opt_agent' }),
+    system: () => ({ area: 'settings' }),
+    i18n: () => '',
+    render_template: () => undefined,
+    $authorizedAjax: async (opts) => {
+      const u = new URL(opts.url);
+      if (u.pathname === '/widget/v1/kb/aliases') {
+        const offset = Number(u.searchParams.get('offset') ?? 0);
+        const limit = Math.min(Number(u.searchParams.get('limit') ?? 50), 50);
+        return { aliases: u.searchParams.get('source_id') ? rows.slice(offset, offset + limit) : [], total: rows.length, offset, limit, groups: [{ sourceId: 35, title: 'Оникс.xlsx', count: rows.length }], all: rows.length };
+      }
+      if (u.pathname === '/widget/v1/kb/sources') return { sources: [], usage: { sources: 0, bytes: 0, chunks: 0, limits: { bytes: 500 * 1024 * 1024, chunks: 20000 } } };
+      if (u.pathname === '/widget/v1/kb/prices') return { items: [], total: 0 };
+      if (u.pathname === '/widget/v1/kb/candidates') return { items: [] };
+      throw { status: 404 };
+    },
+  };
+  const cbs = createCallbacks(self, 'https://opt.test.ru');
+  await act(async () => cbs.advancedSettings!());
+  await act(async () => new Promise((r) => setTimeout(r, 20)));
+  const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === text) as HTMLButtonElement;
+  await act(async () => btn(document, 'База знаний').click());
+  await act(async () => new Promise((r) => setTimeout(r, 20)));
+  if (open) {
+    const box = document.querySelector('.opt-kb-aliases')!;
+    await act(async () => btn(box, 'Показать').click());
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    await act(async () => (box.querySelector('.opt-kb-alias-group-head') as HTMLButtonElement).click());
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    await act(async () => btn(box, 'Ещё 50').click());
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+  }
+  return document.body.innerHTML;
+}
+
+const ALIASES = `
+  const box = document.querySelector('.opt-kb-aliases');
+  const body = box.querySelector('.opt-kb-aliases-body');
+  const cell = box.querySelector('.opt-kb-alias-table tbody td');
+  return {
+    box: Math.round(box.getBoundingClientRect().height),
+    body: body ? Math.round(body.getBoundingClientRect().height) : null,
+    scrolls: body ? body.scrollHeight > body.clientHeight : null,
+    rows: box.querySelectorAll('tbody tr').length,
+    page: document.documentElement.scrollHeight,
+    // Длинный синоним не переносится: одна строка, обрезка многоточием (полный текст — в title).
+    truncated: cell ? getComputedStyle(cell).whiteSpace === 'nowrap' && getComputedStyle(cell).textOverflow === 'ellipsis' && cell.scrollWidth > cell.clientWidth : null,
+    overflow: col.scrollWidth > col.clientWidth,
+  };`;
+
+describe('блок синонимов в «Базе знаний» (KB-ALIASES-UI)', () => {
+  it.skipIf(!hasChrome)('8 154 синонима: свёрнутый блок — одна строка заголовка; раскрытый — не выше 400 px, 100 строк прокручиваются внутри, длинный текст в одну строку', async () => {
+    type M = { box: number; body: number | null; scrolls: boolean | null; rows: number; page: number; truncated: boolean | null; overflow: boolean };
+    const closed = measure<M>(await renderAliases(false), 900, ALIASES, { w: 1000, h: 1200 });
+    expect(closed.body).toBeNull();
+    expect(closed.box).toBeLessThanOrEqual(60);
+    const open = measure<M>(await renderAliases(true), 900, ALIASES, { w: 1000, h: 1200 });
+    expect(open.rows).toBe(100);
+    expect(open.body).toBeLessThanOrEqual(400);
+    expect(open.scrolls).toBe(true);
+    expect(open.box).toBeLessThanOrEqual(460);
+    expect(open.truncated).toBe(true);
+    expect(open.overflow).toBe(false);
+    // Страница растёт только на высоту блока, не на 100 строк.
+    expect(open.page - closed.page).toBeLessThanOrEqual(420);
+  }, 60_000);
+});

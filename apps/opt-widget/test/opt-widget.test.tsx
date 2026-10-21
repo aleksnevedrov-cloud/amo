@@ -770,7 +770,7 @@ describe('виджет «Агент опт»: вкладка «База знан
         return { price: {} };
       },
       'GET /widget/v1/kb/prices/export': { filename: 'kb-prices-2026-10-15.xlsx', rows: 1, contentBase64: Buffer.from('PK').toString('base64') },
-      'GET /widget/v1/kb/aliases': { aliases: [{ id: 1, alias: 'ДПГ + УПД (сота)', canonical: 'ДПГ сота' }] },
+      'GET /widget/v1/kb/aliases': { aliases: [{ id: 1, alias: 'ДПГ + УПД (сота)', canonical: 'ДПГ сота', productId: null, sourceId: null }], total: 1, offset: 0, limit: 50, groups: [{ sourceId: 0, title: 'Добавлены вручную', count: 1 }], all: 1 },
       'POST /widget/v1/kb/aliases': (data?: string) => {
         posted.push({ url: 'aliases', data: JSON.parse(data ?? '{}') });
         return { added: 1, aliases: [] };
@@ -856,8 +856,13 @@ describe('виджет «Агент опт»: вкладка «База знан
     // KB-WEB-ROWS: ручной записи цены в базу нет — в КП идут только цены прайса.
     expect(button('Добавить цену')).toBeUndefined();
     expect(document.body.textContent).toContain('В КП идут только цены прайса');
-    expect(document.body.textContent).toContain('Синонимы и артикулы (1)');
-    expect(document.body.textContent).toContain('ДПГ + УПД (сота)= ДПГ сота');
+    // KB-ALIASES-UI: синонимы свёрнуты; «Показать» — группы по источникам, группа раскрывается по клику.
+    expect(document.querySelector('.opt-kb-aliases-title')?.textContent).toBe('Синонимы (1)');
+    await act(async () => (document.querySelector('.opt-kb-aliases button') as HTMLButtonElement).click());
+    await flush();
+    await act(async () => (document.querySelector('.opt-kb-alias-group-head') as HTMLButtonElement).click());
+    await flush();
+    expect(document.querySelector('.opt-kb-alias-table tbody')?.textContent).toBe('ДПГ + УПД (сота)ДПГ сота×');
     await setInput([...document.querySelectorAll('textarea')].find((t) => t.placeholder.startsWith('ДПГ сота ='))!, 'Турин = Turin');
     await click('Добавить синонимы');
     await flush();

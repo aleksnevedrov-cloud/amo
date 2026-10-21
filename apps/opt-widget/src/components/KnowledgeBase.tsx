@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage, Field, s } from '@core/widget-core';
 import type { KbBookCounts, KbChunkInfo, KbHitInfo, KbSourceInfo, KbUsageInfo, KpApi } from '../api.ts';
 import { KbAnswer } from './KbAnswer.tsx';
-import { AliasesSection, isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
+import { AliasesSection } from './KbAliases.tsx';
+import { isXlsxSource, PriceImport, PricesSection } from './KbPrices.tsx';
 import { CandidatesSection, COMMENT_MAX, isSite, SiteMeta, SitesSection } from './KbSites.tsx';
 import { PriceMarkup } from './KbMarkup.tsx';
 

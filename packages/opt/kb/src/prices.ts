@@ -471,6 +471,35 @@ export class KbPricesRepo {
   }
 }
 
+/** KB-ALIASES-UI: строк синонимов на страницу виджета. */
+export const ALIASES_PAGE = 50;
+/** Группа синонимов, добавленных вручную (source_id IS NULL). */
+export const MANUAL_ALIASES = 0;
+
+/** Поиск синонима: нижний регистр, ё → е, без учёта пробелов по краям. */
+export const aliasSearchKey = (q: string) => q.trim().toLowerCase().replace(/ё/g, 'е');
+
+/** Условие WHERE для страницы и счётчиков: источник и поиск по синониму, модели и ID (LIKE с экранированием % и _). */
+function aliasWhere(opts: { sourceId?: number | null; q?: string }): { sql: string; params: unknown[] } {
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  if (opts.sourceId !== undefined && opts.sourceId !== null) {
+    if (opts.sourceId === MANUAL_ALIASES) parts.push('a.source_id IS NULL');
+    else {
+      params.push(opts.sourceId);
+      parts.push(`a.source_id = $${params.length + 1}`);
+    }
+  }
+  const q = aliasSearchKey(opts.q ?? '');
+  if (q) {
+    params.push(`%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    const n = `$${params.length + 1}`;
+    const norm = (col: string) => `translate(lower(coalesce(${col}, '')), 'ё', 'е')`;
+    parts.push(`(${norm('a.alias')} LIKE ${n} OR ${norm('a.canonical')} LIKE ${n} OR ${norm('a.product_id')} LIKE ${n})`);
+  }
+  return { sql: parts.map((x) => ` AND ${x}`).join(''), params };
+}
+
 export class KbAliasesRepo {
   constructor(private readonly db: Db) {}
 
@@ -504,6 +533,32 @@ export class KbAliasesRepo {
   async list(accountId: number): Promise<KbAlias[]> {
     const { rows } = await this.db.query('SELECT * FROM kb_aliases WHERE account_id = $1 ORDER BY canonical_key, alias_key', [accountId]);
     return rows.map(mapAlias);
+  }
+
+  /**
+   * KB-ALIASES-UI: страница синонимов для виджета — по источнику (прайсу; MANUAL_ALIASES — добавленные вручную, без источника)
+   * и поиску без учёта регистра и ё/е по синониму, модели и ID товара. limit — не больше 50; total — всего найдено.
+   */
+  async page(accountId: number, opts: { sourceId?: number | null; q?: string; offset?: number; limit?: number } = {}): Promise<{ items: KbAlias[]; total: number }> {
+    const limit = Math.max(0, Math.min(opts.limit ?? ALIASES_PAGE, ALIASES_PAGE));
+    const where = aliasWhere(opts);
+    const params = [accountId, ...where.params];
+    const [rows, total] = await Promise.all([
+      limit ? this.db.query(`SELECT a.* FROM kb_aliases a WHERE a.account_id = $1${where.sql} ORDER BY a.canonical_key, a.alias_key, a.id LIMIT ${limit} OFFSET ${Math.max(0, Math.trunc(opts.offset ?? 0))}`, params) : Promise.resolve({ rows: [] }),
+      this.db.query<{ n: number }>(`SELECT count(*)::int AS n FROM kb_aliases a WHERE a.account_id = $1${where.sql}`, params),
+    ]);
+    return { items: rows.rows.map(mapAlias), total: total.rows[0]?.n ?? 0 };
+  }
+
+  /** Счётчики синонимов по источникам (с тем же поиском): прайс-файл — его название, вручную — sourceId = MANUAL_ALIASES. */
+  async groups(accountId: number, q?: string): Promise<{ sourceId: number; title: string; count: number }[]> {
+    const where = aliasWhere({ q });
+    const { rows } = await this.db.query<{ source_id: string | null; title: string | null; n: number }>(
+      `SELECT a.source_id, s.title, count(*)::int AS n FROM kb_aliases a LEFT JOIN kb_sources s ON s.id = a.source_id
+        WHERE a.account_id = $1${where.sql} GROUP BY a.source_id, s.title ORDER BY (a.source_id IS NULL), s.title, a.source_id`,
+      [accountId, ...where.params],
+    );
+    return rows.map((r) => ({ sourceId: r.source_id === null ? MANUAL_ALIASES : Number(r.source_id), title: r.source_id === null ? 'Добавлены вручную' : (r.title ?? `источник ${r.source_id}`), count: r.n }));
   }
 
   async remove(accountId: number, id: number): Promise<boolean> {

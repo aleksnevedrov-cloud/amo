@@ -1,5 +1,5 @@
 import type { WidgetPrincipal } from '@core/amo';
-import { exportCandidatesXlsx, exportSitesXlsx, exportPricesXlsx, isPriceBook, readSitesXlsx, KbLimitError, parsePriceBook, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping, priceListTitleOf } from '@opt/kb';
+import { ALIASES_PAGE, MANUAL_ALIASES, exportCandidatesXlsx, exportSitesXlsx, exportPricesXlsx, isPriceBook, readSitesXlsx, KbLimitError, parsePriceBook, previewPriceList, pricesExportFilename, readKbSheetRows, type ColumnMapping, priceListTitleOf } from '@opt/kb';
 import { answerFromKb, resolveOptRoute } from '@opt/kp';
 import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -57,6 +57,14 @@ const priceBody = z.object({
   note: z.string().trim().max(500).nullable().optional(),
 });
 const pricesQuery = z.object({ q: z.string().trim().max(200).optional(), sourceId: z.coerce.number().int().positive().optional(), limit: z.coerce.number().int().min(1).max(1000).optional(), offset: z.coerce.number().int().min(0).optional() });
+const aliasQuery = z.object({
+  source_id: z.coerce.number().int().min(0).optional(),
+  q: z.string().max(200).optional(),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: z.coerce.number().int().min(0).max(1000).default(ALIASES_PAGE),
+});
+/** Строка синонима для виджета: синоним, модель (каноническое) и ID товара, источник. */
+const aliasView = (a: { id: number; alias: string; canonical: string; productId: string | null; sourceId: number | null }) => ({ id: a.id, alias: a.alias, canonical: a.canonical, productId: a.productId, sourceId: a.sourceId });
 const aliasBody = z.object({ alias: z.string().trim().min(1).max(300).optional(), canonical: z.string().trim().min(1).max(300).optional(), lines: z.string().max(20_000).optional() });
 
 type Principal = (req: FastifyRequest) => WidgetPrincipal;
@@ -396,7 +404,18 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
     return { ok: true };
   });
 
-  api.get('/kb/aliases', async (req) => ({ aliases: await kb.aliases.list(principal(req).accountId) }));
+  /**
+   * KB-ALIASES-UI: синонимы постранично — source_id (0 — добавлены вручную), q (синоним, модель или ID; без регистра и ё/е),
+   * offset, limit (не больше 50); groups — счётчики по источникам с тем же поиском, all — всего синонимов у аккаунта.
+   */
+  api.get('/kb/aliases', async (req, reply) => {
+    const q = aliasQuery.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const { accountId } = principal(req);
+    const [page, groups] = await Promise.all([kb.aliases.page(accountId, { sourceId: q.data.source_id ?? null, q: q.data.q, offset: q.data.offset, limit: q.data.limit }), kb.aliases.groups(accountId, q.data.q)]);
+    const all = q.data.q?.trim() ? (await kb.aliases.groups(accountId)).reduce((n, g) => n + g.count, 0) : groups.reduce((n, g) => n + g.count, 0);
+    return { aliases: page.items.map(aliasView), total: page.total, offset: q.data.offset, limit: Math.min(q.data.limit, ALIASES_PAGE), groups, all };
+  });
 
   /** Синоним: пара alias → canonical или строки «каноническое = синоним = синоним». */
   api.post('/kb/aliases', async (req, reply) => {
@@ -409,7 +428,8 @@ export function kbPriceRoutes(api: FastifyInstance, deps: Deps, principal: Princ
       if (b.data.lines) for (const line of b.data.lines.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) n += await kb.aliases.addLine(p.accountId, line, { createdBy: p.userId });
       else if (b.data.alias && b.data.canonical) n += (await kb.aliases.add(p.accountId, b.data.alias, b.data.canonical, { createdBy: p.userId })) ? 1 : 0;
       else return reply.code(400).send({ error: 'bad_body' });
-      return { added: n, aliases: await kb.aliases.list(p.accountId) };
+      // Добавленные вручную — первая страница своей группы (импортированных из прайсов бывают тысячи).
+      return { added: n, aliases: (await kb.aliases.page(p.accountId, { sourceId: MANUAL_ALIASES })).items.map(aliasView) };
     } catch (err) {
       return fail(reply, err);
     }

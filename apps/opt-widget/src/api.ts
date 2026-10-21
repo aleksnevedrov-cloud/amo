@@ -465,6 +465,25 @@ export interface KbAliasInfo {
   id: number;
   alias: string;
   canonical: string;
+  /** KB-ALIASES-UI: ID товара (синонимы из прайса) и источник; у добавленных вручную — null. */
+  productId?: string | null;
+  sourceId?: number | null;
+}
+
+/** KB-ALIASES-UI: группа синонимов — прайс (или «Добавлены вручную», sourceId 0) и число строк. */
+export interface KbAliasGroup {
+  sourceId: number;
+  title: string;
+  count: number;
+}
+
+export interface KbAliasPage {
+  aliases: KbAliasInfo[];
+  total: number;
+  offset: number;
+  limit: number;
+  groups: KbAliasGroup[];
+  all: number;
 }
 
 export interface ColumnMappingInfo {
@@ -582,7 +601,15 @@ export class KpApi extends ApiClient {
   kbCandidates = () => this.call<{ items: KbCandidateInfo[] }>('GET', '/widget/v1/kb/candidates');
   kbCandidatesExport = () => this.call<{ filename: string; rows: number; contentBase64: string }>('GET', '/widget/v1/kb/candidates/export');
   kbRemoveCandidate = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/candidates/${id}`);
-  kbAliases = () => this.call<{ aliases: KbAliasInfo[] }>('GET', '/widget/v1/kb/aliases');
+  /** Синонимы постранично (по 50): sourceId — группа (0 — вручную), q — поиск; groups — счётчики по прайсам. */
+  kbAliases = (opts: { sourceId?: number; q?: string; offset?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.sourceId !== undefined) qs.set('source_id', String(opts.sourceId));
+    if (opts.q?.trim()) qs.set('q', opts.q.trim());
+    qs.set('offset', String(opts.offset ?? 0));
+    qs.set('limit', String(opts.limit ?? 50));
+    return this.call<KbAliasPage>('GET', `/widget/v1/kb/aliases?${qs.toString()}`);
+  };
   kbAddAliases = (lines: string) => this.call<{ added: number; aliases: KbAliasInfo[] }>('POST', '/widget/v1/kb/aliases', { lines });
   kbRemoveAlias = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/kb/aliases/${id}`);
 

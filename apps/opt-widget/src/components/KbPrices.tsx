@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { errorMessage, Field, s, useLoad } from '@core/widget-core';
+import { errorMessage, s, useLoad } from '@core/widget-core';
 import type { ColumnMappingInfo, KbPriceInfo, KbSourceInfo, KpApi, PriceListPreviewInfo } from '../api.ts';
 
 /**
@@ -383,49 +383,6 @@ function sourceOf(p: KbPriceInfo): string {
 }
 
 const th = { padding: '4px 6px', borderBottom: '1px solid #dfe3e8', textAlign: 'left', color: '#8A949F', fontWeight: 500 } as const;
-
-/** Раздел «Синонимы»: строки «каноническое = синоним = синоним», список, удаление. */
-export function AliasesSection({ api }: { api: KpApi }) {
-  const load = useCallback(() => api.kbAliases(), [api]);
-  const [state, reload] = useLoad(load);
-  const [lines, setLines] = useState('');
-  const [msg, setMsg] = useState<string | null>(null);
-  const add = async () => {
-    try {
-      const r = await api.kbAddAliases(lines);
-      setMsg(`Добавлено синонимов: ${r.added}`);
-      setLines('');
-      reload();
-    } catch (e) {
-      setMsg(errorMessage(e));
-    }
-  };
-  return (
-    <div style={{ marginTop: 16 }}>
-      <div style={s.label}>Синонимы и артикулы{state.status === 'ready' ? ` (${state.data.aliases.length})` : ''}</div>
-      <Field label="" hint="По строке на модель: сначала каноническое название, затем синонимы через «=». Пример: ДПГ сота = ДПГ + УПД (сота) = дверь глухая ламинированная сотовое заполнение">
-        <textarea style={{ ...s.textarea, minHeight: 60 }} placeholder="ДПГ сота = ДПГ + УПД (сота) = дверь глухая ламинированная сотовое заполнение" value={lines} onChange={(e) => setLines(e.target.value)} />
-        <button type="button" style={{ ...s.button, marginTop: 6 }} disabled={!lines.includes('=')} onClick={() => void add()}>Добавить синонимы</button>
-      </Field>
-      {msg && <div style={{ ...s.muted, ...s.small }}>{msg}</div>}
-      {state.status === 'ready' && state.data.aliases.length > 0 && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <tbody>
-            {state.data.aliases.map((a) => (
-              <tr key={a.id}>
-                <td style={td}>{a.alias}</td>
-                <td style={{ ...td, color: '#8A949F' }}>= {a.canonical}</td>
-                <td style={td}>
-                  <button type="button" style={{ ...s.buttonGhost, padding: '2px 8px' }} onClick={() => void api.kbRemoveAlias(a.id).then(reload, (e) => setMsg(errorMessage(e)))}>×</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
 
 /** Скачивание файла из base64 (как у выгрузки прайса розницы): ссылка-blob, клик, отзыв адреса. */
 export function downloadBase64(base64: string, name: string, mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
