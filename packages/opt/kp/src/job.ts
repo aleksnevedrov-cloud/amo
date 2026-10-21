@@ -112,7 +112,9 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     // причина — в журнале kp_error. Новый черновик создаётся, только если позиции есть или прежнего с позициями нет.
     const prevItems = prevPayload.items?.length ?? 0;
     if (!r.payload.items.length && prev && prevItems > 0) {
-      const why = r.payload.needs_manager.filter((n) => n.request_index === -1).map((n) => n.reason).join('; ') || 'позиции не найдены';
+      // KP-PARSE-RETRY: прежний черновик остаётся — причина, по которой файл не разобран, видна в пометке.
+      const failed = r.failedFiles.map((f) => `файл «${f.name}» не разобран: ${f.reason}`);
+      const why = [...r.payload.needs_manager.filter((n) => n.request_index === -1).map((n) => n.reason), ...failed].join('; ') || 'позиции не найдены';
       const note = `пересборка ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} без позиций (${why}) — черновик сохранён`;
       const needs = (prevPayload.needs_manager ?? []).filter((n) => !(n.request_index === -1 && n.reason.startsWith('пересборка ')));
       needs.push({ request_index: -1, reason: note });

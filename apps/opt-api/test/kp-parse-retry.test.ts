@@ -129,7 +129,7 @@ describe('заявка не теряется из-за сбоя модели и�
     expect(err.summary).toMatch(/пересборка не дала ни одной позиции/);
     expect(j?.summary).toMatch(/позиций 6/);
     const kept = await draft();
-    expect(kept.needsManager.some((n) => /^пересборка .* без позиций/.test(n.reason))).toBe(true);
+    expect(kept.needsManager.find((n) => /^пересборка .* без позиций/.test(n.reason))?.reason).toMatch(/файл «Заявка № СИ14792\.txt» не разобран: .*повторы и разбор по тексту не помогли/);
   });
 
   it('файл не разобран в новой сделке без прежнего черновика — «не разобран» с причиной в source.skipped (failed) и в сводке', async () => {
