@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
+import { errorText } from './errors.ts';
 import { recordHostAllowed } from './notes.ts';
 
 /** Абсолютный путь файла записи: относительный — от корня файлов (том), абсолютный — как есть. */
@@ -70,7 +71,7 @@ export async function downloadRecord(link: string, deps: { fetch: typeof fetch; 
       return { bytes, mime: mime.startsWith('audio/') ? mime : 'audio/mpeg', attempts: attempt };
     } catch (err) {
       if (err instanceof RecordUnavailableError) throw err;
-      lastError = (err as Error).name === 'TimeoutError' ? `таймаут ${DOWNLOAD_TIMEOUT_MS / 1000} с` : (err as Error).message;
+      lastError = (err as Error).name === 'TimeoutError' ? `таймаут ${DOWNLOAD_TIMEOUT_MS / 1000} с` : errorText(err);
       if (attempt < attemptsMax) await sleep(1000 * attempt);
     }
   }

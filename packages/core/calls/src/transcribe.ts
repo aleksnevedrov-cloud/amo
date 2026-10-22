@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import type { CallsDeps, CallsSettings } from './deps.ts';
 import { resolveCallPath } from './download.ts';
+import { errorText, isNetworkError } from './errors.ts';
 import { CALL_ERROR_KIND } from './kinds.ts';
 import type { CallRow } from './repo.ts';
 import { pickStt, type CallStt, type CallTranscript, type SttProviderName } from './stt.ts';
@@ -31,6 +32,8 @@ export interface TranscribeOptions {
 }
 
 export interface TranscribeResult {
+  /** Перезапущено упавших по сети (обратно в downloaded, без счёта попыток). */
+  restarted: number;
   picked: number;
   transcribed: number;
   /** Операций SpeechKit запущено или ещё идёт — результат в следующем опросе. */
@@ -42,7 +45,8 @@ export interface TranscribeResult {
 
 export async function transcribeCalls(deps: CallsDeps, accountId: number, settings: CallsSettings, opts: TranscribeOptions = {}): Promise<TranscribeResult> {
   const now = opts.now ?? (() => new Date());
-  const r: TranscribeResult = { picked: 0, transcribed: 0, pending: 0, unavailable: 0, failed: 0, alerts: 0 };
+  const r: TranscribeResult = { restarted: 0, picked: 0, transcribed: 0, pending: 0, unavailable: 0, failed: 0, alerts: 0 };
+  r.restarted = await deps.calls.resetNetworkFailed(accountId);
   const rows = await deps.calls.listForTranscription(accountId, { retryBefore: new Date(now().getTime() - RETRY_FAILED_AFTER_MS), maxAttempts: MAX_ATTEMPTS, limit: opts.limit ?? TRANSCRIBE_LIMIT, ...(opts.ids ? { ids: opts.ids } : {}) });
   r.picked = rows.length;
   if (!rows.length) return r;
@@ -79,8 +83,23 @@ async function transcribeOne(ctx: Ctx, row: CallRow): Promise<void> {
   try {
     await stepTranscribe(ctx, row);
   } catch (err) {
-    await onFailure(ctx, row, (err as Error).message);
+    if (isNetworkError(err)) return onNetworkFailure(ctx, row, errorText(err));
+    await onFailure(ctx, row, errorText(err));
   }
+}
+
+/** Сеть (DNS, соединение, таймаут): failed без счёта попыток и без алерта; следующий опрос вернёт звонок в downloaded. */
+async function onNetworkFailure(ctx: Ctx, row: CallRow, message: string): Promise<void> {
+  const op = row.transcript && 'pending' in row.transcript ? row.transcript.pending?.operationId : undefined;
+  await ctx.deps.calls.setFailed(row.id, 'transcribe', `сеть: ${message}`);
+  ctx.result.failed++;
+  await ctx.deps.journal.add({
+    accountId: row.accountId,
+    ...(row.leadId ? { leadId: row.leadId } : {}),
+    kind: CALL_ERROR_KIND,
+    summary: `Звонок ${row.id} (${describeCall(row)}): расшифровка — сетевая ошибка (${message}); повтор при следующем опросе${op ? `, операция ${op} сохранена` : ''}`,
+    details: { callId: row.id, noteId: row.noteId, leadId: row.leadId, stage: 'transcribe', network: true, error: message, sttMode: row.sttMode },
+  });
 }
 
 /** Ошибка шага: failed, попытка + 1, журнал; после MAX_ATTEMPTS — один алерт. */

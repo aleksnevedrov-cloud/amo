@@ -262,18 +262,53 @@ describe('ошибки и повторы (часы от реального вр�
   });
   afterAll(() => drop());
 
+  it('сетевая ошибка при проверке операции → failed без счёта попыток; следующий опрос возвращает в downloaded и забирает результат по сохранённой операции', async () => {
+    let fail = true;
+    const stt: CallStt = {
+      name: 'speechkit',
+      async start(_b, _m, o) {
+        return { pending: { provider: 'speechkit', mode: o.mode, operationId: 'op-net', startedAt: NOW.toISOString(), polls: 0 } };
+      },
+      async poll(p) {
+        if (fail) throw new TypeError('fetch failed', { cause: { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND operations.api.cloud.yandex.net' } });
+        expect(p.operationId).toBe('op-net');
+        return transcript(1, p.mode);
+      },
+    };
+    let starts = 0;
+    const counting: CallStt = { name: 'speechkit', start: async (...a) => (starts++, stt.start(...a)), poll: (...a) => stt.poll(...a) };
+    const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null }, transcribeOptions: { stt: () => counting, inlineWaitMs: 5000 } });
+    const r1 = await poll();
+    expect(r1.transcribed).toMatchObject({ restarted: 0, picked: 1, failed: 1, alerts: 0 });
+    let row = (await deps.calls.list(ACC))[0]!;
+    expect([row.status, row.stage, row.attempts, row.error]).toEqual(['failed', 'transcribe', 0, 'сеть: fetch failed: ENOTFOUND getaddrinfo ENOTFOUND operations.api.cloud.yandex.net']);
+    expect((row.transcript as { pending: PendingTranscription }).pending.operationId).toBe('op-net');
+    expect(starts).toBe(1);
+    fail = false;
+    const r2 = await poll(); // без ожидания 30 минут
+    expect(r2.transcribed).toMatchObject({ restarted: 1, picked: 1, transcribed: 1, failed: 0 });
+    row = (await deps.calls.list(ACC))[0]!;
+    expect([row.status, row.attempts, starts]).toEqual(['transcribed', 0, 1]); // файл повторно не отправлялся
+    // Дальше — обычный сценарий с ошибкой сервиса на втором звонке.
+    const [id] = await deps.calls.insertNew(ACC, [{ noteId: 2, entity: 'contact', entityId: 501, direction: 'in', link: 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-22/aaaaaaaa-0000-0000-0000-000000000002/x.mp3', recordKey: 'k2', phone: '79099500381', durationSec: 185, callStatus: 4, calledAt: now(), noteUpdatedAt: now(), managerId: 3, leadId: 90141 }]);
+    const rel = `calls/${ACC}/2026-10/${id}_x.mp3`;
+    mkdirSync(dirname(join(deps.filesRoot, rel)), { recursive: true });
+    writeFileSync(join(deps.filesRoot, rel), MP3);
+    await deps.calls.setDownloaded(id!, { filePath: rel, fileBytes: MP3.byteLength, fileMime: 'audio/mpeg' });
+  });
+
   it('расшифровка падает → failed, повтор через 30 мин, после 3 попыток — один алерт в Telegram и остановка', async () => {
     const stt = new FakeSpeechKit(1, true);
     const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null }, transcribeOptions: { stt: () => stt } });
     expect((await poll()).transcribed).toMatchObject({ picked: 1, failed: 1, alerts: 0 });
-    const row = (await deps.calls.list(ACC))[0]!;
+    const row = (await deps.calls.list(ACC)).find((c) => c.noteId === 2)!;
     expect([row.status, row.stage, row.attempts, row.error]).toEqual(['failed', 'transcribe', 1, 'SpeechKit: HTTP 500']);
     expect((await poll()).transcribed?.picked).toBe(0);
     tick(31);
     expect((await poll()).transcribed?.failed).toBe(1);
     tick(31);
     expect((await poll()).transcribed).toMatchObject({ failed: 1, alerts: 1 });
-    expect((await deps.calls.list(ACC))[0]).toMatchObject({ attempts: MAX_ATTEMPTS, status: 'failed' });
+    expect((await deps.calls.list(ACC)).find((c) => c.noteId === 2)).toMatchObject({ attempts: MAX_ATTEMPTS, status: 'failed' });
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toContain('расшифровка не удалась 3 раза: SpeechKit: HTTP 500');
     tick(31);

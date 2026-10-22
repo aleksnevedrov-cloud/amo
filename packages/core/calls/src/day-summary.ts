@@ -1,5 +1,6 @@
 import { analyzeDay, mmss, type DayCallInput, type DaySummary } from './day-analyze.ts';
 import type { CallsDeps, CallsSettings } from './deps.ts';
+import { errorText } from './errors.ts';
 import { CALL_DAY_KIND, CALL_DAY_RUN_KIND, CALL_ERROR_KIND } from './kinds.ts';
 import { amoRaw, type AmoRaw } from './notes.ts';
 import type { CallRow } from './repo.ts';
@@ -282,6 +283,6 @@ async function summarizeGroup(deps: CallsDeps, accountId: number, all: Awaited<R
     r.errors++;
     const where = g.leadId !== null ? `сделка ${g.leadId}` : `контакт ${g.contactId}`;
     const ctx = { deps, result: { failed: 0, alerts: 0 } };
-    for (const c of g.calls) await onFailure(ctx, c, `${where}: ${(err as Error).message}`, 'day');
+    for (const c of g.calls) await onFailure(ctx, c, `${where}: ${errorText(err)}`, 'day');
   }
 }

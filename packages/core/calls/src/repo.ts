@@ -172,6 +172,15 @@ export class CallsRepo {
     return rows.map(mapCall);
   }
 
+  /**
+   * Упавшие на расшифровке по сети («сеть: …») — обратно в downloaded без счёта попыток: следующий опрос продолжит по
+   * сохранённой операции (transcript.pending) или отправит файл заново. Возвращает число перезапущенных.
+   */
+  async resetNetworkFailed(accountId: number): Promise<number> {
+    const { rowCount } = await this.db.query(`UPDATE calls SET status = 'downloaded', stage = NULL, updated_at = now() WHERE account_id = $1 AND status = 'failed' AND stage = 'transcribe' AND error LIKE 'сеть: %'`, [accountId]);
+    return rowCount ?? 0;
+  }
+
   /** Расшифровка: готовая — статус transcribed; запущенная операция — статус остаётся downloaded. */
   async setTranscript(id: number, transcript: TranscriptField, status: 'transcribed' | 'downloaded'): Promise<void> {
     await this.db.query(`UPDATE calls SET transcript = $2::jsonb, status = $3, stage = NULL, error = NULL, updated_at = now() WHERE id = $1`, [id, JSON.stringify(transcript), status]);

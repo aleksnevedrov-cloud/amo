@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { CALL_ERROR_KIND, CALL_FETCH_KIND, callFileRel, downloadRecord, looksLikeMp3, parseCallNote, recordHostAllowed, recordKeyOf, RecordUnavailableError, runCallsPoll, runCallsPollAll, type CallsDeps } from '../src/index.ts';
-import { depsOf, fakeAmoFetch, type Fake } from './helpers.ts';
+import { CALL_ERROR_KIND, CALL_FETCH_KIND, callFileRel, downloadRecord, errorText, isNetworkError, looksLikeMp3, parseCallNote, recordHostAllowed, recordKeyOf, RecordUnavailableError, runCallsPoll, runCallsPollAll, SpeechKitStt, type CallsDeps } from '../src/index.ts';
+import { depsOf, fakeAmoFetch, json, type Fake } from './helpers.ts';
 
 const ACCOUNT = 1;
 const UUID = '54dd41f6-7d7d-433b-9253-102849f4deb8';
@@ -47,6 +47,35 @@ describe('разбор примечаний-звонков и скачивани
     expect(f.calls.filter((u) => u === LINK_404)).toHaveLength(1);
     const s = widgetSettingsSchema.parse({}).calls;
     expect(s).toMatchObject({ callsEnabled: true, postDayNote: true, daySummaryTime: '19:30', daySummaryTimeoutSec: 300, pipelineId: 1873498, statusIds: [], minDurationSec: 30, keepMp3Days: 30, sttProvider: 'speechkit' });
+  });
+});
+
+describe('адреса SpeechKit API v3 и текст сетевой ошибки', () => {
+  it('recognizeFileAsync → operation.api.cloud.yandex.net/operations/<id> → getRecognition?operation_id=', async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url.endsWith('/stt/v3/recognizeFileAsync')) {
+        const body = JSON.parse(String(init?.body)) as { content: string; recognitionModel: { model: string }; speakerLabeling: unknown };
+        expect(body.recognitionModel.model).toBe('deferred-general');
+        expect(Buffer.from(body.content, 'base64')).toEqual(Buffer.from(MP3));
+        return json(200, { id: 'e3sp1abc', done: false });
+      }
+      if (url === 'https://operation.api.cloud.yandex.net/operations/e3sp1abc') return json(200, { id: 'e3sp1abc', done: true });
+      if (url === 'https://stt.api.cloud.yandex.net/stt/v3/getRecognition?operation_id=e3sp1abc') return new Response(`${JSON.stringify({ result: { channelTag: '1', final: { alternatives: [{ text: 'алло', words: [{ startTimeMs: '0', endTimeMs: '500' }] }] } } })}\n`, { status: 200 });
+      return json(404, {});
+    }) as typeof fetch;
+    const stt = new SpeechKitStt('KEY', fetchImpl);
+    const started = await stt.start(MP3, 'audio/mpeg', { mode: 'deferred', durationSec: 60 });
+    expect('pending' in started && started.pending.operationId).toBe('e3sp1abc');
+    const t = await stt.poll({ provider: 'speechkit', mode: 'deferred', operationId: 'e3sp1abc', startedAt: '', polls: 0 }, 60);
+    expect(t?.segments).toEqual([{ speaker: '1', startMs: 0, endMs: 500, text: 'алло' }]);
+    expect(urls).toEqual(['POST https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync', 'GET https://operation.api.cloud.yandex.net/operations/e3sp1abc', 'GET https://stt.api.cloud.yandex.net/stt/v3/getRecognition?operation_id=e3sp1abc']);
+    // Сетевая ошибка Node: «fetch failed» + причина из cause; таймаут; ошибка сервиса — не сетевая.
+    const dns = new TypeError('fetch failed', { cause: { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND operations.api.cloud.yandex.net' } });
+    expect(errorText(dns)).toBe('fetch failed: ENOTFOUND getaddrinfo ENOTFOUND operations.api.cloud.yandex.net');
+    expect([isNetworkError(dns), isNetworkError(Object.assign(new Error('x'), { name: 'TimeoutError' })), isNetworkError(new Error('SpeechKit: HTTP 500'))]).toEqual([true, true, false]);
   });
 });
 

@@ -69,11 +69,16 @@ export const OPENAI_STT_USD_PER_MIN = 0.006;
 export const OPENAI_STT_MODEL = 'gpt-4o-transcribe';
 
 const SPEECHKIT_STT = 'https://stt.api.cloud.yandex.net/stt/v3';
-const SPEECHKIT_OPS = 'https://operations.api.cloud.yandex.net/operations';
+/** Статус операции — operation.api.cloud.yandex.net (без «s»; operations.* не существует — проверено на сервере 22.10). */
+const SPEECHKIT_OPS = 'https://operation.api.cloud.yandex.net/operations';
 
 const bill15s = (durationSec: number): number => Math.max(1, Math.ceil(durationSec / 15)) * 15;
 
-/** Яндекс SpeechKit API v3: recognizeFileAsync → операция → getRecognition (JSON построчно). */
+/**
+ * Яндекс SpeechKit API v3 (адреса по документации «Асинхронное распознавание, API v3»): POST stt.api.cloud.yandex.net/stt/v3/
+ * recognizeFileAsync → id операции; GET operation.api.cloud.yandex.net/operations/<id> — статус; GET stt.api.cloud.yandex.net/
+ * stt/v3/getRecognition?operation_id=<id> — результат (JSON построчно).
+ */
 export class SpeechKitStt implements CallStt {
   readonly name = 'speechkit' as const;
   constructor(
@@ -105,7 +110,7 @@ export class SpeechKitStt implements CallStt {
     if (!op.ok) throw new SttError(`SpeechKit operation ${p.operationId}: HTTP ${op.status} ${st?.message ?? ''}`.trim());
     if (st?.error) throw new SttError(`SpeechKit operation ${p.operationId}: ${st.error.message ?? `код ${st.error.code}`}`);
     if (!st?.done) return null;
-    const res = await this.fetchImpl(`${SPEECHKIT_STT}/getRecognition?operationId=${encodeURIComponent(p.operationId)}`, { headers: { authorization: `Api-Key ${this.apiKey}` }, signal: AbortSignal.timeout(120_000) });
+    const res = await this.fetchImpl(`${SPEECHKIT_STT}/getRecognition?operation_id=${encodeURIComponent(p.operationId)}`, { headers: { authorization: `Api-Key ${this.apiKey}` }, signal: AbortSignal.timeout(120_000) });
     if (!res.ok) throw new SttError(`SpeechKit getRecognition: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`.trim());
     const rawText = await res.text();
     const parsed = parseSpeechKitLines(rawText);

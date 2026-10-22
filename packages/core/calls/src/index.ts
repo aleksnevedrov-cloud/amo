@@ -3,6 +3,7 @@ export * from './day-summary.ts';
 export * from './demo.ts';
 export * from './deps.ts';
 export * from './download.ts';
+export * from './errors.ts';
 export * from './job.ts';
 export * from './kinds.ts';
 export * from './notes.ts';
