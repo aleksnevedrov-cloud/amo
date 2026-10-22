@@ -4,7 +4,6 @@ import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, 
 import type { LLMProvider, LlmGateway, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import { createKbCore, createUrlFetcher, DEFAULT_EMBEDDING_MODEL, loadKbEnv, OpenAiEmbedder, type EmbedderFor, type KbCore, type UrlFetcher } from '@opt/kb';
-import { CallsRepo } from './calls/repo.ts';
 import { createOptAi, OPT_LLM_TIMEOUT_MS, type OptAiProvider } from './llm.ts';
 import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailReadResult, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
@@ -35,8 +34,6 @@ export interface OptCore {
   kp: KpRepo;
   /** Результаты поиска рыночных цен и кэш (этап 3). */
   research: KpPriceResearchRepo;
-  /** RFD-AI-AGENT-OPT-CALLS: записи разговоров из примечаний amo и отметки сбора. */
-  calls: CallsRepo;
   /** База знаний опта (RFD-AI-AGENT-OPT-KB): отдельная БД ai_door_opt_kb, файлы на томе opt-kb-files, индексация и поиск. */
   kb: KbCore;
   /** Корень файлов опта: шаблон КП и собранные документы (/data в контейнере, том opt_data). */
@@ -148,7 +145,6 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     ai,
     kp: new KpRepo(db),
     research: new KpPriceResearchRepo(db),
-    calls: new CallsRepo(db),
     kb,
     filesRoot: overrides.filesRoot ?? process.env.KP_FILES_ROOT ?? '/data',
     mailRead: overrides.mailRead ?? readLatestMail,

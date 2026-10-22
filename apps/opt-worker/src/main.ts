@@ -1,6 +1,6 @@
 import { loadEnv } from '@core/shared';
 import { KB_INDEX_JOB, KB_QUEUE, kbIndexJobId, type KbIndexJob } from '@opt/kb';
-import { CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, createOptCore, DRAFT_JOB, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runCallsPollAll, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
+import { createOptCore, DRAFT_JOB, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
 import { Queue, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -9,9 +9,8 @@ import { pino } from 'pino';
  * Фоновый обработчик «Агента опт» (Redis база 1): очередь kp — задание «собрать черновик» по кнопке
  * менеджера; очередь kp-research (RFD-AI-AGENT-OPT-PRICE, этап 5) — поиск рыночной цены по одной позиции
  * черновика, по кнопке «Найти цены» или автоматически при сборке, если включено в настройках КП.
- * Опроса почты и вебхуков нет (ТЗ 6.5); токены amoCRM обновляются при обращении. Плановые задачи: переиндексация
- * ссылок базы знаний по сроку (kb-maintenance, раз в час; RFD-AI-AGENT-OPT-KB, этап 2) и сбор записей разговоров из
- * примечаний amo (calls-poll, раз в 10 минут; RFD-AI-AGENT-OPT-CALLS, этап 1) — только у аккаунтов, где разбор включён.
+ * Опроса почты и вебхуков нет (ТЗ 6.5); токены amoCRM обновляются при обращении. Единственная плановая задача —
+ * переиндексация ссылок базы знаний по сроку (kb-maintenance, раз в час; RFD-AI-AGENT-OPT-KB, этап 2).
  */
 const env = loadEnv();
 const log = pino({ level: env.LOG_LEVEL });
@@ -109,30 +108,11 @@ const kbMaintenanceWorker = new Worker(
   { connection, concurrency: 1 },
 );
 kbMaintenanceWorker.on('failed', (job, err) => log.error({ err, job: job?.name }, 'kb-maintenance: задача упала'));
-
-// Звонки (RFD-AI-AGENT-OPT-CALLS): раз в 10 минут — примечания call_in / call_out с отметки, скачивание MP3, удаление по сроку.
-// Один обработчик, без параллельных опросов: второй запуск при незавершённом первом задание планировщика не создаёт.
-const callsQueue = new Queue(CALLS_QUEUE, { connection });
-await callsQueue.upsertJobScheduler(CALLS_POLL_JOB, { every: CALLS_POLL_EVERY_MS }, { name: CALLS_POLL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
-const callsWorker = new Worker(
-  CALLS_QUEUE,
-  async (job) => {
-    if (job.name !== CALLS_POLL_JOB) throw new Error(`Неизвестная задача ${job.name}`);
-    const results = await runCallsPollAll(core);
-    for (const r of results) {
-      if (!r.enabled) continue;
-      if (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length) log.info({ ...r }, 'calls-poll: аккаунт опрошен');
-    }
-    return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
-  },
-  { connection, concurrency: 1 },
-);
-callsWorker.on('failed', (job, err) => log.error({ err, job: job?.name }, 'calls-poll: задача упала'));
-log.info('opt-worker запущен: очереди kp, kp-research, kb-index, kb-maintenance (ссылки раз в час) и calls-poll (звонки раз в 10 минут)');
+log.info('opt-worker запущен: очереди kp, kp-research, kb-index и kb-maintenance (ссылки раз в час)');
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
-    await Promise.all([worker.close(), researchWorker.close(), kbWorker.close(), kbMaintenanceWorker.close(), callsWorker.close(), researchQueue.close(), kbQueue.close(), kbMaintenance.close(), callsQueue.close()]);
+    await Promise.all([worker.close(), researchWorker.close(), kbWorker.close(), kbMaintenanceWorker.close(), researchQueue.close(), kbQueue.close(), kbMaintenance.close()]);
     await connection.quit();
     await core.close();
     process.exit(0);
