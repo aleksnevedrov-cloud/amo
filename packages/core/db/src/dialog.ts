@@ -109,6 +109,18 @@ export class DialogRepo {
   }
 
   /** Последние сообщения сделки в хронологическом порядке. */
+  /** RFD-AI-AGENT-CALLS-DAY-FULL: сообщения диалога по сделке за период, с id (для дедупликации и учёта в итоге дня). */
+  async betweenByLead(accountId: number, leadId: number, since: Date, until: Date, limit = 500): Promise<{ id: number; role: Role; text: string; createdAt: Date }[]> {
+    const { rows } = await this.db.query(`SELECT id, role, text, created_at FROM dialog_messages WHERE account_id = $1 AND lead_id = $2 AND created_at >= $3 AND created_at < $4 ORDER BY id ASC LIMIT $5`, [accountId, leadId, since, until, limit]);
+    return rows.map((r) => ({ id: Number(r.id), role: r.role, text: r.text, createdAt: r.created_at }));
+  }
+
+  /** Сделки с сообщениями диалога за период. */
+  async leadsActiveBetween(accountId: number, since: Date, until: Date): Promise<number[]> {
+    const { rows } = await this.db.query<{ lead_id: string }>(`SELECT DISTINCT lead_id FROM dialog_messages WHERE account_id = $1 AND created_at >= $2 AND created_at < $3`, [accountId, since, until]);
+    return rows.map((r) => Number(r.lead_id));
+  }
+
   async history(accountId: number, leadId: number, limit = 30): Promise<{ role: Role; text: string; createdAt: Date }[]> {
     const { rows } = await this.db.query(
       `SELECT role, text, created_at FROM (

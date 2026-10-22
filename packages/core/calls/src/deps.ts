@@ -36,4 +36,25 @@ export interface CallsDeps {
   llmFor(accountId: number): Promise<CallsLlm | null>;
   /** Подключённые аккаунты. */
   accountIds(): Promise<number[]>;
+  /** RFD-AI-AGENT-CALLS-DAY-FULL: локальные источники общения (таблицы розницы); нет — только звонки и источники amo. */
+  sources?: LocalSources;
+}
+
+export interface LocalMessage {
+  id: string;
+  direction: 'in' | 'out';
+  author: 'client' | 'manager' | 'agent';
+  text: string;
+  at: Date;
+  /** Канал Wazzup (whatsapp / telegram / max). */
+  channel?: string;
+}
+
+export interface LocalSources {
+  /** Wazzup по сделке (lead_id) и телефонам её контактов за период. */
+  wazzup?(accountId: number, leadId: number, phones: string[], since: Date, until: Date): Promise<LocalMessage[]>;
+  /** Диалог AI-агента (dialog_messages): client — текст из чатов amo и входящих писем, ai — ответы агента, manager — ответы из виджета. */
+  dialog?(accountId: number, leadId: number, since: Date, until: Date): Promise<LocalMessage[]>;
+  /** Сделки с перепиской за период (Wazzup с lead_id, диалог). */
+  activeLeads?(accountId: number, since: Date, until: Date): Promise<number[]>;
 }

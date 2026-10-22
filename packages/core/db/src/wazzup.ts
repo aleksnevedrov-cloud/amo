@@ -171,6 +171,29 @@ export class WazzupRepo {
     return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at }));
   }
 
+  /**
+   * RFD-AI-AGENT-CALLS-DAY-FULL: переписка по сделке за период — по lead_id (чаты, привязанные Salesbot) или по телефонам
+   * контактов сделки (lead_id у вебхуков пуст); без групп и системных. С message_id — для дедупликации с чатами amo.
+   */
+  async chatForLeadBetween(accountId: number, leadId: number, phones: string[], since: Date, until: Date, limit = 500): Promise<WazzupChatItem[]> {
+    const { rows } = await this.db.query(
+      `SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at FROM wazzup_messages
+        WHERE account_id = $1 AND NOT is_system AND text <> '' AND text NOT LIKE '%=== SYSTEM WZ ===%'
+          AND (chat_type IS NULL OR chat_type NOT LIKE '%group')
+          AND sent_at >= $4 AND sent_at < $5
+          AND (lead_id = $2 OR phone = ANY($3::text[]) OR chat_id IN (SELECT chat_id FROM wazzup_messages WHERE account_id = $1 AND lead_id = $2))
+        ORDER BY sent_at ASC LIMIT $6`,
+      [accountId, leadId, phones, since, until, limit],
+    );
+    return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at }));
+  }
+
+  /** Сделки с перепиской за период (только привязанные lead_id). */
+  async leadsActiveBetween(accountId: number, since: Date, until: Date): Promise<number[]> {
+    const { rows } = await this.db.query<{ lead_id: string }>(`SELECT DISTINCT lead_id FROM wazzup_messages WHERE account_id = $1 AND lead_id IS NOT NULL AND NOT is_system AND text <> '' AND sent_at >= $2 AND sent_at < $3`, [accountId, since, until]);
+    return rows.map((r) => Number(r.lead_id));
+  }
+
   /** История по телефону — последние limit сообщений в хронологическом порядке, без системных. */
   async historyByPhone(accountId: number, phone: string, limit = 40): Promise<WazzupHistoryItem[]> {
     const { rows } = await this.db.query(

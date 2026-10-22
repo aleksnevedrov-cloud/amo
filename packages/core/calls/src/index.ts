@@ -1,5 +1,7 @@
 export * from './day-analyze.ts';
+export * from './day-sources.ts';
 export * from './day-summary.ts';
+export * from './day-timeline.ts';
 export * from './demo.ts';
 export * from './deps.ts';
 export * from './download.ts';

@@ -261,6 +261,9 @@ export interface DaySummaryRow {
   business: boolean;
   summary: DaySummary;
   callIds: number[];
+  /** id записей ленты общения (call:… / wz:… / chat:… / agent:… / note:… / mail:…), вошедших в итог. */
+  itemIds: string[];
+  counts: { calls: number; messages: number; emails: number; notes: number } | null;
   callsCount: number;
   totalDurationSec: number;
   noteId: number | null;
@@ -276,13 +279,22 @@ export interface DaySummaryRow {
 export class DaySummariesRepo {
   constructor(private readonly db: Db) {}
 
-  async insert(r: { accountId: number; leadId: number | null; contactId: number | null; day: string; business: boolean; summary: DaySummary; callIds: number[]; callsCount: number; totalDurationSec: number; provider: string | null; model: string | null; cost: Record<string, unknown> | null }): Promise<number> {
+  async insert(r: { accountId: number; leadId: number | null; contactId: number | null; day: string; business: boolean; summary: DaySummary; callIds: number[]; itemIds: string[]; counts: { calls: number; messages: number; emails: number; notes: number } | null; callsCount: number; totalDurationSec: number; provider: string | null; model: string | null; cost: Record<string, unknown> | null }): Promise<number> {
     const { rows } = await this.db.query<{ id: string }>(
-      `INSERT INTO call_day_summaries (account_id, lead_id, contact_id, day, business, summary, call_ids, calls_count, total_duration_sec, provider, model, cost)
-       VALUES ($1, $2, $3, $4::date, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12::jsonb) RETURNING id`,
-      [r.accountId, r.leadId, r.contactId, r.day, r.business, JSON.stringify(r.summary), JSON.stringify(r.callIds), r.callsCount, r.totalDurationSec, r.provider, r.model, r.cost ? JSON.stringify(r.cost) : null],
+      `INSERT INTO call_day_summaries (account_id, lead_id, contact_id, day, business, summary, call_ids, item_ids, counts, calls_count, total_duration_sec, provider, model, cost)
+       VALUES ($1, $2, $3, $4::date, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14::jsonb) RETURNING id`,
+      [r.accountId, r.leadId, r.contactId, r.day, r.business, JSON.stringify(r.summary), JSON.stringify(r.callIds), JSON.stringify(r.itemIds), r.counts ? JSON.stringify(r.counts) : null, r.callsCount, r.totalDurationSec, r.provider, r.model, r.cost ? JSON.stringify(r.cost) : null],
     );
     return Number(rows[0]?.id ?? 0);
+  }
+
+  /** id записей общения, уже вошедших в итоги этого дня по сделке (или контакту) — повторный запуск берёт только новое. */
+  async summarizedItemIds(accountId: number, where: { leadId: number | null; contactId: number | null }, day: string): Promise<Set<string>> {
+    const { rows } = await this.db.query<{ item_ids: string[] }>(
+      `SELECT item_ids FROM call_day_summaries WHERE account_id = $1 AND day = $2::date AND (($3::bigint IS NOT NULL AND lead_id = $3) OR ($3::bigint IS NULL AND contact_id = $4))`,
+      [accountId, day, where.leadId, where.contactId],
+    );
+    return new Set(rows.flatMap((r) => r.item_ids ?? []));
   }
 
   async setNote(id: number, note: { noteId: number; entity: 'lead' | 'contact'; text: string }): Promise<void> {
@@ -364,6 +376,8 @@ function mapDay(r: Record<string, unknown>): DaySummaryRow {
     business: Boolean(r.business),
     summary: r.summary as DaySummary,
     callIds: ((r.call_ids as number[] | null) ?? []).map(Number),
+    itemIds: ((r.item_ids as string[] | null) ?? []).map(String),
+    counts: (r.counts as DaySummaryRow['counts']) ?? null,
     callsCount: Number(r.calls_count ?? 0),
     totalDurationSec: Number(r.total_duration_sec ?? 0),
     noteId: num(r.note_id),

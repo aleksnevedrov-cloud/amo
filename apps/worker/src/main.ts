@@ -147,6 +147,12 @@ const callsDeps: CallsDeps = {
     return { llm: a.llm, route: resolveRoute(s), pricing: s.billing.pricing, usdRubRate: s.billing.usdRubRate };
   },
   accountIds: () => settings.listAccountIds(),
+  // RFD-AI-AGENT-CALLS-DAY-FULL: локальные источники общения для итога дня (Wazzup по сделке и телефонам, диалог агента).
+  sources: {
+    wazzup: async (accountId, leadId, phones, since, until) => (await wazzupRepo.chatForLeadBetween(accountId, leadId, phones, since, until)).map((m) => ({ id: m.messageId, direction: m.direction, author: m.direction === 'in' ? ('client' as const) : ('manager' as const), text: m.text, at: m.sentAt, channel: m.chatType ?? undefined })),
+    dialog: async (accountId, leadId, since, until) => (await dialog.betweenByLead(accountId, leadId, since, until)).map((m) => ({ id: String(m.id), direction: m.role === 'client' ? ('in' as const) : ('out' as const), author: m.role === 'client' ? ('client' as const) : m.role === 'ai' ? ('agent' as const) : ('manager' as const), text: m.text, at: m.createdAt })),
+    activeLeads: async (accountId, since, until) => [...new Set([...(await wazzupRepo.leadsActiveBetween(accountId, since, until)), ...(await dialog.leadsActiveBetween(accountId, since, until))])],
+  },
 };
 
 const sweepDeps: SweepDeps = {

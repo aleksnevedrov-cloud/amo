@@ -227,6 +227,18 @@ export const widgetSettingsSchema = z
         minDurationSec: z.number().int().min(1).max(3600).default(30),
         keepMp3Days: z.number().int().min(1).max(365).default(30),
         sttProvider: z.enum(['speechkit', 'openai']).default('speechkit'),
+        /** RFD-AI-AGENT-CALLS-DAY-FULL: что входит в итог дня, кроме звонков. */
+        sources: z
+          .object({
+            calls: z.boolean().default(true),
+            wazzup: z.boolean().default(true),
+            amoChats: z.boolean().default(true),
+            agentDialog: z.boolean().default(true),
+            managerNotes: z.boolean().default(true),
+            email: z.boolean().default(true),
+          })
+          .strict()
+          .default({}),
       })
       .strict()
       .default({}),
