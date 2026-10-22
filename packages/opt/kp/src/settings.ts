@@ -2,6 +2,37 @@ import { llmProviderSchema, widgetSettingsSchema, type Db, type WidgetSettings }
 import { sameModel, type ChatRoute, type ModelRef } from '@core/llm';
 import { z } from 'zod';
 
+/** Чек-лист оценки менеджера по умолчанию (ТЗ CALLS, п. 6); веса в сумме 100, правится в виджете. */
+export const DEFAULT_CALL_CHECKLIST: { text: string; weight: number }[] = [
+  { text: 'Поздоровался, представился, назвал компанию', weight: 10 },
+  { text: 'Выявил потребность: объект, количество, размеры, покрытие, сроки', weight: 25 },
+  { text: 'Уточнил ГОСТ / требования объекта', weight: 10 },
+  { text: 'Предложил решение и озвучил цену или порядок цен', weight: 15 },
+  { text: 'Отработал возражения', weight: 15 },
+  { text: 'Договорился о следующем шаге с датой', weight: 20 },
+  { text: 'Вежливость, без перебиваний', weight: 5 },
+];
+
+/** Разбор записей разговоров (RFD-AI-AGENT-OPT-CALLS, п. 8 «Настройки»). */
+export const callsSettingsSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Воронки, в которых ищется открытая сделка контакта; пусто — все. */
+    pipelineIds: z.array(z.number().int().positive()).max(50).default([]),
+    /** Короче — не разбираем (пропущенные с duration 0 — тем более). */
+    minDurationSec: z.number().int().min(1).max(3600).default(20),
+    keepMp3Days: z.number().int().min(1).max(365).default(30),
+    sttProvider: z.enum(['speechkit', 'openai']).default('speechkit'),
+    createTasks: z.boolean().default(true),
+    /** Минут расшифровки в день; 0 — без ограничения. */
+    maxMinutesPerDay: z.number().int().min(0).max(100_000).default(300),
+    checklist: z
+      .array(z.object({ text: z.string().min(1).max(300), weight: z.number().int().min(0).max(100) }).strict())
+      .max(20)
+      .default(DEFAULT_CALL_CHECKLIST),
+  })
+  .strict();
+
 /**
  * Настройки «Агента опт». У опта нет диалога, каталога и почтового ящика, поэтому схема
  * своя и короткая: модель, разбор файлов, письмо с КП, курс. Хранится в opt_settings,
@@ -64,11 +95,19 @@ export const optSettingsSchema = z
       })
       .strict()
       .default({}),
+    /**
+     * RFD-AI-AGENT-OPT-CALLS: разбор записей разговоров. Без значения по умолчанию (как sentFolder): ключ появляется
+     * в сохранённых настройках, только когда раздел заполнили, — откат кода не ломает чтение строгой схемой.
+     */
+    calls: callsSettingsSchema.optional(),
   })
   .strict();
 
 export type OptSettings = z.infer<typeof optSettingsSchema>;
 export const defaultOptSettings = (): OptSettings => optSettingsSchema.parse({});
+export type CallsSettings = z.infer<typeof callsSettingsSchema>;
+/** Настройки звонков с умолчаниями: раздел не заполняли — выключено. */
+export const callsSettingsOf = (s: OptSettings): CallsSettings => s.calls ?? callsSettingsSchema.parse({});
 
 /** Основная и резервная модели по настройкам; совпадающая с основной резервная не считается. */
 export function resolveOptRoute(s: OptSettings): ChatRoute {
