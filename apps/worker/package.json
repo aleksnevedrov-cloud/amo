@@ -6,13 +6,14 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js",
+    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js && node ../../scripts/build-app.mjs src/calls-backfill.ts dist/calls-backfill.js && node ../../scripts/build-app.mjs src/calls-inspect.ts dist/calls-inspect.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@retail/agent": "workspace:*",
     "@core/amo": "workspace:*",
+    "@core/calls": "workspace:*",
     "@retail/catalog": "workspace:*",
     "@core/db": "workspace:*",
     "@core/docs": "workspace:*",

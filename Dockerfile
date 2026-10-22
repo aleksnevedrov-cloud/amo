@@ -18,6 +18,7 @@ COPY packages/core/tools/package.json packages/core/tools/
 COPY packages/retail/agent/package.json packages/retail/agent/
 COPY packages/retail/pricing/package.json packages/retail/pricing/
 COPY packages/core/media/package.json packages/core/media/
+COPY packages/core/calls/package.json packages/core/calls/
 COPY packages/core/docs/package.json packages/core/docs/
 COPY packages/retail/mail/package.json packages/retail/mail/
 COPY packages/opt/kp/package.json packages/opt/kp/

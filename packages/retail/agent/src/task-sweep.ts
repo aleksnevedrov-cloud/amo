@@ -19,7 +19,7 @@ export interface SweepDeps {
   amo(accountId: number): Promise<{ api: AmoApiClient }>;
   /** Сжатие переписки за день в один абзац; null — если модель недоступна. */
   summarize?(accountId: number, history: SweepHistoryItem[]): Promise<string | null>;
-  /** Расшифровки звонков за день; пока не подключено — пусто. */
+  /** RFD-AI-AGENT-CALLS-RETAIL: итог разговоров за день по сделке («Итог: …», «Следующий шаг: …») из таблицы итогов; нет — пусто. */
   callTexts?(accountId: number, leadId: number, since: Date): Promise<string[]>;
   /** Переписка в мессенджере по сделке за период (Wazzup). */
   messengerSince?(accountId: number, leadId: number, since: Date): Promise<SweepHistoryItem[]>;
@@ -47,7 +47,12 @@ function cut(s: string, n: number): string {
   return t.length <= n ? t : t.slice(0, n - 1) + '…';
 }
 
-/** Комментарий к задаче: переписка за день плюс расшифровки звонков. */
+/** Блок звонков в комментарии задачи: итог дня от модуля звонков или фраза, что разговоров не было. */
+export function callsBlock(calls: string[]): string {
+  return calls.length ? `Разговоры за день: ${calls.map((t) => t.trim()).filter(Boolean).join(' ')}` : 'За сегодня разговоров в сделке не было.';
+}
+
+/** Комментарий к задаче: переписка за день плюс блок «Разговоры за день» (итог дня по звонкам). */
 export async function buildComment(
   d: SweepDeps,
   accountId: number,
@@ -77,25 +82,21 @@ export async function buildComment(
   if (chat.length) {
     history = [...history, ...chat].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
-  if (!history.length && !calls.length) return 'За сегодня переписки в сделке не было.';
-
-  const parts: SweepHistoryItem[] = [
-    ...history,
-    ...calls.map((t, i) => ({ role: 'call', text: t, createdAt: new Date(since.getTime() + i) })),
-  ];
+  // Блок звонков всегда отдельной строкой: итог дня — или что разговоров не было (ТЗ RFD-AI-AGENT-CALLS-RETAIL, п. 4).
+  const withCalls = (text: string): string => cut(`${text}\n${callsBlock(calls)}`, 900);
+  if (!history.length) return withCalls('За сегодня переписки в сделке не было.');
 
   if (s.taskSweep.llmComment && d.summarize) {
     try {
-      const made = await d.summarize(accountId, parts);
-      if (made) return cut(made, 900);
+      const made = await d.summarize(accountId, history);
+      if (made) return withCalls(cut(made, 700));
     } catch {
       // ниже — запасной вариант без модели
     }
   }
-  const label = (r: string): string =>
-    r === 'client' ? 'клиент' : r === 'call' ? 'звонок' : r === 'ai' ? 'AI' : 'менеджер';
-  const tail = parts.slice(-6).map((m) => `${label(m.role)}: ${cut(m.text, 160)}`);
-  return cut(tail.join('\n'), 900);
+  const label = (r: string): string => (r === 'client' ? 'клиент' : r === 'ai' ? 'AI' : 'менеджер');
+  const tail = history.slice(-6).map((m) => `${label(m.role)}: ${cut(m.text, 160)}`);
+  return withCalls(cut(tail.join('\n'), 700));
 }
 
 /**

@@ -26,7 +26,12 @@ export type JournalKind =
   | 'mail_fetch'
   | 'summary'
   | 'task'
-  | 'document';
+  | 'document'
+  // RFD-AI-AGENT-CALLS-RETAIL: записи разговоров — сбор, ошибки, итог дня по сделке, итог задания.
+  | 'call_fetch'
+  | 'call_error'
+  | 'call_day'
+  | 'call_day_run';
 
 export interface JournalEntry {
   accountId: number;

@@ -11,6 +11,7 @@ import {
   summarizeDialog,
   type IncomingJob,
   type SweepDeps,
+  resolveRoute,
 } from '@retail/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@core/amo';
 import { CatalogImporter, CatalogRepo } from '@retail/catalog';
@@ -23,6 +24,7 @@ import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
+import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DAY_SYNC_ENTITY, DaySummariesRepo, daySummaryDue, runCallsPollAll, runDaySummary, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -124,7 +126,39 @@ await maintenance.upsertJobScheduler(WAZZUP_DUMP_JOB, { every: WAZZUP_DUMP_EVERY
 // Зависимости обходов автопостановки задач.
 const wazzupRepo = new WazzupRepo(db);
 
+// Звонки (RFD-AI-AGENT-CALLS-RETAIL): записи ВАТС из примечаний amo, расшифровка, итог разговоров за день.
+const callsRepo = new CallsRepo(db);
+const daySummaries = new DaySummariesRepo(db);
+const callsDeps: CallsDeps = {
+  calls: callsRepo,
+  days: daySummaries,
+  journal,
+  accounts,
+  tokenService,
+  fetch,
+  filesRoot: process.env.MAIL_FILES_ROOT ?? '/data',
+  keys: { speechkit: env.YANDEX_SPEECHKIT_API_KEY ?? null, openai: env.OPENAI_API_KEY ?? null },
+  alerter,
+  settingsFor: async (accountId) => (await settings.get(accountId)).settings,
+  llmFor: async (accountId) => {
+    const a = await ai(accountId);
+    if (!a) return null;
+    const { settings: s } = await settings.get(accountId);
+    return { llm: a.llm, route: resolveRoute(s), pricing: s.billing.pricing, usdRubRate: s.billing.usdRubRate };
+  },
+  accountIds: () => settings.listAccountIds(),
+};
+
 const sweepDeps: SweepDeps = {
+  // Итог разговоров за день по сделке — из таблицы итогов (своя БД, без сетевых запросов): «Итог», «Следующий шаг».
+  callTexts: async (accountId: number, leadId: number, since: Date) => {
+    const day = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(since);
+    const g = (t: string) => day.find((x) => x.type === t)?.value ?? '';
+    const rows = (await daySummaries.forLead(accountId, leadId, `${g('year')}-${g('month')}-${g('day')}`)).filter((r) => r.business);
+    const last = rows.at(-1);
+    if (!last) return [];
+    return [`Итог: ${last.summary.summary}`, ...(last.summary.nextStep ? [`Следующий шаг: ${last.summary.nextStep}`] : [])];
+  },
   messengerSince: async (accountId: number, leadId: number, since: Date) =>
     (await wazzupRepo.historyByLead(accountId, leadId, since, 40)).map((m) => ({
       role: m.direction === 'in' ? 'client' : 'manager',
@@ -157,6 +191,45 @@ await maintenance.upsertJobScheduler(
 );
 await maintenance.upsertJobScheduler(TASKS_NEW_JOB, { every: TASKS_NEW_EVERY_MS }, { name: TASKS_NEW_JOB });
 await maintenance.upsertJobScheduler(TASKS_EVENING_JOB, { every: TASKS_EVENING_EVERY_MS }, { name: TASKS_EVENING_JOB });
+
+// Очередь звонков отдельно от обслуживания: опрос с расшифровкой идёт минутами и не должен задерживать почту и задачи.
+const callsQueue = new Queue(CALLS_QUEUE, { connection });
+await callsQueue.upsertJobScheduler(CALLS_POLL_JOB, { every: CALLS_POLL_EVERY_MS }, { name: CALLS_POLL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVERY_MS }, { name: CALLS_DAY_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+const callsWorker = new Worker(
+  CALLS_QUEUE,
+  async (job) => {
+    if (job.name === CALLS_POLL_JOB) {
+      const results = await runCallsPollAll(callsDeps);
+      for (const r of results) if (r.enabled && (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length || r.transcribed?.transcribed || r.transcribed?.failed)) log.info({ ...r }, 'calls-poll: аккаунт опрошен');
+      return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
+    }
+    if (job.name === CALLS_DAY_JOB) {
+      // Раз в 5 минут: у кого наступило время итога и сегодня не запускали — запустить; у остальных — повторы упавших групп без ожидания.
+      const out: unknown[] = [];
+      for (const accountId of await callsDeps.accountIds()) {
+        const { settings: s } = await settings.get(accountId);
+        if (!s.calls.callsEnabled) continue;
+        const sync = await callsRepo.getSync(accountId, DAY_SYNC_ENTITY);
+        const now = new Date();
+        const due = daySummaryDue(s.calls.daySummaryTime, sync?.lastRunAt ?? null, now);
+        if (due) await callsRepo.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });
+        try {
+          const r = await runDaySummary(callsDeps, accountId, { noWait: !due });
+          if (r.groups || r.errors || r.waiting) log.info({ ...r, due }, 'calls-day-summary: итог дня');
+          out.push(r);
+        } catch (err) {
+          log.warn({ accountId, err: (err as Error).message }, 'calls-day-summary: сбой');
+          if (due) await callsRepo.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: (err as Error).message });
+        }
+      }
+      return { accounts: out.length };
+    }
+    throw new Error(`Неизвестная задача ${job.name}`);
+  },
+  { connection, concurrency: 1 },
+);
+callsWorker.on('failed', (job, err) => log.error({ err, job: job?.name }, 'calls: задача упала'));
 
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
@@ -269,8 +342,10 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
     await incomingWorker?.close();
     await maintenanceWorker.close();
+    await callsWorker.close();
     await incoming.close();
     await maintenance.close();
+    await callsQueue.close();
     await connection.quit();
     await db.end();
     process.exit(0);

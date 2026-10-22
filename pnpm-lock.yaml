@@ -328,6 +328,9 @@ importers:
       '@core/amo':
         specifier: workspace:*
         version: link:../../packages/core/amo
+      '@core/calls':
+        specifier: workspace:*
+        version: link:../../packages/core/calls
       '@core/db':
         specifier: workspace:*
         version: link:../../packages/core/db
@@ -443,6 +446,28 @@ importers:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
+
+  packages/core/calls:
+    dependencies:
+      '@core/amo':
+        specifier: workspace:*
+        version: link:../amo
+      '@core/db':
+        specifier: workspace:*
+        version: link:../db
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@core/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
 
   packages/core/db:
     dependencies:

@@ -203,6 +203,33 @@ export const widgetSettingsSchema = z
       })
       .strict()
       .default({}),
+    /**
+     * RFD-AI-AGENT-CALLS-RETAIL: записи разговоров ВАТС из примечаний amo — скачивание, расшифровка, один итог за день на
+     * сделку (воронка «Двери», этапы кроме 142 / 143) или контакт. Включено по умолчанию; экрана в виджете пока нет.
+     */
+    calls: z
+      .object({
+        callsEnabled: z.boolean().default(true),
+        /** Примечание «Итог разговоров за день» в сделку / контакт. */
+        postDayNote: z.boolean().default(true),
+        /** Время запуска итога дня, ЧЧ:ММ по Москве (до вечернего обхода в 20:00). */
+        daySummaryTime: z
+          .string()
+          .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+          .default('19:30'),
+        /** Сколько ждать незавершённые расшифровки перед итогом, с. */
+        daySummaryTimeoutSec: z.number().int().min(0).max(3600).default(300),
+        /** Воронка «Двери». */
+        pipelineId: z.number().int().positive().default(1873498),
+        /** Этапы воронки для итога; пусто — все, кроме 142 («Успешно реализовано») и 143 («Отказ»). */
+        statusIds: z.array(z.number().int().positive()).max(50).default([]),
+        /** Короче — не собираем и не расшифровываем. */
+        minDurationSec: z.number().int().min(1).max(3600).default(30),
+        keepMp3Days: z.number().int().min(1).max(365).default(30),
+        sttProvider: z.enum(['speechkit', 'openai']).default('speechkit'),
+      })
+      .strict()
+      .default({}),
     /** Разбор файлов и фото (фаза 3). */
     vision: z
       .object({

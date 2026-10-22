@@ -20,6 +20,8 @@ function deps(opts: {
   sweep?: Record<string, unknown>;
   history?: { role: string; text: string; createdAt: Date }[];
   summary?: string | null;
+  /** RFD-AI-AGENT-CALLS-RETAIL: итог разговоров за день («Итог: …», «Следующий шаг: …»); undefined — модуль звонков не подключён. */
+  calls?: string[];
 }): { d: SweepDeps; created: { leadId: number; text: string }[] } {
   const created: { leadId: number; text: string }[] = [];
   const settings = widgetSettingsSchema.parse({ taskSweep: { ...(opts.sweep ?? {}) } });
@@ -38,6 +40,7 @@ function deps(opts: {
     journal: { add: async () => undefined },
     amo: async () => ({ api }),
     summarize: opts.summary === undefined ? undefined : async () => opts.summary,
+    callTexts: opts.calls === undefined ? undefined : async () => opts.calls ?? [],
     now: () => new Date('2026-10-07T12:00:00Z'),
   } as unknown as SweepDeps;
   return { d, created };
@@ -162,5 +165,27 @@ describe('автопостановка задач', () => {
     d.managerWroteSince = async () => null;
     await sweepNewLeads(d, ACC);
     expect(created).toHaveLength(1);
+  });
+});
+
+describe('итог разговоров за день в вечернем обходе (RFD-AI-AGENT-CALLS-RETAIL)', () => {
+  it('итог есть → в задаче блок «Разговоры за день: итог, следующий шаг»', async () => {
+    const { d, created } = deps({ leads: [lead(1)], history: [{ role: 'client', text: 'Когда будет счёт?', createdAt: new Date('2026-10-07T10:00:00Z') }], summary: 'Клиент ждёт счёт', calls: ['Итог: Нужны три двери, замер на неделе.', 'Следующий шаг: Менеджер согласует время замера.'] });
+    await sweepNewLeads(d, ACC);
+    expect(created[0]?.text).toContain('Клиент ждёт счёт');
+    expect(created[0]?.text).toContain('Разговоры за день: Итог: Нужны три двери, замер на неделе. Следующий шаг: Менеджер согласует время замера.');
+  });
+
+  it('итога нет → фраза «За сегодня разговоров в сделке не было»', async () => {
+    const { d, created } = deps({ leads: [lead(1)], calls: [] });
+    await sweepNewLeads(d, ACC);
+    expect(created[0]?.text).toContain('За сегодня переписки в сделке не было.');
+    expect(created[0]?.text).toContain('За сегодня разговоров в сделке не было.');
+  });
+
+  it('у сделки есть задача → задача не ставится; итог дня от этого не зависит (его пишет отдельное задание)', async () => {
+    const { d, created } = deps({ leads: [lead(1)], openTasks: { 1: 1 }, calls: ['Итог: разговор был.'] });
+    const res = await sweepNewLeads(d, ACC);
+    expect([res.created, created.length]).toEqual([0, 0]);
   });
 });
