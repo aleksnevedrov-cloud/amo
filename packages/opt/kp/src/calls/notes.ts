@@ -21,25 +21,30 @@ export interface AmoCallNote {
 
 export interface AmoRaw {
   get<T>(path: string): Promise<T | null>;
+  post<T>(path: string, body: unknown): Promise<T | null>;
 }
 
-/** GET на домене аккаунта: bearer, повтор при 429 до 3 раз, 204 → null, остальные ошибки — AmoError. */
+/** GET / POST на домене аккаунта: bearer, повтор при 429 до 3 раз, 204 → null, остальные ошибки — AmoError. */
 export function amoRaw(accountDomain: string, getAccessToken: () => Promise<string>, fetchImpl: typeof fetch, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): AmoRaw {
-  return {
-    async get<T>(path: string): Promise<T | null> {
-      for (let attempt = 0; ; attempt++) {
-        const token = await getAccessToken();
-        const res = await fetchImpl(`https://${accountDomain}${path}`, { method: 'GET', headers: { authorization: `Bearer ${token}`, accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
-        if (res.status === 429 && attempt < 3) {
-          await sleep(500 * 2 ** attempt);
-          continue;
-        }
-        if (res.status === 204) return null;
-        if (!res.ok) throw new AmoError(`amo API GET ${path.split('?')[0]}: HTTP ${res.status}`, res.status, await res.text().catch(() => ''));
-        return (await res.json()) as T;
+  const request = async <T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T | null> => {
+    for (let attempt = 0; ; attempt++) {
+      const token = await getAccessToken();
+      const res = await fetchImpl(`https://${accountDomain}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 429 && attempt < 3) {
+        await sleep(500 * 2 ** attempt);
+        continue;
       }
-    },
+      if (res.status === 204) return null;
+      if (!res.ok) throw new AmoError(`amo API ${method} ${path.split('?')[0]}: HTTP ${res.status}`, res.status, await res.text().catch(() => ''));
+      return (await res.json()) as T;
+    }
   };
+  return { get: (path) => request('GET', path), post: (path, body) => request('POST', path, body) };
 }
 
 export type CallEntity = 'contact' | 'lead';

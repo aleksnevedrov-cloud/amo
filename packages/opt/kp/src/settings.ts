@@ -19,10 +19,13 @@ export const callsSettingsSchema = z
     enabled: z.boolean().default(false),
     /** Воронки, в которых ищется открытая сделка контакта; пусто — все. */
     pipelineIds: z.array(z.number().int().positive()).max(50).default([]),
-    /** Короче — не разбираем (пропущенные с duration 0 — тем более). */
-    minDurationSec: z.number().int().min(1).max(3600).default(20),
+    /** Короче — не собираем и не расшифровываем (пропущенные с duration 0 — тем более). */
+    minDurationSec: z.number().int().min(1).max(3600).default(30),
     keepMp3Days: z.number().int().min(1).max(365).default(30),
     sttProvider: z.enum(['speechkit', 'openai']).default('speechkit'),
+    /** Этапы 2–3: разбор расшифровки моделью и примечание «Анализ звонка» в сделку / контакт. */
+    analyzeEnabled: z.boolean().default(true),
+    postNoteEnabled: z.boolean().default(true),
     createTasks: z.boolean().default(true),
     /** Минут расшифровки в день; 0 — без ограничения. */
     maxMinutesPerDay: z.number().int().min(0).max(100_000).default(300),

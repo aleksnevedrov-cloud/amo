@@ -1,11 +1,14 @@
 import { unlink } from 'node:fs/promises';
-import type { JournalKind } from '@core/db';
+import { costOfUsage } from '@core/llm';
 import type { OptCore } from '../deps.ts';
 import { resolveKpPath } from '../paths.ts';
-import { callsSettingsOf, type CallsSettings } from '../settings.ts';
+import { callsSettingsOf, resolveOptRoute, type CallsSettings } from '../settings.ts';
 import { callFileRel, downloadRecord, RecordUnavailableError, saveRecordFile } from './download.ts';
-import { amoRaw, fetchCallNotes, parseCallNote, type AmoRaw, type CallEntity, type ParsedCallNote } from './notes.ts';
+import { CALL_ERROR_KIND, CALL_FETCH_KIND } from './kinds.ts';
+import { amoRaw, fetchCallNotes, parseCallNote, recordHostAllowed, type AmoRaw, type CallEntity, type ParsedCallNote } from './notes.ts';
+import { processCalls, type CallsProcessCore, type ProcessOptions, type ProcessResult } from './process.ts';
 import type { CallRow } from './repo.ts';
+import { OPENAI_STT_USD_PER_MIN, SPEECHKIT_RUB_PER_MIN, type SttMode } from './stt.ts';
 
 /**
  * RFD-AI-AGENT-OPT-CALLS, этап 1: плановый опрос amoCRM (раз в 10 мин) — примечания-звонки контактов и сделок с
@@ -17,10 +20,6 @@ export const CALLS_QUEUE = 'calls-poll';
 export const CALLS_POLL_JOB = 'poll';
 export const CALLS_POLL_EVERY_MS = 10 * 60_000;
 
-/** Виды записей журнала по звонкам; в общий JournalKind (packages/core) не добавляются — ядро не меняем. */
-export const CALL_FETCH_KIND = 'call_fetch' as JournalKind;
-export const CALL_ERROR_KIND = 'call_error' as JournalKind;
-
 /** Скачиваний за один опрос аккаунта: записи по 1–5 МБ, 10 минут между опросами — хватает с запасом. */
 const DOWNLOADS_PER_RUN = 30;
 /** Повтор скачивания после ошибки (failed / download) — не раньше чем через столько минут, чтобы не долбить ВАТС. */
@@ -28,11 +27,18 @@ const RETRY_FAILED_AFTER_MS = 30 * 60_000;
 /** Отметка первого сбора — чуть назад, чтобы не потерять звонок, оформленный в amo в минуту включения. */
 const FIRST_RUN_OVERLAP_MS = 5 * 60_000;
 
-export type CallsCore = Pick<OptCore, 'calls' | 'journal' | 'settings' | 'accounts' | 'tokenService' | 'fetch' | 'filesRoot'>;
+export type CallsCore = Pick<OptCore, 'calls' | 'journal' | 'settings' | 'accounts' | 'tokenService' | 'fetch' | 'filesRoot' | 'ai' | 'env' | 'alerter'>;
 
 export interface CallsPollOptions {
   /** Разовый догон истории («Загрузить историю»): примечания за столько дней назад, независимо от отметки. */
   sinceDays?: number;
+  /** Режим SpeechKit для новых звонков этого опроса; по умолчанию deferred при догоне, иначе async. */
+  sttMode?: SttMode;
+  /** Скачиваний за опрос (догрузка ставит больше). */
+  maxDownloads?: number;
+  /** false — только собрать и скачать (догрузка: обработку делает плановый опрос воркера). */
+  process?: boolean;
+  processOptions?: ProcessOptions;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** Клиент amo в тестах. */
@@ -51,6 +57,8 @@ export interface CallsPollResult {
   failed: number;
   filesDeleted: number;
   errors: string[];
+  /** Этапы 2–3: расшифровка, разбор, примечания за этот опрос. */
+  processed: ProcessResult | null;
 }
 
 /** Все подключённые аккаунты с включённым разбором звонков — по одному. */
@@ -67,12 +75,13 @@ export async function runCallsPollAll(core: CallsCore, opts: CallsPollOptions = 
   return out;
 }
 
-const emptyResult = (accountId: number, enabled: boolean): CallsPollResult => ({ accountId, enabled, found: 0, skippedShort: 0, noLink: 0, inserted: 0, downloaded: 0, unavailable: 0, failed: 0, filesDeleted: 0, errors: [] });
+const emptyResult = (accountId: number, enabled: boolean): CallsPollResult => ({ accountId, enabled, found: 0, skippedShort: 0, noLink: 0, inserted: 0, downloaded: 0, unavailable: 0, failed: 0, filesDeleted: 0, errors: [], processed: null });
 
 /** Опрос одного аккаунта: сбор → вставка новых → скачивание → удаление старых MP3 → журнал. */
 export async function runCallsPoll(core: CallsCore, accountId: number, opts: CallsPollOptions = {}): Promise<CallsPollResult> {
   const now = opts.now ?? (() => new Date());
-  const settings = callsSettingsOf((await core.settings.get(accountId)).settings);
+  const all = (await core.settings.get(accountId)).settings;
+  const settings = callsSettingsOf(all);
   const r = emptyResult(accountId, settings.enabled);
   if (!settings.enabled) return r;
   const account = await core.accounts.get(accountId);
@@ -82,7 +91,7 @@ export async function runCallsPoll(core: CallsCore, accountId: number, opts: Cal
   const insertedCalls: { id: number; leadId: number | null; link: string }[] = [];
   for (const entity of ['contact', 'lead'] as const) {
     try {
-      const got = await collectEntity(core, amo, accountId, entity, settings, now(), opts.sinceDays);
+      const got = await collectEntity(core, amo, accountId, entity, settings, now(), opts.sinceDays, opts.sttMode ?? (opts.sinceDays ? 'deferred' : 'async'));
       r.found += got.found;
       r.skippedShort += got.skippedShort;
       r.noLink += got.noLink;
@@ -98,7 +107,8 @@ export async function runCallsPoll(core: CallsCore, accountId: number, opts: Cal
 
   // Скачивание: новые и упавшие раньше (не чаще раза в полчаса), не больше DOWNLOADS_PER_RUN за опрос.
   const retryBefore = new Date(now().getTime() - RETRY_FAILED_AFTER_MS);
-  const queue: CallRow[] = [...(await core.calls.listByStatus(accountId, 'new', DOWNLOADS_PER_RUN)), ...(await core.calls.listFailedAt(accountId, 'download', DOWNLOADS_PER_RUN)).filter((c) => c.updatedAt < retryBefore)].slice(0, DOWNLOADS_PER_RUN);
+  const maxDownloads = opts.maxDownloads ?? DOWNLOADS_PER_RUN;
+  const queue: CallRow[] = [...(await core.calls.listByStatus(accountId, 'new', maxDownloads)), ...(await core.calls.listFailedAt(accountId, 'download', maxDownloads)).filter((c) => c.updatedAt < retryBefore)].slice(0, maxDownloads);
   for (const call of queue) {
     const res = await downloadOne(core, call, opts);
     if (res === 'downloaded') r.downloaded++;
@@ -106,15 +116,26 @@ export async function runCallsPoll(core: CallsCore, accountId: number, opts: Cal
     else r.failed++;
   }
 
+  // Этапы 2–3: расшифровка → разбор → примечание, не больше 2 звонков одновременно; догрузка (process: false) это пропускает.
+  if (opts.process !== false) r.processed = await processCalls(core as CallsProcessCore, accountId, all, { now, ...(opts.sleep ? { sleep: opts.sleep } : {}), ...(opts.amo ? { amo: opts.amo } : {}), ...opts.processOptions });
+
   r.filesDeleted = await deleteExpiredFiles(core, accountId, settings, now());
 
-  if (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length) {
+  const p = r.processed;
+  if (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length || (p && (p.transcribed || p.analyzed || p.posted || p.failed || p.unavailable))) {
     const parts = [`найдено ${r.found}`, `новых ${r.inserted}`];
     if (r.skippedShort) parts.push(`коротких и пропущенных ${r.skippedShort}`);
     if (r.noLink) parts.push(`без записи ${r.noLink}`);
     if (r.downloaded) parts.push(`скачано ${r.downloaded}`);
     if (r.unavailable) parts.push(`недоступно ${r.unavailable}`);
     if (r.failed) parts.push(`ошибок скачивания ${r.failed}`);
+    if (p?.transcribed) parts.push(`расшифровано ${p.transcribed}`);
+    if (p?.pending) parts.push(`расшифровка идёт ${p.pending}`);
+    if (p?.analyzed) parts.push(`разобрано ${p.analyzed}`);
+    if (p?.posted) parts.push(`примечаний ${p.posted}`);
+    if (p?.skipped) parts.push(`без примечания ${p.skipped}`);
+    if (p?.unavailable) parts.push(`не расшифровать ${p.unavailable}`);
+    if (p?.failed) parts.push(`ошибок обработки ${p.failed}`);
     if (r.filesDeleted) parts.push(`удалено старых MP3 ${r.filesDeleted}`);
     if (r.errors.length) parts.push(`сбой сбора: ${r.errors.join('; ')}`);
     await core.journal.add({ accountId, kind: CALL_FETCH_KIND, summary: `Звонки: ${parts.join(', ')}`, details: { ...r, inserted: insertedCalls.map((c) => c.id), leads: [...new Set(insertedCalls.map((c) => c.leadId).filter((x): x is number => x !== null))] } });
@@ -122,7 +143,7 @@ export async function runCallsPoll(core: CallsCore, accountId: number, opts: Cal
   return r;
 }
 
-async function collectEntity(core: CallsCore, amo: AmoRaw, accountId: number, entity: CallEntity, s: CallsSettings, now: Date, sinceDays?: number) {
+async function collectEntity(core: CallsCore, amo: AmoRaw, accountId: number, entity: CallEntity, s: CallsSettings, now: Date, sinceDays: number | undefined, sttMode: SttMode) {
   const sync = await core.calls.getSync(accountId, entity);
   // Первый опрос — с момента включения (ТЗ п. 9): историю не тянем; догон за N дней — только по кнопке.
   const since = sinceDays ? new Date(now.getTime() - sinceDays * 86_400_000) : (sync?.lastUpdatedAt ?? new Date(now.getTime() - FIRST_RUN_OVERLAP_MS));
@@ -147,7 +168,7 @@ async function collectEntity(core: CallsCore, amo: AmoRaw, accountId: number, en
   for (const c of parsed) {
     rows.push({ ...c, leadId: c.entity === 'lead' ? c.entityId : await leadOfContact(amo, c.entityId, s.pipelineIds, leadCache) });
   }
-  const ids = await core.calls.insertNew(accountId, rows);
+  const ids = await core.calls.insertNew(accountId, rows, sttMode);
   const inserted = ids.flatMap((id, i) => (id === null ? [] : [{ id, leadId: rows[i]?.leadId ?? null, link: rows[i]?.link ?? '' }]));
   // Отметка: самый поздний updated_at среди полученных (при обрыве по лимиту страниц остаток придёт в следующий раз);
   // всё прочитано — не раньше «сейчас минус запас», чтобы не перечитывать одно и то же каждые 10 минут.
@@ -220,4 +241,65 @@ async function deleteExpiredFiles(core: CallsCore, accountId: number, s: CallsSe
     n++;
   }
   return n;
+}
+
+export interface BackfillPreview {
+  accountId: number;
+  days: number;
+  /** Примечаний-звонков за период, из них новых (нет в calls) с записью и не короче минимума. */
+  found: number;
+  newCalls: number;
+  newMinutes: number;
+  shortOrNoLink: number;
+  estimate: { sttRub: number; llmUsd: number; llmRub: number; totalRub: number; model: string };
+}
+
+/** Оценка стоимости для одного разобранного звонка: ≈ 230 токенов входа на минуту + подсказка, ≈ 350 токенов ответа. */
+const LLM_INPUT_TOKENS_PER_MIN = 230;
+const LLM_INPUT_TOKENS_BASE = 900;
+const LLM_OUTPUT_TOKENS = 350;
+
+/** Догрузка (ТЗ этапов 2–3, п. 5): сколько звонков найдено за период и во что обойдётся расшифровка (отложенный режим) и разбор — без записи в базу. */
+export async function previewCallsBackfill(core: CallsCore, accountId: number, days: number, opts: { now?: () => Date; amo?: AmoRaw } = {}): Promise<BackfillPreview> {
+  const now = opts.now ?? (() => new Date());
+  const all = (await core.settings.get(accountId)).settings;
+  const s = callsSettingsOf(all);
+  const account = await core.accounts.get(accountId);
+  if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён к «Агенту опт»`);
+  const amo = opts.amo ?? amoRaw(account.accountDomain, () => core.tokenService.getAccessToken(accountId), core.fetch);
+  const since = new Date(now().getTime() - days * 86_400_000);
+  let found = 0;
+  let shortOrNoLink = 0;
+  const candidates: ParsedCallNote[] = [];
+  for (const entity of ['contact', 'lead'] as const) {
+    const { notes } = await fetchCallNotes(amo, entity, since);
+    found += notes.length;
+    for (const n of notes) {
+      const c = parseCallNote(n, entity);
+      if (!c || c.durationSec < s.minDurationSec || !recordHostAllowed(c.link)) {
+        shortOrNoLink++;
+        continue;
+      }
+      candidates.push(c);
+    }
+  }
+  const existing = await core.calls.existingNoteIds(accountId, candidates.map((c) => c.noteId));
+  const fresh = candidates.filter((c) => !existing.has(c.noteId));
+  const minutes = fresh.reduce((m, c) => m + Math.ceil(c.durationSec / 15) * 15, 0) / 60;
+  const route = resolveOptRoute(all);
+  const hasSpeechKit = Boolean(core.env.YANDEX_SPEECHKIT_API_KEY);
+  const sttRub = hasSpeechKit ? minutes * SPEECHKIT_RUB_PER_MIN.deferred : 0;
+  const sttUsd = hasSpeechKit ? 0 : minutes * OPENAI_STT_USD_PER_MIN;
+  const llm = fresh.reduce((usd, c) => usd + costOfUsage(route.primary, { inputTokens: Math.round((c.durationSec / 60) * LLM_INPUT_TOKENS_PER_MIN) + LLM_INPUT_TOKENS_BASE, outputTokens: LLM_OUTPUT_TOKENS, cachedInputTokens: 0, cacheWriteTokens: 0 }, all.billing.pricing).usd, 0);
+  const rate = all.billing.usdRubRate;
+  const llmUsd = llm + sttUsd;
+  return {
+    accountId,
+    days,
+    found,
+    newCalls: fresh.length,
+    newMinutes: Math.round(minutes * 10) / 10,
+    shortOrNoLink,
+    estimate: { sttRub: Math.round(sttRub * 100) / 100, llmUsd: Math.round(llmUsd * 10_000) / 10_000, llmRub: Math.round(llmUsd * rate * 100) / 100, totalRub: Math.round((sttRub + llmUsd * rate) * 100) / 100, model: `${route.primary.provider}:${route.primary.model}` },
+  };
 }

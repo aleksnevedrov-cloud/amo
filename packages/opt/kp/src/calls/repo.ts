@@ -1,5 +1,12 @@
 import type { Db } from '@core/db';
 import type { CallEntity, ParsedCallNote } from './notes.ts';
+import type { CallTranscript, PendingTranscription, SttMode } from './stt.ts';
+
+/** Поле transcript: готовая расшифровка либо запущенная операция SpeechKit (статус остаётся downloaded). */
+export type TranscriptField = CallTranscript | { pending: PendingTranscription };
+/** Шаги обработки после скачивания; на каждом возможен failed с повтором. */
+export type CallStage = 'transcribe' | 'analyze' | 'post';
+export const CALL_STAGES: CallStage[] = ['transcribe', 'analyze', 'post'];
 
 /** Статусы звонка: цепочка обработки и два конечных «не вышло». */
 export type CallStatus = 'new' | 'downloaded' | 'transcribed' | 'analyzed' | 'posted' | 'unavailable' | 'failed';
@@ -28,10 +35,14 @@ export interface CallRow {
   fileMime: string | null;
   downloadedAt: Date | null;
   fileDeletedAt: Date | null;
-  transcript: Record<string, unknown> | null;
+  transcript: TranscriptField | null;
   analysis: Record<string, unknown> | null;
   posted: Record<string, unknown> | null;
   cost: Record<string, unknown> | null;
+  /** Сколько раз шаг (stage) падал; после 3 — алерт, повторов нет. */
+  attempts: number;
+  sttMode: SttMode;
+  alertedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,15 +64,15 @@ export class CallsRepo {
   }
 
   /** Новые звонки; уже известные (account_id + note_id + record_key) пропускаются. На каждый входной — id вставленного или null (дубль). */
-  async insertNew(accountId: number, calls: (ParsedCallNote & { leadId: number | null })[]): Promise<(number | null)[]> {
+  async insertNew(accountId: number, calls: (ParsedCallNote & { leadId: number | null })[], sttMode: SttMode = 'async'): Promise<(number | null)[]> {
     const ids: (number | null)[] = [];
     for (const c of calls) {
       const { rows } = await this.db.query<{ id: string }>(
-        `INSERT INTO calls (account_id, note_id, entity, entity_id, record_key, direction, phone, duration_sec, call_status, link, called_at, note_updated_at, manager_id, lead_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        `INSERT INTO calls (account_id, note_id, entity, entity_id, record_key, direction, phone, duration_sec, call_status, link, called_at, note_updated_at, manager_id, lead_id, stt_mode)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          ON CONFLICT (account_id, note_id, record_key) DO NOTHING
          RETURNING id`,
-        [accountId, c.noteId, c.entity, c.entityId, c.recordKey, c.direction, c.phone, c.durationSec, c.callStatus, c.link, c.calledAt, c.noteUpdatedAt, c.managerId, c.leadId],
+        [accountId, c.noteId, c.entity, c.entityId, c.recordKey, c.direction, c.phone, c.durationSec, c.callStatus, c.link, c.calledAt, c.noteUpdatedAt, c.managerId, c.leadId, sttMode],
       );
       ids.push(rows[0] ? Number(rows[0].id) : null);
     }
@@ -132,6 +143,61 @@ export class CallsRepo {
     await this.db.query(`UPDATE calls SET file_path = NULL, file_deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
   }
 
+  /** Какие из примечаний уже есть в calls (для оценки догрузки до запуска). */
+  async existingNoteIds(accountId: number, noteIds: number[]): Promise<Set<number>> {
+    if (!noteIds.length) return new Set();
+    const { rows } = await this.db.query<{ note_id: string }>('SELECT note_id FROM calls WHERE account_id = $1 AND note_id = ANY($2::bigint[])', [accountId, noteIds]);
+    return new Set(rows.map((r) => Number(r.note_id)));
+  }
+
+  /**
+   * Звонки на обработку (этапы 2–3): скачанные, расшифрованные, разобранные без примечания; упавшие на шагах
+   * transcribe / analyze / post — не раньше retryBefore и не больше maxAttempts попыток. От старых к новым.
+   */
+  async listForProcessing(accountId: number, o: { retryBefore: Date; maxAttempts: number; limit: number }): Promise<CallRow[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM calls
+        WHERE account_id = $1
+          AND (status IN ('downloaded', 'transcribed') OR (status = 'analyzed' AND posted IS NULL)
+               OR (status = 'failed' AND stage = ANY($2::text[]) AND attempts < $3 AND updated_at < $4))
+        ORDER BY called_at ASC, id ASC
+        LIMIT $5`,
+      [accountId, CALL_STAGES, o.maxAttempts, o.retryBefore, o.limit],
+    );
+    return rows.map(mapCall);
+  }
+
+  /** Расшифровка: готовая — статус transcribed; запущенная операция — статус остаётся downloaded. */
+  async setTranscript(id: number, transcript: TranscriptField, status: 'transcribed' | 'downloaded'): Promise<void> {
+    await this.db.query(`UPDATE calls SET transcript = $2::jsonb, status = $3, stage = NULL, error = NULL, updated_at = now() WHERE id = $1`, [id, JSON.stringify(transcript), status]);
+  }
+
+  async setAnalysis(id: number, analysis: Record<string, unknown>, transcript?: TranscriptField): Promise<void> {
+    await this.db.query(
+      `UPDATE calls SET analysis = $2::jsonb, transcript = COALESCE($3::jsonb, transcript), status = 'analyzed', stage = NULL, error = NULL, updated_at = now() WHERE id = $1`,
+      [id, JSON.stringify(analysis), transcript ? JSON.stringify(transcript) : null],
+    );
+  }
+
+  /** Примечание создано (status posted) или намеренно не пишется (status analyzed, posted — причина). */
+  async setPosted(id: number, posted: Record<string, unknown>, status: 'posted' | 'analyzed'): Promise<void> {
+    await this.db.query(`UPDATE calls SET posted = $2::jsonb, status = $3, stage = NULL, error = NULL, updated_at = now() WHERE id = $1`, [id, JSON.stringify(posted), status]);
+  }
+
+  /** Шаг упал: attempts + 1; возвращает новое число попыток. */
+  async bumpFailed(id: number, stage: CallStage, error: string): Promise<number> {
+    const { rows } = await this.db.query<{ attempts: number }>(`UPDATE calls SET status = 'failed', stage = $2, error = $3, attempts = attempts + 1, updated_at = now() WHERE id = $1 RETURNING attempts`, [id, stage, error.slice(0, 1000)]);
+    return rows[0]?.attempts ?? 0;
+  }
+
+  async markAlerted(id: number): Promise<void> {
+    await this.db.query(`UPDATE calls SET alerted_at = now() WHERE id = $1`, [id]);
+  }
+
+  async addCost(id: number, cost: Record<string, unknown>): Promise<void> {
+    await this.db.query(`UPDATE calls SET cost = COALESCE(cost, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`, [id, JSON.stringify(cost)]);
+  }
+
   async getSync(accountId: number, entity: CallEntity): Promise<CallsSync | null> {
     const { rows } = await this.db.query<{ last_updated_at: Date; last_run_at: Date | null; last_error: string | null }>('SELECT last_updated_at, last_run_at, last_error FROM calls_sync WHERE account_id = $1 AND entity = $2', [accountId, entity]);
     const r = rows[0];
@@ -173,10 +239,13 @@ function mapCall(r: Record<string, unknown>): CallRow {
     fileMime: (r.file_mime as string | null) ?? null,
     downloadedAt: (r.downloaded_at as Date | null) ?? null,
     fileDeletedAt: (r.file_deleted_at as Date | null) ?? null,
-    transcript: (r.transcript as Record<string, unknown> | null) ?? null,
+    transcript: (r.transcript as TranscriptField | null) ?? null,
     analysis: (r.analysis as Record<string, unknown> | null) ?? null,
     posted: (r.posted as Record<string, unknown> | null) ?? null,
     cost: (r.cost as Record<string, unknown> | null) ?? null,
+    attempts: Number(r.attempts ?? 0),
+    sttMode: (r.stt_mode as SttMode) ?? 'async',
+    alertedAt: (r.alerted_at as Date | null) ?? null,
     createdAt: r.created_at as Date,
     updatedAt: r.updated_at as Date,
   };

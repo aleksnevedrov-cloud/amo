@@ -63,6 +63,9 @@ function coreOf(db: Db, f: Fake, filesRoot: string): CallsCore {
     tokenService: { getAccessToken: async () => 'TOKEN' } as unknown as CallsCore['tokenService'],
     fetch: fakeFetch(f),
     filesRoot,
+    ai: async () => null,
+    env: {} as CallsCore['env'],
+    alerter: { alert: async () => undefined },
   };
 }
 
@@ -99,7 +102,7 @@ describe('разбор примечаний-звонков (без БД)', () =>
     expect((eHtml as Error).message).toContain('ответ не аудио (text/html)');
     expect(f.calls.filter((u) => u === LINK_404)).toHaveLength(1);
     const settings = callsSettingsSchema.parse({});
-    expect(settings).toMatchObject({ enabled: false, minDurationSec: 20, keepMp3Days: 30, sttProvider: 'speechkit', createTasks: true });
+    expect(settings).toMatchObject({ enabled: false, minDurationSec: 30, keepMp3Days: 30, sttProvider: 'speechkit', createTasks: true, analyzeEnabled: true, postNoteEnabled: true });
     expect(settings.checklist.reduce((s, c) => s + c.weight, 0)).toBe(100);
   });
 });
@@ -123,7 +126,7 @@ describe('опрос звонков на БД опта (миграции с ну
 
   it('выключено — amo не опрашивается; включили — первый опрос с момента включения', async () => {
     f.contactNotes = [note(1, 501, 'call_in', { link: LINK, duration: 185, phone: '79099500381', call_status: 4 })];
-    const off = await runCallsPoll(core, ACCOUNT, { now });
+    const off = await runCallsPoll(core, ACCOUNT, { now, process: false });
     expect(off).toMatchObject({ enabled: false, found: 0 });
     expect(f.calls).toHaveLength(0);
     const s = new OptSettingsRepo(db);
@@ -144,7 +147,7 @@ describe('опрос звонков на БД опта (миграции с ну
       note(5, 501, 'call_in', { duration: 90, phone: '79099500381' }),
     ];
     f.leadNotes = [note(6, 90025, 'call_out', { link: LINK_404, duration: 75, phone: '79000000006' })];
-    const r = await runCallsPoll(core, ACCOUNT, { now, sleep: async () => undefined });
+    const r = await runCallsPoll(core, ACCOUNT, { now, sleep: async () => undefined, process: false });
     expect(r).toMatchObject({ enabled: true, found: 6, inserted: 3, skippedShort: 2, noLink: 1, downloaded: 1, unavailable: 2, failed: 0, errors: [] });
     // Запрос примечаний — с отметки «сейчас минус 5 минут», страницами по 250, от старых к новым.
     const notesUrl = f.calls.find((u) => u.includes('/api/v4/contacts/notes?'))!;
@@ -178,7 +181,7 @@ describe('опрос звонков на БД опта (миграции с ну
   it('повторный опрос: дублей нет, записи журнала нет, отметка — с прошлого раза; сбой amo по сделкам не ломает контакты', async () => {
     const before = (await core.calls.list(ACCOUNT)).length;
     const calls0 = f.calls.length;
-    const r = await runCallsPoll(core, ACCOUNT, { now: () => new Date('2026-10-21T13:10:00Z'), sleep: async () => undefined });
+    const r = await runCallsPoll(core, ACCOUNT, { now: () => new Date('2026-10-21T13:10:00Z'), sleep: async () => undefined, process: false });
     expect(r).toMatchObject({ found: 6, inserted: 0, downloaded: 0, unavailable: 0, failed: 0 });
     expect((await core.calls.list(ACCOUNT)).length).toBe(before);
     expect(f.calls.slice(calls0).find((u) => u.includes('/api/v4/contacts/notes?'))).toContain(`filter[updated_at][from]=${Math.floor(Date.parse('2026-10-21T12:55:00Z') / 1000)}`);
@@ -186,7 +189,7 @@ describe('опрос звонков на БД опта (миграции с ну
     // Сделки: amo отвечает 500 — ошибка в результате и в calls_sync, звонки контактов всё равно собраны.
     const saved = core.fetch;
     core.fetch = (async (input: string | URL | Request, init?: RequestInit) => (String(input).includes('/api/v4/leads/notes?') ? new Response('boom', { status: 500 }) : saved(input, init))) as typeof fetch;
-    const r2 = await runCallsPoll(core, ACCOUNT, { now: () => new Date('2026-10-21T13:20:00Z') });
+    const r2 = await runCallsPoll(core, ACCOUNT, { now: () => new Date('2026-10-21T13:20:00Z'), process: false });
     expect(r2.errors).toEqual(['сделки: amo API GET /api/v4/leads/notes: HTTP 500']);
     expect((await core.calls.getSync(ACCOUNT, 'lead'))?.lastError).toContain('HTTP 500');
     core.fetch = saved;
@@ -198,7 +201,7 @@ describe('опрос звонков на БД опта (миграции с ну
     f.contactNotes = [note(7, 501, 'call_in', { link: 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-21/aaaaaaaa-0000-0000-0000-000000000007/x.mp3', duration: 40, phone: '79099500381' })];
     f.leadNotes = [];
     const calls0 = f.calls.length;
-    const r = await runCallsPoll(core, ACCOUNT, { now, sinceDays: 30, sleep: async () => undefined });
+    const r = await runCallsPoll(core, ACCOUNT, { now, sinceDays: 30, sleep: async () => undefined, process: false });
     expect(r).toMatchObject({ inserted: 1, found: 1 });
     expect(f.calls.slice(calls0).find((u) => u.includes('/api/v4/contacts/notes?'))).toContain(`filter[updated_at][from]=${Math.floor(now().getTime() / 1000) - 30 * 86_400}`);
     const row = (await core.calls.list(ACCOUNT, { limit: 1 }))[0]!;
@@ -212,7 +215,7 @@ describe('опрос звонков на БД опта (миграции с ну
     expect(existsSync(abs)).toBe(true);
     await db.query(`UPDATE calls SET downloaded_at = now() - interval '40 days' WHERE id = $1`, [ok.id]);
     f.contactNotes = [];
-    const all = await runCallsPollAll(core, { now, sleep: async () => undefined });
+    const all = await runCallsPollAll(core, { now, sleep: async () => undefined, process: false });
     expect(all.map((r) => [r.accountId, r.enabled, r.filesDeleted])).toEqual([[2, false, 0], [ACCOUNT, true, 1]]);
     expect(existsSync(abs)).toBe(false);
     const after = await core.calls.get(ACCOUNT, ok.id);
