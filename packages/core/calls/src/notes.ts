@@ -73,6 +73,26 @@ export async function fetchCallNotes(amo: AmoRaw, entity: CallEntity, since: Dat
   return { notes, pages, truncated: true };
 }
 
+/** Примечания-звонки одной сделки или контакта (все, без отметки), страницами по 250. */
+export async function fetchEntityCallNotes(amo: AmoRaw, entity: CallEntity, entityId: number): Promise<AmoCallNote[]> {
+  const base = `/api/v4/${entity === 'contact' ? 'contacts' : 'leads'}/${entityId}/notes`;
+  const notes: AmoCallNote[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const res = await amo.get<{ _embedded?: { notes?: AmoCallNote[] } }>(`${base}?filter[note_type][]=call_in&filter[note_type][]=call_out&order[created_at]=asc&limit=${NOTES_PAGE}&page=${page}`);
+    const rows = res?._embedded?.notes ?? [];
+    notes.push(...rows.map((n) => ({ ...n, entity_id: n.entity_id ?? entityId })));
+    if (rows.length < NOTES_PAGE) break;
+  }
+  return notes;
+}
+
+/** Контакты сделки (id). */
+export async function leadContactIds(amo: AmoRaw, leadId: number): Promise<number[]> {
+  const lead = await amo.get<{ _embedded?: { contacts?: { id: number }[] } }>(`/api/v4/leads/${leadId}?with=contacts`);
+  if (!lead) throw new Error(`сделка ${leadId} не найдена в amo`);
+  return (lead._embedded?.contacts ?? []).map((c) => c.id);
+}
+
 /** Хосты записей, которые скачиваем: ВАТС МегаФон (текущая) и OnlinePBX (старые ссылки, пробуем). */
 export function recordHostAllowed(link: string): boolean {
   try {

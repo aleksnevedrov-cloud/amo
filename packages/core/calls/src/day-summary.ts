@@ -55,7 +55,7 @@ export interface DaySummaryResult {
   waiting: number;
 }
 
-interface Group {
+export interface Group {
   key: string;
   leadId: number | null;
   contactId: number | null;
@@ -190,7 +190,7 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
   const groups = groupCalls(allowed, today);
   const queue = [...groups];
   await Promise.all(Array.from({ length: Math.min(GROUP_CONCURRENCY, queue.length) }, async () => {
-    for (let g = queue.shift(); g; g = queue.shift()) await summarizeGroup(deps, accountId, all, amo, g, r, now);
+    for (let g = queue.shift(); g; g = queue.shift()) await summarizeGroup(deps, accountId, all, amo, g, r);
   }));
   await journalRun(deps, accountId, r);
   return r;
@@ -205,59 +205,83 @@ async function journalRun(deps: CallsDeps, accountId: number, r: DaySummaryResul
   await deps.journal.add({ accountId, kind: CALL_DAY_RUN_KIND, summary: `Итог разговоров за день: ${parts.join(', ')}`, details: { ...r } });
 }
 
-async function summarizeGroup(deps: CallsDeps, accountId: number, all: Awaited<ReturnType<CallsDeps['settingsFor']>>, amo: AmoRaw, g: Group, r: DaySummaryResult, now: () => Date): Promise<void> {
-  const s = all.calls;
+/** Расчёт итога группы без записи куда-либо: разбор моделью, роли, текст примечания, стоимость. */
+export interface GroupAnalysis {
+  group: Group;
+  summary: DaySummary;
+  business: CallRow[];
+  rest: CallRow[];
+  /** Расшифровки с ролями говорящих (по id звонка). */
+  transcripts: Map<number, CallTranscript>;
+  noteText: string | null;
+  cost: { llmUsd: number; llmRub: number; llmInputTokens: number; llmOutputTokens: number; sttRub: number; sttUsd: number };
+  provider: string;
+  model: string;
+  attempts: number;
+  raw: string;
+}
+
+export async function analyzeGroup(deps: CallsDeps, accountId: number, g: Group): Promise<GroupAnalysis> {
+  const llm = await deps.llmFor(accountId);
+  if (!llm) throw new Error('нет ключа модели (вкладка «Модель»)');
+  const inputs: DayCallInput[] = g.calls.map((c) => ({ id: c.id, calledAt: c.calledAt, direction: c.direction, durationSec: c.durationSec, transcript: c.transcript as CallTranscript }));
+  const res = await analyzeDay(llm.llm, llm.route, { calls: inputs, dateLabel: dayLabel(g.day), pricing: llm.pricing });
+  const business = g.calls.filter((c) => res.summary.callIds.includes(c.id));
+  const rest = g.calls.filter((c) => !res.summary.callIds.includes(c.id));
+  const transcripts = new Map<number, CallTranscript>();
+  for (const c of g.calls) {
+    const t = c.transcript as CallTranscript;
+    const roles = new Map(res.summary.speakers.filter((x) => x.callId === c.id).map((x) => [x.tag, x.role]));
+    transcripts.set(c.id, roles.size ? { ...t, segments: t.segments.map((seg) => (seg.speaker && roles.has(seg.speaker) ? { ...seg, role: roles.get(seg.speaker) } : seg)) } : t);
+  }
+  const cost = { llmUsd: res.cost.usd, llmRub: res.cost.usd * llm.usdRubRate, llmInputTokens: res.cost.inputTokens, llmOutputTokens: res.cost.outputTokens, sttRub: g.calls.reduce((n, c) => n + Number((c.cost as { sttRub?: number } | null)?.sttRub ?? 0), 0), sttUsd: g.calls.reduce((n, c) => n + Number((c.cost as { sttUsd?: number } | null)?.sttUsd ?? 0), 0) };
+  return { group: g, summary: res.summary, business, rest, transcripts, noteText: business.length ? formatDayNote(g.day, res.summary, business) : null, cost, provider: res.provider, model: res.model, attempts: res.attempts, raw: res.raw };
+}
+
+/** Сохранить итог: роли в расшифровки, строка в call_day_summaries, примечание в amo (если есть деловые и включено), статусы звонков, журнал. */
+export async function persistGroup(deps: CallsDeps, accountId: number, s: CallsSettings, amo: AmoRaw, a: GroupAnalysis): Promise<{ summaryId: number; noteId: number | null }> {
+  const g = a.group;
   const where = g.leadId !== null ? `сделка ${g.leadId}` : `контакт ${g.contactId}`;
+  for (const [id, t] of a.transcripts) await deps.calls.setTranscript(id, t, 'transcribed');
+  const summaryId = await deps.days.insert({ accountId, leadId: g.leadId, contactId: g.contactId, day: g.day, business: a.business.length > 0, summary: a.summary, callIds: g.calls.map((c) => c.id), callsCount: a.summary.callsCount, totalDurationSec: a.summary.totalDuration, provider: a.provider, model: a.model, cost: a.cost });
+  let noteId: number | null = null;
+  if (a.noteText && s.postDayNote) {
+    const entity = g.leadId !== null ? 'lead' : 'contact';
+    const entityId = g.leadId ?? g.contactId ?? 0;
+    const posted = await amo.post<{ _embedded?: { notes?: { id: number }[] } }>(`/api/v4/${entity === 'lead' ? 'leads' : 'contacts'}/${entityId}/notes`, [{ note_type: 'common', params: { text: a.noteText } }]);
+    noteId = posted?._embedded?.notes?.[0]?.id ?? 0;
+    if (!noteId) throw new Error(`amo не вернул id примечания (${where})`);
+    await deps.days.setNote(summaryId, { noteId, entity, text: a.noteText });
+  }
+  await deps.calls.attachToSummary(a.business.map((c) => c.id), summaryId, noteId ? 'posted' : 'analyzed');
+  await deps.calls.attachToSummary(a.rest.map((c) => c.id), summaryId, 'analyzed');
+  await deps.journal.add({
+    accountId,
+    ...(g.leadId !== null ? { leadId: g.leadId } : {}),
+    kind: CALL_DAY_KIND,
+    summary: a.business.length ? `Итог разговоров за ${dayLabel(g.day)} (${where}): ${a.summary.callsCount} зв., ${mmss(a.summary.totalDuration)} — ${a.summary.summary.slice(0, 300)}; оценка ${a.summary.managerScore}/10${noteId ? `; примечание ${noteId}` : s.postDayNote ? '' : '; примечание выключено'}` : `Итог разговоров за ${dayLabel(g.day)} (${where}): деловых звонков нет — ${a.summary.summary.slice(0, 200)}; примечание не пишется`,
+    details: { summaryId, day: g.day, leadId: g.leadId, contactId: g.contactId, callIds: g.calls.map((c) => c.id), businessCallIds: a.business.map((c) => c.id), noteId, noteText: a.noteText, provider: a.provider, model: a.model, attempts: a.attempts, raw: a.raw, cost: a.cost },
+    inputTokens: a.cost.llmInputTokens,
+    outputTokens: a.cost.llmOutputTokens,
+    costUsd: a.cost.llmUsd,
+    costRub: a.cost.llmRub,
+  });
+  return { summaryId, noteId };
+}
+
+async function summarizeGroup(deps: CallsDeps, accountId: number, all: Awaited<ReturnType<CallsDeps['settingsFor']>>, amo: AmoRaw, g: Group, r: DaySummaryResult): Promise<void> {
   try {
-    const llm = await deps.llmFor(accountId);
-    if (!llm) throw new Error('нет ключа модели (вкладка «Модель»)');
-    const inputs: DayCallInput[] = g.calls.map((c) => ({ id: c.id, calledAt: c.calledAt, direction: c.direction, durationSec: c.durationSec, transcript: c.transcript as CallTranscript }));
-    const res = await analyzeDay(llm.llm, llm.route, { calls: inputs, dateLabel: dayLabel(g.day), pricing: llm.pricing });
-    const business = g.calls.filter((c) => res.summary.callIds.includes(c.id));
-    const rest = g.calls.filter((c) => !res.summary.callIds.includes(c.id));
-    // Роли говорящих — в реплики расшифровок.
-    for (const c of g.calls) {
-      const t = c.transcript as CallTranscript;
-      const roles = new Map(res.summary.speakers.filter((x) => x.callId === c.id).map((x) => [x.tag, x.role]));
-      if (!roles.size) continue;
-      await deps.calls.setTranscript(c.id, { ...t, segments: t.segments.map((seg) => (seg.speaker && roles.has(seg.speaker) ? { ...seg, role: roles.get(seg.speaker) } : seg)) }, 'transcribed');
-    }
-    const cost = { llmUsd: res.cost.usd, llmRub: res.cost.usd * llm.usdRubRate, llmInputTokens: res.cost.inputTokens, llmOutputTokens: res.cost.outputTokens, sttRub: g.calls.reduce((n, c) => n + Number((c.cost as { sttRub?: number } | null)?.sttRub ?? 0), 0), sttUsd: g.calls.reduce((n, c) => n + Number((c.cost as { sttUsd?: number } | null)?.sttUsd ?? 0), 0) };
-    const id = await deps.days.insert({ accountId, leadId: g.leadId, contactId: g.contactId, day: g.day, business: business.length > 0, summary: res.summary, callIds: g.calls.map((c) => c.id), callsCount: res.summary.callsCount, totalDurationSec: res.summary.totalDuration, provider: res.provider, model: res.model, cost });
+    const a = await analyzeGroup(deps, accountId, g);
+    const { noteId } = await persistGroup(deps, accountId, all.calls, amo, a);
     r.groups++;
     r.calls += g.calls.length;
-    let noteText: string | null = null;
-    let noteId: number | null = null;
-    if (business.length && s.postDayNote) {
-      noteText = formatDayNote(g.day, res.summary, business);
-      const entity = g.leadId !== null ? 'lead' : 'contact';
-      const entityId = g.leadId ?? g.contactId ?? 0;
-      const posted = await amo.post<{ _embedded?: { notes?: { id: number }[] } }>(`/api/v4/${entity === 'lead' ? 'leads' : 'contacts'}/${entityId}/notes`, [{ note_type: 'common', params: { text: noteText } }]);
-      noteId = posted?._embedded?.notes?.[0]?.id ?? 0;
-      if (!noteId) throw new Error(`amo не вернул id примечания (${where})`);
-      await deps.days.setNote(id, { noteId, entity, text: noteText });
-      r.notes++;
-    }
-    await deps.calls.attachToSummary(business.map((c) => c.id), id, noteId ? 'posted' : 'analyzed');
-    await deps.calls.attachToSummary(rest.map((c) => c.id), id, 'analyzed');
-    if (!business.length) r.noBusiness++;
-    await deps.journal.add({
-      accountId,
-      ...(g.leadId !== null ? { leadId: g.leadId } : {}),
-      kind: CALL_DAY_KIND,
-      summary: business.length ? `Итог разговоров за ${dayLabel(g.day)} (${where}): ${res.summary.callsCount} зв., ${mmss(res.summary.totalDuration)} — ${res.summary.summary.slice(0, 300)}; оценка ${res.summary.managerScore}/10${noteId ? `; примечание ${noteId}` : s.postDayNote ? '' : '; примечание выключено'}` : `Итог разговоров за ${dayLabel(g.day)} (${where}): деловых звонков нет — ${res.summary.summary.slice(0, 200)}; примечание не пишется`,
-      details: { summaryId: id, day: g.day, leadId: g.leadId, contactId: g.contactId, callIds: g.calls.map((c) => c.id), businessCallIds: business.map((c) => c.id), noteId, noteText, provider: res.provider, model: res.model, attempts: res.attempts, raw: res.raw, cost },
-      inputTokens: res.cost.inputTokens,
-      outputTokens: res.cost.outputTokens,
-      costUsd: res.cost.usd,
-      costRub: res.cost.usd * llm.usdRubRate,
-    });
+    if (noteId) r.notes++;
+    if (!a.business.length) r.noBusiness++;
   } catch (err) {
     // Ошибка по одной сделке не останавливает остальные: звонки группы — failed / day, повтор через 30 мин, 3 попытки.
     r.errors++;
-    const message = `${where}: ${(err as Error).message}`;
+    const where = g.leadId !== null ? `сделка ${g.leadId}` : `контакт ${g.contactId}`;
     const ctx = { deps, result: { failed: 0, alerts: 0 } };
-    for (const c of g.calls) await onFailure(ctx, c, message, 'day');
-    void now;
+    for (const c of g.calls) await onFailure(ctx, c, `${where}: ${(err as Error).message}`, 'day');
   }
 }

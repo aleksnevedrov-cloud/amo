@@ -104,7 +104,7 @@ export async function runCallsPoll(deps: CallsDeps, accountId: number, opts: Cal
   const maxDownloads = opts.maxDownloads ?? DOWNLOADS_PER_RUN;
   const queue: CallRow[] = [...(await deps.calls.listByStatus(accountId, 'new', maxDownloads)), ...(await deps.calls.listFailedAt(accountId, 'download', maxDownloads)).filter((c) => c.updatedAt < retryBefore)].slice(0, maxDownloads);
   for (const call of queue) {
-    const res = await downloadOne(deps, call, opts);
+    const res = await downloadCall(deps, call, opts);
     if (res === 'downloaded') r.downloaded++;
     else if (res === 'unavailable') r.unavailable++;
     else r.failed++;
@@ -184,7 +184,8 @@ export async function leadOfContact(amo: AmoRaw, contactId: number, pipelineId: 
   return result;
 }
 
-async function downloadOne(deps: CallsDeps, call: CallRow, opts: CallsPollOptions): Promise<'downloaded' | 'unavailable' | 'failed'> {
+/** Скачать запись одного звонка: downloaded / unavailable (конечный) / failed (повтор при опросе). */
+export async function downloadCall(deps: CallsDeps, call: CallRow, opts: Pick<CallsPollOptions, 'sleep'> = {}): Promise<'downloaded' | 'unavailable' | 'failed'> {
   try {
     const rec = await downloadRecord(call.link, { fetch: deps.fetch, ...(opts.sleep ? { sleep: opts.sleep } : {}) });
     const rel = callFileRel(call.accountId, call.id, call.recordKey, call.calledAt);

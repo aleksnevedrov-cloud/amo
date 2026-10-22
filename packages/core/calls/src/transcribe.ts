@@ -26,6 +26,8 @@ export interface TranscribeOptions {
   stt?: (preferred: SttProviderName) => CallStt | null;
   limit?: number;
   inlineWaitMs?: number;
+  /** Только эти звонки (демо по сделке). */
+  ids?: number[];
 }
 
 export interface TranscribeResult {
@@ -41,7 +43,7 @@ export interface TranscribeResult {
 export async function transcribeCalls(deps: CallsDeps, accountId: number, settings: CallsSettings, opts: TranscribeOptions = {}): Promise<TranscribeResult> {
   const now = opts.now ?? (() => new Date());
   const r: TranscribeResult = { picked: 0, transcribed: 0, pending: 0, unavailable: 0, failed: 0, alerts: 0 };
-  const rows = await deps.calls.listForTranscription(accountId, { retryBefore: new Date(now().getTime() - RETRY_FAILED_AFTER_MS), maxAttempts: MAX_ATTEMPTS, limit: opts.limit ?? TRANSCRIBE_LIMIT });
+  const rows = await deps.calls.listForTranscription(accountId, { retryBefore: new Date(now().getTime() - RETRY_FAILED_AFTER_MS), maxAttempts: MAX_ATTEMPTS, limit: opts.limit ?? TRANSCRIBE_LIMIT, ...(opts.ids ? { ids: opts.ids } : {}) });
   r.picked = rows.length;
   if (!rows.length) return r;
   const ctx: Ctx = {

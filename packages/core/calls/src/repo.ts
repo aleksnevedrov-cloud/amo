@@ -151,15 +151,23 @@ export class CallsRepo {
     return new Set(rows.map((r) => Number(r.note_id)));
   }
 
-  /** На расшифровку: скачанные (в т. ч. с запущенной операцией) и упавшие на расшифровке не раньше retryBefore, не больше maxAttempts. */
-  async listForTranscription(accountId: number, o: { retryBefore: Date; maxAttempts: number; limit: number }): Promise<CallRow[]> {
+  /** Звонки по id примечаний amo (для демо по сделке: что уже в базе). */
+  async byNoteIds(accountId: number, noteIds: number[]): Promise<CallRow[]> {
+    if (!noteIds.length) return [];
+    const { rows } = await this.db.query('SELECT * FROM calls WHERE account_id = $1 AND note_id = ANY($2::bigint[]) ORDER BY called_at ASC, id ASC', [accountId, noteIds]);
+    return rows.map(mapCall);
+  }
+
+  /** На расшифровку: скачанные (в т. ч. с запущенной операцией) и упавшие на расшифровке не раньше retryBefore, не больше maxAttempts; ids — только эти. */
+  async listForTranscription(accountId: number, o: { retryBefore: Date; maxAttempts: number; limit: number; ids?: number[] }): Promise<CallRow[]> {
     const { rows } = await this.db.query(
       `SELECT * FROM calls
         WHERE account_id = $1
           AND (status = 'downloaded' OR (status = 'failed' AND stage = 'transcribe' AND attempts < $2 AND updated_at < $3))
+          AND ($5::bigint[] IS NULL OR id = ANY($5::bigint[]))
         ORDER BY called_at ASC, id ASC
         LIMIT $4`,
-      [accountId, o.maxAttempts, o.retryBefore, o.limit],
+      [accountId, o.maxAttempts, o.retryBefore, o.limit, o.ids ?? null],
     );
     return rows.map(mapCall);
   }
