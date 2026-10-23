@@ -81,6 +81,7 @@ describe('итог по одной сделке — calls-demo (БД розни�
       if (path.startsWith(`/api/v4/leads/${LEAD}/notes?filter[note_type][]=common`)) return { _embedded: { notes: [{ id: 70, created_by: 5, created_at: T('2026-10-22T09:00:00Z'), note_type: 'common', entity_id: LEAD, params: { text: 'Клиент из Люберец, объект — коттедж' } }] } } as never;
       return null;
     },
+    patch: async () => null,
     post: async (path, body) => {
       posts.push({ path, text: (body as { params: { text: string } }[])[0]?.params.text ?? '' });
       return { _embedded: { notes: [{ id: 900 + posts.length }] } } as never;

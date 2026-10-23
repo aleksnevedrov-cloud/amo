@@ -1,5 +1,6 @@
 import type { Db } from '@core/db';
 import type { DaySummary } from './day-analyze.ts';
+import type { RefusalAnalysis } from './refusal-analyze.ts';
 import type { CallEntity, ParsedCallNote } from './notes.ts';
 import type { CallTranscript, PendingTranscription, SttMode } from './stt.ts';
 
@@ -388,4 +389,99 @@ function mapDay(r: Record<string, unknown>): DaySummaryRow {
     cost: (r.cost as Record<string, unknown> | null) ?? null,
     createdAt: r.created_at as Date,
   };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ» — одна строка на один переход (event_id).
+
+export interface RefusalRow {
+  id: number;
+  accountId: number;
+  leadId: number;
+  eventId: string;
+  changedAt: Date;
+  statusId: number;
+  pipelineId: number;
+  analysis: RefusalAnalysis | null;
+  counts: { calls: number; messages: number; emails: number; notes: number } | null;
+  itemIds: string[];
+  noteId: number | null;
+  noteText: string | null;
+  taskId: number | null;
+  taskUpdated: boolean;
+  provider: string | null;
+  model: string | null;
+  cost: Record<string, unknown> | null;
+  error: string | null;
+  attempts: number;
+  createdAt: Date;
+}
+
+const mapRefusal = (r: Record<string, unknown>): RefusalRow => ({
+  id: Number(r.id),
+  accountId: Number(r.account_id),
+  leadId: Number(r.lead_id),
+  eventId: String(r.event_id),
+  changedAt: r.changed_at as Date,
+  statusId: Number(r.status_id),
+  pipelineId: Number(r.pipeline_id),
+  analysis: (r.analysis as RefusalAnalysis | null) ?? null,
+  counts: (r.counts as RefusalRow['counts']) ?? null,
+  itemIds: (r.item_ids as string[]) ?? [],
+  noteId: r.note_id === null || r.note_id === undefined ? null : Number(r.note_id),
+  noteText: (r.note_text as string | null) ?? null,
+  taskId: r.task_id === null || r.task_id === undefined ? null : Number(r.task_id),
+  taskUpdated: Boolean(r.task_updated),
+  provider: (r.provider as string | null) ?? null,
+  model: (r.model as string | null) ?? null,
+  cost: (r.cost as Record<string, unknown> | null) ?? null,
+  error: (r.error as string | null) ?? null,
+  attempts: Number(r.attempts ?? 0),
+  createdAt: r.created_at as Date,
+});
+
+export class RefusalsRepo {
+  constructor(private readonly db: Db) {}
+
+  /** Занять переход: строка на событие; уже есть — null (защита от дублей при повторном событии / перекрытии окон опроса). */
+  async claim(r: { accountId: number; leadId: number; eventId: string; changedAt: Date; statusId: number; pipelineId: number }): Promise<number | null> {
+    const { rows } = await this.db.query<{ id: string }>(
+      `INSERT INTO refusal_analyses (account_id, lead_id, event_id, changed_at, status_id, pipeline_id) VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (account_id, event_id) DO NOTHING RETURNING id`,
+      [r.accountId, r.leadId, r.eventId, r.changedAt, r.statusId, r.pipelineId],
+    );
+    return rows[0] ? Number(rows[0].id) : null;
+  }
+
+  async setResult(id: number, r: { analysis: RefusalAnalysis | null; counts: RefusalRow['counts']; itemIds: string[]; noteId: number | null; noteText: string | null; taskId: number | null; taskUpdated: boolean; provider: string | null; model: string | null; cost: Record<string, unknown> | null }): Promise<void> {
+    await this.db.query(
+      `UPDATE refusal_analyses SET analysis = $2::jsonb, counts = $3::jsonb, item_ids = $4::jsonb, note_id = $5, note_text = $6, task_id = $7, task_updated = $8, provider = $9, model = $10, cost = $11::jsonb, error = NULL, updated_at = now() WHERE id = $1`,
+      [id, r.analysis ? JSON.stringify(r.analysis) : null, r.counts ? JSON.stringify(r.counts) : null, JSON.stringify(r.itemIds), r.noteId, r.noteText, r.taskId, r.taskUpdated, r.provider, r.model, r.cost ? JSON.stringify(r.cost) : null],
+    );
+  }
+
+  async setError(id: number, error: string): Promise<void> {
+    await this.db.query(`UPDATE refusal_analyses SET error = $2, attempts = attempts + 1, updated_at = now() WHERE id = $1`, [id, error.slice(0, 2000)]);
+  }
+
+  async get(accountId: number, id: number): Promise<RefusalRow | null> {
+    const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 AND id = $2', [accountId, id]);
+    return rows[0] ? mapRefusal(rows[0]) : null;
+  }
+
+  /** Незавершённые (ошибка, попыток меньше max) — повтор при следующем опросе. */
+  async listRetry(accountId: number, maxAttempts: number, limit = 20): Promise<RefusalRow[]> {
+    const { rows } = await this.db.query(`SELECT * FROM refusal_analyses WHERE account_id = $1 AND note_id IS NULL AND error IS NOT NULL AND attempts < $2 ORDER BY changed_at ASC LIMIT $3`, [accountId, maxAttempts, limit]);
+    return rows.map(mapRefusal);
+  }
+
+  async forLead(accountId: number, leadId: number): Promise<RefusalRow[]> {
+    const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 AND lead_id = $2 ORDER BY changed_at ASC, id ASC', [accountId, leadId]);
+    return rows.map(mapRefusal);
+  }
+
+  async list(accountId: number, limit = 100): Promise<RefusalRow[]> {
+    const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 ORDER BY id ASC LIMIT $2', [accountId, limit]);
+    return rows.map(mapRefusal);
+  }
 }

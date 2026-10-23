@@ -1,6 +1,6 @@
 /* eslint-disable no-console -- консольная утилита: вывод для заказчика */
 import { loadEnv } from '@core/shared';
-import { runCallsDemo } from '@core/calls';
+import { runCallsDemo, runRefusalDemo } from '@core/calls';
 import { buildCallsDeps } from './calls-deps.ts';
 
 /**
@@ -9,6 +9,11 @@ import { buildCallsDeps } from './calls-deps.ts';
  * Без --post ничего не пишет в amoCRM и таблицы итогов — печатает хронологию (первые 30 записей), итог и стоимость.
  *
  *   docker compose exec worker node apps/worker/dist/calls-demo.js --lead <id сделки> [--date ГГГГ-ММ-ДД] [--post] [--account <id>]
+ *
+ * С --refusal (RFD-AI-AGENT-REFUSAL-ANALYSIS) — анализ сделки при отказе за всю её жизнь: без --post только вывод, с --post —
+ * примечание в сделку и строки в задачу администратора (один раз на переход).
+ *
+ *   docker compose exec worker node apps/worker/dist/calls-demo.js --lead <id сделки> --refusal [--post]
  */
 const args = parseArgs(process.argv.slice(2));
 const leadId = Number(args.lead);
@@ -23,6 +28,12 @@ try {
   const accountId = accounts[0];
   if (!accountId) fail('подключённых аккаунтов нет');
   if (accounts.length > 1) console.log(`Аккаунтов несколько, берём ${accountId}; другой — --account <id>`);
+  if (args.refusal === true) {
+    const r = await runRefusalDemo(deps, { accountId, leadId, post: args.post === true, out: (line) => console.log(line) });
+    console.log(`\nИтого: записей ленты ${r.items} (в разбор ${r.used}), звонков ${r.calls}, без расшифровки ${r.notReady}${r.posted ? `, опубликовано: примечание ${r.posted.noteId}${r.posted.taskUpdated ? `, задача ${r.posted.taskId}` : ''}` : r.already ? ', уже было опубликовано' : ''}`);
+    await close();
+    process.exit(0);
+  }
   const r = await runCallsDemo(deps, { accountId, leadId, date, post: args.post === true, out: (line) => console.log(line) });
   console.log(`\nИтого: день ${r.day || '—'}, звонков ${r.calls}, расшифровано ${r.transcribed}, не готово ${r.notReady}, записей ленты ${r.items} (новых ${r.newItems})${r.posted ? `, опубликовано: итог ${r.posted.summaryId}${r.posted.noteId ? `, примечание ${r.posted.noteId}` : ''}` : ''}`);
 } finally {

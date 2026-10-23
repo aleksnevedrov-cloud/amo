@@ -242,6 +242,21 @@ export const widgetSettingsSchema = z
       })
       .strict()
       .default({}),
+    /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
+    refusal: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** Этап «Отказ». */
+        statusId: z.number().int().positive().default(143),
+        /** Воронки, где срабатывает (по умолчанию «Двери»). */
+        pipelineIds: z.array(z.number().int().positive()).max(50).default([1873498]),
+        /** Администраторы — ответственные по задаче автоматизации; пусто — любая новая открытая задача сделки. */
+        adminUserIds: z.array(z.number().int().positive()).max(50).default([]),
+        /** Дописывать причину отказа в задачу администратора. */
+        updateTask: z.boolean().default(true),
+      })
+      .strict()
+      .default({}),
     /** Разбор файлов и фото (фаза 3). */
     vision: z
       .object({

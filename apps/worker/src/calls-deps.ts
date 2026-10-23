@@ -1,5 +1,5 @@
 import { AmoOAuth, TokenService } from '@core/amo';
-import { CallsRepo, DaySummariesRepo, type CallsDeps } from '@core/calls';
+import { CallsRepo, DaySummariesRepo, RefusalsRepo, type CallsDeps } from '@core/calls';
 import { AccountsRepo, createPool, JournalRepo, PgTokenStore, SecretsRepo, SettingsRepo } from '@core/db';
 import { createAiProvider, resolveRoute } from '@retail/agent';
 import { buildLocalSources } from './local-sources.ts';
@@ -16,6 +16,7 @@ export function buildCallsDeps(env: Env): { deps: CallsDeps; settings: SettingsR
   const deps: CallsDeps = {
     calls: new CallsRepo(db),
     days: new DaySummariesRepo(db),
+    refusals: new RefusalsRepo(db),
     journal: new JournalRepo(db),
     accounts: new AccountsRepo(db),
     tokenService,

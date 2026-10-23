@@ -9,6 +9,8 @@ export * from './errors.ts';
 export * from './job.ts';
 export * from './kinds.ts';
 export * from './notes.ts';
+export * from './refusal-analyze.ts';
+export * from './refusal.ts';
 export * from './repo.ts';
 export * from './stt.ts';
 export * from './transcribe.ts';

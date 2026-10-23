@@ -22,11 +22,12 @@ export interface AmoCallNote {
 export interface AmoRaw {
   get<T>(path: string): Promise<T | null>;
   post<T>(path: string, body: unknown): Promise<T | null>;
+  patch<T>(path: string, body: unknown): Promise<T | null>;
 }
 
-/** GET / POST на домене аккаунта: bearer, повтор при 429 до 3 раз, 204 → null, остальные ошибки — AmoError. */
+/** GET / POST / PATCH на домене аккаунта: bearer, повтор при 429 до 3 раз, 204 → null, остальные ошибки — AmoError. */
 export function amoRaw(accountDomain: string, getAccessToken: () => Promise<string>, fetchImpl: typeof fetch, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): AmoRaw {
-  const request = async <T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T | null> => {
+  const request = async <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T | null> => {
     for (let attempt = 0; ; attempt++) {
       const token = await getAccessToken();
       const res = await fetchImpl(`https://${accountDomain}${path}`, {
@@ -44,7 +45,7 @@ export function amoRaw(accountDomain: string, getAccessToken: () => Promise<stri
       return (await res.json()) as T;
     }
   };
-  return { get: (path) => request('GET', path), post: (path, body) => request('POST', path, body) };
+  return { get: (path) => request('GET', path), post: (path, body) => request('POST', path, body), patch: (path, body) => request('PATCH', path, body) };
 }
 
 export type CallEntity = 'contact' | 'lead';

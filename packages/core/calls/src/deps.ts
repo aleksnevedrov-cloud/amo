@@ -2,7 +2,7 @@ import type { TokenService } from '@core/amo';
 import type { AccountsRepo, JournalRepo, WidgetSettings } from '@core/db';
 import type { ChatRoute, LlmGateway, PricingOverrides } from '@core/llm';
 import type { Alerter } from '@core/shared';
-import type { CallsRepo, DaySummariesRepo } from './repo.ts';
+import type { CallsRepo, DaySummariesRepo, RefusalsRepo } from './repo.ts';
 
 /** Настройки звонков — блок calls настроек виджета розницы. */
 export type CallsSettings = WidgetSettings['calls'];
@@ -22,6 +22,8 @@ export interface CallsLlm {
 export interface CallsDeps {
   calls: CallsRepo;
   days: DaySummariesRepo;
+  /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализы сделок при отказе. */
+  refusals: RefusalsRepo;
   journal: JournalRepo;
   accounts: Pick<AccountsRepo, 'get'>;
   tokenService: Pick<TokenService, 'getAccessToken'>;

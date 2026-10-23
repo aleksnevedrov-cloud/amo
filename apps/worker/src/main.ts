@@ -26,7 +26,7 @@ import { KnowledgeRepo } from '@retail/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
 import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail/agent';
 import { buildLocalSources } from './local-sources.ts';
-import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, runCallsPollAll, runDaySummaryIfDue, type CallsDeps } from '@core/calls';
+import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, REFUSAL_EVERY_MS, REFUSAL_JOB, RefusalsRepo, runCallsPollAll, runDaySummaryIfDue, runRefusalPollAll, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -134,6 +134,7 @@ const daySummaries = new DaySummariesRepo(db);
 const callsDeps: CallsDeps = {
   calls: callsRepo,
   days: daySummaries,
+  refusals: new RefusalsRepo(db),
   journal,
   accounts,
   tokenService,
@@ -202,6 +203,8 @@ await callsQueue.upsertJobScheduler(CALLS_POLL_JOB, { every: CALLS_POLL_EVERY_MS
 await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVERY_MS }, { name: CALLS_DAY_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 // Файлы Wazzup в обе стороны (RFD-AI-AGENT-WA-FILES): раз в 5 минут, тем же DocumentService, что вложения писем; не больше 2 файлов одновременно.
 await callsQueue.upsertJobScheduler(WAZZUP_FILES_JOB, { every: WAZZUP_FILES_EVERY_MS }, { name: WAZZUP_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Анализ сделки при переносе в «Отказ» (RFD-AI-AGENT-REFUSAL-ANALYSIS): события lead_status_changed раз в 5 минут.
+await callsQueue.upsertJobScheduler(REFUSAL_JOB, { every: REFUSAL_EVERY_MS }, { name: REFUSAL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 const callsWorker = new Worker(
   CALLS_QUEUE,
   async (job) => {
@@ -211,6 +214,11 @@ const callsWorker = new Worker(
       return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
     }
     if (job.name === WAZZUP_FILES_JOB) return runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
+    if (job.name === REFUSAL_JOB) {
+      const results = await runRefusalPollAll(callsDeps);
+      for (const r of results) if (r.matched || r.retried || r.errors) log.info({ ...r }, 'refusal-poll: переходы в «Отказ»');
+      return { accounts: results.length, analyzed: results.reduce((n, r) => n + r.analyzed, 0) };
+    }
     if (job.name === CALLS_DAY_JOB) {
       // Раз в 5 минут: у кого наступило время итога (calls.daySummaryTime) и сегодня не запускали — один запуск; иначе ничего.
       const out: unknown[] = [];

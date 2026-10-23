@@ -31,7 +31,9 @@ export type JournalKind =
   | 'call_fetch'
   | 'call_error'
   | 'call_day'
-  | 'call_day_run';
+  | 'call_day_run'
+  /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
+  | 'refusal';
 
 export interface JournalEntry {
   accountId: number;

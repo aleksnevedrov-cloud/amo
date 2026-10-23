@@ -1,6 +1,6 @@
 // Помощники тестов звонков: поддельный fetch amoCRM + ВАТС и зависимости модуля на тестовой БД.
 import { AccountsRepo, JournalRepo, SettingsRepo, type Db } from '@core/db';
-import { CallsRepo, DaySummariesRepo, type CallsDeps } from '../src/index.ts';
+import { CallsRepo, DaySummariesRepo, RefusalsRepo, type CallsDeps } from '../src/index.ts';
 
 const T0 = Math.floor(Date.parse('2026-10-21T12:05:51Z') / 1000);
 
@@ -43,6 +43,7 @@ export function depsOf(db: Db, fetchImpl: typeof fetch, filesRoot: string, extra
   return {
     calls: new CallsRepo(db),
     days: new DaySummariesRepo(db),
+    refusals: new RefusalsRepo(db),
     journal: new JournalRepo(db),
     accounts: new AccountsRepo(db),
     tokenService: { getAccessToken: async () => 'TOKEN' },

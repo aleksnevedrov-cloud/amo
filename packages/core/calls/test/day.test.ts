@@ -103,6 +103,7 @@ describe('итог дня по всему общению на БД розниц�
       if (path.startsWith('/api/v4/leads/notes?')) return { _embedded: { notes: Object.entries(state.notes).flatMap(([lead, ns]) => ns.map((n) => ({ ...n, note_type: 'common', entity_id: Number(lead) }))) } } as never;
       return null;
     },
+    patch: async () => null,
     post: async (path, body) => {
       state.posts.push({ path, text: (body as { params: { text: string } }[])[0]?.params.text ?? '' });
       return { _embedded: { notes: [{ id: 500 + state.posts.length }] } } as never;
@@ -366,6 +367,7 @@ describe('итог дня по всему общению на БД розниц�
         return null;
       },
       post: async () => null,
+      patch: async () => null,
     };
     const before = (await deps.calls.list(ACC, { limit: 500 })).length;
     const p = await previewCallsBackfill(deps, ACC, 30, { now: () => NOW, amo: amoNotes });
@@ -415,7 +417,7 @@ describe('ошибки и повторы (часы от реального вр�
     };
     let starts = 0;
     const counting: CallStt = { name: 'speechkit', start: async (...a) => (starts++, stt.start(...a)), poll: (...a) => stt.poll(...a) };
-    const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null }, transcribeOptions: { stt: () => counting, inlineWaitMs: 5000 } });
+    const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null, patch: async () => null }, transcribeOptions: { stt: () => counting, inlineWaitMs: 5000 } });
     expect((await poll()).transcribed).toMatchObject({ restarted: 0, picked: 1, failed: 1, alerts: 0 });
     let row = (await deps.calls.list(ACC))[0]!;
     expect([row.status, row.stage, row.attempts, row.error]).toEqual(['failed', 'transcribe', 0, 'сеть: fetch failed: ENOTFOUND getaddrinfo ENOTFOUND operations.api.cloud.yandex.net']);
@@ -433,7 +435,7 @@ describe('ошибки и повторы (часы от реального вр�
 
   it('расшифровка падает → failed, повтор через 30 мин, после 3 попыток — один алерт в Telegram и остановка', async () => {
     const stt = new FakeSpeechKit(1, true);
-    const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null }, transcribeOptions: { stt: () => stt } });
+    const poll = () => runCallsPoll(deps, ACC, { now, sleep: async () => undefined, amo: { get: async () => null, post: async () => null, patch: async () => null }, transcribeOptions: { stt: () => stt } });
     expect((await poll()).transcribed).toMatchObject({ picked: 1, failed: 1, alerts: 0 });
     const row = (await deps.calls.list(ACC)).find((c) => c.noteId === 2)!;
     expect([row.status, row.stage, row.attempts, row.error]).toEqual(['failed', 'transcribe', 1, 'SpeechKit: HTTP 500']);

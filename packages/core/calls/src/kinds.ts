@@ -7,3 +7,5 @@ export const CALL_ERROR_KIND: JournalKind = 'call_error';
 export const CALL_DAY_KIND: JournalKind = 'call_day';
 /** Итог задания calls-day-summary по аккаунту: сделок, звонков, примечаний, ошибок. */
 export const CALL_DAY_RUN_KIND: JournalKind = 'call_day_run';
+/** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
+export const REFUSAL_KIND: JournalKind = 'refusal';
