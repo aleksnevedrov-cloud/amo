@@ -10,7 +10,7 @@ import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db 
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { CALL_DAY_KIND, fetchStatusEvents, findAdminTask, formatRefusalNote, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runDaySummaryIfDue, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
+import { CALL_DAY_KIND, fetchStatusEvents, findAdminTask, formatRefusalNote, recordKeyOf, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runDaySummaryIfDue, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
 import { depsOf } from './helpers.ts';
 
 const ACC = 1;
@@ -388,6 +388,24 @@ describe('анализ сделки при переносе в «Отказ» (�
     expect(await poll(at('2026-10-23T21:01:00Z'))).toMatchObject({ analyzed: 1, postponed: 0, noData: 1 });
     expect(state.posts.at(-1)?.text).toContain('Факты общения: звонок исх. 23.10, 22:58 (0:50) — запись в amo не получена');
     await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7], delayMin: 0 } }));
+  });
+
+  it('«90209»: звонок контакта уже в calls от calls-poll без lead_id (сделка создана той же минутой) → найден по примечанию amo, привязан к сделке, в анализе', async () => {
+    lead(1014, at('2026-10-23T21:25:00Z')); // сделка создана в ту же минуту, что звонок
+    state.contacts[1014] = [514];
+    const link = 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-23/aaaaaaaa-0000-0000-0000-000000009105/x.mp3';
+    state.callNotes['contact:514'] = [{ id: 9105, created_at: unix(at('2026-10-23T21:25:30Z')), note_type: 'call_in', params: { link, duration: 163, phone: '79099500385' } }];
+    // calls-poll забрал звонок раньше анализа: сделки у контакта ещё не было → lead_id пуст; расшифровка уже есть.
+    const [id] = await deps.calls.insertNew(ACC, [{ noteId: 9105, entity: 'contact', entityId: 514, direction: 'in', link, recordKey: recordKeyOf(link), phone: '79099500385', durationSec: 163, callStatus: 4, calledAt: at('2026-10-23T21:25:30Z'), noteUpdatedAt: at('2026-10-23T21:25:30Z'), managerId: 5, leadId: null }], 'async');
+    await deps.calls.setTranscript(id as number, { ...transcript, durationSec: 163 }, 'transcribed');
+    state.tasks[1014] = [];
+    state.events.push({ id: 'e15', entity_id: 1014, created_at: unix(at('2026-10-23T21:30:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    const r = await poll(at('2026-10-23T21:35:00Z'));
+    expect(r).toMatchObject({ analyzed: 1, notes: 1, noData: 0, postponed: 0, errors: 0 });
+    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Анализ сделки при отказе (24.10.2026): 1 звонок (2:43), 0 сообщений, 0 писем за весь период'); // 21:30 UTC — уже 24.10 по Москве
+    expect(llm.asked.at(-1)).toContain('[call:');
+    expect((await deps.calls.get(ACC, id as number))?.leadId).toBe(1014);
+    expect((await deps.calls.list(ACC, { leadId: 1014 })).map((c) => c.noteId)).toEqual([9105]);
   });
 
   it('разбор событий amo и формат примечания без общения', async () => {

@@ -153,6 +153,12 @@ export class CallsRepo {
   }
 
   /** Звонки по id примечаний amo (для демо по сделке: что уже в базе). */
+  /** Звонок попал в calls опросом раньше, чем появилась сделка (lead_id пуст или другая сделка контакта) — привязать к сделке анализа. */
+  async setLeadId(ids: number[], leadId: number): Promise<void> {
+    if (!ids.length) return;
+    await this.db.query('UPDATE calls SET lead_id = $2, updated_at = now() WHERE id = ANY($1::bigint[]) AND (lead_id IS NULL OR lead_id <> $2) AND day_summary_id IS NULL', [ids, leadId]);
+  }
+
   async byNoteIds(accountId: number, noteIds: number[]): Promise<CallRow[]> {
     if (!noteIds.length) return [];
     const { rows } = await this.db.query('SELECT * FROM calls WHERE account_id = $1 AND note_id = ANY($2::bigint[]) ORDER BY called_at ASC, id ASC', [accountId, noteIds]);

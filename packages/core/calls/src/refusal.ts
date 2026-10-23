@@ -152,6 +152,8 @@ export const managerLine = (m: ManagerRefusal): string => `Причина по �
 const stamp = (d: Date): string => d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 export interface CallSync {
+  /** Примечания-звонки сделки и контактов с записью не короче minDurationSec — по ним звонки берутся из calls независимо от lead_id. */
+  noteIds: number[];
   /** Факты общения без текста: короткие звонки, звонки без записи. */
   facts: string[];
   /** Звонков не короче minDurationSec, у которых записи в amo ещё нет (свежих) — анализ стоит отложить. */
@@ -193,7 +195,7 @@ export async function syncLeadCalls(deps: CallsDeps, accountId: number, amo: Amo
     facts.push(`${label} — запись в amo не получена`);
   }
   const ids = toInsert.length ? await deps.calls.insertNew(accountId, toInsert, 'async') : [];
-  return { facts, awaitingRecord, inserted: ids.filter((x) => x !== null).length, notes: seen.size };
+  return { noteIds: toInsert.map((c) => c.noteId), facts, awaitingRecord, inserted: ids.filter((x) => x !== null).length, notes: seen.size };
 }
 
 interface AmoTask {
@@ -297,16 +299,24 @@ export async function analyzeLeadRefusal(deps: CallsDeps, accountId: number, inp
   const empty = { leadId: input.leadId, changedAt: input.changedAt, since, items: [] as TimelineItem[], used: [] as TimelineItem[], truncated: [] as string[], counts: { calls: 0, messages: 0, emails: 0, notes: 0, totalCallDuration: 0 }, warnings: [] as string[], notReady: 0, transcripts: new Map<number, CallTranscript>(), facts: sync.facts, manager, awaitingRecord: sync.awaitingRecord, analysis: null, noteText: '', cost: { llmUsd: 0, llmRub: 0, llmInputTokens: 0, llmOutputTokens: 0, sttRub: 0, sttUsd: 0 }, provider: null, model: null, attempts: 0, raw: null };
   if (o.abortIfAwaitingRecord && sync.awaitingRecord) return { ...empty, postponed: true };
 
-  // Звонки сделки: скачать и расшифровать те, что ещё без расшифровки (асинхронный SpeechKit, ожидание до waitMs).
-  let calls = await deps.calls.list(accountId, { leadId: input.leadId, limit: 500 });
+  // Звонки сделки: по lead_id и по примечаниям amo (звонок контакта мог попасть в calls опросом раньше, чем появилась сделка, —
+  // «90209»: lead_id пуст или другая сделка контакта; привязываем к этой сделке). Скачать и расшифровать те, что без расшифровки.
+  const loadCalls = async (): Promise<CallRow[]> => {
+    const byLead = await deps.calls.list(accountId, { leadId: input.leadId, limit: 500 });
+    const byNotes = await deps.calls.byNoteIds(accountId, sync.noteIds);
+    const seen = new Set<number>();
+    return [...byLead, ...byNotes].filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true))).sort((a, b) => a.calledAt.getTime() - b.calledAt.getTime() || a.id - b.id);
+  };
+  let calls = await loadCalls();
+  await deps.calls.setLeadId(calls.filter((c) => c.leadId !== input.leadId).map((c) => c.id), input.leadId);
   const ids = calls.map((c) => c.id);
   for (const c of calls) if (c.status === 'new' || (c.status === 'failed' && c.stage === 'download')) await downloadCall(deps, c, { sleep });
   const deadline = now().getTime() + (o.waitMs ?? all.calls.daySummaryTimeoutSec * 1000);
   const pending = (rows: CallRow[]) => rows.filter((r) => r.status === 'downloaded' || (r.status === 'failed' && r.stage === 'transcribe'));
-  calls = await deps.calls.list(accountId, { leadId: input.leadId, limit: 500 });
+  calls = await loadCalls();
   while (pending(calls).length) {
     await transcribeCalls(deps, accountId, all.calls, { now, sleep, ids, inlineWaitMs: 60_000, ...(o.stt ? { stt: o.stt } : {}) });
-    calls = await deps.calls.list(accountId, { leadId: input.leadId, limit: 500 });
+    calls = await loadCalls();
     if (!calls.some((r) => r.status === 'downloaded') || now().getTime() >= deadline) break;
     await sleep(WAIT_POLL_MS);
   }

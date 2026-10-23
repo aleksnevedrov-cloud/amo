@@ -309,6 +309,8 @@ docker compose exec worker node apps/worker/dist/calls-demo.js --lead 30033216 -
 | 5. Пересчёт | `calls-demo --lead <id> --refusal --post`: новая строка анализа (ключ по `closed_at`), новое примечание, старые не трогаются; задача администратора дополняется и при повторном анализе |
 | 6. Тесты | `refusal.test.ts` (+3): звонок в amo есть, в `calls` нет → забран, расшифрован, в анализе; поля → в запрос и строкой в примечании и задаче; короткий звонок + чат без текста → факты, без «общения нет», модель не вызывается; задержка 15 мин, звонок без записи → отложено, запись появилась → анализ со звонком; записи нет дольше часа → анализ с фактом |
 
+Доработка после показа «90209» без публикации (звонок по-прежнему не найден): примечание-звонок контакта из amo читалось, но `insertNew` молча пропускал его как дубль — `calls-poll` забрал звонок раньше (сделка создана той же минутой, что звонок, `lead_id` у строки пуст или другая сделка контакта), а анализ брал звонки только по `lead_id`. Теперь звонки берутся и по `note_id` примечаний сделки и её контактов, строки без этой сделки привязываются к ней (`setLeadId`, кроме уже вошедших в итог дня). Тест: звонок контакта уже в `calls` без `lead_id`, сделка создана в ту же минуту → найден, привязан, в анализе.
+
 Пересчёт по двум сделкам после развёртывания (старые примечания 256423634 и 256425276 остаются):
 ```bash
 cd /opt/ai-door/src && docker compose exec worker node apps/worker/dist/calls-demo.js --lead 30033396 --refusal --post
@@ -444,7 +446,7 @@ docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage 
 |---|---|
 | typecheck | Чистый по всему workspace розницы |
 | eslint | Мои файлы чистые. В ветке есть 7 прежних ошибок `no-non-null-assertion` в `apps/worker/src/wazzup-dump.ts` и `packages/core/db/src/wazzup-dumps.ts` (есть на HEAD до этих правок, не трогал) |
-| `@core/calls` | 36/36 (WA-FILES: +2, DEMO-SOURCES: +1, CALLS-DAY: +1, REFUSAL: +7, DAY-FIX2: +1, REFUSAL-FIX: +3) |
+| `@core/calls` | 37/37 (WA-FILES: +2, DEMO-SOURCES: +1, CALLS-DAY: +1, REFUSAL: +7, DAY-FIX2: +1, REFUSAL-FIX: +4) |
 | `@retail/agent` | 142/142 (WA-FILES: +7, FILES-PRIORITY: +2) |
 | `@retail/mail` | 60/60 (FILES-PRIORITY: +5, FIX-PACK ч. 2: +4) |
 | `@core/amo` | 67/67 (FIX-PACK ч. 3: +1) |
