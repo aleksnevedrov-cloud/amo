@@ -264,6 +264,38 @@ cd /opt/ai-door/src && docker compose exec worker node apps/worker/dist/calls-de
 cd /opt/ai-door/src && docker compose exec worker node apps/worker/dist/calls-demo.js --lead 30030360 --date 2026-10-22
 ```
 
+## RFD-AI-AGENT-FIX-PACK-2410: несколько почтовых ящиков и files-defer
+
+Часть 1 (анализ отказа) — коммит `deab669`, раздел ниже «Исправление RFD-AI-AGENT-REFUSAL-ANALYSIS». Части 2 и 3 — этот коммит.
+
+### Часть 2 — несколько почтовых ящиков
+
+| Пункт | Реализация |
+|---|---|
+| 2.1 Настройки | `settings.email.mailboxes[]`: `{ id, address, imapHost, imapPort, imapSecure, username, inboxFolder, sentFolder, mode: 'read' \| 'reply', backfillDays }`. Миграция 024 переносит прежний ящик первым элементом (`id: main`, `mode: reply`, дочитка 0); без `mailboxes` и с заполненными прежними полями код сам считает их ящиком main. Подпись, SMTP, лимиты, исключения — общие (прежние поля). Ответы уходят только из ящика `reply` (прежний) |
+| 2.2 Пароли | `mailbox_credentials` — ключ `(account_id, mailbox_id)`, шифрование прежнее; ввод только в виджете: вкладка «Почта» → блок «Ящики» (список, «Добавить ящик», поля IMAP и логина, «Сохранить пароль», «Проверить подключение», «Убрать»). API: `PUT /widget/v1/email/password {password, mailboxId}`, `POST /widget/v1/email/test {mailboxId}`, `DELETE /widget/v1/email/password/:mailboxId`, `GET /widget/v1/email/status` → по ящикам. Пароль обратно не отдаётся, в журнал не пишется |
+| 2.3 Состояние | `mailbox_state` — ключ `(account_id, mailbox_id, folder)`, ошибки входа и паузы — отдельно по ящику |
+| 2.4 Режим read | По умолчанию для новых ящиков: письмо привязывается к открытой сделке контакта по адресу отправителя; нет сделки — пропуск с записью в журнал (сделки не создаём, amo не ждём); текст и разбор вложений — в историю сделки (оттуда — контекст агента, итог дня, анализ отказа); вложения — на том, в `mail_attachments` и в карточку сделки, разбор с приоритетом (письмо старше суток — догрузка) и дневным лимитом; ответов нет, лимит ответов на адрес не применяется |
+| 2.5 Дубли | Перед записью в историю: у сделки уже есть сообщение клиента с той же темой в пределах ±10 минут (история или очередь — письмо пришло через Salesbot / карточку amo) → запись `skipped` «дубль не добавлен». Обратный порядок (письмо из ящика раньше Salesbot) не отсекается — Salesbot приносит текст без Message-ID; при появлении таких дублей добавим проверку на стороне конвейера |
+| 2.6 Повторное скачивание | Вложения ящиков лежат на томе (`storage_path`): повтор отложенных по лимиту и пересчёт анализа берут файл оттуда |
+| 2.7 Первое подключение | Для ящика без сохранённой позиции и `backfillDays > 0` — IMAP SEARCH SINCE за 14 дней (до 200 писем), в историю без ответов; прежний ящик main — только позиция, как раньше |
+
+Как добавить ящик в виджете: вкладка «Почта» → внизу блок «Ящики» → «Добавить ящик» → адрес, IMAP-сервер и порт, логин, режим «только чтение» → общая кнопка «Сохранить» → в строке ящика ввести пароль приложения → «Сохранить пароль» → «Проверить подключение». Первый опрос — в течение минуты, дочитка за 14 дней — тем же проходом.
+
+Тесты `poller.test.ts` (+4): два ящика читаются независимо (свои пароли, своя позиция, дочитка у нового, без пароля — пропуск); ящик read — неизвестный отправитель без сделки и ожидания, известный — в историю, очередь ответа пуста; дубль с письмом из amo — один раз; вложение из ящика read при лимите отложено на томе и разобрано повторно с текстом в истории. `mail.test.ts`: пароли и позиции по ящикам.
+
+### Часть 3 — files-defer
+
+`GET /api/v4/leads/{id}/files` на живом аккаунте отдаёт только `id` и `file_uuid`; прежний код ходил за карточкой файла на домен аккаунта (`/api/v4/files/{uuid}` → 404) и отбрасывал файл. Теперь карточка (имя, размер, MIME, ссылка на скачивание) берётся из Files API на drive-url (`GET {drive}/v1.0/files/{uuid}`, drive — из `/api/v4/account?with=drive_url`), запасной путь — прежний. Фильтр `--name` — по имени без учёта регистра. Тест `client.test.ts` (+1): реальный формат ответа (два файла только с `id` и `file_uuid`) → «Запрос.docx» найден по имени.
+
+Команды после развёртывания:
+```bash
+cd /opt/ai-door/src && docker compose exec worker node apps/worker/dist/files-defer.js --lead 29207977 --name Запрос
+# разбор — ближайшим проходом wazzup-files (до 5 минут): текст в историю сделки и в задачу «…из-за дневного лимита»
+docker compose exec worker node apps/worker/dist/calls-demo.js --lead 30033396 --refusal --post
+docker compose exec worker node apps/worker/dist/calls-demo.js --lead 30033216 --refusal --post
+```
+
 ## Исправление RFD-AI-AGENT-REFUSAL-ANALYSIS: «общения нет» при звонках и полях отказа
 
 23.10: «90209» (30033396) — входящий звонок 15:47 (163 с) ещё не попал в `calls` (опрос раз в 10 минут), анализ в 15:55 — «общения нет»; «90205» (30033216) — исходящий звонок 12 с и чат Jivo без текста; поля отказа менеджера не учитывались.
@@ -414,13 +446,15 @@ docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage 
 | eslint | Мои файлы чистые. В ветке есть 7 прежних ошибок `no-non-null-assertion` в `apps/worker/src/wazzup-dump.ts` и `packages/core/db/src/wazzup-dumps.ts` (есть на HEAD до этих правок, не трогал) |
 | `@core/calls` | 36/36 (WA-FILES: +2, DEMO-SOURCES: +1, CALLS-DAY: +1, REFUSAL: +7, DAY-FIX2: +1, REFUSAL-FIX: +3) |
 | `@retail/agent` | 142/142 (WA-FILES: +7, FILES-PRIORITY: +2) |
+| `@retail/mail` | 60/60 (FILES-PRIORITY: +5, FIX-PACK ч. 2: +4) |
+| `@core/amo` | 67/67 (FIX-PACK ч. 3: +1) |
 | `@core/db`, `apps/worker` | 22/22, 8/8 |
 | `apps/api` | 6 файлов пройдено; `phase1` «справочники amo» и `phase2` «бот-отправщик» падают и на HEAD до этих правок — не связаны со звонками |
 | Опт | `@opt/kp` 148/148, `@opt/api` 79 / 8 пропущено; граница с розницей на ветке опта пуста |
 
 ## Развёртывание
 
-Розница (миграции 018–023 применятся при старте api):
+Розница (миграции 018–024 применятся при старте api):
 ```bash
 cd /opt/ai-door/src; git fetch origin claude/new-session-8uzdox && git checkout <хеш> && docker compose build api worker && docker compose up -d api worker
 docker compose logs --since 2m worker | grep -i "calls\|worker запущен"

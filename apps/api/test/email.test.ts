@@ -14,6 +14,7 @@ const mailbox: Mailbox = {
     return { uidValidity: '1', maxUid: 0 };
   },
   fetchAfter: async () => [],
+  fetchSince: async () => [],
   findSentFolder: async () => 'Отправленные',
   append: async (folder) => void appended.push(folder),
   close: async () => undefined,

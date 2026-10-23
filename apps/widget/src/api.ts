@@ -466,11 +466,14 @@ export class WidgetApi {
     this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/documents`, body);
 
   emailStatus = () =>
-    this.call<{ enabled: boolean; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }>(
-      'GET',
-      '/widget/v1/email/status',
-    );
-  setEmailPassword = (password: string) => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password });
+    this.call<{
+      enabled: boolean;
+      hasPassword: boolean;
+      folders: { folder: string; lastOkAt: string | null; lastError: string | null }[];
+      mailboxes: { id: string; address: string; mode: 'read' | 'reply'; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }[];
+    }>('GET', '/widget/v1/email/status');
+  setEmailPassword = (password: string, mailboxId = 'main') => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password, mailboxId });
+  deleteEmailPassword = (mailboxId: string) => this.call<{ ok: true }>('DELETE', `/widget/v1/email/password/${encodeURIComponent(mailboxId)}`);
   wazzupStatus = () =>
     this.call<{
       hasKey: boolean;
@@ -490,7 +493,7 @@ export class WidgetApi {
   wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
     this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
   wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
-  testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
+  testEmail = (mailboxId = 'main') => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test', { mailboxId });
 
   /** Окно виджета: лента переписки, ответ клиенту (только по кнопке), режим агента (администратор). */
   leadDialog = (leadId: number) => this.call<LeadDialog>('GET', `/widget/v1/leads/${leadId}/dialog`);

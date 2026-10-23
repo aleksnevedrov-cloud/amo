@@ -440,11 +440,25 @@ export class AmoApiClient {
     for (const row of res?._embedded?.files ?? []) {
       const uuid = row.file_uuid ?? row.uuid ?? row.file?.uuid;
       if (!uuid) continue;
-      const info = row.file ?? (await this.request<AmoFileInfo>('GET', `/api/v4/files/${uuid}`, undefined, { allow404: true }));
+      const info = row.file ?? (await this.fileInfo(uuid));
       if (!info) continue;
       out.push(toLeadFile(uuid, info));
     }
     return out;
+  }
+
+  /**
+   * Карточка файла по uuid: на живом аккаунте /api/v4/leads/{id}/files отдаёт только id и file_uuid (RFD-AI-AGENT-FIX-PACK-2410,
+   * ч. 3), а имя, размер и ссылка на скачивание живут в Files API на drive-url (GET {drive}/v1.0/files/{uuid}); запасной путь —
+   * /api/v4/files/{uuid} на домене аккаунта. Нет ни там, ни там — null.
+   */
+  async fileInfo(uuid: string): Promise<AmoFileInfo | null> {
+    const drive = await this.getDriveUrl();
+    if (drive) {
+      const info = await this.request<AmoFileInfo>('GET', `${drive}/v1.0/files/${uuid}`, undefined, { allow404: true }).catch(() => null);
+      if (info) return info;
+    }
+    return this.request<AmoFileInfo>('GET', `/api/v4/files/${uuid}`, undefined, { allow404: true }).catch(() => null);
   }
 
   /** Содержимое файла сделки по ссылке из его карточки. */

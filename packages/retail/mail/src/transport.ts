@@ -24,6 +24,8 @@ export interface Mailbox {
   folderState(folder: string): Promise<{ uidValidity: string; maxUid: number }>;
   /** Письма с UID > afterUid (не больше limit). */
   fetchAfter(folder: string, afterUid: number, limit: number): Promise<FetchedMessage[]>;
+  /** Письма не старше since (IMAP SEARCH SINCE), от старых к новым, не больше limit — дочитка при первом подключении ящика. */
+  fetchSince(folder: string, since: Date, limit: number): Promise<FetchedMessage[]>;
   /** Папка «Отправленные» по специальной метке \Sent. */
   findSentFolder(): Promise<string | null>;
   append(folder: string, raw: Buffer): Promise<void>;
@@ -151,6 +153,19 @@ export class ImapMailbox implements Mailbox {
         if (m.uid > afterUid && m.source) out.push({ uid: m.uid, source: m.source });
         if (out.length >= limit) break;
       }
+      return out.sort((a, b) => a.uid - b.uid);
+    } finally {
+      lock.release();
+    }
+  }
+
+  async fetchSince(folder: string, since: Date, limit: number): Promise<FetchedMessage[]> {
+    const lock = await this.client.getMailboxLock(folder, { readOnly: true });
+    try {
+      const uids = ((await this.client.search({ since }, { uid: true })) || []).sort((a, b) => a - b).slice(-limit);
+      if (!uids.length) return [];
+      const out: FetchedMessage[] = [];
+      for await (const m of this.client.fetch(uids, { uid: true, source: true }, { uid: true })) if (m.source) out.push({ uid: m.uid, source: m.source });
       return out.sort((a, b) => a.uid - b.uid);
     } finally {
       lock.release();

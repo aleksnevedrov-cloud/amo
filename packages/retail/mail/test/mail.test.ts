@@ -105,17 +105,22 @@ describe('MailRepo', () => {
 
   it('пароль хранится зашифрованным', async () => {
     expect(await repo.hasPassword(1)).toBe(false);
-    await repo.setPassword(1, 'app-password-123', 5);
+    await repo.setPassword(1, 'main', 'app-password-123', 5);
     expect(await repo.getPassword(1)).toBe('app-password-123');
     const { rows } = await db.query('SELECT password_enc FROM mailbox_credentials');
     expect(rows[0].password_enc).not.toContain('app-password');
   });
 
   it('позиции папок, ошибки, лимит ответов, активность менеджера', async () => {
-    await repo.markError(1, 'INBOX', 'AUTH failed');
-    expect((await repo.folderState(1, 'INBOX'))?.lastError).toBe('AUTH failed');
-    await repo.saveFolderState(1, 'INBOX', '123', 40);
-    expect(await repo.folderState(1, 'INBOX')).toMatchObject({ uidValidity: '123', lastUid: 40, lastError: null });
+    await repo.markError(1, 'main', 'INBOX', 'AUTH failed');
+    expect((await repo.folderState(1, 'main', 'INBOX'))?.lastError).toBe('AUTH failed');
+    await repo.saveFolderState(1, 'main', 'INBOX', '123', 40);
+    expect(await repo.folderState(1, 'main', 'INBOX')).toMatchObject({ uidValidity: '123', lastUid: 40, lastError: null });
+    // Второй ящик — свой пароль и своя позиция (RFD-AI-AGENT-FIX-PACK-2410, ч. 2).
+    await repo.setPassword(1, 'ek', 'pw-2', 5);
+    expect([await repo.getPassword(1, 'ek'), await repo.getPassword(1, 'main'), [...(await repo.mailboxesWithPassword(1))].sort()]).toEqual(['pw-2', 'app-password-123', ['ek', 'main']]);
+    await repo.saveFolderState(1, 'ek', 'INBOX', '9', 7);
+    expect((await repo.status(1)).map((x) => [x.mailboxId, x.folder])).toEqual([['ek', 'INBOX'], ['main', 'INBOX']]);
     await repo.logOutbound(1, 5, 'Ivan@Client.ru', '<a@x>');
     await repo.logOutbound(1, 5, 'ivan@client.ru', '<b@x>');
     expect(await repo.repliesToday(1, 'IVAN@client.ru')).toBe(2);

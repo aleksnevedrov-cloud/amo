@@ -58,6 +58,8 @@ export interface PollResult {
   retryAt?: Date;
   /** Ящик помечен «ошибка входа»: опрос остановлен до смены пароля или настроек. */
   authLocked?: boolean;
+  /** По ящикам (RFD-AI-AGENT-FIX-PACK-2410, ч. 2). */
+  mailboxes?: { id: string; address: string; mode: 'read' | 'reply'; received: number; error?: string }[];
 }
 
 /** Писем за один проход — остальные в следующий. */
@@ -77,6 +79,27 @@ export function serverConfig(e: WidgetSettings['email'], password: string): Mail
 }
 
 export const ourAddress = (e: WidgetSettings['email']) => (e.fromAddress || e.username).toLowerCase();
+
+/** Ящик из настроек (RFD-AI-AGENT-FIX-PACK-2410, ч. 2). */
+export type MailboxCfg = WidgetSettings['email']['mailboxes'][number];
+
+/** Ящики аккаунта: email.mailboxes, а без них — один ящик main из прежних полей (ответы — из него). */
+export function mailboxesOf(e: WidgetSettings['email']): MailboxCfg[] {
+  if (e.mailboxes.length) return e.mailboxes;
+  if (!e.imapHost || !e.username) return [];
+  return [{ id: 'main', address: e.fromAddress || e.username, imapHost: e.imapHost, imapPort: e.imapPort, imapSecure: e.imapSecure, username: e.username, inboxFolder: e.inboxFolder, sentFolder: e.sentFolder, mode: 'reply', backfillDays: 0 }];
+}
+
+/** IMAP ящика + общий SMTP из настроек (ответы уходят только из ящика reply). */
+export function mailboxConfig(e: WidgetSettings['email'], mb: MailboxCfg, password: string): MailServerConfig {
+  return { imapHost: mb.imapHost, imapPort: mb.imapPort, imapSecure: mb.imapSecure, smtpHost: e.smtpHost, smtpPort: e.smtpPort, smtpSecure: e.smtpSecure, username: mb.username, password };
+}
+
+const mailboxLabel = (mb: MailboxCfg) => mb.address || mb.username || mb.id;
+/** Дубль письма из Salesbot / карточки amo: та же тема у того же клиента в истории сделки в пределах ±10 минут. */
+const DUPLICATE_WINDOW_MS = 10 * 60_000;
+/** Дочитка при первом подключении ящика — не больше писем за проход. */
+const BACKFILL_LIMIT = 200;
 
 /**
  * Отказ входа (неверный пароль, «Already logged out», блокировка провайдером).
@@ -137,16 +160,46 @@ function authStateFor(key: string, st: { lastError: string | null; lastErrorAt: 
  * позицию — старая переписка не обрабатывается.
  */
 export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollResult> {
-  const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0 };
+  const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0, mailboxes: [] };
   const { settings } = await d.settings.get(accountId);
   const e = settings.email;
-  if (!e.enabled || !e.imapHost || !e.username) return res;
-  const cred = await d.mail.credentials(accountId);
+  if (!e.enabled) return res;
+  const boxes = mailboxesOf(e);
+  if (!boxes.length) return res;
+  let waitingDone = false;
+  for (const mb of boxes) {
+    if (!mb.imapHost || !mb.username) continue;
+    const one = await pollOneMailbox(accountId, mb, settings, d, async () => {
+      // Письма, которые ждали сделку от amo (ящик reply), — один раз за проход.
+      if (waitingDone) return;
+      waitingDone = true;
+      for (const r of await retryWaiting(accountId, settings, d)) res[r] += 1;
+    });
+    res.received += one.received;
+    res.queued += one.queued;
+    res.skipped += one.skipped;
+    res.waiting += one.waiting;
+    res.managerReplies += one.managerReplies;
+    // Один ящик — текст ошибки как есть (статус на вкладке); несколько — с адресом ящика.
+    if (one.error) res.error = boxes.length === 1 ? one.error : res.error ? `${res.error}; ${mailboxLabel(mb)}: ${one.error}` : `${mailboxLabel(mb)}: ${one.error}`;
+    if (one.authFailures !== undefined) res.authFailures = Math.max(res.authFailures ?? 0, one.authFailures);
+    if (one.authLocked) res.authLocked = true;
+    if (one.retryAt && (!res.retryAt || one.retryAt < res.retryAt)) res.retryAt = one.retryAt;
+    res.mailboxes?.push({ id: mb.id, address: mailboxLabel(mb), mode: mb.mode, received: one.received, ...(one.error ? { error: one.error } : {}) });
+  }
+  return res;
+}
+
+/** Один ящик: вход, ожидавшие письма (только для первого), входящие, «Отправленные». */
+async function pollOneMailbox(accountId: number, mb: MailboxCfg, settings: WidgetSettings, d: PollDeps, beforeRead: () => Promise<void>): Promise<PollResult> {
+  const res: PollResult = { accountId, received: 0, queued: 0, skipped: 0, waiting: 0, managerReplies: 0 };
+  const e = settings.email;
+  const cred = await d.mail.credentials(accountId, mb.id);
   if (!cred) return res;
-  const mailbox = `${e.username}@${e.imapHost}:${e.imapPort}`;
-  const authKey = `${accountId}:${mailbox}`;
+  const mailbox = `${mb.username}@${mb.imapHost}:${mb.imapPort}`;
+  const authKey = `${accountId}:${mb.id}:${mailbox}`;
   const passwordAt = new Date(cred.updatedAt).getTime();
-  const st = await d.mail.folderState(accountId, e.inboxFolder);
+  const st = await d.mail.folderState(accountId, mb.id, mb.inboxFolder);
   const auth = authStateFor(authKey, st, passwordAt);
   if (auth) {
     // Ошибка остаётся видна на вкладке «Почта»; к серверу не ходим, пока не истечёт пауза.
@@ -165,20 +218,19 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
 
   let box: Mailbox | null = null;
   try {
-    box = await d.connect(serverConfig(e, cred.password), {
+    box = await d.connect(mailboxConfig(e, mb, cred.password), {
       // Соединение уже закрыто imapflow; процесс жив, запись в журнал без пароля.
       onError: (err) => d.log?.warn({ accountId, mailbox, err: err.message, code: err.code, authenticationFailed: err.authenticationFailed === true }, 'mail: ошибка IMAP-соединения'),
     });
     authState.delete(authKey);
-    // Сначала — письма, которые ждали сделку от amo.
-    for (const r of await retryWaiting(accountId, settings, d)) res[r] += 1;
-    await readFolder(box, accountId, e.inboxFolder, d, async (msg) => {
+    await beforeRead();
+    await readFolder(box, accountId, mb, mb.inboxFolder, d, async (msg) => {
       res.received += 1;
-      res[await handleIncoming(accountId, msg, settings, d)] += 1;
+      res[await handleIncoming(accountId, msg, settings, d, mb)] += 1;
     });
-    const sent = e.sentFolder || (await box.findSentFolder());
+    const sent = mb.sentFolder || (await box.findSentFolder());
     if (sent) {
-      await readFolder(box, accountId, sent, d, async (msg) => {
+      await readFolder(box, accountId, mb, sent, d, async (msg) => {
         if (msg.fromAiDoor || (msg.messageId && (await d.mail.isOurMessage(accountId, msg.messageId)))) return;
         for (const to of msg.to) {
           await d.mail.managerWrote(accountId, to, msg.date ?? new Date());
@@ -190,7 +242,7 @@ export async function pollMailbox(accountId: number, d: PollDeps): Promise<PollR
     // imapflow: текст ответа сервера (например «[AUTHENTICATIONFAILED] LOGIN invalid credentials») лежит не в message.
     res.error = imapErrorText(err) || String(err);
     const text = isAuthFailure(err) ? await noteAuthFailure(accountId, mailbox, authKey, auth, passwordAt, err as ImapError, res, d) : res.error;
-    await d.mail.markError(accountId, e.inboxFolder, text);
+    await d.mail.markError(accountId, mb.id, mb.inboxFolder, text);
   } finally {
     await box?.close().catch(() => undefined);
   }
@@ -230,35 +282,57 @@ async function noteAuthFailure(
   return `${AUTH_LOCK_PREFIX} (${failures} из ${AUTH_MAX_FAILURES}, следующая попытка в ${moscowTime(retryAt)} МСК): ${res.error}`;
 }
 
-async function readFolder(box: Mailbox, accountId: number, folder: string, d: PollDeps, onMessage: (m: IncomingEmail) => Promise<void>) {
+async function readFolder(box: Mailbox, accountId: number, mb: MailboxCfg, folder: string, d: PollDeps, onMessage: (m: IncomingEmail) => Promise<void>) {
   const cur = await box.folderState(folder);
-  const st = await d.mail.folderState(accountId, folder);
+  const st = await d.mail.folderState(accountId, mb.id, folder);
   if (!st || !st.uidValidity || st.uidValidity !== cur.uidValidity) {
-    await d.mail.saveFolderState(accountId, folder, cur.uidValidity, cur.maxUid);
+    // Первое подключение ящика: дочитать письма за backfillDays (ч. 2, п. 7; ответы по ним не готовятся — читаем в историю).
+    // Смена UIDVALIDITY или ящик без дочитки — только запомнить позицию.
+    if (!st && mb.backfillDays > 0 && folder === mb.inboxFolder) {
+      const since = new Date(Date.now() - mb.backfillDays * 86_400_000);
+      for (const m of await box.fetchSince(folder, since, BACKFILL_LIMIT)) await onMessage(await parseEmail(m.source));
+    }
+    await d.mail.saveFolderState(accountId, mb.id, folder, cur.uidValidity, cur.maxUid);
     return;
   }
   if (cur.maxUid <= st.lastUid) {
-    await d.mail.saveFolderState(accountId, folder, cur.uidValidity, st.lastUid);
+    await d.mail.saveFolderState(accountId, mb.id, folder, cur.uidValidity, st.lastUid);
     return;
   }
   for (const m of await box.fetchAfter(folder, st.lastUid, BATCH)) {
     await onMessage(await parseEmail(m.source));
     // Позиция сохраняется после каждого письма: при сбое следующий проход продолжит с него.
-    await d.mail.saveFolderState(accountId, folder, cur.uidValidity, m.uid);
+    await d.mail.saveFolderState(accountId, mb.id, folder, cur.uidValidity, m.uid);
   }
 }
 
 type Outcome = 'queued' | 'skipped' | 'waiting';
 
-async function handleIncoming(accountId: number, msg: IncomingEmail, settings: WidgetSettings, d: PollDeps): Promise<Outcome> {
+async function handleIncoming(accountId: number, msg: IncomingEmail, settings: WidgetSettings, d: PollDeps, mb: MailboxCfg): Promise<Outcome> {
   const e = settings.email;
   const from = msg.from;
+  const readOnly = mb.mode === 'read';
+  const boxLabel = mailboxLabel(mb);
   if (!from || msg.automated || msg.fromAiDoor) return 'skipped';
   if (from.address === ourAddress(e) || isIgnored(from.address, e.ignore)) return 'skipped';
-  if ((await d.mail.repliesToday(accountId, from.address)) >= e.maxRepliesPerAddressPerDay) {
+  if (!readOnly && (await d.mail.repliesToday(accountId, from.address)) >= e.maxRepliesPerAddressPerDay) {
     await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address}: достигнут лимит ответов на адрес за сутки` });
     return 'skipped';
   }
+  // Ящик read: только существующая сделка по отправителю — сделки не создаём, amo не ждём, не отвечаем.
+  const api = await d.amo(accountId);
+  const link = await linkEmailToLead(api, from, msg.subject, e, readOnly ? 'skip' : undefined);
+  if ('skip' in link) {
+    await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address} (${boxLabel}) не обработано: ${link.skip}` });
+    return 'skipped';
+  }
+  // Дубль с письмом из Salesbot / карточки amo: та же тема у этого клиента уже в истории сделки в пределах ±10 минут (ч. 2, п. 5).
+  if (!('notFound' in link) && msg.subject.trim().length >= 3 && (await d.dialog.hasClientMessageNear(accountId, link.leadId, msg.subject.trim(), msg.date ?? new Date(), DUPLICATE_WINDOW_MS))) {
+    await d.journal.add({ accountId, leadId: link.leadId, kind: 'skipped', summary: `Письмо от ${from.address} «${msg.subject}» (${boxLabel}): уже есть в истории сделки из amo — дубль не добавлен` });
+    return 'skipped';
+  }
+  // Письмо старше суток (дочитка) — разбор вложений как догрузка, не в ущерб новым файлам.
+  const priority = msg.date && Date.now() - msg.date.getTime() > 24 * 60 * 60_000 ? ('backlog' as const) : ('new' as const);
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
   const openings: unknown[] = [];
   // Раздел КП из розницы убран (решение заказчика 12.10.2026): вложения разбираются только по настройке авторазбора.
@@ -272,7 +346,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
         continue;
       }
       try {
-        const r = await docs.analyze({ accountId, leadId: null, source: 'email', filename: name, mime: a.contentType, bytes: new Uint8Array(a.content), settings });
+        const r = await docs.analyze({ accountId, leadId: 'notFound' in link ? null : link.leadId, source: 'email', filename: name, mime: a.contentType, bytes: new Uint8Array(a.content), settings, priority });
         parts.push(r.text);
         extracts.set(name, { text: r.text });
         openings.push(...r.memoryOpenings);
@@ -300,17 +374,11 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
     text: parts.join('\n'),
     meta: { from: from.address, fromName: from.name, subject: msg.subject, messageId: msg.messageId, references: msg.references, ...(openings.length ? { openings } : {}) },
   };
-  const api = await d.amo(accountId);
-  const link = await linkEmailToLead(api, from, msg.subject, e);
   if ('notFound' in link) {
     // Почта подключена к amo: сделку создаст amo — ответим, когда она появится.
     await d.mail.addWaiting(accountId, letter);
     await d.journal.add({ accountId, kind: 'note', summary: `Письмо от ${from.address}: ждём, пока amo создаст сделку` });
     return 'waiting';
-  }
-  if ('skip' in link) {
-    await d.journal.add({ accountId, kind: 'skipped', summary: `Письмо от ${from.address} не обработано: ${link.skip}` });
-    return 'skipped';
   }
   if (d.attachments && msg.attachments.length) {
     // Файлы кладём в сделку всегда, даже когда разбор текста выключен.

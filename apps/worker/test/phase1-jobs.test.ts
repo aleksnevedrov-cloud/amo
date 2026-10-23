@@ -73,7 +73,7 @@ describe('runPollMail', () => {
     const { randomBytes } = await import('node:crypto');
     await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { enabled: true, imapHost: 'imap.x.ru', smtpHost: 'smtp.x.ru', username: 'a@x.ru' } }));
     const mail = new MailRepo(db, new SecretBox(randomBytes(32).toString('hex')));
-    await mail.setPassword(1, 'p', 1);
+    await mail.setPassword(1, 'main', 'p', 1);
     const connected: string[] = [];
     const res = await runPollMail(
       {
@@ -89,6 +89,7 @@ describe('runPollMail', () => {
           return {
             folderState: async () => ({ uidValidity: '1', maxUid: 5 }),
             fetchAfter: async () => [],
+            fetchSince: async () => [],
             findSentFolder: async () => null,
             append: async () => undefined,
             close: async () => undefined,

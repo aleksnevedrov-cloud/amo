@@ -1,6 +1,6 @@
 import type { AmoApiClient } from '@core/amo';
 import type { SettingsRepo } from '@core/db';
-import { ourAddress, serverConfig } from './poller.ts';
+import { mailboxesOf, ourAddress, serverConfig } from './poller.ts';
 import type { MailRepo } from './repo.ts';
 import { buildReply } from './reply.ts';
 import type { Mailbox, MailSender, MailServerConfig } from './transport.ts';
@@ -29,7 +29,9 @@ export class EmailChannel {
   async reply(accountId: number, leadId: number, meta: EmailMeta, text: string): Promise<{ messageId: string }> {
     const { settings } = await this.d.settings.get(accountId);
     const e = settings.email;
-    const password = await this.d.mail.getPassword(accountId);
+    // Ответы уходят из ящика с режимом reply (прежний ящик main); SMTP — из общих полей настроек.
+    const replyBox = mailboxesOf(e).find((m) => m.mode === 'reply');
+    const password = replyBox ? await this.d.mail.getPassword(accountId, replyBox.id) : null;
     if (!e.enabled || !password) throw new Error('Почта не подключена');
     const cfg = serverConfig(e, password);
     const mail = buildReply(

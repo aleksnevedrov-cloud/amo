@@ -194,6 +194,32 @@ export const widgetSettingsSchema = z
         maxRepliesPerAddressPerDay: z.number().int().min(1).max(100).default(10),
         /** Адреса и домены, на которые AI не отвечает (поставщики, сервисы). */
         ignore: z.array(z.string().max(200)).max(200).default([]),
+        /**
+         * RFD-AI-AGENT-FIX-PACK-2410, ч. 2: несколько ящиков. Первый (id main) — прежний ящик (переносится миграцией 024, mode
+         * reply: из него уходят ответы по SMTP из общих полей выше). Остальные — ящики почты amo (ek@…, info@…), mode read:
+         * агент читает письма и вложения, привязывает к сделке по отправителю, в сделки не создаёт и не отвечает. Пароль —
+         * на каждый ящик (mailbox_credentials.mailbox_id). Пусто и заданы imapHost / username — один ящик main из полей выше.
+         */
+        mailboxes: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(40).regex(/^[a-z0-9_-]+$/i),
+                address: z.string().max(200).default(''),
+                imapHost: z.string().max(200).default(''),
+                imapPort: z.number().int().min(1).max(65535).default(993),
+                imapSecure: z.boolean().default(true),
+                username: z.string().max(200).default(''),
+                inboxFolder: z.string().max(200).default('INBOX'),
+                sentFolder: z.string().max(200).default(''),
+                mode: z.enum(['read', 'reply']).default('read'),
+                /** При первом подключении дочитать письма за столько дней (без ответов); 0 — только новые. */
+                backfillDays: z.number().int().min(0).max(90).default(14),
+              })
+              .strict(),
+          )
+          .max(20)
+          .default([]),
       })
       .strict()
       .default({}),

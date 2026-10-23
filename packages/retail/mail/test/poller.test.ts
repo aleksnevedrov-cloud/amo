@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AmoApiClient } from '@core/amo';
-import { AccountsRepo, DialogRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db, type WidgetSettingsInput } from '@core/db';
+import { AccountsRepo, DialogRepo, JournalRepo, MailAttachmentsRepo, SettingsRepo, widgetSettingsSchema, type Db, type WidgetSettingsInput } from '@core/db';
 import { SecretBox } from '@core/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { freshDb } from '../../../core/db/test/setup.ts';
@@ -12,6 +15,7 @@ import {
   MailRepo,
   pollMailbox,
   resetAuthBackoff,
+  runDeferredMailFiles,
   type Mailbox,
   type OutgoingEmail,
   type PollDeps,
@@ -30,6 +34,10 @@ class FakeMailbox implements Mailbox {
   }
   async fetchAfter(folder: string, after: number, limit: number) {
     return this.folders.get(folder)!.msgs.filter((m) => m.uid > after).slice(0, limit);
+  }
+  /** Дочитка при первом подключении: в заглушке — все письма папки (даты не проверяем). */
+  async fetchSince(folder: string, _since: Date, limit: number) {
+    return this.folders.get(folder)!.msgs.slice(-limit);
   }
   async findSentFolder() {
     return 'Отправленные';
@@ -66,7 +74,7 @@ beforeAll(async () => {
   ({ db, drop } = await freshDb());
   await new AccountsRepo(db).upsertInstalled({ id: 1, subdomain: 'a', accountDomain: 'a.amocrm.ru' });
   mail = new MailRepo(db, box);
-  await mail.setPassword(1, 'secret', 1);
+  await mail.setPassword(1, 'main', 'secret', 1);
 });
 afterAll(async () => drop());
 
@@ -339,6 +347,121 @@ describe('почта уже подключена к amo: ждём сделку �
   });
 });
 
+describe('несколько ящиков (RFD-AI-AGENT-FIX-PACK-2410, ч. 2)', () => {
+  const EK = { id: 'ek', address: 'ek@oklandpiter.ru', imapHost: 'imap.okland.ru', imapPort: 993, imapSecure: true, username: 'ek@oklandpiter.ru', inboxFolder: 'INBOX', sentFolder: '', mode: 'read' as const, backfillDays: 14 };
+  const MAIN = { id: 'main', address: 'shop@rf-dveri.ru', imapHost: 'imap.yandex.ru', imapPort: 993, imapSecure: true, username: 'shop@rf-dveri.ru', inboxFolder: 'INBOX', sentFolder: '', mode: 'reply' as const, backfillDays: 0 };
+
+  async function setupBoxes(amoOpts: Parameters<typeof fakeAmo>[0] = knownContact, extra: Partial<PollDeps> = {}) {
+    await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ enabled: true, mode: 'auto', email: { ...EMAIL, mailboxes: [MAIN, EK] } }));
+    await mail.setPassword(1, 'ek', 'secret-ek', 1);
+    const boxes: Record<string, FakeMailbox> = { 'imap.yandex.ru': new FakeMailbox(), 'imap.okland.ru': new FakeMailbox() };
+    const connected: string[] = [];
+    const amo = fakeAmo(amoOpts);
+    const deps: PollDeps = {
+      settings: new SettingsRepo(db),
+      mail,
+      dialog: new DialogRepo(db),
+      journal: new JournalRepo(db),
+      amo: async () => amo.api,
+      connect: async (cfg) => {
+        connected.push(`${cfg.username}@${cfg.imapHost}`);
+        return boxes[cfg.imapHost]!;
+      },
+      schedule: async () => undefined,
+      ...extra,
+    };
+    await db.query('DELETE FROM mailbox_state');
+    await db.query('DELETE FROM ai_journal');
+    return { boxes, connected, amo, deps };
+  }
+
+  it('два ящика читаются независимо: свои пароли, своя позиция; ящик read при первом подключении дочитывает письма, main — только запоминает позицию', async () => {
+    const t = await setupBoxes();
+    await t.boxes['imap.yandex.ru']!.put('INBOX', { subject: 'Старое письмо в main' });
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Запрос КП (дочитка)', text: 'Прошу КП на 3 двери' });
+    const r1 = await pollMailbox(1, t.deps);
+    expect(t.connected).toEqual(['shop@rf-dveri.ru@imap.yandex.ru', 'ek@oklandpiter.ru@imap.okland.ru']);
+    expect(r1.mailboxes).toEqual([
+      { id: 'main', address: 'shop@rf-dveri.ru', mode: 'reply', received: 0 },
+      { id: 'ek', address: 'ek@oklandpiter.ru', mode: 'read', received: 1 },
+    ]);
+    expect(await lastClientText(301)).toContain('Тема письма: Запрос КП (дочитка)\nПрошу КП на 3 двери');
+    expect((await mail.status(1)).map((x) => [x.mailboxId, x.folder])).toEqual([['ek', 'INBOX'], ['ek', 'Отправленные'], ['main', 'INBOX'], ['main', 'Отправленные']]);
+    // Новые письма в каждом ящике — по своей позиции.
+    await t.boxes['imap.yandex.ru']!.put('INBOX', { subject: 'Новое в main', text: 'привет из main' });
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Новое в ek', text: 'привет из ek' });
+    const r2 = await pollMailbox(1, t.deps);
+    expect(r2.mailboxes?.map((m) => [m.id, m.received])).toEqual([['main', 1], ['ek', 1]]);
+    const texts = (await new DialogRepo(db).history(1, 301)).filter((m) => m.role === 'client').map((m) => m.text);
+    expect(texts.some((x) => x.includes('привет из main'))).toBe(true);
+    expect(texts.some((x) => x.includes('привет из ek'))).toBe(true);
+    // Ящик без пароля — пропускается без ошибки.
+    await mail.deletePassword(1, 'ek');
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Без пароля' });
+    expect((await pollMailbox(1, t.deps)).mailboxes?.find((m) => m.id === 'ek')).toMatchObject({ received: 0 });
+    expect(await mail.getPassword(1, 'ek')).toBeNull();
+  });
+
+  it('ящик read: письмо неизвестного отправителя — пропуск без создания сделки и без ожидания amo; известного — в историю, в очередь ответа ничего', async () => {
+    const t = await setupBoxes(knownContact);
+    await pollMailbox(1, t.deps); // первое подключение
+    await t.boxes['imap.okland.ru']!.put('INBOX', { from: { name: 'Новый', address: 'new@client.ru' }, subject: 'Хочу двери', text: 'Посчитайте' });
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Известный клиент', text: 'Ещё вопрос' });
+    const r = await pollMailbox(1, t.deps);
+    expect(r.mailboxes?.find((m) => m.id === 'ek')).toMatchObject({ received: 2 });
+    expect(r).toMatchObject({ waiting: 0 });
+    expect(await mail.listWaiting(1)).toEqual([]);
+    expect(t.amo.calls.filter((c) => c.method === 'POST' && (c.path.endsWith('/leads') || c.path.endsWith('/leads/complex')))).toHaveLength(0);
+    expect(await lastClientText(301)).toContain('Известный клиент');
+    expect((await db.query('SELECT count(*)::int AS n FROM pending_messages')).rows[0].n).toBe(0);
+    const { rows } = await db.query("SELECT summary FROM ai_journal WHERE account_id = 1 AND kind = 'skipped' ORDER BY id");
+    expect(rows.some((x) => x.summary.startsWith('Письмо от new@client.ru (ek@oklandpiter.ru) не обработано'))).toBe(true);
+  });
+
+  it('дубль с письмом из Salesbot / карточки amo (та же тема у клиента в пределах ±10 минут) — один раз', async () => {
+    const t = await setupBoxes(knownContact);
+    await pollMailbox(1, t.deps);
+    await new DialogRepo(db).addMessage(1, 301, 'client', 'Тема письма: Счёт на оплату\nПришлите счёт (пришло через Salesbot из amo)');
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Счёт на оплату', text: 'Пришлите счёт' });
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Другая тема', text: 'Не дубль' });
+    const before = (await new DialogRepo(db).history(1, 301)).length;
+    await pollMailbox(1, t.deps);
+    const hist = (await new DialogRepo(db).history(1, 301)).filter((m) => m.role === 'client').map((m) => m.text);
+    expect(hist.filter((x) => x.includes('Счёт на оплату'))).toHaveLength(1);
+    expect(hist.some((x) => x.includes('Другая тема'))).toBe(true);
+    expect((await new DialogRepo(db).history(1, 301)).length).toBe(before + 1);
+    const { rows } = await db.query("SELECT summary FROM ai_journal WHERE account_id = 1 AND kind = 'skipped' AND summary LIKE '%дубль не добавлен%'");
+    expect(rows).toHaveLength(1);
+  });
+
+  it('вложение из ящика read: при лимите — отложено на томе, разбирается повторно после лимита с текстом в истории', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mbox-'));
+    const attachments = new MailAttachmentsRepo(db);
+    let limited = true;
+    const t = await setupBoxes(knownContact, {
+      documents: {
+        async analyze(input) {
+          if (limited) throw Object.assign(new Error('Достигнут дневной лимит разбора файлов (3)'), { stage: 'limit' });
+          return { id: 1, kind: 'request', text: `[Документ «${input.filename}»: Запрос КП] Три двери 800×2000.`, memoryOpenings: [], costUsd: 0.02, model: 'test-docs' };
+        },
+      },
+      attachments: { attachments, journal: new JournalRepo(db), root },
+    });
+    await pollMailbox(1, t.deps);
+    await t.boxes['imap.okland.ru']!.put('INBOX', { subject: 'Запрос', text: 'Во вложении', attachments: [{ filename: 'Запрос.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', content: Buffer.from('docx') }] } as unknown as Partial<OutgoingEmail>);
+    await pollMailbox(1, t.deps);
+    expect(await lastClientText(301)).toContain('(во вложении файл «Запрос.docx» — разбор отложен по дневному лимиту, будет разобран автоматически)');
+    const deferred = await attachments.listDeferred(1);
+    expect(deferred.map((a) => [a.leadId, a.filename, a.extractStatus])).toEqual([[301, 'Запрос.docx', 'deferred']]);
+    expect(readFileSync(deferred[0]!.storagePath).toString()).toBe('docx');
+    limited = false;
+    const r = await runDeferredMailFiles({ attachments, settings: new SettingsRepo(db), journal: new JournalRepo(db), dialog: new DialogRepo(db), amo: async () => ({ openLeadTasks: async () => [], updateTaskText: async () => undefined }), documents: { analyze: async (input) => ({ id: 2, kind: 'request', text: `[Документ «${input.filename}»: Запрос КП] Три двери 800×2000.`, costUsd: 0.02, model: 'test-docs' }) } }, { info: () => undefined, warn: () => undefined });
+    expect(r).toMatchObject({ picked: 1, done: 1 });
+    expect(await lastClientText(301)).toContain('Тема письма: Запрос\nВо вложении\n[Документ «Запрос.docx»: Запрос КП] Три двери 800×2000.');
+    expect(await attachments.listDeferred(1)).toEqual([]);
+  });
+});
+
 describe('EmailChannel', () => {
   it('отвечает в цепочку, кладёт копию в «Отправленные», пишет примечание и журнал отправки', async () => {
     await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { ...EMAIL, fromName: 'РФ-Двери', noteInLead: true } }));
@@ -461,7 +584,7 @@ describe('отказ входа: нарастающая пауза и блоки
     expect(attempts).toBe(AUTH_MAX_FAILURES);
     // Новый пароль снимает блокировку: счёт отказов начинается заново.
     vi.useRealTimers();
-    await mail.setPassword(1, 'new-secret', 1);
+    await mail.setPassword(1, 'main', 'new-secret', 1);
     const again = await pollMailbox(1, t.deps);
     expect(again).toMatchObject({ authFailures: 1 });
     expect(again.authLocked).toBeUndefined();

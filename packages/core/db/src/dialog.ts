@@ -114,6 +114,20 @@ export class DialogRepo {
     return rows.map((r) => ({ id: Number(r.id), text: r.text }));
   }
 
+  /** Есть ли у сделки сообщение клиента с этим текстом (тема письма) в окне ±windowMs — в истории или в очереди (дубль письма из amo и из ящика). */
+  async hasClientMessageNear(accountId: number, leadId: number, needle: string, at: Date, windowMs: number): Promise<boolean> {
+    const from = new Date(at.getTime() - windowMs);
+    const to = new Date(at.getTime() + windowMs);
+    const { rows } = await this.db.query(
+      `SELECT 1 FROM dialog_messages WHERE account_id = $1 AND lead_id = $2 AND role = 'client' AND position($3 in text) > 0 AND created_at BETWEEN $4 AND $5
+       UNION ALL
+       SELECT 1 FROM pending_messages WHERE account_id = $1 AND lead_id = $2 AND position($3 in text) > 0 AND received_at BETWEEN $4 AND $5
+       LIMIT 1`,
+      [accountId, leadId, needle, from, to],
+    );
+    return rows.length > 0;
+  }
+
   async updateText(id: number, text: string): Promise<void> {
     await this.db.query('UPDATE dialog_messages SET text = $2 WHERE id = $1', [id, text]);
   }
