@@ -74,7 +74,7 @@ async function entityNotes(amo: AmoRaw, entity: CallEntity, entityId: number, ty
 }
 
 /** События чатов сделки за период (ответы менеджера в чатах amoCRM — только факт и время; created_by > 0 — человек). */
-async function chatEvents(amo: AmoRaw, leadId: number, since: Date, until: Date): Promise<{ id: string; created_by: number; created_at: number; type: string }[]> {
+export async function chatEvents(amo: AmoRaw, leadId: number, since: Date, until: Date): Promise<{ id: string; created_by: number; created_at: number; type: string }[]> {
   const q = `filter[entity]=lead&filter[entity_id]=${leadId}&filter[type][]=outgoing_chat_message&filter[type][]=incoming_chat_message&filter[created_at][from]=${Math.floor(since.getTime() / 1000)}&filter[created_at][to]=${Math.floor(until.getTime() / 1000)}&limit=100`;
   const res = await amo.get<{ _embedded?: { events?: { id: string; created_by: number; created_at: number; type: string }[] } }>(`/api/v4/events?${q}`).catch(() => null);
   return res?._embedded?.events ?? [];

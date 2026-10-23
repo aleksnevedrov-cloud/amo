@@ -10,7 +10,7 @@ import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db 
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { CALL_DAY_KIND, fetchStatusEvents, findAdminTask, formatRefusalNote, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runDaySummaryIfDue, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallTranscript, type LocalMessage } from '../src/index.ts';
+import { CALL_DAY_KIND, fetchStatusEvents, findAdminTask, formatRefusalNote, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runDaySummaryIfDue, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
 import { depsOf } from './helpers.ts';
 
 const ACC = 1;
@@ -22,7 +22,10 @@ const at = (iso: string) => new Date(iso);
 
 const state = {
   events: [] as { id: string; entity_id: number; created_at: number; after: { id: number; pipeline_id: number }; before?: { id: number; pipeline_id: number } }[],
-  leads: {} as Record<number, { created_at: number; closed_at: number | null; status_id: number; pipeline_id: number }>,
+  leads: {} as Record<number, { created_at: number; closed_at: number | null; status_id: number; pipeline_id: number; fields?: { field_id: number; values: { value: string }[] }[] }>,
+  contacts: {} as Record<number, number[]>,
+  callNotes: {} as Record<string, { id: number; created_at: number; note_type: 'call_in' | 'call_out'; params: { link?: string; duration: number; phone: string } }[]>,
+  chatEvents: {} as Record<number, { id: string; created_by: number; created_at: number; type: string }[]>,
   tasks: {} as Record<number, { id: number; text: string; created_at: number; responsible_user_id: number }[]>,
   notes: {} as Record<number, { id: number; created_by: number; created_at: number; params: { text: string } }[]>,
   wz: {} as Record<number, LocalMessage[]>,
@@ -44,8 +47,14 @@ const amo: AmoRaw = {
     let m = /^\/api\/v4\/leads\/(\d+)$/.exec(path);
     if (m) {
       const l = state.leads[Number(m[1])];
-      return l ? ({ id: Number(m[1]), ...l, responsible_user_id: 5 } as never) : null;
+      return l ? ({ id: Number(m[1]), ...l, responsible_user_id: 5, custom_fields_values: l.fields ?? null } as never) : null;
     }
+    m = /^\/api\/v4\/leads\/(\d+)\?with=contacts$/.exec(path);
+    if (m) return { id: Number(m[1]), _embedded: { contacts: (state.contacts[Number(m[1])] ?? []).map((id) => ({ id })) } } as never;
+    m = /^\/api\/v4\/(leads|contacts)\/(\d+)\/notes\?filter\[note_type\]\[\]=call_in/.exec(path);
+    if (m) return { _embedded: { notes: (state.callNotes[`${m[1] === 'leads' ? 'lead' : 'contact'}:${m[2]}`] ?? []).map((n) => ({ ...n, entity_id: Number(m![2]), created_by: 5, updated_at: n.created_at, responsible_user_id: 5 })) } } as never;
+    m = /^\/api\/v4\/events\?filter\[entity\]=lead&filter\[entity_id\]=(\d+)/.exec(path);
+    if (m) return { _embedded: { events: state.chatEvents[Number(m[1])] ?? [] } } as never;
     m = /^\/api\/v4\/tasks\?filter\[entity_type\]=leads&filter\[entity_id\]=(\d+)/.exec(path);
     if (m) return { _embedded: { tasks: (state.tasks[Number(m[1])] ?? []).map((t) => ({ ...t, is_completed: false, entity_id: Number(m![1]), entity_type: 'leads' })) } } as never;
     m = /^\/api\/v4\/leads\/(\d+)\/notes\?filter\[note_type\]\[\]=common/.exec(path);
@@ -92,6 +101,18 @@ function fakeLlm() {
   return { llm, asked };
 }
 
+const MP3 = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0, 0, 0, 0, 0, 0x0a, 0xff, 0xfb, 0x90, 0x64, 1, 2, 3]);
+/** SpeechKit в тестах: расшифровка готова при первом опросе. */
+class FakeSpeechKit implements CallStt {
+  readonly name = 'speechkit' as const;
+  async start(_b: Uint8Array, _m: string, o: { mode: SttMode }) {
+    return { pending: { provider: 'speechkit' as const, mode: o.mode, operationId: 'op-1', startedAt: T0.toISOString(), polls: 0 } };
+  }
+  async poll(p: PendingTranscription): Promise<CallTranscript> {
+    return { ...transcript, mode: p.mode, text: 'Компания РФ-Двери, здравствуйте.\nДорого у вас, я подумаю.', segments: [{ speaker: '1', startMs: 0, endMs: 3000, text: 'Компания РФ-Двери, здравствуйте.' }, { speaker: '2', startMs: 3500, endMs: 9000, text: 'Дорого у вас, я подумаю.' }], durationSec: 163 };
+  }
+}
+
 const transcript: CallTranscript = { provider: 'speechkit', mode: 'async', model: 'general', text: 'Компания РФ-Двери, здравствуйте.\nНужны три двери, посчитайте.', segments: [{ speaker: '1', startMs: 0, endMs: 3000, text: 'Компания РФ-Двери, здравствуйте.' }, { speaker: '2', startMs: 3500, endMs: 9000, text: 'Нужны три двери, посчитайте.' }], durationSec: 185, speakers: 2, cost: { rub: 1.87, usd: 0 }, startedAt: T0.toISOString(), finishedAt: T0.toISOString() };
 
 describe('анализ сделки при переносе в «Отказ» (БД розницы, миграции с нуля)', () => {
@@ -99,7 +120,7 @@ describe('анализ сделки при переносе в «Отказ» (�
   let drop: () => Promise<void>;
   let deps: CallsDeps;
   const llm = fakeLlm();
-  const poll = (now = NOW) => runRefusalPoll(deps, ACC, { now: () => now, sleep: async () => undefined, amo, client });
+  const poll = (now = NOW) => runRefusalPoll(deps, ACC, { now: () => now, sleep: async () => undefined, amo, client, stt: () => new FakeSpeechKit() });
   const lead = (id: number, createdAt: Date, status = 143) => {
     state.leads[id] = { created_at: unix(createdAt), closed_at: status === 143 ? unix(T0) : null, status_id: status, pipeline_id: PIPE };
   };
@@ -107,8 +128,9 @@ describe('анализ сделки при переносе в «Отказ» (�
   beforeAll(async () => {
     ({ db, drop } = await freshDb());
     await new AccountsRepo(db).upsertInstalled({ id: ACC, subdomain: 'acc', accountDomain: 'acc.amocrm.ru' });
-    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7] } }));
-    deps = depsOf(db, (async () => new Response('нет', { status: 404 })) as typeof fetch, mkdtempSync(join(tmpdir(), 'refusal-')), {
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7], delayMin: 0 } }));
+    const fetchRecords = (async (input: string | URL | Request) => (String(input).includes('/call-records/') ? new Response(MP3, { status: 200, headers: { 'content-type': 'audio/mpeg' } }) : new Response('нет', { status: 404 }))) as typeof fetch;
+    deps = depsOf(db, fetchRecords, mkdtempSync(join(tmpdir(), 'refusal-')), {
       llmFor: async () => ({ llm: llm.llm, route: { primary: { provider: 'openai', model: 'gpt-5.5' }, fallback: null }, pricing: {}, usdRubRate: 90 }),
       sources: {
         wazzup: async (_a, leadId, _p, since, until) => (state.wz[leadId] ?? []).filter((m) => m.at >= since && m.at < until),
@@ -222,7 +244,7 @@ describe('анализ сделки при переносе в «Отказ» (�
     expect(r).toMatchObject({ matched: 1, analyzed: 1, notes: 1, noData: 1, tasks: 1 });
     expect(llm.asked).toHaveLength(asked);
     expect(state.posts.at(-1)?.text).toBe('Анализ сделки при отказе (23.10.2026): общения в данных агента нет — звонков с записью, сообщений, писем и примечаний по сделке не найдено.');
-    expect(state.tasks[1003]?.[0]?.text).toBe('Отказ: разобраться\n\nОбщения в данных агента нет. Анализ — в примечании сделки.');
+    expect(state.tasks[1003]?.[0]?.text).toBe('Отказ: разобраться\n\nОбщения в данных агента нет.\nАнализ — в примечании сделки.');
     expect((await deps.refusals.forLead(ACC, 1003))[0]).toMatchObject({ analysis: null, noteId: expect.any(Number), taskUpdated: true });
   });
 
@@ -286,6 +308,86 @@ describe('анализ сделки при переносе в «Отказ» (�
     expect((await deps.days.list(ACC)).map((d) => d.leadId)).toEqual([1009]);
     // Следующий день 20:30: итог за 24.10 (новое общение) — и догон не трогает 23.10 (уже выполнен).
     state.wz[1009] = [];
+  });
+
+  it('исправление: звонок есть в amo, в calls ещё нет → забирается, расшифровывается и входит в анализ; поля отказа менеджера → в запрос модели и строкой в примечании', async () => {
+    // «90209»: входящий звонок 163 с в контакте за 5 минут до перехода, опрос calls его ещё не видел; поля 422103 / 609893 / 422109 заполнены.
+    lead(1010, at('2026-10-20T08:00:00Z'));
+    state.leads[1010]!.fields = [{ field_id: 422103, values: [{ value: 'Дорого' }] }, { field_id: 609893, values: [{ value: 'После расчёта' }] }, { field_id: 422109, values: [{ value: 'Нашёл дешевле у конкурентов' }] }];
+    state.contacts[1010] = [510];
+    state.callNotes['contact:510'] = [{ id: 9101, created_at: unix(at('2026-10-23T18:25:00Z')), note_type: 'call_in', params: { link: 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-23/aaaaaaaa-0000-0000-0000-000000009101/x.mp3', duration: 163, phone: '79099500381' } }];
+    state.tasks[1010] = [{ id: 3301, text: 'Отказ: проверить', created_at: unix(at('2026-10-23T18:31:00Z')), responsible_user_id: 7 }];
+    state.events.push({ id: 'e11', entity_id: 1010, created_at: unix(at('2026-10-23T18:30:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    expect(await deps.calls.list(ACC, { leadId: 1010 })).toEqual([]);
+    const asked = llm.asked.length;
+    const r = await poll(at('2026-10-23T18:35:00Z'));
+    expect(r).toMatchObject({ matched: 1, analyzed: 1, notes: 1, noData: 0, postponed: 0, errors: 0 });
+    expect((await deps.calls.list(ACC, { leadId: 1010 })).map((c) => [c.noteId, c.status])).toEqual([[9101, 'transcribed']]);
+    const prompt = llm.asked[asked] ?? '';
+    expect(prompt).toContain('звонков 1 (2:43)');
+    expect(prompt).toContain('Причина отказа по данным менеджера (поля сделки): причина «Дорого», этап отказа «После расчёта», комментарий «Нашёл дешевле у конкурентов».');
+    expect(prompt).toContain('Дорого у вас, я подумаю.');
+    const note = state.posts.at(-1)?.text.split('\n') ?? [];
+    expect(note[0]).toBe('Анализ сделки при отказе (23.10.2026): 1 звонок (2:43), 0 сообщений, 0 писем за весь период');
+    expect(note).toContain('Причина по данным менеджера: Дорого — Нашёл дешевле у конкурентов (этап отказа: После расчёта)');
+    expect(note.indexOf('Причина по данным менеджера: Дорого — Нашёл дешевле у конкурентов (этап отказа: После расчёта)')).toBe(note.indexOf(`Причина отказа: ${ANALYSIS.refusalReason}`) + 1);
+    expect(state.tasks[1010]?.[0]?.text).toContain('Причина по данным менеджера: Дорого — Нашёл дешевле у конкурентов (этап отказа: После расчёта)');
+  });
+
+  it('исправление: короткий звонок и чат без текста (Jivo) → факты общения в примечании и задаче, не «общения нет»; модель не вызывается', async () => {
+    // «90205»: исходящий звонок 12 с (контакт), события чата amo без текста в данных агента; поле причины заполнено.
+    lead(1011, at('2026-10-22T08:00:00Z'));
+    state.leads[1011]!.fields = [{ field_id: 422103, values: [{ value: 'Не отвечает' }] }];
+    state.contacts[1011] = [511];
+    state.callNotes['contact:511'] = [{ id: 9102, created_at: unix(at('2026-10-23T14:10:00Z')), note_type: 'call_out', params: { link: 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-23/aaaaaaaa-0000-0000-0000-000000009102/x.mp3', duration: 12, phone: '79099500382' } }];
+    state.chatEvents[1011] = [{ id: 'c1', created_by: 0, created_at: unix(at('2026-10-22T09:00:00Z')), type: 'incoming_chat_message' }, { id: 'c2', created_by: 0, created_at: unix(at('2026-10-22T09:05:00Z')), type: 'incoming_chat_message' }];
+    state.tasks[1011] = [{ id: 3302, text: 'Отказ: проверить', created_at: unix(at('2026-10-23T18:41:00Z')), responsible_user_id: 7 }];
+    state.events.push({ id: 'e12', entity_id: 1011, created_at: unix(at('2026-10-23T18:40:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    const asked = llm.asked.length;
+    const r = await poll(at('2026-10-23T18:45:00Z'));
+    expect(r).toMatchObject({ matched: 1, analyzed: 1, notes: 1, noData: 1, tasks: 1 });
+    expect(llm.asked).toHaveLength(asked);
+    expect(await deps.calls.list(ACC, { leadId: 1011 })).toEqual([]); // короче 30 с — не скачиваем
+    const text = state.posts.at(-1)?.text ?? '';
+    expect(text.split('\n')[0]).not.toContain('общения в данных агента нет');
+    expect(text.split('\n')).toEqual([
+      'Анализ сделки при отказе (23.10.2026): общение без текста для анализа',
+      'Факты общения: звонок исх. 23.10, 17:10 (0:12) — без анализа (короче 30 с); чат amoCRM — 2 сообщ., текст недоступен (Jivo и подобные каналы)',
+      'Причина по данным менеджера: Не отвечает',
+      'История: текста общения в данных агента нет — оценка менеджера и причина по словам клиента не определяются.',
+    ]);
+    expect(state.tasks[1011]?.[0]?.text).toBe('Отказ: проверить\n\nОбщение без текста для анализа: звонок исх. 23.10, 17:10 (0:12) — без анализа (короче 30 с); чат amoCRM — 2 сообщ., текст недоступен (Jivo и подобные каналы)\nПричина по данным менеджера: Не отвечает\nАнализ — в примечании сделки.');
+    expect((await deps.refusals.forLead(ACC, 1011))[0]?.facts).toHaveLength(2);
+  });
+
+  it('исправление: первый запуск через delayMin после перехода; у звонка нет записи → повтор через delayMin, не дольше maxDelayMin', async () => {
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7], delayMin: 15, maxDelayMin: 60 } }));
+    lead(1012, at('2026-10-22T08:00:00Z'));
+    state.contacts[1012] = [512];
+    // Звонок 40 с за 3 минуты до перехода: примечание есть, записи ещё нет.
+    state.callNotes['contact:512'] = [{ id: 9103, created_at: unix(at('2026-10-23T18:57:00Z')), note_type: 'call_in', params: { duration: 40, phone: '79099500383' } }];
+    state.events.push({ id: 'e13', entity_id: 1012, created_at: unix(at('2026-10-23T19:00:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    const before = state.posts.length;
+    // Через 5 минут: переход занят строкой, срок не наступил — ничего.
+    expect(await poll(at('2026-10-23T19:05:00Z'))).toMatchObject({ matched: 1, analyzed: 0, postponed: 0, waiting: 1 });
+    // Через 16 минут: срок наступил, но записи у звонка нет → отложено ещё на 15 минут.
+    expect(await poll(at('2026-10-23T19:16:00Z'))).toMatchObject({ analyzed: 0, postponed: 1, waiting: 1 });
+    expect((await deps.refusals.forLead(ACC, 1012))[0]).toMatchObject({ noteId: null, attempts: 0, facts: ['ждём запись звонка в amo (1)'] });
+    expect(await poll(at('2026-10-23T19:20:00Z'))).toMatchObject({ analyzed: 0, postponed: 0, waiting: 1 });
+    expect(state.posts).toHaveLength(before);
+    // Запись появилась → в 17:32 анализ со звонком.
+    state.callNotes['contact:512']![0]!.params.link = 'https://rfdveri.megapbx.ru/api/v2/call-records/record/2026-10-23/aaaaaaaa-0000-0000-0000-000000009103/x.mp3';
+    expect(await poll(at('2026-10-23T19:32:00Z'))).toMatchObject({ analyzed: 1, notes: 1, postponed: 0, waiting: 0 });
+    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Анализ сделки при отказе (23.10.2026): 1 звонок (0:40), 0 сообщений, 0 писем за весь период');
+    // Записи так и нет дольше maxDelayMin → анализ без неё, звонок — фактом «запись в amo не получена».
+    lead(1013, at('2026-10-22T08:00:00Z'));
+    state.contacts[1013] = [513];
+    state.callNotes['contact:513'] = [{ id: 9104, created_at: unix(at('2026-10-23T19:58:00Z')), note_type: 'call_out', params: { duration: 50, phone: '79099500384' } }];
+    state.events.push({ id: 'e14', entity_id: 1013, created_at: unix(at('2026-10-23T20:00:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    expect(await poll(at('2026-10-23T20:16:00Z'))).toMatchObject({ postponed: 1 });
+    expect(await poll(at('2026-10-23T21:01:00Z'))).toMatchObject({ analyzed: 1, postponed: 0, noData: 1 });
+    expect(state.posts.at(-1)?.text).toContain('Факты общения: звонок исх. 23.10, 22:58 (0:50) — запись в amo не получена');
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7], delayMin: 0 } }));
   });
 
   it('разбор событий amo и формат примечания без общения', async () => {

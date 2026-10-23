@@ -254,6 +254,19 @@ export const widgetSettingsSchema = z
         adminUserIds: z.array(z.number().int().positive()).max(50).default([]),
         /** Дописывать причину отказа в задачу администратора. */
         updateTask: z.boolean().default(true),
+        /** Первый запуск анализа — через столько минут после перехода (запись звонка приходит в amo с задержкой). */
+        delayMin: z.number().int().min(0).max(240).default(15),
+        /** Если у звонка из amo ещё нет записи — повтор через delayMin, но не дольше этого от перехода. */
+        maxDelayMin: z.number().int().min(0).max(1440).default(60),
+        /** Поля сделки, которые заполняет менеджер при отказе: причина, этап отказа, комментарий (id полей amo). */
+        fields: z
+          .object({
+            reason: z.number().int().positive().nullable().default(422103),
+            stage: z.number().int().positive().nullable().default(609893),
+            comment: z.number().int().positive().nullable().default(422109),
+          })
+          .strict()
+          .default({}),
       })
       .strict()
       .default({}),

@@ -420,6 +420,10 @@ export interface RefusalRow {
   cost: Record<string, unknown> | null;
   error: string | null;
   attempts: number;
+  /** Раньше этого не запускать (задержка после перехода, ожидание записи звонка). */
+  nextTryAt: Date | null;
+  /** Факты общения без текста: короткие звонки, звонки без записи, чаты без текста. */
+  facts: string[];
   createdAt: Date;
 }
 
@@ -443,6 +447,8 @@ const mapRefusal = (r: Record<string, unknown>): RefusalRow => ({
   cost: (r.cost as Record<string, unknown> | null) ?? null,
   error: (r.error as string | null) ?? null,
   attempts: Number(r.attempts ?? 0),
+  nextTryAt: (r.next_try_at as Date | null) ?? null,
+  facts: (r.facts as string[] | null) ?? [],
   createdAt: r.created_at as Date,
 });
 
@@ -450,24 +456,36 @@ export class RefusalsRepo {
   constructor(private readonly db: Db) {}
 
   /** Занять переход: строка на событие; уже есть — null (защита от дублей при повторном событии / перекрытии окон опроса). */
-  async claim(r: { accountId: number; leadId: number; eventId: string; changedAt: Date; statusId: number; pipelineId: number }): Promise<number | null> {
+  async claim(r: { accountId: number; leadId: number; eventId: string; changedAt: Date; statusId: number; pipelineId: number; nextTryAt?: Date | null }): Promise<number | null> {
     const { rows } = await this.db.query<{ id: string }>(
-      `INSERT INTO refusal_analyses (account_id, lead_id, event_id, changed_at, status_id, pipeline_id) VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO refusal_analyses (account_id, lead_id, event_id, changed_at, status_id, pipeline_id, next_try_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (account_id, event_id) DO NOTHING RETURNING id`,
-      [r.accountId, r.leadId, r.eventId, r.changedAt, r.statusId, r.pipelineId],
+      [r.accountId, r.leadId, r.eventId, r.changedAt, r.statusId, r.pipelineId, r.nextTryAt ?? null],
     );
     return rows[0] ? Number(rows[0].id) : null;
   }
 
-  async setResult(id: number, r: { analysis: RefusalAnalysis | null; counts: RefusalRow['counts']; itemIds: string[]; noteId: number | null; noteText: string | null; taskId: number | null; taskUpdated: boolean; provider: string | null; model: string | null; cost: Record<string, unknown> | null }): Promise<void> {
+  async setResult(id: number, r: { analysis: RefusalAnalysis | null; counts: RefusalRow['counts']; itemIds: string[]; facts?: string[]; noteId: number | null; noteText: string | null; taskId: number | null; taskUpdated: boolean; provider: string | null; model: string | null; cost: Record<string, unknown> | null }): Promise<void> {
     await this.db.query(
-      `UPDATE refusal_analyses SET analysis = $2::jsonb, counts = $3::jsonb, item_ids = $4::jsonb, note_id = $5, note_text = $6, task_id = $7, task_updated = $8, provider = $9, model = $10, cost = $11::jsonb, error = NULL, updated_at = now() WHERE id = $1`,
-      [id, r.analysis ? JSON.stringify(r.analysis) : null, r.counts ? JSON.stringify(r.counts) : null, JSON.stringify(r.itemIds), r.noteId, r.noteText, r.taskId, r.taskUpdated, r.provider, r.model, r.cost ? JSON.stringify(r.cost) : null],
+      `UPDATE refusal_analyses SET analysis = $2::jsonb, counts = $3::jsonb, item_ids = $4::jsonb, note_id = $5, note_text = $6, task_id = $7, task_updated = $8, provider = $9, model = $10, cost = $11::jsonb, facts = $12::jsonb, error = NULL, next_try_at = NULL, updated_at = now() WHERE id = $1`,
+      [id, r.analysis ? JSON.stringify(r.analysis) : null, r.counts ? JSON.stringify(r.counts) : null, JSON.stringify(r.itemIds), r.noteId, r.noteText, r.taskId, r.taskUpdated, r.provider, r.model, r.cost ? JSON.stringify(r.cost) : null, JSON.stringify(r.facts ?? [])],
     );
   }
 
-  async setError(id: number, error: string): Promise<void> {
-    await this.db.query(`UPDATE refusal_analyses SET error = $2, attempts = attempts + 1, updated_at = now() WHERE id = $1`, [id, error.slice(0, 2000)]);
+  /** Ошибка разбора: попытка засчитана, повтор не раньше retryAt. */
+  async setError(id: number, error: string, retryAt: Date | null = null): Promise<void> {
+    await this.db.query(`UPDATE refusal_analyses SET error = $2, attempts = attempts + 1, next_try_at = $3, updated_at = now() WHERE id = $1`, [id, error.slice(0, 2000), retryAt]);
+  }
+
+  /** Отложить (ждём запись звонка): попытка не тратится. */
+  async postpone(id: number, until: Date, reason: string): Promise<void> {
+    await this.db.query(`UPDATE refusal_analyses SET next_try_at = $2, error = NULL, facts = $3::jsonb, updated_at = now() WHERE id = $1`, [id, until, JSON.stringify([reason])]);
+  }
+
+  /** К запуску: без примечания, срок наступил (или не задан), попыток меньше max. */
+  async listDue(accountId: number, now: Date, maxAttempts: number, limit = 20): Promise<RefusalRow[]> {
+    const { rows } = await this.db.query(`SELECT * FROM refusal_analyses WHERE account_id = $1 AND note_id IS NULL AND attempts < $2 AND (next_try_at IS NULL OR next_try_at <= $3) ORDER BY changed_at ASC LIMIT $4`, [accountId, maxAttempts, now, limit]);
+    return rows.map(mapRefusal);
   }
 
   async get(accountId: number, id: number): Promise<RefusalRow | null> {
@@ -485,6 +503,12 @@ export class RefusalsRepo {
   async coversSince(accountId: number, leadId: number, since: Date): Promise<RefusalRow | null> {
     const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 AND lead_id = $2 AND note_id IS NOT NULL AND changed_at >= $3 ORDER BY changed_at DESC LIMIT 1', [accountId, leadId, since]);
     return rows[0] ? mapRefusal(rows[0]) : null;
+  }
+
+  /** Ждут срока (next_try_at в будущем) и ещё без примечания. */
+  async countWaiting(accountId: number, now: Date, maxAttempts: number): Promise<number> {
+    const { rows } = await this.db.query<{ n: string }>(`SELECT count(*) AS n FROM refusal_analyses WHERE account_id = $1 AND note_id IS NULL AND attempts < $2 AND next_try_at > $3`, [accountId, maxAttempts, now]);
+    return Number(rows[0]?.n ?? 0);
   }
 
   async forLead(accountId: number, leadId: number): Promise<RefusalRow[]> {
