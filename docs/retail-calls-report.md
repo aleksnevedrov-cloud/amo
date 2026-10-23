@@ -357,6 +357,27 @@ SELECT created_at AT TIME ZONE 'Europe/Moscow' AS msk, summary FROM ai_journal W
 | 3. Журнал и показ | `documents.priority` и `details.priority` в `ai_journal` (kind `document`); в сводке `wazzup-files` — `byPriority`, `deferred`, `backlogWait`. Команда расхода лимита за день по трём группам и очередям: `docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage [ГГГГ-ММ-ДД]` |
 | 4. Тесты | `packages/core/docs/test/service.test.ts` (+1): правило лимита при лимите 3 и доле 0.5. `packages/retail/agent/test/wazzup-files.test.ts` (+1): лимит 3, очередь старых 10, новый файл — разобран первым, догрузка только 1 (доля), остальные ждут; ещё три новых — два разобраны, третий отложен и первым в очереди; на следующий день отложенный разобран. `packages/retail/mail/test/deferred.test.ts` (4): пока лимит исчерпан — остаются отложенными без записей; лимит позволяет — разобраны с приоритетом deferred, текст в истории (новая пометка и прежний формат) и в задаче «из-за дневного лимита»; пометки нет — отдельным сообщением; файл не прочитан — ошибка без падения. `poller.test.ts` (+1): лимит при опросе → пометка «разбор отложен» и запись `skipped`, не ошибка |
 
+### Доработка: вложения писем из карточки amoCRM
+
+По «74236» (29207977) письмо пришло в карточку amo (amomail_message): такие письма агент получает через Salesbot — текстом и ссылкой на вложение из «Файлов» amo, вложение разбирает `attachmentText` конвейера (`pipeline.ts`, источник `chat`), в `mail_attachments` оно не попадало, поэтому повтор отложенных его не видел.
+
+| | Реализация |
+|---|---|
+| Приоритет | Файл через Salesbot (вложение письма карточки amo, файл чата) разбирается при получении — приоритет «новый» |
+| Отложено по лимиту | При `stage: 'limit'` конвейер не пишет ошибку: файл (он уже скачан) кладётся на том и в очередь отложенных (`deferFileToDisk` → `mail_attachments`, статус `deferred`, ключ по ссылке — без дублей), в текст хода — «(клиент отправил файл «X» — разбор отложен по дневному лимиту, будет разобран автоматически)», в журнал — `skipped`; у сообщения Wazzup (если файл оттуда) — `file_status = deferred` |
+| Автоповтор | Тот же проход `runDeferredMailFiles` раз в 5 минут: разбор с приоритетом «отложенный», текст — в историю сделки вместо пометки (регулярка знает и «клиент отправил файл …», и «во вложении файл …», и прежний формат), и в открытую задачу сделки с «дневной лимит» |
+| Файлы, упёршиеся в лимит до доработки | Команда ставит файлы сделки из amo в очередь отложенных (скачивает из «Файлов» amo на том, ничего в amo не меняет); разбор — ближайшим проходом `wazzup-files` (до 5 минут), содержимое уйдёт в историю и в задачу «…из-за дневного лимита» |
+| Тест | `pipeline-docs.test.ts` (+1, сквозной): письмо из карточки amo с вложением при исчерпанном лимите → пометка агенту, `skipped`, файл на томе и строка `deferred`, повтор без дубля → лимит повышен → разобрано, текст в истории сделки и дописан в задачу. `deferred.test.ts`: замена пометки формата Salesbot |
+
+Сразу после развёртывания — «Запрос.docx» по 29207977:
+```bash
+cd /opt/ai-door/src && docker compose exec worker node apps/worker/dist/files-defer.js --lead 29207977 --name Запрос
+# через ≤ 5 минут:
+docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage
+docker compose exec db psql -U aidoor -d aidoor -c "SELECT created_at AT TIME ZONE 'Europe/Moscow', summary FROM ai_journal WHERE lead_id = 29207977 AND kind IN ('document','skipped','error') ORDER BY id DESC LIMIT 5;"
+```
+Если файла в «Файлах» сделки нет (письмо карточки без прикрепления к сделке), команда напишет «файлов в карточке 0» — тогда вложение нужно переслать через Salesbot заново или приложить к сделке вручную.
+
 Настройка: `vision.backlogShare` (0–1, по умолчанию 0.5). После разбора очереди вернуть `vision.maxFilesPerDay` на 100 — догрузка тогда пойдёт по 50 в день из остатка.
 
 Расход за день и очереди:
@@ -373,7 +394,7 @@ docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage 
 | typecheck | Чистый по всему workspace розницы |
 | eslint | Мои файлы чистые. В ветке есть 7 прежних ошибок `no-non-null-assertion` в `apps/worker/src/wazzup-dump.ts` и `packages/core/db/src/wazzup-dumps.ts` (есть на HEAD до этих правок, не трогал) |
 | `@core/calls` | 33/33 (WA-FILES: +2, DEMO-SOURCES: +1, CALLS-DAY: +1, REFUSAL: +7, DAY-FIX2: +1) |
-| `@retail/agent` | 141/141 (WA-FILES: +7, FILES-PRIORITY: +1) |
+| `@retail/agent` | 142/142 (WA-FILES: +7, FILES-PRIORITY: +2) |
 | `@core/db`, `apps/worker` | 22/22, 8/8 |
 | `apps/api` | 6 файлов пройдено; `phase1` «справочники amo» и `phase2` «бот-отправщик» падают и на HEAD до этих правок — не связаны со звонками |
 | Опт | `@opt/kp` 148/148, `@opt/api` 79 / 8 пропущено; граница с розницей на ветке опта пуста |

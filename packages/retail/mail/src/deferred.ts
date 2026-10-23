@@ -1,4 +1,7 @@
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { storagePathFor } from './attachments.ts';
 import type { AmoApiClient } from '@core/amo';
 import type { DialogRepo, JournalRepo, MailAttachmentsRepo, SettingsRepo, WidgetSettings } from '@core/db';
 import { DEFERRED_MARK } from './poller.ts';
@@ -37,11 +40,15 @@ const PER_RUN = 20;
 const TASK_TEXT_CHARS = 600;
 const TASK_LIMIT_RE = /дневн[а-яё]* лимит/i;
 
-/** Пометки в истории сделки, которые заменяются текстом разбора: новая («разбор отложен…») и прежняя («разобрать не удалось: … лимит …»). */
+/**
+ * Пометки в истории сделки, которые заменяются текстом разбора: «во вложении файл «X» — разбор отложен…» (письмо из ящика),
+ * «клиент отправил файл «X» — разбор отложен…» (файл через Salesbot, в т. ч. вложение письма из карточки amo) и прежняя
+ * «разобрать не удалось: … лимит …».
+ */
 export function replaceDeferredMark(text: string, filename: string, replacement: string): string | null {
   const name = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // До конца строки (в тексте ошибки бывают свои скобки: «…файлов (100)»).
-  const re = new RegExp(`\\(во вложении файл «${name}»(?: — ${DEFERRED_MARK}[^\\n]*|, разобрать не удалось: [^\\n]*лимит[^\\n]*)\\)`, 'iu');
+  const re = new RegExp(`\\((?:во вложении файл|клиент отправил файл) «${name}»(?: — ${DEFERRED_MARK}[^\\n]*|, разобрать не удалось: [^\\n]*лимит[^\\n]*)\\)`, 'iu');
   if (!re.test(text)) return null;
   return text.replace(re, replacement);
 }
@@ -123,4 +130,27 @@ async function appendToLimitTask(d: DeferredMailDeps, accountId: number, leadId:
   const short = text.replace(/\s+/g, ' ').trim();
   await api.updateTaskText(task.id, `${task.text.trimEnd()}\n\nСодержимое файла «${filename}» (разобрано после дневного лимита): ${short.length > TASK_TEXT_CHARS ? `${short.slice(0, TASK_TEXT_CHARS)}…` : short}`);
   return task.id;
+}
+
+export interface DeferToDiskDeps {
+  attachments: Pick<MailAttachmentsRepo, 'insert' | 'setExtract'>;
+  /** Корень файлов на томе (MAIL_FILES_ROOT). */
+  root: string;
+  now?: () => Date;
+}
+
+/**
+ * Файл, упёршийся в дневной лимит не из ящика (Salesbot: вложение письма из карточки amo, файл чата; файлы сделки из amo по
+ * команде), — на том и в очередь отложенных (mail_attachments, статус deferred). Повторно тот же файл (ключ по ссылке / uuid,
+ * имени и размеру) не дублируется. Возвращает id строки и создана ли она.
+ */
+export async function deferFileToDisk(d: DeferToDiskDeps, input: { accountId: number; leadId: number | null; filename: string; mime: string; bytes: Uint8Array; key: string; error: string }): Promise<{ id: number; created: boolean }> {
+  const now = d.now?.() ?? new Date();
+  const path = storagePathFor(d.root, input.accountId, input.filename, now);
+  const row = await d.attachments.insert({ accountId: input.accountId, leadId: input.leadId, messageUid: null, messageId: `deferred:${createHash('sha1').update(input.key).digest('hex').slice(0, 24)}`, filename: input.filename, mime: input.mime || 'application/octet-stream', sizeBytes: input.bytes.byteLength, storagePath: path });
+  if (!row.created) return row;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, input.bytes);
+  await d.attachments.setExtract(row.id, { error: input.error, deferred: true });
+  return row;
 }

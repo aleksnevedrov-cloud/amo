@@ -1,9 +1,13 @@
-import { DialogRepo, JournalRepo, MemoryRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema, type WidgetSettingsInput } from '@core/db';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DialogRepo, JournalRepo, MailAttachmentsRepo, MemoryRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema, type WidgetSettingsInput } from '@core/db';
 import { PricingRepo } from '@retail/pricing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seeded, type Seeded } from '../../../core/tools/test/fixtures.ts';
 import { Orchestrator } from '../src/orchestrator.ts';
 import { DialogPipeline, type DocumentAnalyzer } from '../src/pipeline.ts';
+import { deferFileToDisk, runDeferredMailFiles } from '../../mail/src/deferred.ts';
 import { fakeAmo } from './fake-amo.ts';
 import { ScriptedLlm, text } from './scripted-llm.ts';
 
@@ -115,6 +119,60 @@ describe('вложения из чата (фаза 3)', () => {
     const e2 = (await t.journal.list(ACC, { leadId: lead })).find((e) => e.kind === 'error');
     expect(e2?.summary).toBe('Разбор файла «x.jpeg» — скачивание: TypeError без текста');
     expect(e2?.details).toMatchObject({ stage: 'download', error: 'TypeError без текста', errorName: 'TypeError', status: null });
+  });
+
+  it('вложение письма из карточки amo при исчерпанном лимите → отложено (файл на томе, очередь deferred) → разобрано после повышения лимита → текст в истории сделки и в задаче «из-за дневного лимита» (RFD-AI-AGENT-FILES-PRIORITY)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'defer-'));
+    const attachments = new MailAttachmentsRepo(s.db);
+    let limited = true;
+    const docs: DocumentAnalyzer & { analyze(input: { filename: string; priority?: string; bytes: Uint8Array }): Promise<never> } = {
+      async analyze() {
+        throw Object.assign(new Error('Достигнут дневной лимит разбора файлов (100)'), { stage: 'limit' });
+      },
+    } as never;
+    const t = await setup([text('Файл получил, разберу чуть позже и отвечу по запросу.')], {}, docs);
+    const deferred: string[] = [];
+    const pipeline = new DialogPipeline({
+      ...t,
+      download: async () => ({ bytes: new Uint8Array([0x50, 0x4b, 3, 4]), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
+      deferFile: async (f) => {
+        deferred.push(f.filename);
+        await deferFileToDisk({ attachments, root }, { accountId: f.accountId, leadId: f.leadId, filename: f.filename, mime: f.mime, bytes: f.bytes, key: f.url, error: f.error });
+      },
+    });
+    // Salesbot передал письмо из карточки amo: текст и ссылку на вложение из «Файлов» amo.
+    await t.dialog.enqueue(ACC, lead, 'Тема письма: Запрос КП\nПрошу посчитать по вложению', 'https://test.amocrm.ru/c/3', { url: 'https://drive-b.amocrm.ru/download/abc/Запрос.docx', type: 'file' });
+    expect((await pipeline.processLead(ACC, lead)).status).toBe('replied');
+    expect(deferred).toEqual(['Запрос.docx']);
+    expect(JSON.stringify(t.llm.requests[0]!.messages)).toContain('(клиент отправил файл «Запрос.docx» — разбор отложен по дневному лимиту, будет разобран автоматически)');
+    const log = await t.journal.list(ACC, { leadId: lead });
+    expect(log.find((e) => e.kind === 'skipped')?.summary).toBe('Файл «Запрос.docx» отложен по дневному лимиту — разберётся автоматически');
+    expect(log.some((e) => e.kind === 'error')).toBe(false);
+    const queued = await attachments.listDeferred(ACC);
+    expect(queued.map((a) => [a.leadId, a.filename, a.extractStatus, a.sizeBytes])).toEqual([[lead, 'Запрос.docx', 'deferred', 4]]);
+    expect(readFileSync(queued[0]!.storagePath)).toEqual(Buffer.from([0x50, 0x4b, 3, 4]));
+    // Повтор того же файла не дублирует очередь.
+    expect((await deferFileToDisk({ attachments, root }, { accountId: ACC, leadId: lead, filename: 'Запрос.docx', mime: 'x', bytes: new Uint8Array([0x50, 0x4b, 3, 4]), key: 'https://drive-b.amocrm.ru/download/abc/Запрос.docx', error: 'e' })).created).toBe(false);
+
+    // Менеджеру из-за лимита поставлена задача; лимит повышен (или новые сутки) → проход отложенных: текст в историю и в задачу.
+    limited = false;
+    const tasks = [{ id: 44, text: 'Клиент прислал письмо с файлом «Запрос.docx», файл разобрать не удалось из-за дневного лимита. Разобрать вручную.' }];
+    const updated: { id: number; text: string }[] = [];
+    const r = await runDeferredMailFiles(
+      {
+        attachments,
+        settings: t.settings,
+        journal: t.journal,
+        dialog: t.dialog,
+        amo: async () => ({ openLeadTasks: async () => tasks, updateTaskText: async (id: number, txt: string) => void updated.push({ id, text: txt }) }),
+        documents: { analyze: async (input) => (limited ? Promise.reject(Object.assign(new Error('лимит'), { stage: 'limit' })) : { id: 1, kind: 'request', text: `[Документ «${input.filename}»: Запрос КП] Три двери 800×2000, эмаль белая, монтаж; срок до 15.11.`, costUsd: 0.02, model: 'test-docs' }) },
+      },
+      { info: () => undefined, warn: () => undefined },
+    );
+    expect(r).toMatchObject({ picked: 1, done: 1, tasksUpdated: 1 });
+    expect((await t.dialog.history(ACC, lead)).filter((m) => m.role === 'client').map((m) => m.text)).toEqual(['Тема письма: Запрос КП\nПрошу посчитать по вложению\n[Документ «Запрос.docx»: Запрос КП] Три двери 800×2000, эмаль белая, монтаж; срок до 15.11.']);
+    expect(updated).toEqual([{ id: 44, text: 'Клиент прислал письмо с файлом «Запрос.docx», файл разобрать не удалось из-за дневного лимита. Разобрать вручную.\n\nСодержимое файла «Запрос.docx» (разобрано после дневного лимита): [Документ «Запрос.docx»: Запрос КП] Три двери 800×2000, эмаль белая, монтаж; срок до 15.11.' }]);
+    expect(await attachments.listDeferred(ACC)).toEqual([]);
   });
 
   it('автоматический разбор выключен — файл не скачивается', async () => {

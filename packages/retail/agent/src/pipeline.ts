@@ -72,7 +72,7 @@ export interface PipelineDeps {
     /** RFD-AI-AGENT-WA-FILES: файлы переписки с извлечённым текстом (обе стороны) — в контекст агента. */
     filesByPhones?(accountId: number, phones: string[], since: Date, limit?: number): Promise<{ direction: 'in' | 'out'; sentAt: Date; file: { name: string | null; text: string | null; status: string | null; error: string | null; type?: string | null } }[]>;
     /** Результат разбора входящего файла агентом — чтобы фоновое задание не разбирало его второй раз. */
-    setFileResultByUri?(accountId: number, contentUri: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed'; error: string | null }): Promise<void>;
+    setFileResultByUri?(accountId: number, contentUri: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed' | 'deferred'; error: string | null }): Promise<void>;
   };
   suggestions: SuggestionsRepo;
   /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
@@ -89,6 +89,12 @@ export interface PipelineDeps {
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(accountId: number, provider: WidgetSettings['stt']['provider']): Promise<SttProvider | null>;
   download?: typeof downloadAttachment;
+  /**
+   * RFD-AI-AGENT-FILES-PRIORITY: файл клиента (в т. ч. вложение письма из карточки amo через Salesbot), упёршийся в дневной
+   * лимит, — на том и в очередь отложенных (mail_attachments, статус deferred): разберётся автоматически, текст уйдёт в историю
+   * сделки и в задачу. Нет — только пометка в тексте хода.
+   */
+  deferFile?: (input: { accountId: number; leadId: number; filename: string; mime: string; bytes: Uint8Array; url: string; error: string }) => Promise<void>;
   /** Лог воркера (pino.warn): сбои разбора вложений с деталями, не только журнал. */
   log?: (fields: Record<string, unknown>, msg: string) => void;
   /** Пауза перед повторным поиском вложения в Wazzup (мс); в тестах 0. */
@@ -716,8 +722,25 @@ export class DialogPipeline {
       if (t.settings.vision.noteInLead) await t.access.api.addLeadNote(t.leadId, r.note).catch(() => undefined);
       return [m.text, r.text].filter(Boolean).join('\n');
     } catch (err) {
+      if ((err as { stage?: string }).stage === 'limit') return this.deferAttachment(t, m.text, url, filename, file, (err as Error).message);
       return fail((err as { stage?: string }).stage ?? 'analyze', err, { mime: file.mime, bytes: file.bytes.byteLength });
     }
+  }
+
+  /** Дневной лимит разбора — не сбой: файл откладывается (на том, очередь deferred) и разберётся автоматически; в текст хода — пометка. */
+  private async deferAttachment(t: Turn, text: string, url: string, filename: string, file: { bytes: Uint8Array; mime: string }, error: string): Promise<string> {
+    let queued = false;
+    if (this.d.deferFile) {
+      try {
+        await this.d.deferFile({ accountId: t.accountId, leadId: t.leadId, filename, mime: file.mime, bytes: file.bytes, url, error });
+        queued = true;
+      } catch (err) {
+        await this.journal(t, { kind: 'error', summary: `Файл «${filename}» не поставлен в очередь отложенных: ${(err as Error).message}`, details: { url: safeUrl(url), error } });
+      }
+    }
+    await this.d.wazzup?.setFileResultByUri?.(t.accountId, url, { name: filename, text: null, status: 'deferred', error: `отложено по дневному лимиту: ${error}` }).catch(() => undefined);
+    await this.journal(t, { kind: 'skipped', summary: `Файл «${filename}» отложен по дневному лимиту — ${queued ? 'разберётся автоматически' : 'очередь отложенных не подключена'}`, details: { url: safeUrl(url), error, queued, mime: file.mime, bytes: file.bytes.byteLength } });
+    return [text, `(клиент отправил файл «${filename}» — разбор отложен по дневному лимиту, будет разобран автоматически)`].filter(Boolean).join('\n');
   }
 
   private async skip(t: Turn, reason: string, summary: string): Promise<PipelineOutcome> {

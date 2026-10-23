@@ -19,7 +19,7 @@ import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, Memor
   MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
-import { EmailChannel, ImapMailbox, MailRepo, runDeferredMailFiles, SmtpSender } from '@retail/mail';
+import { deferFileToDisk, EmailChannel, ImapMailbox, MailRepo, runDeferredMailFiles, SmtpSender } from '@retail/mail';
 import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
@@ -302,6 +302,10 @@ const pipeline = new DialogPipeline({
     llm,
     ai,
     documents: docs,
+    // RFD-AI-AGENT-FILES-PRIORITY: файл, упёршийся в лимит (в т. ч. вложение письма из карточки amo через Salesbot), — на том и в очередь отложенных.
+    deferFile: async (f) => {
+      await deferFileToDisk({ attachments: new MailAttachmentsRepo(db), root: process.env.MAIL_FILES_ROOT ?? '/data' }, { accountId: f.accountId, leadId: f.leadId, filename: f.filename, mime: f.mime, bytes: f.bytes, key: f.url, error: f.error });
+    },
     log: (fields, msg) => log.warn(fields, msg),
     outcomes,
     email: {
