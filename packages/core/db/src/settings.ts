@@ -273,6 +273,11 @@ export const widgetSettingsSchema = z
         noteInLead: z.boolean().default(true),
         /** Лимит файлов в сутки на аккаунт — защита от расхода. */
         maxFilesPerDay: z.number().int().min(1).max(1000).default(100),
+        /**
+         * RFD-AI-AGENT-FILES-PRIORITY: доля дневного лимита для фоновой догрузки старых файлов (старше 24 часов); новые файлы
+         * (письма, WhatsApp, чат за последние сутки) разбираются первыми и на долю не смотрят.
+         */
+        backlogShare: z.number().min(0).max(1).default(0.5),
       })
       .strict()
       .default({}),

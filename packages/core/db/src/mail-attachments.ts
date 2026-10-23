@@ -57,7 +57,7 @@ export class MailAttachmentsRepo {
   /** Текст вложения, извлечённый при разборе письма (этап 2 темы RFD-AI-AGENT-KP). */
   async setExtract(
     id: number,
-    r: { text?: string | null; error?: string | null },
+    r: { text?: string | null; error?: string | null; deferred?: boolean },
   ): Promise<void> {
     await this.db.query(
       `UPDATE mail_attachments
@@ -66,8 +66,18 @@ export class MailAttachmentsRepo {
               extract_error = $4,
               extracted_at = now()
         WHERE id = $1`,
-      [id, r.text ?? null, r.error ? 'error' : 'done', r.error ? r.error.slice(0, 500) : null],
+      [id, r.text ?? null, r.deferred ? 'deferred' : r.error ? 'error' : 'done', r.error ? r.error.slice(0, 500) : null],
     );
+  }
+
+  /** RFD-AI-AGENT-FILES-PRIORITY: вложения, отложенные по дневному лимиту, — на повторный разбор (старые раньше). */
+  async listDeferred(accountId: number, limit = 20): Promise<(MailAttachmentRow & { messageId: string; createdAt: Date })[]> {
+    const { rows } = await this.db.query(
+      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at
+         FROM mail_attachments WHERE account_id = $1 AND extract_status = 'deferred' AND storage_path <> '' ORDER BY created_at ASC LIMIT $2`,
+      [accountId, limit],
+    );
+    return rows.map((r) => ({ id: Number(r.id), accountId: Number(r.account_id), leadId: r.lead_id === null ? null : Number(r.lead_id), messageId: r.message_id, filename: r.filename, mime: r.mime, sizeBytes: Number(r.size_bytes), storagePath: r.storage_path, amoFileUuid: r.amo_file_uuid, extractStatus: r.extract_status, extractedText: r.extracted_text, createdAt: r.created_at }));
   }
 
   async markUploaded(id: number, fileUuid: string): Promise<void> {

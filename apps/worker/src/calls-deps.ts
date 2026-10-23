@@ -1,12 +1,12 @@
 import { AmoOAuth, TokenService } from '@core/amo';
 import { CallsRepo, DaySummariesRepo, RefusalsRepo, type CallsDeps } from '@core/calls';
-import { AccountsRepo, createPool, JournalRepo, PgTokenStore, SecretsRepo, SettingsRepo } from '@core/db';
+import { AccountsRepo, createPool, JournalRepo, PgTokenStore, SecretsRepo, SettingsRepo, type Db } from '@core/db';
 import { createAiProvider, resolveRoute } from '@retail/agent';
 import { buildLocalSources } from './local-sources.ts';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Env } from '@core/shared';
 
 /** Зависимости модуля звонков для консольных команд (догрузка, проверка ролей) — те же, что у воркера. */
-export function buildCallsDeps(env: Env): { deps: CallsDeps; settings: SettingsRepo; close: () => Promise<void> } {
+export function buildCallsDeps(env: Env): { deps: CallsDeps; settings: SettingsRepo; db: Db; close: () => Promise<void> } {
   const db = createPool(env.DATABASE_URL);
   const alerter = new TelegramAlerter(env.TELEGRAM_ALERT_BOT_TOKEN, env.TELEGRAM_ALERT_CHAT_ID);
   const tokenService = new TokenService(new PgTokenStore(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY)), new AmoOAuth({ clientId: env.AMO_CLIENT_ID, clientSecret: env.AMO_CLIENT_SECRET, redirectUri: amoRedirectUri(env) }), env.TOKEN_REFRESH_MARGIN_SEC * 1000, alerter);
@@ -35,5 +35,5 @@ export function buildCallsDeps(env: Env): { deps: CallsDeps; settings: SettingsR
     // Локальные источники общения — та же сборка, что у воркера (RFD-AI-AGENT-CALLS-DEMO-SOURCES).
     sources: buildLocalSources(db),
   };
-  return { deps, settings, close: () => db.end() };
+  return { deps, settings, db, close: () => db.end() };
 }

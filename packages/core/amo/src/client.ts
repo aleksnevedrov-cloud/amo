@@ -286,6 +286,11 @@ export class AmoApiClient {
     return res?._embedded.tasks[0]?.id ?? 0;
   }
 
+  /** Текст существующей задачи (RFD-AI-AGENT-FILES-PRIORITY: дописать содержимое файла, разобранного после лимита). */
+  async updateTaskText(taskId: number, text: string): Promise<void> {
+    await this.request('PATCH', `/api/v4/tasks/${taskId}`, { text });
+  }
+
   /** Незакрытые задачи сделки: по ним решаем, нужна ли ещё одна. */
   async openLeadTasks(leadId: number): Promise<{ id: number; text: string }[]> {
     const res = await this.request<{ _embedded?: { tasks?: { id: number; text: string }[] } }>(

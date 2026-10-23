@@ -3,7 +3,7 @@ import type { CatalogRepo } from '@retail/catalog';
 import { defaultSettings, type DocumentsRepo, type NewDocument } from '@core/db';
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
-import { analyzeDocument, DocumentError, DocumentService, documentJsonSchema, type DocumentData, type OcrProvider } from '../src/index.ts';
+import { analyzeDocument, checkFileLimit, DocumentError, DocumentService, documentJsonSchema, type DocumentData, type OcrProvider } from '../src/index.ts';
 
 const baseDoc: DocumentData = {
   kind: 'request',
@@ -46,7 +46,7 @@ const catalog = {
 
 function fakeRepo() {
   const saved: NewDocument[] = [];
-  const repo = { async add(d: NewDocument) { saved.push(d); return saved.length; }, async countToday() { return saved.length; } } as unknown as DocumentsRepo;
+  const repo = { async add(d: NewDocument) { saved.push(d); return saved.length; }, async usageOn() { return { total: saved.length, new: saved.length, backlog: 0, deferred: 0 }; } } as unknown as DocumentsRepo;
   return { repo, saved };
 }
 
@@ -186,5 +186,25 @@ describe('DocumentService', () => {
     await expect(svc.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'a.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1]), settings: strict })).rejects.toMatchObject({ name: 'DocumentError', stage: 'ocr' });
     const none = new DocumentService({ llm: null, catalog, documents: repo, ocr: () => null });
     await expect(none.analyze({ accountId: 1, leadId: 1, source: 'chat', filename: 'a.txt', mime: 'text/plain', bytes: new Uint8Array([65]), settings })).rejects.toThrow(/LLM/);
+  });
+});
+
+describe('дневной лимит по группам (RFD-AI-AGENT-FILES-PRIORITY)', () => {
+  const vision = { maxFilesPerDay: 3, backlogShare: 0.5 }; // доля догрузки — floor(1.5) = 1
+  it('новые и отложенные — до лимита независимо от догрузки; догрузка — не больше доли и только из остатка дня', () => {
+    expect(checkFileLimit({ total: 0, new: 0, backlog: 0, deferred: 0 }, vision, 'backlog')).toBeNull();
+    expect(checkFileLimit({ total: 1, new: 0, backlog: 1, deferred: 0 }, vision, 'backlog')?.message).toContain('Доля догрузки старых файлов на день (1 из 3) исчерпана');
+    expect(checkFileLimit({ total: 1, new: 0, backlog: 1, deferred: 0 }, vision, 'backlog')?.backlog).toBe(true);
+    // Догрузка уже взяла свою долю — новые всё равно разбираются до лимита (3 новых), расход догрузки на них не влияет.
+    expect(checkFileLimit({ total: 1, new: 0, backlog: 1, deferred: 0 }, vision, 'new')).toBeNull();
+    expect(checkFileLimit({ total: 3, new: 2, backlog: 1, deferred: 0 }, vision, 'new')).toBeNull();
+    expect(checkFileLimit({ total: 4, new: 3, backlog: 1, deferred: 0 }, vision, 'new')?.message).toBe('Достигнут дневной лимит разбора файлов (3)');
+    expect(checkFileLimit({ total: 4, new: 3, backlog: 1, deferred: 0 }, vision, 'new')?.backlog).toBe(false);
+    // Отложенные считаются вместе с новыми.
+    expect(checkFileLimit({ total: 2, new: 2, backlog: 0, deferred: 0 }, vision, 'deferred')).toBeNull();
+    expect(checkFileLimit({ total: 3, new: 2, backlog: 0, deferred: 1 }, vision, 'deferred')?.stage).toBe('limit');
+    // Лимит исчерпан новыми — старые ждут следующего дня, даже если доля догрузки не выбрана.
+    expect(checkFileLimit({ total: 3, new: 3, backlog: 0, deferred: 0 }, vision, 'backlog')?.message).toContain('Дневной лимит разбора файлов (3) исчерпан — догрузка старых файлов ждёт');
+    expect(checkFileLimit({ total: 0, new: 0, backlog: 0, deferred: 0 }, { maxFilesPerDay: 1, backlogShare: 0 }, 'backlog')?.message).toContain('Доля догрузки старых файлов на день (0 из 1)');
   });
 });

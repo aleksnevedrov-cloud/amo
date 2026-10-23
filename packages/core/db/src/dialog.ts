@@ -108,7 +108,16 @@ export class DialogRepo {
     ]);
   }
 
-  /** Последние сообщения сделки в хронологическом порядке. */
+  /** RFD-AI-AGENT-FILES-PRIORITY: сообщения клиента по сделке с упоминанием (имя файла) — чтобы дописать разбор отложенного вложения. */
+  async clientMessagesMentioning(accountId: number, leadId: number, needle: string, limit = 5): Promise<{ id: number; text: string }[]> {
+    const { rows } = await this.db.query(`SELECT id, text FROM dialog_messages WHERE account_id = $1 AND lead_id = $2 AND role = 'client' AND position($3 in text) > 0 ORDER BY id DESC LIMIT $4`, [accountId, leadId, needle, limit]);
+    return rows.map((r) => ({ id: Number(r.id), text: r.text }));
+  }
+
+  async updateText(id: number, text: string): Promise<void> {
+    await this.db.query('UPDATE dialog_messages SET text = $2 WHERE id = $1', [id, text]);
+  }
+
   /** RFD-AI-AGENT-CALLS-DAY-FULL: сообщения диалога по сделке за период, с id (для дедупликации и учёта в итоге дня). */
   async betweenByLead(accountId: number, leadId: number, since: Date, until: Date, limit = 500): Promise<{ id: number; role: Role; text: string; createdAt: Date }[]> {
     const { rows } = await this.db.query(`SELECT id, role, text, created_at FROM dialog_messages WHERE account_id = $1 AND lead_id = $2 AND created_at >= $3 AND created_at < $4 ORDER BY id ASC LIMIT $5`, [accountId, leadId, since, until, limit]);

@@ -1,7 +1,7 @@
 import { resolveRoute, type LlmClient } from '@retail/agent';
 import type { ChatRoute, LlmGateway } from '@core/llm';
 import type { CatalogRepo } from '@retail/catalog';
-import type { DocumentSource, DocumentsRepo, WidgetSettings } from '@core/db';
+import type { DocumentPriority, DocumentSource, DocumentsRepo, DocumentsUsage, WidgetSettings } from '@core/db';
 import { analyzeDocument, AnalyzeError, pickVisionRoute } from './analyze.ts';
 import type { DwgConverter } from './dwg.ts';
 import { extract, ExtractError, type Extracted } from './extract.ts';
@@ -36,6 +36,25 @@ export interface AnalyzeFileInput {
   hint?: 'measurement' | 'request' | 'photo';
   /** Провайдер и модель (переопределение сделки); по умолчанию — из настроек. */
   route?: ChatRoute;
+  /** RFD-AI-AGENT-FILES-PRIORITY: новый файл (по умолчанию) / фоновая догрузка старого / отложенный по лимиту. */
+  priority?: DocumentPriority;
+}
+
+/**
+ * Дневной лимит по группам (RFD-AI-AGENT-FILES-PRIORITY, п. 1): новые и отложенные файлы разбираются, пока их за день меньше
+ * maxFilesPerDay — расход догрузки на них не влияет; догрузка старых — только из остатка дня и не больше доли backlogShare.
+ * null — можно разбирать, иначе ошибка со stage 'limit' (для догрузки — с пометкой backlog).
+ */
+export function checkFileLimit(usage: DocumentsUsage, vision: Pick<WidgetSettings['vision'], 'maxFilesPerDay' | 'backlogShare'>, priority: DocumentPriority): DocumentError | null {
+  const max = vision.maxFilesPerDay;
+  if (priority === 'backlog') {
+    const share = Math.floor(max * vision.backlogShare);
+    if (usage.total >= max) return new DocumentError(`Дневной лимит разбора файлов (${max}) исчерпан — догрузка старых файлов ждёт следующего дня`, 'limit', true);
+    if (usage.backlog >= share) return new DocumentError(`Доля догрузки старых файлов на день (${share} из ${max}) исчерпана — остальные ждут следующего дня`, 'limit', true);
+    return null;
+  }
+  if (usage.new + usage.deferred >= max) return new DocumentError(`Достигнут дневной лимит разбора файлов (${max})`, 'limit');
+  return null;
 }
 
 export interface DocumentResult {
@@ -68,6 +87,8 @@ export class DocumentError extends Error {
   constructor(
     message: string,
     readonly stage: DocumentStage = 'llm',
+    /** Лимит догрузки старых файлов (доля дня), а не общий дневной лимит новых. */
+    readonly backlog = false,
   ) {
     super(message);
   }
@@ -89,9 +110,8 @@ export class DocumentService {
     const { settings } = input;
     const llm = (await this.d.llmFor?.(input.accountId)) ?? this.d.llm;
     if (!llm) throw new DocumentError('LLM не настроена: задайте ключ провайдера в настройках («Модель») или на сервере', 'limit');
-    if ((await this.d.documents.countToday(input.accountId)) >= settings.vision.maxFilesPerDay) {
-      throw new DocumentError(`Достигнут дневной лимит разбора файлов (${settings.vision.maxFilesPerDay})`, 'limit');
-    }
+    const limit = checkFileLimit(await this.d.documents.usageOn(input.accountId), settings.vision, input.priority ?? 'new');
+    if (limit) throw limit;
     let extracted: Extracted;
     try {
       extracted = await extract(input.bytes, input.mime, input.filename, this.d.dwg ? { dwg: this.d.dwg } : {});
@@ -154,6 +174,7 @@ export class DocumentService {
     const id = await this.d.documents.add({
       accountId: input.accountId,
       leadId: input.leadId,
+      priority: input.priority ?? 'new',
       source: input.source,
       filename: input.filename,
       mime: input.mime,

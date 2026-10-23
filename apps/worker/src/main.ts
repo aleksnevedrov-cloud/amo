@@ -19,7 +19,7 @@ import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, Memor
   MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
-import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@retail/mail';
+import { EmailChannel, ImapMailbox, MailRepo, runDeferredMailFiles, SmtpSender } from '@retail/mail';
 import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
@@ -213,7 +213,12 @@ const callsWorker = new Worker(
       for (const r of results) if (r.enabled && (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length || r.transcribed?.transcribed || r.transcribed?.failed)) log.info({ ...r }, 'calls-poll: аккаунт опрошен');
       return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
     }
-    if (job.name === WAZZUP_FILES_JOB) return runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
+    if (job.name === WAZZUP_FILES_JOB) {
+      const files = await runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
+      // RFD-AI-AGENT-FILES-PRIORITY: вложения писем, отложенные по дневному лимиту, — тем же проходом.
+      const deferred = await runDeferredMailFiles({ attachments: new MailAttachmentsRepo(db), settings, journal, dialog, amo: amoClient, documents: docs }, log);
+      return { files, deferred };
+    }
     if (job.name === REFUSAL_JOB) {
       const results = await runRefusalPollAll(callsDeps);
       for (const r of results) if (r.matched || r.retried || r.errors) log.info({ ...r }, 'refusal-poll: переходы в «Отказ»');

@@ -4,6 +4,7 @@
 import { AccountsRepo, JournalRepo, SettingsRepo, WazzupRepo, widgetSettingsSchema, type Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../../core/db/test/setup.ts';
+import { checkFileLimit } from '../../../core/docs/src/service.ts';
 import { formatWazzupFiles, runWazzupFiles, wazzupFileName, wazzupMimeOf, type WazzupFileAnalyzer } from '../src/wazzup-files.ts';
 
 const ACC = 1;
@@ -32,7 +33,8 @@ describe('файлы Wazzup: фоновое задание (wazzup-files)', () =
   let seq = 0;
   const msg = (messageId: string, direction: 'in' | 'out', contentUri: string, contentType: string, extra: Partial<Parameters<WazzupRepo['upsert']>[1]> = {}) =>
     wazzup.upsert(ACC, { messageId, channelId: 'ch1', chatId: '79099500381', chatType: 'whatsapp', phone: '79099500381', direction, author: direction === 'in' ? 'client' : 'manager', text: direction === 'in' ? '[document]' : 'Отправляю КП', status: null, isSystem: false, sentAt: new Date(Date.UTC(2026, 9, 22, 7, 45, ++seq)), source: 'webhook', raw: { type: contentType }, contentUri, contentType, ...extra });
-  const deps = () => ({ wazzup, settings, journal, documents, download });
+  // «Сейчас» для деления на новые / старые — рядом с датами сообщений теста (22.10): все файлы ниже — новые.
+  const deps = () => ({ wazzup, settings, journal, documents, download, now: () => new Date('2026-10-22T08:00:00Z') });
 
   beforeAll(async () => {
     ({ db, drop } = await freshDb());
@@ -104,9 +106,10 @@ describe('файлы Wazzup: фоновое задание (wazzup-files)', () =
     // Лимит разбора на день (DocumentError stage 'limit') — файл остаётся pending до следующего прохода.
     await msg('m-limit', 'out', 'https://store.wazzup24.com/files/КП_3.pdf', 'document');
     const limited: WazzupFileAnalyzer = { analyze: async () => { throw Object.assign(new Error('дневной лимит разбора файлов исчерпан'), { stage: 'limit' }); } };
-    expect(await runWazzupFiles({ ...deps(), documents: limited }, log)).toMatchObject({ picked: 1, skipped: 1, failed: 0 });
-    expect((await wazzup.filesPending(ACC)).map((p) => p.messageId)).toEqual(['m-limit']);
-    expect(await runWazzupFiles(deps(), log)).toMatchObject({ picked: 1, done: 1 });
+    expect(await runWazzupFiles({ ...deps(), documents: limited }, log)).toMatchObject({ picked: 1, deferred: 1, skipped: 0, failed: 0 });
+    expect((await wazzup.filesPending(ACC)).map((p) => [p.messageId, p.fileStatus])).toEqual([['m-limit', 'deferred']]);
+    expect((await wazzup.filesByPhones(ACC, ['79099500381'], new Date('2026-10-01T00:00:00Z'))).find((f) => f.messageId === 'm-limit')?.file).toMatchObject({ status: 'deferred', error: 'отложено по дневному лимиту: дневной лимит разбора файлов исчерпан' });
+    expect(await runWazzupFiles(deps(), log)).toMatchObject({ picked: 1, done: 1, byPriority: { new: 0, backlog: 0, deferred: 1 } });
   });
 
   it('разбор вложений выключен (vision.autoParse) или DocumentService недоступен → отметка без скачивания', async () => {
@@ -115,6 +118,46 @@ describe('файлы Wazzup: фоновое задание (wazzup-files)', () =
     expect(await runWazzupFiles({ ...deps(), documents: null }, log)).toMatchObject({ picked: 1, skipped: 1 });
     expect(downloaded.length).toBe(n);
     expect((await wazzup.filesByPhones(ACC, ['79099500381'], new Date('2026-10-01T00:00:00Z'))).find((f) => f.messageId === 'm-off')?.file).toMatchObject({ status: 'skipped', error: 'разбор вложений выключен' });
+  });
+
+  it('приоритет (RFD-AI-AGENT-FILES-PRIORITY): лимит 3, очередь старых 10 — новый файл разобран первым, догрузка не больше доли; упёршийся в лимит новый — отложен и разобран на следующий день', async () => {
+    const vision = { maxFilesPerDay: 3, backlogShare: 0.5 };
+    const usage = { total: 0, new: 0, backlog: 0, deferred: 0 };
+    const calls: { filename: string; priority: string }[] = [];
+    const limited: WazzupFileAnalyzer = {
+      async analyze(input) {
+        const err = checkFileLimit(usage, vision, input.priority);
+        if (err) throw err;
+        usage.total++;
+        usage[input.priority]++;
+        calls.push({ filename: input.filename, priority: input.priority });
+        return { id: calls.length, kind: 'quote', text: `текст ${input.filename}`, costUsd: 0.01, model: 'test-docs' };
+      },
+    };
+    const now = new Date();
+    for (let i = 1; i <= 10; i++) await msg(`old-${i}`, 'in', `https://store.wazzup24.com/files/old-${i}.pdf`, 'document', { sentAt: new Date(now.getTime() - (10 + i) * 86_400_000) });
+    await msg('new-1', 'in', 'https://store.wazzup24.com/files/new-1.pdf', 'document', { sentAt: new Date(now.getTime() - 3_600_000) });
+    const r1 = await runWazzupFiles({ ...deps(), documents: limited, now: () => now }, log);
+    expect(r1).toMatchObject({ picked: 11, done: 2, deferred: 0, backlogWait: 9, failed: 0, byPriority: { new: 1, backlog: 1, deferred: 0 } });
+    expect(calls.find((c) => c.filename === 'new-1.pdf')?.priority).toBe('new');
+    expect(calls.filter((c) => c.priority === 'backlog')).toHaveLength(1);
+    // Ещё три новых за день: лимит 3 на новые — два разобраны, третий отложен; старые ждут (доля дня выбрана).
+    for (let i = 2; i <= 4; i++) await msg(`new-${i}`, 'in', `https://store.wazzup24.com/files/new-${i}.pdf`, 'document', { sentAt: new Date(now.getTime() - i * 60_000) });
+    const r2 = await runWazzupFiles({ ...deps(), documents: limited, now: () => now }, log);
+    expect(r2).toMatchObject({ done: 2, deferred: 1, backlogWait: 9, byPriority: { new: 2, backlog: 0, deferred: 0 } });
+    const pending = await wazzup.filesPending(ACC, 50);
+    expect(pending.filter((p) => p.fileStatus === 'deferred')).toHaveLength(1);
+    expect(pending.filter((p) => p.fileStatus === null)).toHaveLength(9);
+    expect(pending[0]?.fileStatus).toBe('deferred'); // отложенный — первым в очереди
+    const skippedLog = await journal.list(ACC, { kind: 'skipped' });
+    expect(skippedLog.some((e) => /^Файл Wazzup «new-\d\.pdf» \(клиент\) отложен по дневному лимиту — разберётся автоматически$/.test(e.summary))).toBe(true);
+    // Следующие сутки (лимит обнулился): отложенный разобран первым, догрузка — снова в пределах доли.
+    Object.assign(usage, { total: 0, new: 0, backlog: 0, deferred: 0 });
+    const r3 = await runWazzupFiles({ ...deps(), documents: limited, now: () => now }, log);
+    expect(r3).toMatchObject({ done: 2, deferred: 0, backlogWait: 8, byPriority: { new: 0, backlog: 1, deferred: 1 } });
+    expect(calls.at(-2)?.priority === 'deferred' || calls.at(-1)?.priority === 'deferred').toBe(true);
+    expect((await journal.list(ACC, { kind: 'document' })).some((e) => e.summary.includes('(quote, отложенный)'))).toBe(true);
+    expect((await wazzup.filesPending(ACC, 50)).every((p) => p.fileStatus === null)).toBe(true);
   });
 
   it('имя и MIME файла по вебхуку, заголовку и ссылке', () => {

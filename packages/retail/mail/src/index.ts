@@ -6,3 +6,4 @@ export * from './channel.ts';
 export * from './link.ts';
 export * from './poller.ts';
 export * from './attachments.ts';
+export * from './deferred.ts';

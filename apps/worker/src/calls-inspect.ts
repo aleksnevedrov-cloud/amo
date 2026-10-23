@@ -1,6 +1,7 @@
 /* eslint-disable no-console -- консольная утилита: вывод для заказчика */
 import { loadEnv } from '@core/shared';
 import { addDays, amoRaw, mskDayStart, type CallTranscript } from '@core/calls';
+import { DocumentsRepo } from '@core/db';
 import { buildCallsDeps } from './calls-deps.ts';
 
 /**
@@ -14,12 +15,22 @@ import { buildCallsDeps } from './calls-deps.ts';
  * сделка, примечание, время публикации, первая строка. Ничего не меняет.
  *
  *   docker compose exec worker node apps/worker/dist/calls-inspect.js --day-summaries ГГГГ-ММ-ДД [--until ЧЧ:ММ] [--account <id>]
+ *
+ * RFD-AI-AGENT-FILES-PRIORITY, п. 3: расход дневного лимита разбора файлов по группам (новые / догрузка старых / отложенные по
+ * лимиту) за день, лимит и доля догрузки, очередь ожидающих.
+ *
+ *   docker compose exec worker node apps/worker/dist/calls-inspect.js --files-usage [ГГГГ-ММ-ДД] [--account <id>]
  */
 const args = parseArgs(process.argv.slice(2));
 const env = loadEnv();
-const { deps, close } = buildCallsDeps(env);
+const { deps, settings, db, close } = buildCallsDeps(env);
 try {
   const accounts = args.account ? [Number(args.account)] : await deps.accountIds();
+  if (args['files-usage'] !== undefined) {
+    await filesUsage(accounts, typeof args['files-usage'] === 'string' ? args['files-usage'] : undefined);
+    await close();
+    process.exit(0);
+  }
   if (typeof args['day-summaries'] === 'string') {
     await listDaySummaries(accounts, args['day-summaries'], typeof args.until === 'string' ? args.until : null);
     await close();
@@ -44,6 +55,26 @@ try {
   if (!shown) console.log('Расшифрованных звонков пока нет.');
 } finally {
   await close();
+}
+
+async function filesUsage(accounts: number[], day: string | undefined): Promise<void> {
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--files-usage ГГГГ-ММ-ДД');
+  const documents = new DocumentsRepo(db);
+  for (const accountId of accounts) {
+    const { settings: s } = await settings.get(accountId);
+    const u = await documents.usageOn(accountId, day);
+    const max = s.vision.maxFilesPerDay;
+    const share = Math.floor(max * s.vision.backlogShare);
+    const { rows } = await db.query<{ wz_pending: string; wz_deferred: string; mail_deferred: string }>(
+      `SELECT (SELECT count(*) FROM wazzup_messages WHERE account_id = $1 AND content_uri IS NOT NULL AND file_status IS NULL AND NOT is_system AND (chat_type IS NULL OR chat_type NOT LIKE '%group')) AS wz_pending,
+              (SELECT count(*) FROM wazzup_messages WHERE account_id = $1 AND file_status = 'deferred') AS wz_deferred,
+              (SELECT count(*) FROM mail_attachments WHERE account_id = $1 AND extract_status = 'deferred') AS mail_deferred`,
+      [accountId],
+    );
+    const q = rows[0];
+    console.log(`Аккаунт ${accountId}, разбор файлов за ${day ?? 'сегодня'} (МСК): всего ${u.total} из лимита ${max} — новые ${u.new}, отложенные ${u.deferred} (вместе не больше ${max}), догрузка старых ${u.backlog} (доля дня ${share}, и только из остатка)`);
+    console.log(`  Ожидают: файлов Wazzup в очереди ${q?.wz_pending ?? 0}, отложено по лимиту — Wazzup ${q?.wz_deferred ?? 0}, вложений писем ${q?.mail_deferred ?? 0}`);
+  }
 }
 
 async function listDaySummaries(accounts: number[], day: string, until: string | null): Promise<void> {

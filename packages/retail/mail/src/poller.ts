@@ -20,7 +20,7 @@ export interface PollDeps {
   attachments?: SaveAttachmentsDeps;
   /** Разбор вложений письма (фаза 3). */
   documents?: {
-    analyze(input: { accountId: number; leadId: null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings }): Promise<{
+    analyze(input: { accountId: number; leadId: number | null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings; priority?: 'new' | 'backlog' | 'deferred' }): Promise<{
       id: number;
       kind: string;
       text: string;
@@ -40,6 +40,8 @@ export type PollAttachmentsDeps = SaveAttachmentsDeps;
 
 /** Вложений из одного письма разбираем не больше. */
 const MAX_ATTACHMENTS = 5;
+/** Пометка в тексте письма для вложения, отложенного по дневному лимиту (по ней разбор допишется в историю). */
+export const DEFERRED_MARK = 'разбор отложен по дневному лимиту';
 
 export interface PollResult {
   accountId: number;
@@ -260,7 +262,7 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
   const parts = [`Тема письма: ${msg.subject || '(без темы)'}`, msg.text || '(пустое письмо)'];
   const openings: unknown[] = [];
   // Раздел КП из розницы убран (решение заказчика 12.10.2026): вложения разбираются только по настройке авторазбора.
-  const extracts = new Map<string, { text?: string; error?: string }>();
+  const extracts = new Map<string, { text?: string; error?: string; deferred?: boolean }>();
   if (msg.attachments.length) {
     const docs = d.documents && settings.vision.autoParse ? d.documents : null;
     for (const a of msg.attachments.slice(0, MAX_ATTACHMENTS)) {
@@ -276,6 +278,14 @@ async function handleIncoming(accountId: number, msg: IncomingEmail, settings: W
         openings.push(...r.memoryOpenings);
         await d.journal.add({ accountId, kind: 'document', summary: `Разобрано вложение «${name}» из письма от ${from.address} (${r.kind})`, details: { documentId: r.id, model: r.model }, costUsd: r.costUsd, costRub: r.costUsd * settings.billing.usdRubRate });
       } catch (err) {
+        // RFD-AI-AGENT-FILES-PRIORITY: дневной лимит — не ошибка файла: вложение «отложено по лимиту», разберётся автоматически
+        // (runDeferredMailFiles), разбор допишется в историю сделки и в задачу, если менеджеру её поставили из-за лимита.
+        if ((err as { stage?: string }).stage === 'limit') {
+          parts.push(`(во вложении файл «${name}» — ${DEFERRED_MARK}, будет разобран автоматически)`);
+          extracts.set(name, { error: (err as Error).message, deferred: true });
+          await d.journal.add({ accountId, kind: 'skipped', summary: `Вложение «${name}» из письма от ${from.address} отложено по дневному лимиту — разберётся автоматически`, details: { error: (err as Error).message } });
+          continue;
+        }
         parts.push(`(во вложении файл «${name}», разобрать не удалось: ${(err as Error).message})`);
         extracts.set(name, { error: (err as Error).message });
         await d.journal.add({ accountId, kind: 'error', summary: `Вложение «${name}» из письма от ${from.address}: ${(err as Error).message}` });

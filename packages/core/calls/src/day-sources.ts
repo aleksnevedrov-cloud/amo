@@ -25,6 +25,7 @@ export function fileOf(m: LocalMessage): TimelineFile | null {
   if (kind) return { name: f.name, text: null, note: kind };
   if (f.status === 'failed') return { name: f.name, text: null, note: `не разобран: ${f.error ?? 'ошибка'}` };
   if (f.status === 'skipped') return { name: f.name, text: null, note: f.error ?? 'не разбирается' };
+  if (f.status === 'deferred') return { name: f.name, text: null, note: 'разбор отложен по дневному лимиту' };
   if (f.status === 'done') return { name: f.name, text: null, note: 'текста нет' };
   return { name: f.name, text: null, note: 'разбор ещё идёт' };
 }

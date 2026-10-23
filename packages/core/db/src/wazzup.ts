@@ -84,6 +84,8 @@ export interface WazzupFileRow {
   contentType: string | null;
   raw: Record<string, unknown> | null;
   consumedAt: Date | null;
+  /** null — не разбирали; 'deferred' — отложен по дневному лимиту (RFD-AI-AGENT-FILES-PRIORITY). */
+  fileStatus: string | null;
 }
 
 export function normalizePhone(v: string | null | undefined): string | null {
@@ -216,17 +218,18 @@ export class WazzupRepo {
 
   /**
    * RFD-AI-AGENT-WA-FILES: сообщения с файлом, ещё не разобранные (обе стороны, без групп), старые первыми — очередь фонового
-   * разбора. Разобранные повторно не берутся (file_status заполнен).
+   * разбора. Разобранные повторно не берутся (file_status заполнен); отложенные по лимиту ('deferred') и новые (за 24 часа) — первыми
+   * (RFD-AI-AGENT-FILES-PRIORITY).
    */
   async filesPending(accountId: number, limit = 20): Promise<WazzupFileRow[]> {
     const { rows } = await this.db.query(
-      `SELECT id, message_id, chat_id, chat_type, phone, direction, text, sent_at, lead_id, content_uri, content_type, raw, consumed_at FROM wazzup_messages
-        WHERE account_id = $1 AND content_uri IS NOT NULL AND file_status IS NULL AND NOT is_system
+      `SELECT id, message_id, chat_id, chat_type, phone, direction, text, sent_at, lead_id, content_uri, content_type, raw, consumed_at, file_status FROM wazzup_messages
+        WHERE account_id = $1 AND content_uri IS NOT NULL AND (file_status IS NULL OR file_status = 'deferred') AND NOT is_system
           AND (chat_type IS NULL OR chat_type NOT LIKE '%group')
-        ORDER BY sent_at ASC LIMIT $2`,
+        ORDER BY (COALESCE(file_status = 'deferred', false) OR sent_at >= now() - interval '24 hours') DESC, sent_at ASC LIMIT $2`,
       [accountId, limit],
     );
-    return rows.map((r) => ({ id: Number(r.id), messageId: r.message_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, text: r.text, sentAt: r.sent_at, leadId: r.lead_id === null ? null : Number(r.lead_id), contentUri: r.content_uri, contentType: r.content_type, raw: (r.raw as Record<string, unknown> | null) ?? null, consumedAt: r.consumed_at ?? null }));
+    return rows.map((r) => ({ id: Number(r.id), messageId: r.message_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, text: r.text, sentAt: r.sent_at, leadId: r.lead_id === null ? null : Number(r.lead_id), contentUri: r.content_uri, contentType: r.content_type, raw: (r.raw as Record<string, unknown> | null) ?? null, consumedAt: r.consumed_at ?? null, fileStatus: (r.file_status as string | null) ?? null }));
   }
 
   /** Результат разбора файла по ссылке хранилища (агент разобрал входящий файл при получении — фоновому заданию не повторять). */
@@ -235,7 +238,7 @@ export class WazzupRepo {
   }
 
   /** Результат разбора файла сообщения (один раз на сообщение). */
-  async setFileResult(accountId: number, messageId: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed'; error: string | null }): Promise<void> {
+  async setFileResult(accountId: number, messageId: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed' | 'deferred'; error: string | null }): Promise<void> {
     await this.db.query(`UPDATE wazzup_messages SET file_name = COALESCE($3, file_name), file_text = $4, file_status = $5, file_error = $6, file_extracted_at = now() WHERE account_id = $1 AND message_id = $2`, [accountId, messageId, r.name, r.text, r.status, r.error?.slice(0, 1000) ?? null]);
   }
 

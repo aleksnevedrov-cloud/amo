@@ -216,6 +216,20 @@ describe('pollMailbox', () => {
     expect(rows[0].summary).toContain('Разобрано вложение «замер.pdf»');
   });
 
+  it('дневной лимит разбора → вложение отложено: пометка в письме, журнал skipped, не ошибка (RFD-AI-AGENT-FILES-PRIORITY)', async () => {
+    const t = await setup({}, knownContact);
+    t.deps.documents = {
+      async analyze() {
+        throw Object.assign(new Error('Достигнут дневной лимит разбора файлов (3)'), { stage: 'limit' });
+      },
+    };
+    await t.mb.put('INBOX', { subject: 'Запрос', text: 'Прошу КП', attachments: [{ filename: 'Запрос.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', content: Buffer.from('docx') }] } as unknown as Partial<OutgoingEmail>);
+    expect(await pollMailbox(1, t.deps)).toMatchObject({ queued: 1 });
+    expect(await lastClientText(301)).toContain('(во вложении файл «Запрос.docx» — разбор отложен по дневному лимиту, будет разобран автоматически)');
+    const { rows } = await db.query("SELECT kind, summary FROM ai_journal WHERE account_id = 1 AND summary LIKE '%Запрос.docx%' ORDER BY id");
+    expect(rows.map((r) => [r.kind, r.summary])).toEqual([['skipped', 'Вложение «Запрос.docx» из письма от ivan@client.ru отложено по дневному лимиту — разберётся автоматически']]);
+  });
+
   it('без разбора вложений — пометка в тексте письма', async () => {
     const t = await setup({}, knownContact);
     await t.mb.put('INBOX', { attachments: [{ filename: 'смета.xlsx', contentType: 'application/vnd.ms-excel', content: Buffer.from('x') }] } as unknown as Partial<OutgoingEmail>);
