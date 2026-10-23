@@ -10,7 +10,7 @@ import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db 
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { CALL_DAY_KIND, CALL_DAY_RUN_KIND, daySummaryDue, formatDayNote, MAX_ATTEMPTS, previewCallsBackfill, runCallsPoll, runDaySummary, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMailFile, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
+import { CALL_DAY_KIND, CALL_DAY_RUN_KIND, DAY_SYNC_ENTITY, daySummaryDue, formatDayNote, MAX_ATTEMPTS, previewCallsBackfill, runCallsPoll, runDaySummary, runDaySummaryIfDue, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMailFile, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
 import { depsOf } from './helpers.ts';
 
 const ACC = 1;
@@ -295,7 +295,7 @@ describe('итог дня по всему общению на БД розниц�
     state.wz[90144] = [];
   });
 
-  it('нерасшифрованный звонок не дождался — в итог следующего дня с пометкой даты; догрузка — итоги по дням', async () => {
+  it('нерасшифрованный звонок не дождался — на следующий день отдельный итог за свой день (дата общения, не запуска); догрузка — итоги по дням', async () => {
     const late = await insert({ calledAt: at('2026-10-22T12:30:00Z'), transcribed: false });
     const r = await run();
     expect(r).toMatchObject({ groups: 0, waiting: 1 });
@@ -310,9 +310,11 @@ describe('итог дня по всему общению на БД розниц�
     state.events[90141] = [];
     llm = fakeLlm();
     const r2 = await runDaySummary(deps, ACC, { now: () => NEXT, sleep: async () => undefined, amo, client, transcribe: { stt: () => new FakeSpeechKit(1), inlineWaitMs: 0 } });
-    expect(r2).toMatchObject({ groups: 1, calls: 2, notes: 1, waiting: 0 });
-    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 23.10.2026: 2 звонка (6:10) (в т. ч. звонки от 22.10)');
+    expect(r2).toMatchObject({ groups: 2, calls: 2, notes: 2, waiting: 0 });
+    // RFD-AI-AGENT-CALLS-DAY: звонок 22.10 — в итог за 22.10, звонок 23.10 — за 23.10; раньше оба попадали в «за 23.10 (в т. ч. звонки от 22.10)».
+    expect(state.posts.slice(-2).map((p) => p.text.split('\n')[0]).sort()).toEqual(['Итог дня по сделке за 22.10.2026: 1 звонок (3:05)', 'Итог дня по сделке за 23.10.2026: 1 звонок (3:05)']);
     expect((await deps.calls.get(ACC, late))?.status).toBe('posted');
+    expect((await deps.days.forLead(ACC, 90141, '2026-10-22')).at(-1)?.callsCount).toBe(1);
     await insert({ calledAt: at('2026-10-15T08:00:00Z'), sttMode: 'deferred' });
     await insert({ calledAt: at('2026-10-15T09:00:00Z'), sttMode: 'deferred' });
     await insert({ calledAt: at('2026-10-16T08:00:00Z'), sttMode: 'deferred' });
@@ -320,6 +322,37 @@ describe('итог дня по всему общению на БД розниц�
     const r3 = await runDaySummary(deps, ACC, { now: () => NEXT, sleep: async () => undefined, amo, client });
     expect(r3).toMatchObject({ groups: 2, calls: 3, notes: 2 });
     expect(state.posts.slice(before).map((p) => p.text.split('\n')[0]).sort()).toEqual(['Итог дня по сделке за 15.10.2026: 2 звонка (6:10)', 'Итог дня по сделке за 16.10.2026: 1 звонок (3:05)']);
+  });
+
+  it('плановый запуск (RFD-AI-AGENT-CALLS-DAY): «сброшенные» звонки прошлых дней в 12:00 не публикуются; в 20:30 — один запуск, итоги с датой дня общения; второй раз за день не запускается', async () => {
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' } }));
+    // Как на сервере 23.10: у двух звонков сделки сброшены day_summary_id и status = transcribed (звонки 22.10 и 21.10).
+    const c22 = await insert({ calledAt: at('2026-10-22T08:15:00Z'), leadId: 90144 });
+    const c21 = await insert({ calledAt: at('2026-10-21T11:40:00Z'), leadId: 90144 });
+    const before = state.posts.length;
+    llm = fakeLlm();
+    const opts = { sleep: async () => undefined, amo, client, transcribe: { stt: () => new FakeSpeechKit(99), inlineWaitMs: 0 } };
+    // 12:03 МСК — проверка раз в 5 минут: не время итога → ничего не делаем.
+    expect(await runDaySummaryIfDue(deps, ACC, { ...opts, now: () => at('2026-10-23T09:03:00Z') })).toBeNull();
+    expect(state.posts).toHaveLength(before);
+    expect([(await deps.calls.get(ACC, c22))?.status, (await deps.calls.get(ACC, c21))?.status]).toEqual(['transcribed', 'transcribed']);
+    expect(await deps.calls.getSync(ACC, DAY_SYNC_ENTITY)).toBeNull();
+    // 20:30 МСК — плановый запуск: два итога, каждый за свой день общения.
+    const r = await runDaySummaryIfDue(deps, ACC, { ...opts, now: () => at('2026-10-23T17:30:00Z') });
+    expect(r).toMatchObject({ groups: 2, calls: 2, notes: 2, errors: 0 });
+    expect(state.posts.slice(before).map((p) => [p.path, p.text.split('\n')[0]]).sort()).toEqual([
+      ['/api/v4/leads/90144/notes', 'Итог дня по сделке за 21.10.2026: 1 звонок (3:05)'],
+      ['/api/v4/leads/90144/notes', 'Итог дня по сделке за 22.10.2026: 1 звонок (3:05)'],
+    ]);
+    // У 90144 за 22.10 уже был итог по переписке (сценарий выше) — новый итог за 22.10 добавился отдельно, за 21.10 — впервые.
+    expect((await deps.days.list(ACC)).filter((d) => d.leadId === 90144).map((d) => d.day).sort()).toEqual(['2026-10-21', '2026-10-22', '2026-10-22']);
+    expect((await deps.calls.get(ACC, c22))?.status).toBe('posted');
+    expect(await deps.calls.getSync(ACC, DAY_SYNC_ENTITY)).toMatchObject({ lastUpdatedAt: at('2026-10-23T17:30:00Z'), lastError: null }); // last_run_at ставит БД
+    // 20:35 того же дня — уже запускали, повтора нет; на следующий день в 20:30 — снова можно.
+    expect(await runDaySummaryIfDue(deps, ACC, { ...opts, now: () => at('2026-10-23T17:35:00Z') })).toBeNull();
+    expect(await runDaySummaryIfDue(deps, ACC, { ...opts, now: () => at('2026-10-24T17:31:00Z') })).toMatchObject({ groups: 0 });
+    expect(state.posts).toHaveLength(before + 2);
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0 } }));
   });
 
   it('оценка догрузки без --yes ничего не пишет; время запуска итога; формат примечания', async () => {

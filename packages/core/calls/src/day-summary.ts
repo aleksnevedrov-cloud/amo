@@ -186,9 +186,9 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
     r.skipped += ids.length;
   }
 
-  // Группы: сделка за сегодня (звонки сегодня и вчера + вся лента дня); звонки старше — по своему дню (только звонки);
-  // звонки без сделки — по контакту и дню (только звонки).
-  const yesterday = addDays(today, -1);
+  // Группы: сделка за день общения (звонки этого дня + вся лента того дня; RFD-AI-AGENT-CALLS-DAY: итог датируется днём
+  // общения, а не днём запуска — звонки вчерашнего дня, не вошедшие в итог, идут отдельным итогом за вчера); звонки без
+  // сделки — по контакту и дню (только звонки).
   const groups = new Map<string, Group>();
   const group = (key: string, leadId: number | null, contactId: number | null, day: string): Group => {
     const g = groups.get(key) ?? { key, leadId, contactId, day, calls: [], items: [] };
@@ -198,8 +198,7 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
   for (const c of calls) {
     const leadId = c.leadId ?? (c.entity === 'lead' ? c.entityId : null);
     if (leadId !== null && !allowed.has(leadId)) continue;
-    const d = mskDay(c.calledAt);
-    const day = d >= yesterday ? today : d;
+    const day = mskDay(c.calledAt);
     if (leadId === null) group(`contact:${c.entityId}:${day}`, null, c.entityId, day).calls.push(c);
     else group(`lead:${leadId}:${day}`, leadId, null, day).calls.push(c);
   }
@@ -207,7 +206,8 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
 
   const queue = [...groups.values()];
   await Promise.all(Array.from({ length: Math.min(GROUP_CONCURRENCY, queue.length) }, async () => {
-    for (let g = queue.shift(); g; g = queue.shift()) await summarizeGroup(deps, accountId, all, amo, client, g, r, since, started);
+    // Окно ленты — день группы: сегодня до текущего момента, прошлый день — целиком.
+    for (let g = queue.shift(); g; g = queue.shift()) await summarizeGroup(deps, accountId, all, amo, client, g, r, mskDayStart(g.day), g.day === today ? started : mskDayStart(addDays(g.day, 1)));
   }));
   await journalRun(deps, accountId, r);
   return r;

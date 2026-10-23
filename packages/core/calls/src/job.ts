@@ -1,7 +1,8 @@
 import { unlink } from 'node:fs/promises';
 import { costOfUsage } from '@core/llm';
-import { mskDay } from './day-summary.ts';
+import { mskDay, runDaySummary, type DaySummaryOptions, type DaySummaryResult } from './day-summary.ts';
 import type { CallsDeps, CallsSettings } from './deps.ts';
+import { errorText } from './errors.ts';
 import { callFileRel, downloadRecord, RecordUnavailableError, resolveCallPath, saveRecordFile } from './download.ts';
 import { CALL_ERROR_KIND, CALL_FETCH_KIND } from './kinds.ts';
 import { amoRaw, fetchCallNotes, parseCallNote, recordHostAllowed, type AmoRaw, type CallEntity, type ParsedCallNote } from './notes.ts';
@@ -218,6 +219,27 @@ async function deleteExpiredFiles(deps: CallsDeps, accountId: number, s: CallsSe
 }
 
 /** Пора ли запускать итог дня: по Москве наступило calls.daySummaryTime и сегодня его ещё не запускали. */
+/**
+ * Плановый запуск итога дня (проверка раз в 5 минут): только когда наступило calls.daySummaryTime и сегодня ещё не
+ * запускали — один раз в день (RFD-AI-AGENT-CALLS-DAY: до этого проверка запускала итог при каждом проходе, и звонки,
+ * оставшиеся без итога, публиковались в любое время). Вне времени — ничего не делает (null). Время запуска пишется в
+ * calls_sync до работы, чтобы долгий итог не запустился второй раз; ошибка — в lastError.
+ */
+export async function runDaySummaryIfDue(deps: CallsDeps, accountId: number, opts: DaySummaryOptions = {}): Promise<DaySummaryResult | null> {
+  const s = (await deps.settingsFor(accountId)).calls;
+  if (!s.callsEnabled) return null;
+  const now = (opts.now ?? (() => new Date()))();
+  const sync = await deps.calls.getSync(accountId, DAY_SYNC_ENTITY);
+  if (!daySummaryDue(s.daySummaryTime, sync?.lastRunAt ?? null, now)) return null;
+  await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });
+  try {
+    return await runDaySummary(deps, accountId, opts);
+  } catch (err) {
+    await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: errorText(err) }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export function daySummaryDue(time: string, lastRunAt: Date | null, now: Date): boolean {
   const today = mskDay(now);
   if (lastRunAt && mskDay(lastRunAt) === today) return false;

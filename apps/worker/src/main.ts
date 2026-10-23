@@ -26,7 +26,7 @@ import { KnowledgeRepo } from '@retail/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
 import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail/agent';
 import { buildLocalSources } from './local-sources.ts';
-import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DAY_SYNC_ENTITY, DaySummariesRepo, daySummaryDue, runCallsPollAll, runDaySummary, type CallsDeps } from '@core/calls';
+import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, runCallsPollAll, runDaySummaryIfDue, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -212,22 +212,17 @@ const callsWorker = new Worker(
     }
     if (job.name === WAZZUP_FILES_JOB) return runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
     if (job.name === CALLS_DAY_JOB) {
-      // Раз в 5 минут: у кого наступило время итога и сегодня не запускали — запустить; у остальных — повторы упавших групп без ожидания.
+      // Раз в 5 минут: у кого наступило время итога (calls.daySummaryTime) и сегодня не запускали — один запуск; иначе ничего.
       const out: unknown[] = [];
       for (const accountId of await callsDeps.accountIds()) {
-        const { settings: s } = await settings.get(accountId);
-        if (!s.calls.callsEnabled) continue;
-        const sync = await callsRepo.getSync(accountId, DAY_SYNC_ENTITY);
-        const now = new Date();
-        const due = daySummaryDue(s.calls.daySummaryTime, sync?.lastRunAt ?? null, now);
-        if (due) await callsRepo.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });
         try {
-          const r = await runDaySummary(callsDeps, accountId, { noWait: !due });
-          if (r.groups || r.errors || r.waiting) log.info({ ...r, due }, 'calls-day-summary: итог дня');
-          out.push(r);
+          const r = await runDaySummaryIfDue(callsDeps, accountId);
+          if (r) {
+            log.info({ ...r }, 'calls-day-summary: итог дня');
+            out.push(r);
+          }
         } catch (err) {
           log.warn({ accountId, err: (err as Error).message }, 'calls-day-summary: сбой');
-          if (due) await callsRepo.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: (err as Error).message });
         }
       }
       return { accounts: out.length };
