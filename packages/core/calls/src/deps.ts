@@ -48,6 +48,18 @@ export interface LocalMessage {
   at: Date;
   /** Канал Wazzup (whatsapp / telegram / max). */
   channel?: string;
+  /** RFD-AI-AGENT-WA-FILES: файл сообщения и его извлечённый текст (status: done / skipped / failed / null — ещё не разбирали). */
+  file?: { name: string; mime: string | null; text: string | null; status: string | null; error: string | null };
+}
+
+/** Вложение письма из mail_attachments с извлечённым текстом. */
+export interface LocalMailFile {
+  id: string;
+  at: Date;
+  messageId: string;
+  name: string;
+  text: string | null;
+  status: string;
 }
 
 export interface LocalSources {
@@ -57,4 +69,6 @@ export interface LocalSources {
   dialog?(accountId: number, leadId: number, since: Date, until: Date): Promise<LocalMessage[]>;
   /** Сделки с перепиской за период (Wazzup с lead_id, диалог). */
   activeLeads?(accountId: number, since: Date, until: Date): Promise<number[]>;
+  /** Вложения входящих писем по сделке за период (mail_attachments) с извлечённым текстом. */
+  mailFiles?(accountId: number, leadId: number, since: Date, until: Date): Promise<LocalMailFile[]>;
 }

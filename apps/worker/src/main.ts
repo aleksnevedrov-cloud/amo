@@ -24,6 +24,8 @@ import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
+import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail/agent';
+import { buildLocalSources } from './local-sources.ts';
 import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DAY_SYNC_ENTITY, DaySummariesRepo, daySummaryDue, runCallsPollAll, runDaySummary, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -147,12 +149,8 @@ const callsDeps: CallsDeps = {
     return { llm: a.llm, route: resolveRoute(s), pricing: s.billing.pricing, usdRubRate: s.billing.usdRubRate };
   },
   accountIds: () => settings.listAccountIds(),
-  // RFD-AI-AGENT-CALLS-DAY-FULL: локальные источники общения для итога дня (Wazzup по сделке и телефонам, диалог агента).
-  sources: {
-    wazzup: async (accountId, leadId, phones, since, until) => (await wazzupRepo.chatForLeadBetween(accountId, leadId, phones, since, until)).map((m) => ({ id: m.messageId, direction: m.direction, author: m.direction === 'in' ? ('client' as const) : ('manager' as const), text: m.text, at: m.sentAt, channel: m.chatType ?? undefined })),
-    dialog: async (accountId, leadId, since, until) => (await dialog.betweenByLead(accountId, leadId, since, until)).map((m) => ({ id: String(m.id), direction: m.role === 'client' ? ('in' as const) : ('out' as const), author: m.role === 'client' ? ('client' as const) : m.role === 'ai' ? ('agent' as const) : ('manager' as const), text: m.text, at: m.createdAt })),
-    activeLeads: async (accountId, since, until) => [...new Set([...(await wazzupRepo.leadsActiveBetween(accountId, since, until)), ...(await dialog.leadsActiveBetween(accountId, since, until))])],
-  },
+  // Локальные источники общения (Wazzup, диалог агента, вложения писем) — общая сборка с calls-demo (RFD-AI-AGENT-CALLS-DEMO-SOURCES).
+  sources: buildLocalSources(db),
 };
 
 const sweepDeps: SweepDeps = {
@@ -202,6 +200,8 @@ await maintenance.upsertJobScheduler(TASKS_EVENING_JOB, { every: TASKS_EVENING_E
 const callsQueue = new Queue(CALLS_QUEUE, { connection });
 await callsQueue.upsertJobScheduler(CALLS_POLL_JOB, { every: CALLS_POLL_EVERY_MS }, { name: CALLS_POLL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVERY_MS }, { name: CALLS_DAY_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Файлы Wazzup в обе стороны (RFD-AI-AGENT-WA-FILES): раз в 5 минут, тем же DocumentService, что вложения писем; не больше 2 файлов одновременно.
+await callsQueue.upsertJobScheduler(WAZZUP_FILES_JOB, { every: WAZZUP_FILES_EVERY_MS }, { name: WAZZUP_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 const callsWorker = new Worker(
   CALLS_QUEUE,
   async (job) => {
@@ -210,6 +210,7 @@ const callsWorker = new Worker(
       for (const r of results) if (r.enabled && (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length || r.transcribed?.transcribed || r.transcribed?.failed)) log.info({ ...r }, 'calls-poll: аккаунт опрошен');
       return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
     }
+    if (job.name === WAZZUP_FILES_JOB) return runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
     if (job.name === CALLS_DAY_JOB) {
       // Раз в 5 минут: у кого наступило время итога и сегодня не запускали — запустить; у остальных — повторы упавших групп без ожидания.
       const out: unknown[] = [];

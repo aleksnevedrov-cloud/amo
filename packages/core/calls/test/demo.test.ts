@@ -63,9 +63,19 @@ describe('итог по одной сделке — calls-demo (БД розни�
   const stt = new FakeSpeechKit();
   const lines: string[] = [];
   const wz: LocalMessage[] = [{ id: 'w1', direction: 'in', author: 'client', text: 'Добрый день, нужны две входные двери', at: msk('09:30'), channel: 'whatsapp' }];
+  /** Сделка «90155»-типа: только переписка WhatsApp (с lead_id), звонков нет — RFD-AI-AGENT-CALLS-DEMO-SOURCES. */
+  const CHAT_LEAD = 90150;
+  const wzChat: LocalMessage[] = [
+    { id: 'c1', direction: 'in', author: 'client', text: 'Здравствуйте, интересует дверь Турин 1', at: msk('10:00', '2026-10-21'), channel: 'whatsapp' },
+    { id: 'c2', direction: 'out', author: 'manager', text: 'Добрый день! Есть в наличии, 14 900 ₽', at: msk('10:10', '2026-10-21'), channel: 'whatsapp' },
+    { id: 'c3', direction: 'in', author: 'client', text: 'Беру, когда замер?', at: msk('10:20', '2026-10-21'), channel: 'whatsapp' },
+    { id: 'c4', direction: 'out', author: 'manager', text: 'Замер в четверг в 12:00', at: msk('10:25', '2026-10-21'), channel: 'whatsapp' },
+    { id: 'c5', direction: 'in', author: 'client', text: 'Жду замерщика', at: msk('09:00'), channel: 'whatsapp' },
+  ];
   const amo: AmoRaw = {
     get: async (path) => {
       if (path === `/api/v4/leads/${LEAD}?with=contacts`) return { id: LEAD, _embedded: { contacts: [{ id: 501 }] } } as never;
+      if (path === `/api/v4/leads/${CHAT_LEAD}?with=contacts`) return { id: CHAT_LEAD, _embedded: { contacts: [{ id: 502 }] } } as never;
       if (path.startsWith(`/api/v4/leads/${LEAD}/notes?filter[note_type][]=call_in`) && path.includes('page=1')) return { _embedded: { notes: [note(1, LEAD, 'call_out', '2026-10-22T08:00:00Z', 185)] } } as never;
       if (path.startsWith('/api/v4/contacts/501/notes?filter[note_type][]=call_in') && path.includes('page=1')) return { _embedded: { notes: [note(2, 501, 'call_in', '2026-10-22T10:30:00Z', 120), note(3, 501, 'call_in', '2026-10-21T10:30:00Z', 200), note(4, 501, 'call_in', '2026-10-22T11:00:00Z', 10)] } } as never;
       if (path.startsWith(`/api/v4/leads/${LEAD}/notes?filter[note_type][]=common`)) return { _embedded: { notes: [{ id: 70, created_by: 5, created_at: T('2026-10-22T09:00:00Z'), note_type: 'common', entity_id: LEAD, params: { text: 'Клиент из Люберец, объект — коттедж' } }] } } as never;
@@ -78,7 +88,7 @@ describe('итог по одной сделке — calls-demo (БД розни�
   };
   const client = { getLead: async (id: number) => ({ id, _embedded: { contacts: [{ id: 501 }] } }), getContact: async () => ({ id: 501, name: 'Иван', custom_fields_values: [{ field_id: 1, field_code: 'PHONE', values: [{ value: '79099500381' }] }] }), leadMailNotes: async () => [] } as unknown as AmoApiClient;
   const fetchRecords = (async (input: string | URL | Request) => (String(input).includes('/call-records/') ? new Response(MP3, { status: 200, headers: { 'content-type': 'audio/mpeg' } }) : new Response('нет', { status: 404 }))) as typeof fetch;
-  const run = (post: boolean, date?: string) => runCallsDemo(deps, { accountId: ACC, leadId: LEAD, post, ...(date ? { date } : {}), now: () => NOW, sleep: async () => undefined, amo, client, stt: () => stt, out: (l) => lines.push(l) });
+  const run = (post: boolean, date?: string, leadId = LEAD) => runCallsDemo(deps, { accountId: ACC, leadId, post, ...(date ? { date } : {}), now: () => NOW, sleep: async () => undefined, amo, client, stt: () => stt, out: (l) => lines.push(l) });
 
   beforeAll(async () => {
     ({ db, drop } = await freshDb());
@@ -86,7 +96,7 @@ describe('итог по одной сделке — calls-demo (БД розни�
     await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({}));
     deps = depsOf(db, fetchRecords, mkdtempSync(join(tmpdir(), 'calls-demo-')), {
       llmFor: async () => ({ llm: llm.llm, route: { primary: { provider: 'openai', model: 'gpt-5.5' }, fallback: null }, pricing: {}, usdRubRate: 90 }),
-      sources: { wazzup: async (_a, leadId) => (leadId === LEAD ? wz : []), dialog: async () => [], activeLeads: async () => [] },
+      sources: { wazzup: async (_a, leadId, _p, since, until) => (leadId === LEAD ? wz : leadId === CHAT_LEAD ? wzChat : []).filter((m) => m.at >= since && m.at < until), dialog: async () => [], activeLeads: async () => [] },
     });
   });
   afterAll(() => drop());
@@ -136,5 +146,20 @@ describe('итог по одной сделке — calls-demo (БД розни�
     const prev = await run(true, '2026-10-21');
     expect(prev).toMatchObject({ day: '2026-10-21', calls: 1, transcribed: 1 });
     expect(posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 21.10.2026: 1 звонок (3:20)');
+  });
+
+  it('сделка с перепиской без звонков (RFD-AI-AGENT-CALLS-DEMO-SOURCES): за прошлую дату и за сегодня лента не пустая, итог по сообщениям', async () => {
+    lines.length = 0;
+    const prev = await run(false, '2026-10-21', CHAT_LEAD);
+    expect(prev).toMatchObject({ day: '2026-10-21', calls: 0, transcribed: 0, items: 4, newItems: 4, posted: null });
+    expect(prev.noteText?.split('\n')[0]).toBe('Итог дня по сделке за 21.10.2026: 4 сообщения');
+    expect(lines.some((l) => l.startsWith('10:00 WhatsApp Клиент [wz:c1]: Здравствуйте, интересует дверь Турин 1'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('10:25 WhatsApp Менеджер [wz:c4]: Замер в четверг в 12:00'))).toBe(true);
+    expect(lines.some((l) => l.includes('нового общения нет'))).toBe(false);
+    // Без --date и без звонков — сегодня: одно сообщение за 22.10.
+    const today = await run(false, undefined, CHAT_LEAD);
+    expect(today).toMatchObject({ day: '2026-10-22', calls: 0, items: 1, newItems: 1 });
+    expect(today.noteText?.split('\n')[0]).toBe('Итог дня по сделке за 22.10.2026: 1 сообщение');
+    expect(posts.filter((p) => p.path.includes(String(CHAT_LEAD)))).toHaveLength(0);
   });
 });

@@ -46,16 +46,26 @@ function analyzer(): DocumentAnalyzer & { inputs: unknown[] } {
   };
 }
 
-function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = [], chat: WazzupChatKind | null = null) {
+type WazzupFileLine = { direction: 'in' | 'out'; sentAt: Date; file: { name: string | null; text: string | null; status: string | null; error: string | null; type?: string | null } };
+
+function wazzupFake(items: WazzupContentItem[], byLead: WazzupContentItem[] = [], chat: WazzupChatKind | null = null, files: WazzupFileLine[] = []) {
   const calls: { phones: string[]; from: Date; to: Date }[] = [];
   const leadCalls: { leadId: number; from: Date; to: Date }[] = [];
   const consumed: number[] = [];
+  const fileResults: { contentUri: string; name: string | null; status: string }[] = [];
   return {
     calls,
     leadCalls,
     consumed,
+    fileResults,
     async historyByPhone() {
-      return [];
+      return files.length ? [{ direction: 'out' as const, author: 'manager', text: 'Отправляю расчёт, посмотрите', sentAt: new Date('2026-10-22T07:40:00Z'), chatType: 'whatsapp' }] : [];
+    },
+    async filesByPhones() {
+      return files;
+    },
+    async setFileResultByUri(_acc: number, contentUri: string, r: { name: string | null; status: string }) {
+      fileResults.push({ contentUri, name: r.name, status: r.status });
     },
     async incomingContent(_acc: number, phones: string[], from: Date, to: Date) {
       calls.push({ phones, from, to });
@@ -98,6 +108,32 @@ async function setup(steps: ConstructorParameters<typeof ScriptedLlm>[0], wazzup
   };
   return { fake, ...deps, pipeline: new DialogPipeline(deps) };
 }
+
+const KP_TEXT = '[Документ «КП_Иванов.pdf»] Коммерческое предложение № 1187. Дверь «Классика 3» эмаль белая 800×2000 — 3 шт. по 19 680 ₽; монтаж 3 × 5 500 ₽. Итого 75 540 ₽. Срок изготовления 25 рабочих дней, предоплата 70 %.';
+
+describe('файлы Wazzup в контексте агента (RFD-AI-AGENT-WA-FILES)', () => {
+  it('исходящий PDF менеджера (КП) → текст в блоке переписки с указанием опираться на него; входящее фото при получении → результат сохраняется один раз', async () => {
+    const wz = wazzupFake([{ id: 701, contentUri: 'https://store.wazzup24.com/x/IMG_7.jpg', contentType: 'image', text: '[image]', sentAt: new Date() }], [], null, [
+      { direction: 'out', sentAt: new Date('2026-10-22T07:45:00Z'), file: { name: 'КП_Иванов.pdf', text: KP_TEXT, status: 'done', error: null, type: 'document' } },
+      { direction: 'in', sentAt: new Date('2026-10-22T08:00:00Z'), file: { name: 'voice.ogg', text: null, status: 'skipped', error: 'аудио', type: 'audio' } },
+    ]);
+    const t = await setup([text('Да, в КП три двери «Классика 3» по 19 680 ₽, итого 75 540 ₽, срок 25 рабочих дней.')], wz);
+    await t.dialog.enqueue(ACC, lead, 'Сколько по КП выходит итого и какой срок?', 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await t.pipeline.processLead(ACC, lead);
+    expect([out.status, out.reason]).toEqual(['replied', undefined]);
+    const req = t.llm.requests[0]!;
+    const system = JSON.stringify(req.system ?? '');
+    const all = system + JSON.stringify(req.messages);
+    expect(all).toContain('Файлы в переписке (содержимое извлечено автоматически; КП менеджера — опирайтесь на его позиции, цены и сроки)');
+    expect(all).toContain('Менеджер отправил файл «КП_Иванов.pdf»: [Документ «КП_Иванов.pdf»] Коммерческое предложение № 1187');
+    expect(all).toContain('Итого 75 540 ₽');
+    expect(all).toContain('Клиент прислал файл «voice.ogg» (аудио)');
+    expect(all).toContain('не противоречь ему');
+    // Входящее фото разобрано при получении — результат записан в wazzup_messages по ссылке, фоновое задание его не повторит.
+    expect(wz.consumed).toEqual([701]);
+    expect(wz.fileResults).toEqual([{ contentUri: 'https://store.wazzup24.com/x/IMG_7.jpg', name: 'IMG_7.jpg', status: 'done' }]);
+  });
+});
 
 describe('вложения клиента из Wazzup (Salesbot их не передаёт)', () => {
   it('сообщение без текста → фото из вебхука разбирается, журнал note, вложение помечено использованным', async () => {

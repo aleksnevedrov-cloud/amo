@@ -10,7 +10,7 @@ import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db 
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { CALL_DAY_KIND, CALL_DAY_RUN_KIND, daySummaryDue, formatDayNote, MAX_ATTEMPTS, previewCallsBackfill, runCallsPoll, runDaySummary, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
+import { CALL_DAY_KIND, CALL_DAY_RUN_KIND, daySummaryDue, formatDayNote, MAX_ATTEMPTS, previewCallsBackfill, runCallsPoll, runDaySummary, type AmoRaw, type CallsDeps, type CallStt, type CallTranscript, type LocalMailFile, type LocalMessage, type PendingTranscription, type SttMode } from '../src/index.ts';
 import { depsOf } from './helpers.ts';
 
 const ACC = 1;
@@ -66,7 +66,7 @@ function fakeLlm(opts: { exclude?: string[]; first?: (string | Error)[] } = {}) 
   return { llm, asked };
 }
 
-const LEADS: Record<number, { status_id: number; pipeline_id: number }> = { 90141: { status_id: 28643029, pipeline_id: 1873498 }, 90142: { status_id: 28643038, pipeline_id: 1873498 }, 90143: { status_id: 28643038, pipeline_id: 1873498 }, 90144: { status_id: 28643038, pipeline_id: 1873498 }, 80000: { status_id: 11, pipeline_id: 2 }, 70000: { status_id: 142, pipeline_id: 1873498 } };
+const LEADS: Record<number, { status_id: number; pipeline_id: number }> = { 90141: { status_id: 28643029, pipeline_id: 1873498 }, 90142: { status_id: 28643038, pipeline_id: 1873498 }, 90143: { status_id: 28643038, pipeline_id: 1873498 }, 90144: { status_id: 28643038, pipeline_id: 1873498 }, 90145: { status_id: 28643038, pipeline_id: 1873498 }, 80000: { status_id: 11, pipeline_id: 2 }, 70000: { status_id: 142, pipeline_id: 1873498 } };
 
 /** Источники по сделкам: Wazzup, диалог, примечания (сделки и контакта), письма карточки, события чатов; меняются по сценариям. */
 const state = {
@@ -76,6 +76,7 @@ const state = {
   cnotes: [] as { id: number; created_by: number; created_at: number; params: { text: string } }[],
   mail: {} as Record<number, { id: number; createdAt: Date; income: boolean; subject: string; text: string; from: string; to: string; attachments: string[] }[]>,
   events: {} as Record<number, { id: string; created_by: number; created_at: number; type: string }[]>,
+  mailFiles: {} as Record<number, LocalMailFile[]>,
   active: [] as number[],
   posts: [] as { path: string; text: string }[],
 };
@@ -139,6 +140,7 @@ describe('итог дня по всему общению на БД розниц�
         wazzup: async (_a, leadId) => state.wz[leadId] ?? [],
         dialog: async (_a, leadId) => state.dlg[leadId] ?? [],
         activeLeads: async () => state.active,
+        mailFiles: async (_a, leadId) => state.mailFiles[leadId] ?? [],
       },
     });
   });
@@ -224,6 +226,35 @@ describe('итог дня по всему общению на БД розниц�
     expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 22.10.2026: 2 сообщения');
     expect(llm.asked[0]).toContain('11:00 Telegram Клиент [wz:w5]: Есть ли дверь 800 на 2000 в наличии?');
     expect((await deps.days.list(ACC)).map((d) => d.leadId).sort()).toEqual([90141, 90142]);
+    state.active = [];
+  });
+
+  it('файлы в ленте дня (RFD-AI-AGENT-WA-FILES): КП менеджера из WhatsApp с текстом, аудио клиента без разбора, вложение письма с текстом; обрезка укорачивает тексты файлов раньше сообщений', async () => {
+    const kp = 'Коммерческое предложение № 1187 от 22.10.2026. Дверь «Классика 3» эмаль белая 800×2000 — 3 шт. по 19 680 ₽; монтаж 3 × 5 500 ₽. Итого 75 540 ₽. Срок изготовления 25 рабочих дней, предоплата 70 %.';
+    state.wz[90145] = [
+      { id: 'f0', direction: 'in', author: 'client', text: 'Пришлите КП, пожалуйста', at: msk('10:30'), channel: 'whatsapp' },
+      { id: 'f1', direction: 'out', author: 'manager', text: 'Отправляю КП', at: msk('10:45'), channel: 'whatsapp', file: { name: 'КП_Иванов.pdf', mime: 'application/pdf', text: kp, status: 'done', error: null } },
+      { id: 'f2', direction: 'in', author: 'client', text: '[audio]', at: msk('11:00'), channel: 'whatsapp', file: { name: 'voice.ogg', mime: 'audio/ogg', text: null, status: 'skipped', error: 'аудио' } },
+      { id: 'f3', direction: 'in', author: 'client', text: '[image]', at: msk('11:05'), channel: 'whatsapp', file: { name: 'IMG_3.jpg', mime: 'image/jpeg', text: null, status: 'failed', error: 'скачивание: файл недоступен: HTTP 404' } },
+    ];
+    state.mail[90145] = [{ id: 91, createdAt: msk('12:00'), income: true, subject: 'Смета', text: 'Смета во вложении', from: 'client@romashka.ru', to: 'sales@rf-dveri.ru', attachments: ['смета.xlsx'] }];
+    state.mailFiles[90145] = [
+      { id: '7', at: msk('12:01'), messageId: 'mm1', name: 'смета.xlsx', text: 'Лист «Смета»: дверь 800×2000 — 3 шт., короб, наличники, монтаж.', status: 'done' },
+      { id: '8', at: msk('14:00'), messageId: 'mm2', name: 'план.pdf', text: null, status: 'pending' },
+    ];
+    state.active = [90145];
+    llm = fakeLlm();
+    const r = await run();
+    expect(r).toMatchObject({ groups: 1, notes: 1, errors: 0 });
+    const prompt = llm.asked[0] ?? '';
+    expect(prompt).toContain(`10:45 WhatsApp Менеджер — отправил файл [wz:f1]: Отправляю КП\nФайл КП_Иванов.pdf: ${kp}`);
+    expect(prompt).toContain('11:00 WhatsApp Клиент — прислал файл [wz:f2]: [audio]\nФайл voice.ogg (аудио)');
+    expect(prompt).toContain('11:05 WhatsApp Клиент — прислал файл [wz:f3]: [image]\nФайл IMG_3.jpg (не разобран: скачивание: файл недоступен: HTTP 404)');
+    expect(prompt).toContain('12:00 Письмо вх. [mail:91] Тема: Смета\nСмета во вложении\nФайл смета.xlsx: Лист «Смета»: дверь 800×2000 — 3 шт., короб, наличники, монтаж.');
+    expect(prompt).toContain('14:00 Письмо вх. [mailfile:8] Тема: вложение план.pdf\n\nФайл план.pdf (разбор ещё идёт)');
+    expect(prompt).not.toContain('Вложения: смета.xlsx'); // имя вложения с текстом не дублируется строкой «Вложения:»
+    expect(state.posts.at(-1)?.path).toBe('/api/v4/leads/90145/notes');
+    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 22.10.2026: 4 сообщения, 2 письма');
     state.active = [];
   });
 

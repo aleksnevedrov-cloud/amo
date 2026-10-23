@@ -50,4 +50,22 @@ describe('лента дня (RFD-AI-AGENT-CALLS-DAY-FULL)', () => {
     expect([onlyMail.truncated, onlyMail.used.find((i) => i.id === 'mail:1')?.text.length]).toEqual([['письма сокращены (1)'], 1501]);
     expect(timelineText(items.slice(0, 2)).truncated).toEqual([]);
   });
+
+  it('файлы (RFD-AI-AGENT-WA-FILES): текст файла до 4000 знаков; при переполнении сначала тексты файлов до 600, потом письма и старые сообщения; звонки не трогаются', () => {
+    const kp = 'позиция '.repeat(700); // ≈ 5600 знаков
+    const file = msg('wz:kp', 'wazzup', 'out', 'manager', 'Отправляю КП', '10:00', { channel: 'whatsapp', files: [{ name: 'КП_Иванов.pdf', text: kp }] });
+    expect(formatItem(file).startsWith('10:00 WhatsApp Менеджер — отправил файл [wz:kp]: Отправляю КП\nФайл КП_Иванов.pdf: позиция ')).toBe(true);
+    expect(formatItem(msg('wz:v', 'wazzup', 'in', 'client', '[audio]', '10:01', { channel: 'whatsapp', files: [{ name: 'voice.ogg', text: null, note: 'аудио' }] }))).toBe('10:01 WhatsApp Клиент — прислал файл [wz:v]: [audio]\nФайл voice.ogg (аудио)');
+    const free = timelineText([call(1, '09:00', 30), file]);
+    expect(free.truncated).toEqual([]);
+    expect(free.used[1]?.files?.[0]?.text?.length).toBe(4001); // 4000 + «…»
+    const long = 'слово '.repeat(400);
+    const items = [call(1, '09:00', 30), file, msg('mail:1', 'email', 'in', 'client', long, '11:00', { subject: 'Большое письмо' }), ...Array.from({ length: 10 }, (_, i) => msg(`wz:${i}`, 'wazzup', 'in', 'client', `сообщение ${i} ${'текст '.repeat(60)}`, `12:${String(i).padStart(2, '0')}`))];
+    const t = timelineText(items, 6000);
+    expect(t.truncated).toEqual(['тексты файлов сокращены', 'письма сокращены (1)', expect.stringMatching(/^старые сообщения не вошли \(\d+\)$/)]);
+    expect(t.text.length).toBeLessThanOrEqual(6000);
+    expect(t.used[0]?.id).toBe('call:1');
+    const onlyFile = timelineText([call(1, '09:00', 30), file], 1500);
+    expect([onlyFile.truncated, onlyFile.used[1]?.files?.[0]?.text?.length]).toEqual([['тексты файлов сокращены'], 601]);
+  });
 });

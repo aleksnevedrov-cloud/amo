@@ -37,6 +37,7 @@ import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts
 import { knownTopics } from './question.ts';
 import { resolveRoute } from './route.ts';
 import { formatCalculation, summarizeDialog } from './summary.ts';
+import { formatWazzupFiles } from './wazzup-files.ts';
 
 export interface AmoAccess {
   api: AmoApiClient;
@@ -68,6 +69,10 @@ export interface PipelineDeps {
     incomingContent?(accountId: number, phones: string[], from: Date, to: Date): Promise<WazzupContentItem[]>;
     incomingContentByLead?(accountId: number, leadId: number, from: Date, to: Date): Promise<WazzupContentItem[]>;
     markConsumed?(accountId: number, ids: number[]): Promise<void>;
+    /** RFD-AI-AGENT-WA-FILES: файлы переписки с извлечённым текстом (обе стороны) — в контекст агента. */
+    filesByPhones?(accountId: number, phones: string[], since: Date, limit?: number): Promise<{ direction: 'in' | 'out'; sentAt: Date; file: { name: string | null; text: string | null; status: string | null; error: string | null; type?: string | null } }[]>;
+    /** Результат разбора входящего файла агентом — чтобы фоновое задание не разбирало его второй раз. */
+    setFileResultByUri?(accountId: number, contentUri: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed'; error: string | null }): Promise<void>;
   };
   suggestions: SuggestionsRepo;
   /** Общие LLM и оркестратор (серверный ключ); null — только ключи аккаунтов через `ai`. */
@@ -150,6 +155,8 @@ const isEmptyPlaceholder = (text: string): boolean => {
   return !v || v.startsWith('(клиент отправил сообщение без текста');
 };
 const WAZZUP_ATTACH_WINDOW_MS = 3 * 60_000;
+/** Файлы переписки Wazzup для контекста агента — за столько дней назад. */
+const WAZZUP_FILES_DAYS = 30;
 const WAZZUP_ATTACH_RETRY_MS = 5_000;
 /** Подписи этапов разбора вложения для журнала. */
 const STAGE_TITLE: Record<string, string> = { download: 'скачивание', limit: 'лимит', extract: 'чтение файла', ocr: 'распознавание', llm: 'модель', analyze: 'разбор' };
@@ -394,6 +401,7 @@ export class DialogPipeline {
     const past = history.slice(0, history.length - t.texts.length);
     // Переписка менеджера с клиентом в мессенджере (Wazzup) — по телефону основного контакта сделки.
     this.lastMessengerCount = 0;
+    this.lastFileTexts = [];
     const messengerText = await this.messengerHistory(accountId, access, contactRef?.id ?? null, history);
 
     let result: TurnResult;
@@ -406,7 +414,9 @@ export class DialogPipeline {
         tools,
         now,
         dynamic: { memory: memoryText, messenger: messengerText, pricing: pricingCodesHint(rules), channel: emails.length && !chats.length ? 'email' : 'chat' },
-        clientFacts,
+        // Тексты файлов переписки (КП менеджера, счёт, расчёт) — допустимый источник цен и сроков для пост-фильтра фактов:
+        // агент должен опираться на КП менеджера, а не отбрасывать его цифры как выдуманные (RFD-AI-AGENT-WA-FILES, п. 2).
+        clientFacts: [...clientFacts, ...this.lastFileTexts],
         knownTopics: knownAnswers,
         route: t.route,
       });
@@ -529,6 +539,8 @@ export class DialogPipeline {
   /** История мессенджера для промпта: телефон контакта → последние сообщения без собственных ответов агента. */
   /** Сколько сообщений Wazzup попало в контекст последнего хода (для журнала). */
   private lastMessengerCount = 0;
+  /** Тексты файлов переписки Wazzup этого хода (для пост-фильтра фактов). */
+  private lastFileTexts: string[] = [];
 
   /** Телефон клиента текущего хода: по нему допуск видит ответы менеджера в WhatsApp. */
   private clientPhone: string | null = null;
@@ -548,12 +560,17 @@ export class DialogPipeline {
       this.clientPhone = phone;
       if (!phone) return null;
       const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
-      if (!items.length) return null;
+      // Файлы переписки за 30 дней (КП менеджера, фото и документы клиента) — с извлечённым текстом (RFD-AI-AGENT-WA-FILES).
+      const files = this.d.wazzup.filesByPhones ? await this.d.wazzup.filesByPhones(accountId, [phone], new Date((this.d.now?.() ?? new Date()).getTime() - WAZZUP_FILES_DAYS * 86_400_000), 30).catch(() => []) : [];
+      if (!items.length && !files.length) return null;
       // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
       const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
       const { text, count } = formatWazzupHistory(items, ownTexts);
       this.lastMessengerCount = count;
-      return text;
+      const fileLines = formatWazzupFiles(files);
+      this.lastFileTexts = files.map((f) => f.file.text ?? '').filter(Boolean);
+      if (!fileLines.length) return text;
+      return `${text ? `${text}\n\n` : ''}Файлы в переписке (содержимое извлечено автоматически; КП менеджера — опирайтесь на его позиции, цены и сроки):\n${fileLines.join('\n')}`;
     } catch (err) {
       await this.d.journal.add({ accountId, kind: 'error', summary: `Wazzup: не удалось собрать историю мессенджера: ${(err as Error).message}` }).catch(() => undefined);
       return null;
@@ -694,6 +711,8 @@ export class DialogPipeline {
       const r = await this.d.documents.analyze({ accountId: t.accountId, leadId: t.leadId, source: 'chat', filename, mime: file.mime, bytes: file.bytes, settings: t.settings });
       t.openings.push(...r.memoryOpenings);
       await this.journal(t, { kind: 'document', summary: `Разобран файл «${filename}» (${r.kind})`, details: { documentId: r.id, model: r.model, text: r.text, mime: file.mime, bytes: file.bytes.byteLength, ms: Date.now() - started }, costUsd: r.costUsd, costRub: r.costUsd * t.settings.billing.usdRubRate });
+      // Текст — в сообщение Wazzup, чтобы фоновый разбор файлов (RFD-AI-AGENT-WA-FILES) не делал это второй раз.
+      await this.d.wazzup?.setFileResultByUri?.(t.accountId, url, { name: filename, text: r.text, status: 'done', error: null }).catch(() => undefined);
       if (t.settings.vision.noteInLead) await t.access.api.addLeadNote(t.leadId, r.note).catch(() => undefined);
       return [m.text, r.text].filter(Boolean).join('\n');
     } catch (err) {

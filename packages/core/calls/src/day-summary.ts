@@ -295,7 +295,10 @@ export async function persistGroup(deps: CallsDeps, accountId: number, s: CallsS
 export async function fillGroupItems(deps: CallsDeps, accountId: number, s: CallsSettings, amo: AmoRaw, client: AmoApiClient, g: Group, since: Date, until: Date): Promise<string[]> {
   const warnings: string[] = [];
   let items: TimelineItem[];
-  if (g.leadId !== null && g.day === mskDay(until)) {
+  // Лента по всем источникам — для группы «сделка за день», когда окно until заканчивается в этот день: у итога дня until = сейчас,
+  // у показа за прошлую дату (calls-demo --date) — начало следующих суток, поэтому берём день последней миллисекунды окна
+  // (RFD-AI-AGENT-CALLS-DEMO-SOURCES: раньше для прошлой даты оставались одни звонки). Группы старых звонков — только звонки.
+  if (g.leadId !== null && g.day === mskDay(new Date(until.getTime() - 1))) {
     const col = await collectLeadTimeline(deps, amo, client, { accountId, leadId: g.leadId, since, until, calls: g.calls, settings: s });
     items = col.items;
     warnings.push(...col.warnings);

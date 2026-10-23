@@ -60,6 +60,32 @@ export interface WazzupState {
 }
 
 /** Телефон к виду 11 цифр (7XXXXXXXXXX); не телефон (Telegram username) — null. */
+/** RFD-AI-AGENT-WA-FILES: файл сообщения и результат его разбора. */
+export interface WazzupFileInfo {
+  uri: string;
+  type: string | null;
+  name: string | null;
+  text: string | null;
+  status: string | null;
+  error: string | null;
+}
+
+export interface WazzupFileRow {
+  id: number;
+  messageId: string;
+  chatId: string;
+  chatType: string | null;
+  phone: string | null;
+  direction: 'in' | 'out';
+  text: string;
+  sentAt: Date;
+  leadId: number | null;
+  contentUri: string;
+  contentType: string | null;
+  raw: Record<string, unknown> | null;
+  consumedAt: Date | null;
+}
+
 export function normalizePhone(v: string | null | undefined): string | null {
   if (!v) return null;
   let d = String(v).replace(/\D+/g, '');
@@ -175,9 +201,9 @@ export class WazzupRepo {
    * RFD-AI-AGENT-CALLS-DAY-FULL: переписка по сделке за период — по lead_id (чаты, привязанные Salesbot) или по телефонам
    * контактов сделки (lead_id у вебхуков пуст); без групп и системных. С message_id — для дедупликации с чатами amo.
    */
-  async chatForLeadBetween(accountId: number, leadId: number, phones: string[], since: Date, until: Date, limit = 500): Promise<WazzupChatItem[]> {
+  async chatForLeadBetween(accountId: number, leadId: number, phones: string[], since: Date, until: Date, limit = 500): Promise<(WazzupChatItem & { file: WazzupFileInfo | null })[]> {
     const { rows } = await this.db.query(
-      `SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at FROM wazzup_messages
+      `SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at, content_uri, content_type, file_name, file_text, file_status, file_error FROM wazzup_messages
         WHERE account_id = $1 AND NOT is_system AND text <> '' AND text NOT LIKE '%=== SYSTEM WZ ===%'
           AND (chat_type IS NULL OR chat_type NOT LIKE '%group')
           AND sent_at >= $4 AND sent_at < $5
@@ -185,7 +211,44 @@ export class WazzupRepo {
         ORDER BY sent_at ASC LIMIT $6`,
       [accountId, leadId, phones, since, until, limit],
     );
-    return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at }));
+    return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at, file: r.content_uri ? { uri: r.content_uri, type: r.content_type, name: r.file_name, text: r.file_text, status: r.file_status, error: r.file_error } : null }));
+  }
+
+  /**
+   * RFD-AI-AGENT-WA-FILES: сообщения с файлом, ещё не разобранные (обе стороны, без групп), старые первыми — очередь фонового
+   * разбора. Разобранные повторно не берутся (file_status заполнен).
+   */
+  async filesPending(accountId: number, limit = 20): Promise<WazzupFileRow[]> {
+    const { rows } = await this.db.query(
+      `SELECT id, message_id, chat_id, chat_type, phone, direction, text, sent_at, lead_id, content_uri, content_type, raw, consumed_at FROM wazzup_messages
+        WHERE account_id = $1 AND content_uri IS NOT NULL AND file_status IS NULL AND NOT is_system
+          AND (chat_type IS NULL OR chat_type NOT LIKE '%group')
+        ORDER BY sent_at ASC LIMIT $2`,
+      [accountId, limit],
+    );
+    return rows.map((r) => ({ id: Number(r.id), messageId: r.message_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, text: r.text, sentAt: r.sent_at, leadId: r.lead_id === null ? null : Number(r.lead_id), contentUri: r.content_uri, contentType: r.content_type, raw: (r.raw as Record<string, unknown> | null) ?? null, consumedAt: r.consumed_at ?? null }));
+  }
+
+  /** Результат разбора файла по ссылке хранилища (агент разобрал входящий файл при получении — фоновому заданию не повторять). */
+  async setFileResultByUri(accountId: number, contentUri: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed'; error: string | null }): Promise<void> {
+    await this.db.query(`UPDATE wazzup_messages SET file_name = COALESCE($3, file_name), file_text = $4, file_status = $5, file_error = $6, file_extracted_at = now() WHERE account_id = $1 AND content_uri = $2 AND file_status IS NULL`, [accountId, contentUri, r.name, r.text, r.status, r.error?.slice(0, 1000) ?? null]);
+  }
+
+  /** Результат разбора файла сообщения (один раз на сообщение). */
+  async setFileResult(accountId: number, messageId: string, r: { name: string | null; text: string | null; status: 'done' | 'skipped' | 'failed'; error: string | null }): Promise<void> {
+    await this.db.query(`UPDATE wazzup_messages SET file_name = COALESCE($3, file_name), file_text = $4, file_status = $5, file_error = $6, file_extracted_at = now() WHERE account_id = $1 AND message_id = $2`, [accountId, messageId, r.name, r.text, r.status, r.error?.slice(0, 1000) ?? null]);
+  }
+
+  /** Сообщения с файлами по телефонам за период с извлечённым текстом — для истории агента. */
+  async filesByPhones(accountId: number, phones: string[], since: Date, limit = 50): Promise<(WazzupChatItem & { file: WazzupFileInfo })[]> {
+    if (!phones.length) return [];
+    const { rows } = await this.db.query(
+      `SELECT message_id, channel_id, chat_id, chat_type, phone, direction, author, text, sent_at, content_uri, content_type, file_name, file_text, file_status, file_error FROM wazzup_messages
+        WHERE account_id = $1 AND phone = ANY($2::text[]) AND content_uri IS NOT NULL AND sent_at >= $3 AND NOT is_system
+        ORDER BY sent_at ASC LIMIT $4`,
+      [accountId, phones, since, limit],
+    );
+    return rows.map((r) => ({ messageId: r.message_id, channelId: r.channel_id, chatId: r.chat_id, chatType: r.chat_type, phone: r.phone, direction: r.direction, author: r.author, text: r.text, sentAt: r.sent_at, file: { uri: r.content_uri, type: r.content_type, name: r.file_name, text: r.file_text, status: r.file_status, error: r.file_error } }));
   }
 
   /** Сделки с перепиской за период (только привязанные lead_id). */

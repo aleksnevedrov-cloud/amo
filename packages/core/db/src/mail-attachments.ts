@@ -107,6 +107,18 @@ export class MailAttachmentsRepo {
     };
   }
 
+  /** RFD-AI-AGENT-WA-FILES: вложения писем сделки за период с извлечённым текстом — для ленты итога дня. */
+  async listByLeadBetween(accountId: number, leadId: number, since: Date, until: Date, limit = 50): Promise<(MailAttachmentRow & { messageId: string; createdAt: Date })[]> {
+    const { rows } = await this.db.query(
+      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at
+         FROM mail_attachments
+         WHERE account_id = $1 AND lead_id = $2 AND created_at >= $3 AND created_at < $4
+         ORDER BY created_at ASC LIMIT $5`,
+      [accountId, leadId, since, until, limit],
+    );
+    return rows.map((r) => ({ id: Number(r.id), accountId: Number(r.account_id), leadId: r.lead_id === null ? null : Number(r.lead_id), messageId: r.message_id, filename: r.filename, mime: r.mime, sizeBytes: Number(r.size_bytes), storagePath: r.storage_path, amoFileUuid: r.amo_file_uuid, extractStatus: r.extract_status, extractedText: r.extracted_text, createdAt: r.created_at }));
+  }
+
   async listByLead(accountId: number, leadId: number, limit = 50): Promise<MailAttachmentRow[]> {
     const { rows } = await this.db.query(
       `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path,

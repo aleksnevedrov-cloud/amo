@@ -27,6 +27,16 @@ export interface TimelineItem {
   callId?: number;
   transcript?: CallTranscript;
   attachments?: string[];
+  /** RFD-AI-AGENT-WA-FILES: файлы с извлечённым текстом (Wazzup — документы и картинки обеих сторон, письма — вложения). */
+  files?: TimelineFile[];
+}
+
+export interface TimelineFile {
+  name: string;
+  /** Извлечённый текст; null — не разобран (статус в note). */
+  text: string | null;
+  /** «аудио», «видео», «не разобран: …», «разбор ещё идёт». */
+  note?: string;
 }
 
 const MSK = 'Europe/Moscow';
@@ -90,26 +100,40 @@ export function dedupeTimeline(items: TimelineItem[]): TimelineItem[] {
 /** Есть ли в ленте общение не только от AI-агента: звонок с расшифровкой, сообщение клиента или менеджера, письмо, примечание. */
 export const hasHumanActivity = (items: TimelineItem[]): boolean => items.some((it) => it.source === 'call' || it.author !== 'agent');
 
+/** Файлы записи: «файл X: текст» или «файл X (аудио)». */
+export function formatFiles(files: TimelineFile[] | undefined): string {
+  if (!files?.length) return '';
+  return files.map((f) => `\nФайл ${f.name}${f.text ? `: ${f.text}` : f.note ? ` (${f.note})` : ''}`).join('');
+}
+
 export function formatItem(it: TimelineItem): string {
   const t = timeMsk(it.at);
+  const files = formatFiles(it.files);
   switch (it.source) {
     case 'call': {
       const lines = (it.transcript?.segments ?? []).map((s) => `${s.role === 'manager' ? 'Менеджер' : s.role === 'client' ? 'Клиент' : `Говорящий ${s.speaker ?? '?'}`}: ${s.text}`);
       return `${t} Звонок ${it.direction === 'in' ? 'вх.' : 'исх.'} (${mmss(it.durationSec ?? 0)}) [${it.id}]:\n${lines.join('\n') || it.transcript?.text || '(расшифровки нет)'}`;
     }
     case 'email': {
-      const att = it.attachments?.length ? `\nВложения: ${it.attachments.join(', ')}` : '';
-      return `${t} Письмо ${it.direction === 'in' ? 'вх.' : 'исх.'} [${it.id}] Тема: ${it.subject ?? '(без темы)'}\n${it.text}${att}`;
+      const named = new Set((it.files ?? []).map((f) => f.name));
+      const rest = (it.attachments ?? []).filter((a) => !named.has(a));
+      const att = rest.length ? `\nВложения: ${rest.join(', ')}` : '';
+      return `${t} Письмо ${it.direction === 'in' ? 'вх.' : 'исх.'} [${it.id}] Тема: ${it.subject ?? '(без темы)'}\n${it.text}${att}${files}`;
     }
     case 'note':
-      return `${t} Примечание менеджера [${it.id}]: ${it.text}`;
-    default:
-      return `${t} ${channelLabel(it.channel, SOURCE_LABEL[it.source])} ${authorLabel(it.author)} [${it.id}]: ${it.text}`;
+      return `${t} Примечание менеджера [${it.id}]: ${it.text}${files}`;
+    default: {
+      const who = it.files?.length ? `${authorLabel(it.author)} — ${it.author === 'client' ? 'прислал' : 'отправил'} файл` : authorLabel(it.author);
+      return `${t} ${channelLabel(it.channel, SOURCE_LABEL[it.source])} ${who} [${it.id}]${it.text ? `: ${it.text}` : ''}${files}`;
+    }
   }
 }
 
 export const MAX_INPUT_CHARS = 60_000;
 const EMAIL_SHORT_CHARS = 1500;
+/** Текст файла в ленте: до этого предела всегда; при превышении общего лимита — сначала укорачивается до FILE_MIN_CHARS. */
+export const FILE_TEXT_CHARS = 4000;
+const FILE_MIN_CHARS = 600;
 
 export interface TimelineText {
   text: string;
@@ -119,12 +143,19 @@ export interface TimelineText {
   used: TimelineItem[];
 }
 
-/** Лента текстом с ограничением: сначала короче письма, затем убираются старые сообщения (не звонки), пока не уложимся. */
+const cutFiles = (it: TimelineItem, max: number): TimelineItem => (it.files?.some((f) => f.text && f.text.length > max) ? { ...it, files: it.files.map((f) => (f.text && f.text.length > max ? { ...f, text: `${f.text.slice(0, max)}…` } : f)) } : it);
+
+/** Лента текстом с ограничением: сначала короче тексты файлов, затем письма, затем убираются старые сообщения (не звонки). */
 export function timelineText(items: TimelineItem[], limit = MAX_INPUT_CHARS): TimelineText {
-  let current = items.map((it) => ({ ...it }));
+  let current = items.map((it) => cutFiles({ ...it }, FILE_TEXT_CHARS));
   const truncated: string[] = [];
   const render = () => current.map(formatItem).join('\n\n');
   let text = render();
+  if (text.length > limit && current.some((it) => it.files?.some((f) => f.text && f.text.length > FILE_MIN_CHARS))) {
+    current = current.map((it) => cutFiles(it, FILE_MIN_CHARS));
+    truncated.push('тексты файлов сокращены');
+    text = render();
+  }
   if (text.length > limit) {
     let cut = 0;
     current = current.map((it) => (it.source === 'email' && it.text.length > EMAIL_SHORT_CHARS ? (cut++, { ...it, text: `${it.text.slice(0, EMAIL_SHORT_CHARS)}…` }) : it));
