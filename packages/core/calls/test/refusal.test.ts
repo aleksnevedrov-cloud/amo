@@ -10,7 +10,7 @@ import { AccountsRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db 
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../db/test/setup.ts';
-import { fetchStatusEvents, findAdminTask, formatRefusalNote, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallTranscript, type LocalMessage } from '../src/index.ts';
+import { CALL_DAY_KIND, fetchStatusEvents, findAdminTask, formatRefusalNote, REFUSAL_KIND, REFUSAL_SYNC_ENTITY, runDaySummaryIfDue, runRefusalDemo, runRefusalPoll, type AmoRaw, type CallsDeps, type CallTranscript, type LocalMessage } from '../src/index.ts';
 import { depsOf } from './helpers.ts';
 
 const ACC = 1;
@@ -36,6 +36,10 @@ const amo: AmoRaw = {
       const from = Number(/from\]=(\d+)/.exec(path)?.[1] ?? 0);
       const to = Number(/to\]=(\d+)/.exec(path)?.[1] ?? 0);
       return { _embedded: { events: state.events.filter((e) => e.created_at >= from && e.created_at <= to).map((e) => ({ id: e.id, type: 'lead_status_changed', entity_id: e.entity_id, entity_type: 'lead', created_by: 5, created_at: e.created_at, value_after: [{ lead_status: e.after }], value_before: e.before ? [{ lead_status: e.before }] : [] })) } } as never;
+    }
+    if (path.startsWith('/api/v4/leads?filter')) {
+      const ids = [...path.matchAll(/filter\[id\]\[\]=(\d+)/g)].map((m) => Number(m[1]));
+      return { _embedded: { leads: ids.filter((id) => state.leads[id]).map((id) => ({ id, status_id: state.leads[id]!.status_id, pipeline_id: state.leads[id]!.pipeline_id })) } } as never;
     }
     let m = /^\/api\/v4\/leads\/(\d+)$/.exec(path);
     if (m) {
@@ -74,7 +78,12 @@ function fakeLlm() {
       const content = String(req.messages[0]?.content ?? '');
       asked.push(content);
       const callIds = [...new Set([...content.matchAll(/\[call:(\d+)\]/g)].map((m) => Number(m[1])))];
-      const text = JSON.stringify({ ...ANALYSIS, speakers: callIds.flatMap((id) => [{ callId: id, tag: '1', role: 'manager' }, { callId: id, tag: '2', role: 'client' }]) });
+      const speakers = callIds.flatMap((id) => [{ callId: id, tag: '1', role: 'manager' }, { callId: id, tag: '2', role: 'client' }]);
+      // Итог дня (calls-day-summary) и анализ отказа — разные схемы: отличаем по заголовку запроса.
+      const ids = [...new Set([...content.matchAll(/\[((?:call|wz|chat|agent|note|mail|chatev):[^\]\s]+)\]/g)].map((m) => m[1] as string))];
+      const text = content.includes('Лента дня:')
+        ? JSON.stringify({ summary: 'Клиент договорился о замере.', agreements: ['Замер завтра в 12:00'], nextStep: 'Менеджер едет на замер.', managerScore: 8, managerComment: 'Быстро договорился.', counts: { calls: 0, messages: 0, emails: 0, notes: 0 }, totalCallDuration: 0, sourceIds: ids.filter((id) => !id.startsWith('agent:')), speakers })
+        : JSON.stringify({ ...ANALYSIS, speakers });
       return { text, toolCalls: [], stopReason: 'end', usage: { inputTokens: 2500, outputTokens: 500, cachedInputTokens: 0, cacheWriteTokens: 0 }, provider: r.primary.provider, model: r.primary.model, assistantMessage: { role: 'assistant', content: text }, latencyMs: 1, fallbackUsed: false, requested: r.primary, attempts: [] } as unknown as RoutedResponse;
     },
     providers: async () => ['openai'],
@@ -98,10 +107,14 @@ describe('анализ сделки при переносе в «Отказ» (�
   beforeAll(async () => {
     ({ db, drop } = await freshDb());
     await new AccountsRepo(db).upsertInstalled({ id: ACC, subdomain: 'acc', accountDomain: 'acc.amocrm.ru' });
-    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0 }, refusal: { adminUserIds: [7] } }));
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({ calls: { daySummaryTimeoutSec: 0, daySummaryTime: '20:30' }, refusal: { adminUserIds: [7] } }));
     deps = depsOf(db, (async () => new Response('нет', { status: 404 })) as typeof fetch, mkdtempSync(join(tmpdir(), 'refusal-')), {
       llmFor: async () => ({ llm: llm.llm, route: { primary: { provider: 'openai', model: 'gpt-5.5' }, fallback: null }, pricing: {}, usdRubRate: 90 }),
-      sources: { wazzup: async (_a, leadId, _p, since, until) => (state.wz[leadId] ?? []).filter((m) => m.at >= since && m.at < until), dialog: async () => [], activeLeads: async () => [] },
+      sources: {
+        wazzup: async (_a, leadId, _p, since, until) => (state.wz[leadId] ?? []).filter((m) => m.at >= since && m.at < until),
+        dialog: async () => [],
+        activeLeads: async (_a, since, until) => Object.entries(state.wz).filter(([, ms]) => ms.some((m) => m.at >= since && m.at < until)).map(([id]) => Number(id)),
+      },
     });
     // Сделка 1001: создана 20.10, переписка три дня, звонок с расшифровкой, переход в «Отказ» 23.10 12:00, задача автоматизации через 5 минут.
     lead(1001, at('2026-10-20T08:00:00Z'));
@@ -235,6 +248,46 @@ describe('анализ сделки при переносе в «Отказ» (�
     expect(llm.asked.length - before.asked).toBe(3); // каждый показ считает заново; записи — одна
   });
 
+  it('итог дня (RFD-AI-AGENT-CALLS-DAY-FIX2): днём публикаций нет; в 20:30 один запуск, сделка с анализом отказа за день пропущена с записью в журнал; рестарт в 20:40 — повтора нет; отказ после 20:30 — анализ пишется', async () => {
+    // Сделка 1007: переписка сегодня, в 18:30 МСК ушла в «Отказ» (анализ записан), в 19:00 вернули в работу — открыта к 20:30.
+    lead(1007, at('2026-10-21T08:00:00Z'));
+    state.wz[1007] = [{ id: 'g1', direction: 'in', author: 'client', text: 'Передумал, отказываюсь', at: at('2026-10-23T10:00:00Z'), channel: 'whatsapp' }, { id: 'g2', direction: 'out', author: 'manager', text: 'Понял, жаль. Если что — пишите', at: at('2026-10-23T10:10:00Z'), channel: 'whatsapp' }];
+    state.events.push({ id: 'e9', entity_id: 1007, created_at: unix(at('2026-10-23T15:30:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    await poll(at('2026-10-23T15:35:00Z'));
+    expect((await deps.refusals.forLead(ACC, 1007))[0]?.noteId).toEqual(expect.any(Number));
+    state.leads[1007] = { ...state.leads[1007]!, status_id: 28643038, closed_at: null };
+    // Сделка 1009: переписка сегодня, отказа нет — итог в 20:30 публикуется.
+    lead(1009, at('2026-10-22T08:00:00Z'), 28643038);
+    state.wz[1009] = [{ id: 'h1', direction: 'in', author: 'client', text: 'Хочу заказать замер', at: at('2026-10-23T11:00:00Z'), channel: 'whatsapp' }, { id: 'h2', direction: 'out', author: 'manager', text: 'Завтра в 12:00 подойдёт?', at: at('2026-10-23T11:05:00Z'), channel: 'whatsapp' }];
+    const dayOpts = { sleep: async () => undefined, amo, client, transcribe: { inlineWaitMs: 0 } };
+    const before = state.posts.length;
+    // Проверки раз в 5 минут днём — ничего (12:00, 15:20, 20:25 МСК).
+    for (const t of ['2026-10-23T09:00:00Z', '2026-10-23T12:20:00Z', '2026-10-23T17:25:00Z']) expect(await runDaySummaryIfDue(deps, ACC, { ...dayOpts, now: () => at(t) })).toBeNull();
+    expect(state.posts).toHaveLength(before);
+    // 20:30 — один запуск: 1009 получает итог, 1007 пропущена (анализ отказа за день), 1001–1004 закрыты (этап 143) — не в итоге.
+    const r = await runDaySummaryIfDue(deps, ACC, { ...dayOpts, now: () => at('2026-10-23T17:30:00Z') });
+    expect(r).toMatchObject({ groups: 1, notes: 1, refusalSkipped: 1, errors: 0 });
+    expect(state.posts.slice(before).map((p) => [p.path, p.text.split('\n')[0]])).toEqual([['/api/v4/leads/1009/notes', 'Итог дня по сделке за 23.10.2026: 2 сообщения']]);
+    const dayLog = await new JournalRepo(db).list(ACC, { kind: CALL_DAY_KIND, leadId: 1007 });
+    expect(dayLog[0]?.summary).toMatch(/^Итог дня за 23\.10\.2026 \(сделка 1007\): пропущено — есть анализ отказа от 23\.10\.2026 \(примечание \d+\)$/);
+    expect((await deps.days.list(ACC)).map((d) => d.leadId)).toEqual([1009]);
+    // Рестарт воркера в 20:40: отметка в calls_sync (БД), а не в памяти — повторного запуска нет; ни в 23:00.
+    const fresh = depsOf(db, deps.fetch, 'x', { llmFor: deps.llmFor, sources: deps.sources });
+    expect(await runDaySummaryIfDue(fresh, ACC, { ...dayOpts, now: () => at('2026-10-23T17:40:00Z') })).toBeNull();
+    expect(await runDaySummaryIfDue(fresh, ACC, { ...dayOpts, now: () => at('2026-10-23T20:00:00Z') })).toBeNull();
+    expect(state.posts).toHaveLength(before + 1);
+    // Отказ после 20:30 (21:00 МСК): анализ отказа пишется как обычно, итоги дня не трогаются.
+    state.events.push({ id: 'e10', entity_id: 1009, created_at: unix(at('2026-10-23T18:00:00Z')), after: { id: 143, pipeline_id: PIPE } });
+    state.leads[1009] = { ...state.leads[1009]!, status_id: 143, closed_at: unix(at('2026-10-23T18:00:00Z')) };
+    const rp = await poll(at('2026-10-23T18:05:00Z'));
+    expect(rp).toMatchObject({ matched: 1, analyzed: 1, notes: 1 });
+    expect(state.posts.at(-1)?.path).toBe('/api/v4/leads/1009/notes');
+    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Анализ сделки при отказе (23.10.2026): 0 звонков (0:00), 2 сообщения, 0 писем за весь период');
+    expect((await deps.days.list(ACC)).map((d) => d.leadId)).toEqual([1009]);
+    // Следующий день 20:30: итог за 24.10 (новое общение) — и догон не трогает 23.10 (уже выполнен).
+    state.wz[1009] = [];
+  });
+
   it('разбор событий amo и формат примечания без общения', async () => {
     const events = await fetchStatusEvents(amo, at('2026-10-23T08:00:00Z'), at('2026-10-23T16:00:00Z'));
     expect(events.map((e) => [e.id, e.leadId, e.statusId, e.pipelineId, e.beforeStatusId])).toEqual([
@@ -245,6 +298,7 @@ describe('анализ сделки при переносе в «Отказ» (�
       ['e6', 1006, 143, 2, null],
       ['e7', 1002, 143, PIPE, null],
       ['e8', 1003, 143, PIPE, null],
+      ['e9', 1007, 143, PIPE, null],
     ]);
     expect(formatRefusalNote(T0, null, { calls: 0, messages: 0, emails: 0, notes: 0, totalCallDuration: 0 })).toContain('общения в данных агента нет');
   });

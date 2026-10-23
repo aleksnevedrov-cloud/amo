@@ -22,6 +22,8 @@ import { MAX_ATTEMPTS, onFailure, RETRY_FAILED_AFTER_MS, transcribeCalls } from 
 const MSK = 'Europe/Moscow';
 const CLOSED_STATUSES = new Set([142, 143]);
 const GROUP_CONCURRENCY = 2;
+/** Догон пропущенных дней (простой воркера) — не дальше недели назад. */
+const MAX_CATCHUP_DAYS = 7;
 const WAIT_POLL_MS = 15_000;
 
 /** День по Москве ГГГГ-ММ-ДД. */
@@ -34,7 +36,7 @@ export function mskDay(d: Date): string {
 export const mskDayStart = (day: string): Date => new Date(Date.parse(`${day}T00:00:00+03:00`));
 export const dayLabel = (day: string): string => day.split('-').reverse().join('.');
 const dayShort = (day: string): string => `${day.slice(8, 10)}.${day.slice(5, 7)}`;
-const addDays = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+export const addDays = (day: string, n: number): string => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
 export interface DaySummaryOptions {
   now?: () => Date;
@@ -44,6 +46,11 @@ export interface DaySummaryOptions {
   transcribe?: Parameters<typeof transcribeCalls>[3];
   /** Не ждать нерасшифрованные (проверка раз в 5 минут между запусками). */
   noWait?: boolean;
+  /**
+   * RFD-AI-AGENT-CALLS-DAY-FIX2: первый день, за который искать общение по сделкам (догон пропущенных дней после простоя
+   * воркера; плановый запуск передаёт день после последнего выполненного). Нет — только сегодня. Не раньше 7 дней назад.
+   */
+  fromDay?: string;
 }
 
 export interface DaySummaryResult {
@@ -59,6 +66,8 @@ export interface DaySummaryResult {
   skipped: number;
   errors: number;
   waiting: number;
+  /** Сделок, по которым за день уже есть анализ отказа — итог дня не публикуется (RFD-AI-AGENT-CALLS-DAY-FIX2, п. 2). */
+  refusalSkipped: number;
 }
 
 export interface Group {
@@ -129,7 +138,7 @@ export async function runDaySummaryAll(deps: CallsDeps, opts: DaySummaryOptions 
     try {
       out.push(await runDaySummary(deps, accountId, opts));
     } catch (err) {
-      out.push({ accountId, enabled: true, groups: 0, calls: 0, notes: 0, noBusiness: 0, noActivity: 0, skipped: 0, errors: 1, waiting: 0 });
+      out.push({ accountId, enabled: true, groups: 0, calls: 0, notes: 0, noBusiness: 0, noActivity: 0, skipped: 0, errors: 1, waiting: 0, refusalSkipped: 0 });
       await deps.journal.add({ accountId, kind: CALL_ERROR_KIND, summary: `Итог дня не выполнен — ${errorText(err)}`, details: { error: errorText(err) } }).catch(() => undefined);
     }
   }
@@ -141,7 +150,7 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
   const sleep = opts.sleep ?? ((ms: number) => new Promise((res) => setTimeout(res, ms)));
   const all = await deps.settingsFor(accountId);
   const s = all.calls;
-  const r: DaySummaryResult = { accountId, enabled: s.callsEnabled, groups: 0, calls: 0, notes: 0, noBusiness: 0, noActivity: 0, skipped: 0, errors: 0, waiting: 0 };
+  const r: DaySummaryResult = { accountId, enabled: s.callsEnabled, groups: 0, calls: 0, notes: 0, noBusiness: 0, noActivity: 0, skipped: 0, errors: 0, waiting: 0, refusalSkipped: 0 };
   if (!s.callsEnabled) return r;
   const account = await deps.accounts.get(accountId);
   if (!account || account.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён`);
@@ -150,7 +159,6 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
   const client = opts.client ?? new AmoApiClient(account.accountDomain, token, deps.fetch);
   const started = now();
   const today = mskDay(started);
-  const since = mskDayStart(today);
 
   // Нерасшифрованные звонки: подтянуть результаты операций SpeechKit и подождать до daySummaryTimeoutSec.
   const deadline = started.getTime() + (opts.noWait ? 0 : s.daySummaryTimeoutSec * 1000);
@@ -166,11 +174,21 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
     await sleep(WAIT_POLL_MS);
   }
 
-  // Кандидаты: звонки без итога + сделки с общением за день (локальные таблицы и amo).
+  // Кандидаты: звонки без итога + сделки с общением за день (локальные таблицы и amo). Дни — сегодня и пропущенные
+  // (fromDay … вчера, не раньше 7 дней назад): догон после простоя воркера, каждый день — своим итогом.
   const calls = await deps.calls.listForDaySummary(accountId, { until: started, retryBefore: new Date(started.getTime() - RETRY_FAILED_AFTER_MS), maxAttempts: MAX_ATTEMPTS });
   const leadIds = new Set<number>(calls.map((c) => c.leadId ?? (c.entity === 'lead' ? c.entityId : null)).filter((x): x is number => x !== null));
-  if (deps.sources?.activeLeads) for (const id of await deps.sources.activeLeads(accountId, since, started).catch(() => [])) leadIds.add(id);
-  for (const id of await amoActiveLeads(amo, since, started, s).catch(() => new Set<number>())) leadIds.add(id);
+  const firstDay = opts.fromDay && opts.fromDay < today ? (opts.fromDay > addDays(today, -MAX_CATCHUP_DAYS) ? opts.fromDay : addDays(today, -MAX_CATCHUP_DAYS)) : today;
+  const activeByDay = new Map<string, Set<number>>();
+  for (let day = firstDay; day <= today; day = addDays(day, 1)) {
+    const from = mskDayStart(day);
+    const to = day === today ? started : mskDayStart(addDays(day, 1));
+    const ids = new Set<number>();
+    if (deps.sources?.activeLeads) for (const id of await deps.sources.activeLeads(accountId, from, to).catch(() => [])) ids.add(id);
+    for (const id of await amoActiveLeads(amo, from, to, s).catch(() => new Set<number>())) ids.add(id);
+    activeByDay.set(day, ids);
+    for (const id of ids) leadIds.add(id);
+  }
 
   // Фильтр по сделке: воронка «Двери», этап не закрыт и в списке; звонки сделок вне — analyzed с причиной.
   const leads = leadIds.size ? await fetchLeads(amo, [...leadIds]) : new Map<number, LeadBrief | null>();
@@ -202,9 +220,21 @@ export async function runDaySummary(deps: CallsDeps, accountId: number, opts: Da
     if (leadId === null) group(`contact:${c.entityId}:${day}`, null, c.entityId, day).calls.push(c);
     else group(`lead:${leadId}:${day}`, leadId, null, day).calls.push(c);
   }
-  for (const id of allowed) group(`lead:${id}:${today}`, id, null, today);
+  for (const [day, ids] of activeByDay) for (const id of ids) if (allowed.has(id)) group(`lead:${id}:${day}`, id, null, day);
 
-  const queue = [...groups.values()];
+  // RFD-AI-AGENT-CALLS-DAY-FIX2, п. 2: по сделке уже есть анализ отказа с переходом не раньше дня группы — он охватывает всю
+  // историю, второй комментарий за день не нужен; звонки группы помечаются, чтобы не ждать итога каждый день.
+  const queue: Group[] = [];
+  for (const g of groups.values()) {
+    const refusal = g.leadId !== null ? await deps.refusals.coversSince(accountId, g.leadId, mskDayStart(g.day)) : null;
+    if (!refusal) {
+      queue.push(g);
+      continue;
+    }
+    r.refusalSkipped++;
+    await deps.calls.setSkipped(g.calls.map((c) => c.id), `есть анализ отказа ${refusal.id}`);
+    await deps.journal.add({ accountId, leadId: g.leadId as number, kind: CALL_DAY_KIND, summary: `Итог дня за ${dayLabel(g.day)} (сделка ${g.leadId}): пропущено — есть анализ отказа от ${dayLabel(mskDay(refusal.changedAt))} (примечание ${refusal.noteId})`, details: { day: g.day, leadId: g.leadId, refusalId: refusal.id, refusalNoteId: refusal.noteId, callIds: g.calls.map((c) => c.id) } });
+  }
   await Promise.all(Array.from({ length: Math.min(GROUP_CONCURRENCY, queue.length) }, async () => {
     // Окно ленты — день группы: сегодня до текущего момента, прошлый день — целиком.
     for (let g = queue.shift(); g; g = queue.shift()) await summarizeGroup(deps, accountId, all, amo, client, g, r, mskDayStart(g.day), g.day === today ? started : mskDayStart(addDays(g.day, 1)));
@@ -220,6 +250,7 @@ async function journalRun(deps: CallsDeps, accountId: number, r: DaySummaryResul
   if (r.skipped) parts.push(`звонков вне воронки или этапа ${r.skipped}`);
   if (r.errors) parts.push(`ошибок ${r.errors}`);
   if (r.waiting) parts.push(`не дождались расшифровки ${r.waiting} — в следующий итог`);
+  if (r.refusalSkipped) parts.push(`пропущено: есть анализ отказа ${r.refusalSkipped}`);
   await deps.journal.add({ accountId, kind: CALL_DAY_RUN_KIND, summary: `Итог дня: ${parts.join(', ')}`, details: { ...r } });
 }
 

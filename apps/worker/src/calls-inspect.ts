@@ -1,6 +1,6 @@
 /* eslint-disable no-console -- консольная утилита: вывод для заказчика */
 import { loadEnv } from '@core/shared';
-import type { CallTranscript } from '@core/calls';
+import { addDays, amoRaw, mskDayStart, type CallTranscript } from '@core/calls';
 import { buildCallsDeps } from './calls-deps.ts';
 
 /**
@@ -9,12 +9,22 @@ import { buildCallsDeps } from './calls-deps.ts';
  * «говорящий —», поле метки в ответе другое — видно по сырому ответу, правка в parseSpeechKitLines.
  *
  *   docker compose exec worker node apps/worker/dist/calls-inspect.js [--account <id>] [--id <id звонка>]
+ *
+ * RFD-AI-AGENT-CALLS-DAY-FIX2, п. 3: список итогов дня, опубликованных за календарный день (МСК), с названиями сделок из amo —
+ * сделка, примечание, время публикации, первая строка. Ничего не меняет.
+ *
+ *   docker compose exec worker node apps/worker/dist/calls-inspect.js --day-summaries ГГГГ-ММ-ДД [--until ЧЧ:ММ] [--account <id>]
  */
 const args = parseArgs(process.argv.slice(2));
 const env = loadEnv();
 const { deps, close } = buildCallsDeps(env);
 try {
   const accounts = args.account ? [Number(args.account)] : await deps.accountIds();
+  if (typeof args['day-summaries'] === 'string') {
+    await listDaySummaries(accounts, args['day-summaries'], typeof args.until === 'string' ? args.until : null);
+    await close();
+    process.exit(0);
+  }
   let shown = false;
   for (const accountId of accounts) {
     const row = args.id ? await deps.calls.get(accountId, Number(args.id)) : await deps.calls.lastTranscribed(accountId);
@@ -34,6 +44,32 @@ try {
   if (!shown) console.log('Расшифрованных звонков пока нет.');
 } finally {
   await close();
+}
+
+async function listDaySummaries(accounts: number[], day: string, until: string | null): Promise<void> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--day-summaries в формате ГГГГ-ММ-ДД');
+  if (until && !/^([01]\d|2[0-3]):[0-5]\d$/.test(until)) throw new Error('--until в формате ЧЧ:ММ');
+  const from = mskDayStart(day);
+  const to = until ? new Date(`${day}T${until}:00+03:00`) : mskDayStart(addDays(day, 1));
+  for (const accountId of accounts) {
+    const rows = await deps.days.listCreatedBetween(accountId, from, to);
+    const account = await deps.accounts.get(accountId);
+    const names = new Map<number, string>();
+    if (account && rows.length) {
+      const amo = amoRaw(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
+      const ids = [...new Set(rows.map((r) => r.leadId).filter((x): x is number => x !== null))];
+      for (let i = 0; i < ids.length; i += 50) {
+        const res = await amo.get<{ _embedded?: { leads?: { id: number; name: string }[] } }>(`/api/v4/leads?${ids.slice(i, i + 50).map((id) => `filter[id][]=${id}`).join('&')}`).catch(() => null);
+        for (const l of res?._embedded?.leads ?? []) names.set(l.id, l.name);
+      }
+    }
+    console.log(`Аккаунт ${accountId}: итогов дня, опубликованных ${day} ${until ? `до ${until}` : 'за сутки'} (МСК) — ${rows.length}${rows.filter((r) => r.noteId).length !== rows.length ? `, из них с примечанием ${rows.filter((r) => r.noteId).length}` : ''}`);
+    for (const r of rows) {
+      const time = r.createdAt.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+      const where = r.leadId !== null ? `сделка «${names.get(r.leadId) ?? '?'}» (${r.leadId})` : `контакт ${r.contactId}`;
+      console.log(`  ${time}  ${where}  итог ${r.id} за ${r.day}  примечание ${r.noteId ?? '—'}  ${(r.noteText ?? '').split('\n')[0] ?? ''}`);
+    }
+  }
 }
 
 function parseArgs(argv: string[]): Record<string, string | true> {

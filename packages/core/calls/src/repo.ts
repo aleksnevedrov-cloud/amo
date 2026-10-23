@@ -313,6 +313,12 @@ export class DaySummariesRepo {
     return rows.map(mapDay);
   }
 
+  /** Итоги, опубликованные (created_at) в окне — для списка «что опубликовано за день» (calls-inspect --day-summaries). */
+  async listCreatedBetween(accountId: number, from: Date, to: Date): Promise<DaySummaryRow[]> {
+    const { rows } = await this.db.query('SELECT * FROM call_day_summaries WHERE account_id = $1 AND created_at >= $2 AND created_at < $3 ORDER BY created_at ASC, id ASC', [accountId, from, to]);
+    return rows.map(mapDay);
+  }
+
   async list(accountId: number, opts: { leadId?: number; limit?: number } = {}): Promise<DaySummaryRow[]> {
     const params: unknown[] = [accountId];
     let where = 'account_id = $1';
@@ -473,6 +479,12 @@ export class RefusalsRepo {
   async listRetry(accountId: number, maxAttempts: number, limit = 20): Promise<RefusalRow[]> {
     const { rows } = await this.db.query(`SELECT * FROM refusal_analyses WHERE account_id = $1 AND note_id IS NULL AND error IS NOT NULL AND attempts < $2 ORDER BY changed_at ASC LIMIT $3`, [accountId, maxAttempts, limit]);
     return rows.map(mapRefusal);
+  }
+
+  /** Есть ли по сделке записанный анализ отказа с переходом не раньше since: он охватывает всю историю, итог дня за этот день не нужен (RFD-AI-AGENT-CALLS-DAY-FIX2, п. 2). */
+  async coversSince(accountId: number, leadId: number, since: Date): Promise<RefusalRow | null> {
+    const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 AND lead_id = $2 AND note_id IS NOT NULL AND changed_at >= $3 ORDER BY changed_at DESC LIMIT 1', [accountId, leadId, since]);
+    return rows[0] ? mapRefusal(rows[0]) : null;
   }
 
   async forLead(accountId: number, leadId: number): Promise<RefusalRow[]> {

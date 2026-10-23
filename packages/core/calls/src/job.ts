@@ -1,6 +1,6 @@
 import { unlink } from 'node:fs/promises';
 import { costOfUsage } from '@core/llm';
-import { mskDay, runDaySummary, type DaySummaryOptions, type DaySummaryResult } from './day-summary.ts';
+import { addDays, mskDay, runDaySummary, type DaySummaryOptions, type DaySummaryResult } from './day-summary.ts';
 import type { CallsDeps, CallsSettings } from './deps.ts';
 import { errorText } from './errors.ts';
 import { callFileRel, downloadRecord, RecordUnavailableError, resolveCallPath, saveRecordFile } from './download.ts';
@@ -231,9 +231,11 @@ export async function runDaySummaryIfDue(deps: CallsDeps, accountId: number, opt
   const now = (opts.now ?? (() => new Date()))();
   const sync = await deps.calls.getSync(accountId, DAY_SYNC_ENTITY);
   if (!daySummaryDue(s.daySummaryTime, sync?.lastRunAt ?? null, now)) return null;
+  // Догон: дни после последнего выполненного запуска (простой воркера) — каждый своим итогом; первый запуск — только сегодня.
+  const fromDay = sync?.lastRunAt ? addDays(mskDay(sync.lastRunAt), 1) : mskDay(now);
   await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });
   try {
-    return await runDaySummary(deps, accountId, opts);
+    return await runDaySummary(deps, accountId, { fromDay, ...opts });
   } catch (err) {
     await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: errorText(err) }).catch(() => undefined);
     throw err;
