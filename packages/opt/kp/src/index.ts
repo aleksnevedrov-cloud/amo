@@ -4,6 +4,7 @@ export * from './component-door.ts';
 export * from './convert.ts';
 export * from './deps.ts';
 export * from './draft.ts';
+export * from './draft-normalize.ts';
 export * from './file-analyze.ts';
 export * from './request-parse.ts';
 export * from './job.ts';

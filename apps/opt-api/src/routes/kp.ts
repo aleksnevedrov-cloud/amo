@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import type { WidgetPrincipal } from '@core/amo';
 import { categoryOf } from '@opt/kb';
-import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, recalcDraftMarkup, researchablePositions, resolveKpPath, sendBlockers, imapConfigFor, kpLeadDirRel, type KpDraft, type KpLine, type KpPayload, type SendResult, type SentMailRecord } from '@opt/kp';
+import { asciiFilename, buildDraftDocument, describeFsError, composeKpMail, DEFAULT_CACHE_DAYS, DEFAULT_MAX_POSITIONS_PER_RUN, DEFAULT_MAX_SEARCH_CALLS, DEFAULT_PRICE_NOTE, DEFAULT_VAT_RATE, DEFAULT_WEB_SEARCH_DAILY_USD, KpBuildError, lineCategory, RESEARCH_BATCH, kpFileOf, kpTemplateRel, renderMailTemplate, addProjectItem, applyAnswer, buildQuestions, draftCounters, isPriceFile, ownNote, recalcDraftMarkup, researchablePositions, resolveKpPath, sendBlockers, imapConfigFor, kpLeadDirRel, normalizeDraftPayload, type KpDraft, type KpLine, type KpPayload, type SendResult, type SentMailRecord } from '@opt/kp';
 import type { JournalKind } from '@core/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -756,7 +756,8 @@ export function verifyFileLink(secret: string, token: string, draftId: number, k
 }
 
 function view(d: KpDraft, priceValidity: string | null = null, vatRate = DEFAULT_VAT_RATE) {
-  const p = d.payload as unknown as Partial<KpPayload>;
+  // Старые черновики (12.10: без requirements, answers, delivery, source.skipped…) дозаполняются при выдаче — сделки открываются.
+  const p: Partial<KpPayload> = normalizeDraftPayload(d.payload);
   // KP-AGENT-V2, п. 5: опросник выводится из состояния черновика; ответы — в payload.answers.
   const survey = buildQuestions(p, { priceValidity });
   return {

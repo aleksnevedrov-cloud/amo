@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { errorMessage } from '@core/widget-core';
 import type { DraftJob, GostProfileInfo, KpAnswerBody, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo, ResearchPosition, ResearchState } from '../api.ts';
@@ -27,6 +27,64 @@ const plural = (n: number, one: string, few: string, many: string) => {
 /** Размер по макету: «1400 × 2700 мм». */
 const sizeLabel = (size: string) => size.replace(/\s*[×x]\s*/i, ' × ');
 const POLL_MS = 3000;
+
+/**
+ * Ошибка рендера одного раздела не роняет весь блок (виджет 2.0.7 падал целиком на старых черновиках): раздел показывается
+ * пометкой «<раздел>: нет данных», остальное работает. Ошибка — в консоль, как у общего ErrorBoundary.
+ */
+export class Section extends Component<{ name: string; children: ReactNode; inline?: boolean }, { failed: boolean }> {
+  override state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  override componentDidCatch(error: Error, info: ErrorInfo) {
+    // eslint-disable-next-line no-console -- единственный канал диагностики внутри amo
+    console.error(`[ai-door] render error in «${this.props.name}»`, error, info.componentStack);
+  }
+  override render() {
+    if (this.state.failed) return this.props.inline ? <span className="opt-kp-sub opt-kp-section-failed">{this.props.name}: нет данных</span> : <div className="opt-kp-note opt-kp-section-failed">{this.props.name}: нет данных</div>;
+    return this.props.children;
+  }
+}
+
+/** Черновик старого формата (12.10) или от старого сервера: массивы — хотя бы [], объекты — хотя бы {} / null, строки — ''. */
+export function normalizeDraft(d: KpDraftInfo | null): KpDraftInfo | null {
+  if (!d) return null;
+  const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+  const str = (v: unknown): string => (typeof v === 'string' ? v : v === null || v === undefined ? '' : String(v));
+  const client = (d.client && typeof d.client === 'object' ? d.client : {}) as Partial<KpDraftInfo['client']>;
+  const src = d.source && typeof d.source === 'object' ? d.source : null;
+  const mail = src?.mail && typeof src.mail === 'object' ? src.mail : undefined;
+  return {
+    ...d,
+    client: { org: str(client.org), fio: str(client.fio), email: str(client.email), phone: str(client.phone) },
+    requestItems: arr(d.requestItems),
+    items: arr<KpDraftLine>(d.items)
+      .filter((l) => l && typeof l === 'object')
+      .map((l, i) => ({ ...l, request_index: Number(l.request_index ?? i) || 0, page_id: l.page_id ?? null, name: str(l.name), size: str(l.size), qty: Number(l.qty ?? 1) || 0, price: typeof l.price === 'number' ? l.price : null, lead_time: str(l.lead_time), discount: Number(l.discount ?? 0) || 0, quoteNotes: arr(l.quoteNotes) })),
+    requiredBlocks: arr(d.requiredBlocks),
+    questions: arr(d.questions),
+    needsManager: arr(d.needsManager),
+    source: src
+      ? {
+          ...src,
+          attachments: arr(src.attachments),
+          documents: arr(src.documents),
+          skipped: arr(src.skipped),
+          ...(Array.isArray(src.files) ? { files: src.files } : {}),
+          ...(mail ? { mail: { ...mail, taken: arr(mail.taken), uploaded: arr(mail.uploaded), skipped: arr(mail.skipped), ...(Array.isArray(mail.files) ? { files: mail.files } : {}) } } : {}),
+        }
+      : null,
+    survey: arr(d.survey),
+    requirements: arr(d.requirements),
+    photos: arr(d.photos),
+    projectRest: arr(d.projectRest),
+    letterText: typeof d.letterText === 'string' ? d.letterText : null,
+    delivery: d.delivery && typeof d.delivery === 'object' ? d.delivery : null,
+    scope: d.scope && typeof d.scope === 'object' ? { ...d.scope, missing: arr(d.scope.missing) } : null,
+    priceValidity: typeof d.priceValidity === 'string' ? d.priceValidity : null,
+  };
+}
 
 /** Работы (монтаж, врезка, доставка): по категории или старому kind — в итог не входят, цена не требуется (KB-COMPONENTS). */
 export const isServiceLine = (l: Pick<KpDraftLine, 'kind' | 'category'>): boolean => l.category === 'service' || l.kind === 'service';
@@ -94,7 +152,8 @@ function useKpDraft(api: KpApi, leadId: number) {
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
 
-  const take = useCallback((d: KpDraftInfo | null) => {
+  const take = useCallback((raw: KpDraftInfo | null) => {
+    const d = normalizeDraft(raw);
     setDraft(d);
     setLines(d?.items ?? []);
     setDirty(false);
@@ -334,7 +393,9 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           <span className={`opt-kp-badge${draft.status === 'draft' || draft.status === 'built' || draft.status === 'sent' ? ' opt-kp-badge-green' : ''}`}>{kpStatus}</span>
         </div>
         <div className="opt-kp-sub">{draft.kpNo ?? 'Номер появится после сборки документа'}</div>
-        <CountersRow c={c} draft={draft} />
+        <Section name="Сводка">
+          <CountersRow c={c} draft={draft} />
+        </Section>
         {pending && <div className="opt-kp-sub">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
         {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
         {error && !open && <div className="opt-error">{error}</div>}
@@ -347,10 +408,14 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           </button>
         </div>
         {downloads}
-        <CopyFailed draft={draft} />
-        <SourceNotes draft={draft} compact />
+        <Section name="Письмо">
+          <CopyFailed draft={draft} />
+          <SourceNotes draft={draft} compact />
+        </Section>
         <div className="opt-kp-note">
-          <KpNote draft={draft} why={why} />
+          <Section name="Примечание" inline>
+            <KpNote draft={draft} why={why} />
+          </Section>
         </div>
       </section>
 
@@ -426,7 +491,9 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           <div className="opt-kp-head">
             <h3 className="opt-kp-title">КП {draft.kpNo ?? '— черновик'}</h3>
             <span className="opt-kp-badge opt-kp-badge-green">{kpStatus}</span>
-            <CountersRow c={counters} draft={draft} />
+            <Section name="Сводка" inline>
+              <CountersRow c={counters} draft={draft} />
+            </Section>
           </div>
           <div className="opt-kp-modal-actions">
             {draft.status === 'draft' && (
@@ -462,8 +529,10 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
             </button>
           </div>
         </div>
-        <CopyFailed draft={draft} />
-        <SourceNotes draft={draft} disabled={busy || pending} onRebuild={onDraft} onCheckMail={onCheckMail} />
+        <Section name="Письмо">
+          <CopyFailed draft={draft} />
+          <SourceNotes draft={draft} disabled={busy || pending} onRebuild={onDraft} onCheckMail={onCheckMail} />
+        </Section>
         <div className="opt-kp-tabs" role="tablist">
           {TABS.map(([id, label]) => (
             <button key={id} type="button" role="tab" aria-selected={tab === id} className={`opt-kp-tab${tab === id ? ' opt-kp-tab-active' : ''}`} onClick={() => setTab(id)}>
@@ -482,17 +551,31 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
                     {draft.scope.missing.length ? ` · в письме есть, во вложениях нет: ${draft.scope.missing.join(', ')}` : ''}
                   </div>
                 )}
-                <KpTable lines={lines} draft={draft} research={research} locked={locked} onEdit={edit} onFind={(i) => void findPrices([i])} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
-                <ProjectRest draft={draft} locked={locked} onAdd={(i) => void act(() => api.addProjectItem(draft.id, i))} />
+                <Section name="Позиции">
+                  <KpTable lines={lines} draft={draft} research={research} locked={locked} onEdit={edit} onFind={(i) => void findPrices([i])} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
+                </Section>
+                <Section name="Ещё в проекте">
+                  <ProjectRest draft={draft} locked={locked} onAdd={(i) => void act(() => api.addProjectItem(draft.id, i))} />
+                </Section>
               </div>
               <aside className="opt-kp-panel">
                 <div className="opt-kp-panel-title">Опросник ({counters.open})</div>
-                <Survey questions={survey} locked={locked} onAnswer={answer} />
+                <Section name="Опросник">
+                  <Survey questions={survey} locked={locked} onAnswer={answer} />
+                </Section>
               </aside>
             </div>
           )}
-          {tab === 'survey' && <Survey questions={survey} locked={locked} onAnswer={answer} />}
-          {tab === 'mail' && <MailTab draft={draft} />}
+          {tab === 'survey' && (
+            <Section name="Опросник">
+              <Survey questions={survey} locked={locked} onAnswer={answer} />
+            </Section>
+          )}
+          {tab === 'mail' && (
+            <Section name="Письмо и файлы">
+              <MailTab draft={draft} />
+            </Section>
+          )}
           {tab === 'kb' && <KbAnswer api={api} leadId={leadId} compact />}
           {tab === 'journal' && <Journal api={api} leadId={leadId} />}
         </div>
@@ -545,7 +628,7 @@ function SourceNotes({ draft, compact = false, disabled = false, onRebuild, onCh
   const src = draft.source;
   if (!src) return null;
   const m = src.mail;
-  const failed = src.files ? src.files.filter((f) => f.status === 'failed') : src.skipped.filter((f) => f.failed);
+  const failed = src.files ? src.files.filter((f) => f.status === 'failed') : (src.skipped ?? []).filter((f) => f.failed);
   const files = src.files ?? [];
   const mailError = m?.status === 'error';
   if (!mailError && !failed.length && !(m?.status === 'skipped' && !compact) && !(files.length && !compact)) return null;
@@ -636,11 +719,11 @@ function MailTab({ draft }: { draft: KpDraftInfo }) {
           ))}
         </div>
       )}
-      {draft.questions.length > 0 && (
+      {(draft.questions ?? []).length > 0 && (
         <div className="opt-col">
           <span className="opt-kp-label">Уточнить у клиента</span>
           <ul className="opt-kp-questions">
-            {draft.questions.map((q) => (
+            {(draft.questions ?? []).map((q) => (
               <li key={q}>{q}</li>
             ))}
           </ul>
@@ -653,7 +736,7 @@ function MailTab({ draft }: { draft: KpDraftInfo }) {
 /** Покупатель по макету: метка капсом, название компании (и имя), e-mail; адрес не повторяется, если он уже стоит в названии или имени. */
 function Buyer({ client }: { client: KpDraftInfo['client'] }) {
   const email = client.email.trim().toLowerCase();
-  const parts = [client.org, client.fio].map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== email);
+  const parts = [client.org ?? '', client.fio ?? ''].map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== email);
   const hasEmail = email && parts.some((x) => x.toLowerCase().includes(email));
   if (!parts.length && !email) return null;
   return (
@@ -677,8 +760,8 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
   const m = src.mail;
   const attachmentNames = new Set([...(m?.files?.map((f) => f.name) ?? []), ...(m?.taken ?? []), ...(m?.skipped.map((f) => f.name) ?? [])]);
   // Ошибки разбора: по вложениям письма — в раздел письма, по файлам карточки — отдельным списком там же.
-  const parseErrors = src.skipped.filter((f) => attachmentNames.has(f.name));
-  const cardErrors = src.skipped.filter((f) => !attachmentNames.has(f.name));
+  const parseErrors = (src.skipped ?? []).filter((f) => attachmentNames.has(f.name));
+  const cardErrors = (src.skipped ?? []).filter((f) => !attachmentNames.has(f.name));
   const summary =
     m?.status === 'found'
       ? `Письмо: ${m.date ? dateTimeMsk(m.date) : 'дата неизвестна'} · ${m.attachments ? plural(m.attachments, 'вложение', 'вложения', 'вложений') : 'без вложений'}`
@@ -716,7 +799,7 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
           {m?.status === 'skipped' && <div className="opt-muted">{m.error}</div>}
           {!m && <div className="opt-muted">Ящик во вкладке «Письмо» не настроен — черновик по письму и файлам из карточки сделки.</div>}
           <div className="opt-muted">
-            {src.documents.length ? `Разобрано файлов: ${src.documents.length}` : src.attachments.length ? 'Файлы не разобраны' : 'Файлов для разбора нет'}
+            {(src.documents ?? []).length ? `Разобрано файлов: ${src.documents.length}` : (src.attachments ?? []).length ? 'Файлы не разобраны' : 'Файлов для разбора нет'}
             {src.mails ? ` · писем в карточке: ${src.mails}` : ''}
           </div>
           {cardErrors.length > 0 && (
@@ -849,7 +932,7 @@ function DoorChoice({ line, doors, locked, onDoor }: { line: KpDraftLine; doors:
  */
 function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { lines: KpDraftLine[]; draft: KpDraftInfo; research: ResearchState | null; locked: boolean; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onFind: (requestIndex: number) => void; onDoor?: (requestIndex: number, doorRequestIndex: number) => void }) {
   // «Цена не задана» под позицией не показываем: это видно по метке «нет цены».
-  const reasons = (i: number) => draft.needsManager.filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
+  const reasons = (i: number) => (draft.needsManager ?? []).filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
   if (!lines.length) return <div className="opt-kp-note">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>;
   const d = draft.delivery;
   let n = 0;

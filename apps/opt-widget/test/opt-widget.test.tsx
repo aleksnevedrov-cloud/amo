@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { act } from 'react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { createRoot } from 'react-dom/client';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AmoWidgetSelf } from '@core/widget-core';
 import { createCallbacks } from '../src/index.tsx';
+import { Section } from '../src/components/KpBlock.tsx';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,6 +78,61 @@ const tab = (prefix: string) =>
 const plainText = () => document.body.textContent?.replace(/\u00a0/g, ' ') ?? '';
 const priceInputs = () => [...document.querySelectorAll<HTMLInputElement>('.opt-kp-table input[aria-label="Цена"]')];
 const badges = () => [...document.querySelectorAll('.opt-kp-table .opt-kp-src')].map((b) => [b.className.replace('opt-kp-src opt-kp-src-', ''), b.textContent]);
+
+describe('старые черновики и сбой раздела (виджет 2.0.8)', () => {
+  it('черновик формата 12.10 (без requirements, photos, survey, counters, source.skipped) → блок и окно открываются без «не удалось отобразить блок»', async () => {
+    // Как отвечал бы старый сервер / как лежит старый черновик: половины полей KP-AGENT-V2 нет, у source нет skipped и documents.
+    const oldDraft = {
+      id: 8, leadId: 29996635, status: 'draft', kpNo: null, createdAt: '2026-10-12T10:00:00Z', builtAt: null, sentAt: null, hasDocx: false, hasPdf: false,
+      client: { org: 'ООО Ромашка', email: 'ivanov@romashka.ru' },
+      requestItems: [{ raw: 'ДПС 01', name: 'Дверь ДПС 01', width_mm: 900, height_mm: 2100, qty: 11 }],
+      items: [{ request_index: 0, name: 'Дверь ДПС 01', size: '2100×900 мм', qty: 11, price: null }],
+      requiredBlocks: ['price'], questions: ['Сторона открывания?'], needsManager: [{ request_index: 0, reason: 'цена не задана' }],
+      source: { from: 'amo_card', mails: 1, letterAt: '2026-10-09T10:00:00Z', attachments: ['Двери (3).docx'] },
+    };
+    const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: oldDraft, job: null } });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect(plainText()).not.toContain('не удалось отобразить блок');
+    expect(plainText()).toContain('Черновик КП');
+    expect(plainText()).toContain('позиций 1');
+    await expand();
+    expect(modal()).not.toBeNull();
+    expect(plainText()).toContain('Дверь ДПС 01');
+    await tab('Письмо и файлы');
+    expect(plainText()).toContain('Сторона открывания?');
+    await tab('Опросник');
+    expect(plainText()).not.toContain('не удалось отобразить блок');
+    expect(document.querySelectorAll('.opt-kp-section-failed')).toHaveLength(0);
+  });
+
+  it('ошибка рендера одного раздела → пометка «<раздел>: нет данных», остальное на месте', async () => {
+    const Boom = () => {
+      throw new Error('битые данные раздела');
+    };
+    const silent = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () =>
+      root.render(
+        <div>
+          <span>Шапка</span>
+          <Section name="Позиции">
+            <Boom />
+          </Section>
+          <span>Итог</span>
+        </div>,
+      ),
+    );
+    expect(host.textContent).toBe('ШапкаПозиции: нет данныхИтог');
+    expect(host.querySelectorAll('.opt-kp-section-failed')).toHaveLength(1);
+    expect(silent).toHaveBeenCalled();
+    silent.mockRestore();
+    await act(async () => root.unmount());
+  });
+});
 
 describe('виджет «Агент опт»: карточка сделки', () => {
   it('«Собрать КП» ставит задание, блок показывает очередь, потом сводку в узкой колонке; «Развернуть ⤢» — окно с вкладками, таблицей и строкой доставки', async () => {
