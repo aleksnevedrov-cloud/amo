@@ -47,6 +47,20 @@ export class SuggestionsRepo {
     });
   }
 
+  /**
+   * Сообщение, которое агент отправляет сам, без одобрения менеджера: уходит ботом-отправщиком
+   * тем же путём, что одобренный черновик (RFD-AI-AGENT-REAKTIVATSIYA — касания по отказным сделкам).
+   * Прежние ожидающие черновики по сделке не трогаем: решение менеджера по ним остаётся за ним.
+   */
+  async addApproved(accountId: number, leadId: number, text: string, details: Record<string, unknown> = {}): Promise<number> {
+    const { rows } = await this.db.query(
+      `INSERT INTO ai_suggestions (account_id, lead_id, kind, text, details, status, decided_at)
+       VALUES ($1, $2, 'draft', $3, $4, 'approved', now()) RETURNING id`,
+      [accountId, leadId, text, details],
+    );
+    return Number(rows[0].id);
+  }
+
   async get(accountId: number, id: number): Promise<Suggestion | null> {
     const { rows } = await this.db.query('SELECT * FROM ai_suggestions WHERE account_id = $1 AND id = $2', [accountId, id]);
     return rows[0] ? row(rows[0]) : null;

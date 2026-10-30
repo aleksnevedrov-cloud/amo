@@ -6,6 +6,7 @@ import { Field, linesToList, NumberInput } from './fields.tsx';
 import { Drafts } from './Drafts.tsx';
 import { EmailSettings } from './EmailSettings.tsx';
 import { TaskScopeSettings } from './TaskScope.tsx';
+import { ReactivationSettings } from './Reactivation.tsx';
 import { WazzupSettings } from './WazzupSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
@@ -34,6 +35,7 @@ const TABS = [
   ['model', 'Модель'],
   ['where', 'Где работает'],
   ['handoff', 'Передача менеджеру'],
+  ['reactivation', 'Догон после отказа'],
   ['email', 'Почта'],
   ['wazzup', 'Wazzup'],
   ['catalog', 'Каталог'],
@@ -47,7 +49,7 @@ const TABS = [
   ['versions', 'Версии'],
 ] as const;
 type Tab = (typeof TABS)[number][0];
-const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'email', 'catalog', 'limits']);
+const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'reactivation', 'email', 'catalog', 'limits']);
 
 /**
  * Расширенные настройки виджета (раздел 11.1 ТЗ). Рисуется и на своей странице (advanced_settings),
@@ -106,7 +108,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   };
 
   useEffect(() => {
-    if ((tab === 'where' || tab === 'handoff' || tab === 'email' || tab === 'model') && !dict) api.dictionaries().then((d) => setDict(d ?? null), () => undefined);
+    if ((tab === 'where' || tab === 'handoff' || tab === 'reactivation' || tab === 'email' || tab === 'model') && !dict) api.dictionaries().then((d) => setDict(d ?? null), () => undefined);
   }, [tab, dict, api]);
 
   useEffect(() => {
@@ -464,6 +466,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           onChange={(patch) => set('email', patch)}
         />
       )}
+      {tab === 'reactivation' && <ReactivationSettings value={draft.reactivation} dict={dict} onChange={(patch) => set('reactivation', patch)} />}
       {tab === 'wazzup' && <WazzupSettings api={api} />}
       {tab === 'knowledge' && <Knowledge api={api} />}
       {tab === 'pricing' && <PricingEditor api={api} />}

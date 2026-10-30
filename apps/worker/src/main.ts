@@ -25,6 +25,8 @@ import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
 import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
 import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail/agent';
+import { handleReactivationReply, REACTIVATION_EVERY_MS, REACTIVATION_JOB, runReactivationAll } from '@retail/agent';
+import { reactivationDeps } from './reactivation-deps.ts';
 import { buildLocalSources } from './local-sources.ts';
 import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, REFUSAL_EVERY_MS, REFUSAL_JOB, RefusalsRepo, runCallsPollAll, runDaySummaryIfDue, runRefusalPollAll, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
@@ -84,6 +86,8 @@ const amoClient = async (accountId: number) => {
   return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
 };
 const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
+// Догон отказных сделок (RFD-AI-AGENT-REAKTIVATSIYA): отбор по разобранным отказам, отправка ботом-отправщиком.
+const reactivation = reactivationDeps(db, { settings, journal, dialog, amo: amoClient });
 // Ключ аккаунта (Маркетплейс) приоритетнее серверного.
 const secrets = new SecretsRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
 const wazzupDumps = new WazzupDumpRepo(db);
@@ -205,6 +209,8 @@ await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVER
 await callsQueue.upsertJobScheduler(WAZZUP_FILES_JOB, { every: WAZZUP_FILES_EVERY_MS }, { name: WAZZUP_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 // Анализ сделки при переносе в «Отказ» (RFD-AI-AGENT-REFUSAL-ANALYSIS): события lead_status_changed раз в 5 минут.
 await callsQueue.upsertJobScheduler(REFUSAL_JOB, { every: REFUSAL_EVERY_MS }, { name: REFUSAL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Догон клиента после отказа (RFD-AI-AGENT-REAKTIVATSIYA): отбор и касания раз в 10 минут.
+await callsQueue.upsertJobScheduler(REACTIVATION_JOB, { every: REACTIVATION_EVERY_MS }, { name: REACTIVATION_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 const callsWorker = new Worker(
   CALLS_QUEUE,
   async (job) => {
@@ -223,6 +229,11 @@ const callsWorker = new Worker(
       const results = await runRefusalPollAll(callsDeps);
       for (const r of results) if (r.matched || r.retried || r.errors) log.info({ ...r }, 'refusal-poll: переходы в «Отказ»');
       return { accounts: results.length, analyzed: results.reduce((n, r) => n + r.analyzed, 0) };
+    }
+    if (job.name === REACTIVATION_JOB) {
+      const results = await runReactivationAll(reactivation);
+      for (const r of results) if (r.planned || r.sent || r.stopped || r.errors) log.info({ ...r }, 'reactivation-poll: догон после отказа');
+      return { accounts: results.length, sent: results.reduce((n, r) => n + r.sent, 0), planned: results.reduce((n, r) => n + r.planned, 0) };
     }
     if (job.name === CALLS_DAY_JOB) {
       // Раз в 5 минут: у кого наступило время итога (calls.daySummaryTime) и сегодня не запускали — один запуск; иначе ничего.
@@ -298,6 +309,8 @@ const pipeline = new DialogPipeline({
     memory: new MemoryRepo(db),
     wazzup: new WazzupRepo(db),
     suggestions: new SuggestionsRepo(db),
+    // Ответ клиента на касание после отказа: исход определяет догон, агент на него не отвечает.
+    reactivationReply: (accountId, lead, text) => handleReactivationReply(reactivation, accountId, lead, text),
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     ai,

@@ -135,3 +135,44 @@ describe('taskScope', () => {
     });
   });
 });
+
+/**
+ * Реактивация отказной сделки (RFD-AI-AGENT-REAKTIVATSIYA): сделку вернули с «Отказа»
+ * на этап заказа, но `closed_at` в amo остался от прежнего закрытия.
+ */
+describe('флаг reactivated', () => {
+  it('остаточный closed_at не считается закрытием, если этап открытый', () => {
+    const l = lead({ status_id: ZAKAZ, closed_at: 1759000000 });
+    expect(isClosedLead(l)).toBe(true);
+    expect(isClosedLead(l, { reactivated: true })).toBe(false);
+  });
+
+  it('этап «Закрыто и не реализовано» флаг не открывает', async () => {
+    const l = lead({ status_id: 143, closed_at: 1759000000 });
+    expect(isClosedLead(l, { reactivated: true })).toBe(true);
+    const { api: a } = api();
+    expect(await canCreateTask(a, l, SCOPE, { reactivated: true })).toMatchObject({ allowed: false, reason: 'closed' });
+  });
+
+  it('задача ставится в возвращённую сделку, но этап и воронка проверяются как обычно', async () => {
+    const { api: a, calls } = api();
+    expect(await canCreateTask(a, lead({ closed_at: 1759000000 }), SCOPE, { reactivated: true })).toMatchObject({ allowed: true });
+    expect(calls).toEqual([29995033]);
+    expect(await canCreateTask(a, lead({ status_id: DOSTAVKA, closed_at: 1759000000 }), SCOPE, { reactivated: true })).toMatchObject({
+      allowed: false,
+      reason: 'other_status',
+    });
+    expect(await canCreateTask(a, lead({ pipeline_id: 777, closed_at: 1759000000 }), SCOPE, { reactivated: true })).toMatchObject({
+      allowed: false,
+      reason: 'other_pipeline',
+    });
+  });
+
+  it('вторая задача не ставится и в возвращённой сделке', async () => {
+    const { api: a } = api([{ id: 9, text: 'AI: перезвонить' }]);
+    expect(await canCreateTask(a, lead({ closed_at: 1759000000 }), SCOPE, { reactivated: true })).toMatchObject({
+      allowed: false,
+      reason: 'has_task',
+    });
+  });
+});

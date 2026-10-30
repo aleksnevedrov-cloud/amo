@@ -1,5 +1,5 @@
 import { hasMention, looksLikeGroupMessage, stripGroupPrefix, stripMention } from '@core/shared';
-import { botIdFromReturnUrl, resolveTaskAssignee, type AmoApiClient, type TaskAssignee } from '@core/amo';
+import { botIdFromReturnUrl, resolveTaskAssignee, type AmoApiClient, type AmoLead, type TaskAssignee } from '@core/amo';
 import type { CatalogRepo } from '@retail/catalog';
 import {
   memorySubject,
@@ -84,6 +84,12 @@ export interface PipelineDeps {
   amo(accountId: number): Promise<AmoAccess>;
   /** Ответ в чат через Salesbot (continue). Пустой список — просто продолжить бота. */
   send(access: AmoAccess, returnUrl: string, messages: string[]): Promise<void>;
+  /**
+   * Ответ клиента на касание по отказной сделке (RFD-AI-AGENT-REAKTIVATSIYA).
+   * `handled` — исход уже определён догоном (задача менеджеру, шаблон «Отказ»,
+   * сохранённая обратная связь), и агент на это сообщение не отвечает.
+   */
+  reactivationReply?(accountId: number, lead: AmoLead, text: string): Promise<{ handled: boolean; action?: string }>;
   /** Клиенту не ответили: запланировать проверку «ответил ли менеджер» через час. */
   onUnanswered?(accountId: number, leadId: number, info: UnansweredInfo): Promise<void>;
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
@@ -291,6 +297,15 @@ export class DialogPipeline {
     if (!lead) return this.skip(t, 'no_lead', 'Сделка не найдена');
     if (settings.where.pipelineIds && !settings.where.pipelineIds.includes(lead.pipeline_id)) {
       return this.skip(t, 'pipeline', 'Воронка не входит в список работы AI');
+    }
+    // Догон отказной сделки идёт на этапе «Отказ», а он у аккаунта помечен «без AI»,
+    // поэтому ответ клиента на касание разбирается раньше этой проверки.
+    if (this.d.reactivationReply) {
+      const react = await this.d.reactivationReply(accountId, lead, t.texts.join('\n')).catch(() => ({ handled: false }) as { handled: boolean; action?: string });
+      if (react.handled) {
+        await this.d.dialog.pause(accountId, leadId, 'reactivation');
+        return this.skip(t, 'reactivation', `Ответ после отказа разобран догоном${react.action ? `: ${react.action}` : ''}`);
+      }
     }
     if (settings.where.disabledStatusIds.includes(lead.status_id)) {
       await this.d.dialog.pause(accountId, leadId, 'status_without_ai');

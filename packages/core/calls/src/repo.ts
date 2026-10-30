@@ -517,6 +517,21 @@ export class RefusalsRepo {
     return Number(rows[0]?.n ?? 0);
   }
 
+  /**
+   * Разобранные отказы за период — исходный список для догона клиента
+   * (RFD-AI-AGENT-REAKTIVATSIYA). Берём только с записанным анализом: из него причина отказа.
+   */
+  async listAnalyzedSince(accountId: number, since: Date, statusId: number, pipelineIds: number[], limit = 100): Promise<RefusalRow[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM refusal_analyses
+        WHERE account_id = $1 AND changed_at >= $2 AND status_id = $3 AND note_id IS NOT NULL
+          AND ($4::int[] = '{}'::int[] OR pipeline_id = ANY($4::int[]))
+        ORDER BY changed_at ASC LIMIT $5`,
+      [accountId, since, statusId, pipelineIds, limit],
+    );
+    return rows.map(mapRefusal);
+  }
+
   async forLead(accountId: number, leadId: number): Promise<RefusalRow[]> {
     const { rows } = await this.db.query('SELECT * FROM refusal_analyses WHERE account_id = $1 AND lead_id = $2 ORDER BY changed_at ASC, id ASC', [accountId, leadId]);
     return rows.map(mapRefusal);

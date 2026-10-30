@@ -44,8 +44,18 @@ export interface TaskGuardResult {
 
 const OK: TaskGuardResult = { allowed: true };
 
-export function isClosedLead(lead: TaskGuardLead): boolean {
+export interface TaskGuardOptions {
+  /**
+   * Реактивация отказной сделки (RFD-AI-AGENT-REAKTIVATSIYA): сделку только что вернули
+   * с «Отказа» на этап заказа, и `closed_at` в amo остаётся заполненным от прежнего закрытия.
+   * С этим флагом закрытость считается только по этапу, сам этап и воронка проверяются как обычно.
+   */
+  reactivated?: boolean;
+}
+
+export function isClosedLead(lead: TaskGuardLead, opts: TaskGuardOptions = {}): boolean {
   if ((CLOSED_STATUS_IDS as readonly number[]).includes(lead.status_id)) return true;
+  if (opts.reactivated) return false;
   return Boolean(lead.closed_at && lead.closed_at > 0);
 }
 
@@ -78,8 +88,9 @@ export async function canCreateTask(
   api: Pick<AmoApiClient, 'openLeadTasks'>,
   lead: TaskGuardLead,
   scope: TaskScope,
+  opts: TaskGuardOptions = {},
 ): Promise<TaskGuardResult> {
-  if (isClosedLead(lead)) {
+  if (isClosedLead(lead, opts)) {
     return { allowed: false, reason: 'closed', details: { statusId: lead.status_id, closedAt: lead.closed_at ?? null } };
   }
   if (scope.pipelineId && lead.pipeline_id !== scope.pipelineId) {
