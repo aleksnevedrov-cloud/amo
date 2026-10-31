@@ -243,6 +243,8 @@ describe('touchText', () => {
     expect(touchText(s, 'price', 1)).toContain('дешевле');
     expect(touchText(s, 'price', 2)).toContain('последнее сообщение');
     expect(touchText(s, 'universal', 1)).toBe(s.universal.first);
+    // у «купил у конкурента» своего набора нет — отдаётся запасной
+    expect(touchText(s, 'competitor', 1)).toBe(s.universal.first);
   });
 });
 
@@ -338,6 +340,26 @@ describe('runTouches: касания', () => {
     const { d, st } = deps({ rows: [row()], leads: [lead()], sendFails: true });
     expect(await runTouches(d, ACC)).toEqual({ sent: 0, stopped: 0, errors: 1 });
     expect(st.rows).toMatchObject([{ state: 'planned', touches: 0 }]);
+  });
+
+  it('купил у конкурента: одно сообщение шаблоном «Отказ», второго касания нет', async () => {
+    const { d, st, sent, emails, settings } = deps({ rows: [row({ reasonCode: 'competitor', reason: 'купил у конкурента' })], leads: [lead()] });
+    expect(await runTouches(d, ACC)).toEqual({ sent: 1, stopped: 0, errors: 0 });
+    expect(sent).toMatchObject([{ text: settings.reactivation.finalTemplate, details: { touch: 'final' } }]);
+    expect(emails).toMatchObject([{ text: settings.reactivation.finalTemplate }]);
+    expect(st.rows).toMatchObject([{ state: 'done', finalSent: true, stopReason: 'bought_elsewhere', nextTouchAt: null }]);
+    expect(await runTouches(d, ACC)).toEqual({ sent: 0, stopped: 0, errors: 0 });
+  });
+
+  it('ответ на этот шаблон агент не комментирует', async () => {
+    const l = lead();
+    const { d, notes, sent } = deps({ rows: [row({ reasonCode: 'competitor' })], leads: [l] });
+    await runTouches(d, ACC);
+    sent.length = 0;
+    const out = await handleReactivationReply(d, ACC, l, 'Взял в другом месте, там дешевле');
+    expect(out).toMatchObject({ handled: true, kind: 'feedback', action: 'note' });
+    expect(sent).toHaveLength(0);
+    expect(notes).toMatchObject([{ text: expect.stringContaining('Взял в другом месте') }]);
   });
 
   it('напоминание после «подумаю» — последнее касание', async () => {

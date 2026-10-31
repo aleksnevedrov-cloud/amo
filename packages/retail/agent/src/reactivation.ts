@@ -14,6 +14,7 @@ import type { JournalRepo, ReactivationRepo, SettingsRepo, SuggestionsRepo, Widg
  *  • только сделки с бюджетом не ниже 30 000 ₽;
  *  • два касания (2-й и 5-й день), после второго — не писать никогда;
  *  • клиент ответил — агент замолкает: дальше либо менеджер, либо шаблон «Отказ»;
+ *  • причина отказа «купил у конкурента» — не продаём: одно сообщение шаблоном «Отказ»;
  *  • интерес или названный срок — сделку на этап «Заказ» (менеджеры отказы не видят) и задачу;
  *  • повторный отказ — шаблон «Отказ» (опрос отдела качества), ответ на него агент не комментирует.
  */
@@ -47,11 +48,21 @@ export function reasonCode(reason: string | null | undefined): ReasonCode {
 
 type Texts = WidgetSettings['reactivation']['texts'];
 
-/** Текст касания: `n` — номер касания (1 или 2); напоминание пользуется текстом второго. */
+/**
+ * Текст касания: `n` — номер касания (1 или 2); напоминание пользуется текстом второго.
+ * У причины «купил у конкурента» своего набора нет — она идёт отдельным сценарием
+ * (одно сообщение шаблоном «Отказ»), поэтому здесь отдаётся запасной набор.
+ */
 export function touchText(texts: Texts, code: ReasonCode, n: 1 | 2): string {
-  const set = texts[code] ?? texts.universal;
+  const set = code in texts ? texts[code as keyof Texts] : texts.universal;
   return n === 1 ? set.first : set.second;
 }
+
+/**
+ * Клиент уже купил двери у другого поставщика: продавать ему нечего.
+ * Такому отправляется одно сообщение — шаблон «Отказ» (опрос отдела качества), и всё.
+ */
+export const BOUGHT_ELSEWHERE: ReasonCode = 'competitor';
 
 export type ReplyKind = 'interest' | 'refusal' | 'think';
 
@@ -237,9 +248,11 @@ export async function runTouches(d: ReactivationDeps, accountId: number): Promis
       }
 
       const reminder = row.state === 'reminder';
+      // Клиент купил у конкурента — не продаём, а один раз спрашиваем причину и поставщика.
+      const bought = row.reasonCode === BOUGHT_ELSEWHERE;
       const n: 1 | 2 = reminder || row.touches >= 1 ? 2 : 1;
-      const text = touchText(r.texts, row.reasonCode as ReasonCode, n);
-      const details = { reactivationId: row.id, touch: reminder ? 'reminder' : n, reasonCode: row.reasonCode };
+      const text = bought ? r.finalTemplate : touchText(r.texts, row.reasonCode as ReasonCode, n);
+      const details = { reactivationId: row.id, touch: bought ? 'final' : reminder ? 'reminder' : n, reasonCode: row.reasonCode };
       const ok = await d.send(accountId, row.leadId, text, details);
       if (!ok) {
         out.errors += 1;
@@ -248,17 +261,21 @@ export async function runTouches(d: ReactivationDeps, accountId: number): Promis
       }
       if (r.email && d.email) await d.email(accountId, row.leadId, text).catch(() => false);
 
-      // После второго касания и после напоминания расписания больше нет: молчим навсегда.
-      const last = reminder || n === 2;
+      // После второго касания, после напоминания и после шаблона «Отказ» расписания нет:
+      // молчим навсегда. Ответ на шаблон сохраняется примечанием, агент его не комментирует.
+      const last = bought || reminder || n === 2;
       const next = last ? null : new Date(row.refusedAt.getTime() + r.secondTouchDay * DAY_MS);
-      await d.reactivation.markTouched(accountId, row.id, t, next, last ? 'stopped' : 'touched');
-      if (last) await d.reactivation.stop(accountId, row.id, reminder ? 'reminder_sent' : 'two_touches');
+      await d.reactivation.markTouched(accountId, row.id, t, next, last ? (bought ? 'done' : 'stopped') : 'touched');
+      if (bought) await d.reactivation.resolve(accountId, row.id, 'done', { stopReason: 'bought_elsewhere', finalSent: true });
+      else if (last) await d.reactivation.stop(accountId, row.id, reminder ? 'reminder_sent' : 'two_touches');
       out.sent += 1;
       await d.journal.add({
         accountId,
         leadId: row.leadId,
         kind: 'reply',
-        summary: `Касание после отказа (${reminder ? 'напоминание' : `${n} из 2`}): ${text.slice(0, 160)}`,
+        summary: bought
+          ? `Клиент купил у конкурента: отправлен шаблон «Отказ», догон закрыт`
+          : `Касание после отказа (${reminder ? 'напоминание' : `${n} из 2`}): ${text.slice(0, 160)}`,
         details: { ...details, email: Boolean(r.email && d.email), next: next?.toISOString() ?? null },
       });
     } catch (err) {
