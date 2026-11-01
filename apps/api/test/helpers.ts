@@ -60,6 +60,9 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith('/api/v4/leads/pipelines')) {
       return json(200, { _embedded: { pipelines: [{ id: 1, name: 'Продажи', _embedded: { statuses: [{ id: 10, name: 'Новая' }] } }] } });
     }
+    // События чата (проверка «менеджер не написал сам») и пользователи аккаунта — пусто.
+    if (url.includes('/api/v4/events')) return json(200, { _embedded: { events: [] } });
+    if (url.includes('/api/v4/users')) return json(200, { _embedded: { users: [] } });
     if (url.endsWith('/api/v2/salesbot/run')) return json(200, {});
     if (url.includes('/salesbot/') && url.includes('/continue/')) return json(200, {});
     if (/\/api\/v4\/leads\/\d+\/notes$/.test(url)) return json(200, { _embedded: { notes: [{ id: 1 }] } });

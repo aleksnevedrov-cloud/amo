@@ -51,7 +51,9 @@ export class WazzupDumpRepo {
       `INSERT INTO wazzup_dumps (account_id, channel_id, start_at, end_at, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING ${COLS}`,
       [accountId, p.channelId ?? null, p.startAt, p.endAt, p.userId ?? null],
     );
-    return toDump(rows[0]!);
+    const r = rows[0];
+    if (!r) throw new Error('wazzup_dumps: INSERT не вернул строку');
+    return toDump(r);
   }
 
   async list(accountId: number, limit = 10): Promise<WazzupDump[]> {

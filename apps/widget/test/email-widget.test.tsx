@@ -60,7 +60,7 @@ describe('вкладка «Почта»', () => {
     await type(inputs().find((i) => i.type === 'password')!, 'app-pass');
     await click('Сохранить пароль');
     await flush();
-    expect(JSON.parse(calls.find((c) => c.url.endsWith('/email/password'))!.data!)).toEqual({ password: 'app-pass' });
+    expect(JSON.parse(calls.find((c) => c.url.endsWith('/email/password'))!.data!)).toEqual({ password: 'app-pass', mailboxId: 'main' });
 
     await click('Сохранить');
     await flush();

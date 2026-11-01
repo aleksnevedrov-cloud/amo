@@ -249,11 +249,12 @@ export class CallsRepo {
     return r ? { lastUpdatedAt: r.last_updated_at, lastRunAt: r.last_run_at, lastError: r.last_error } : null;
   }
 
-  async setSync(accountId: number, entity: string, s: { lastUpdatedAt: Date; lastError: string | null }): Promise<void> {
+  /** `runAt` — момент запуска (по умолчанию время БД); плановые задания передают своё «сейчас», чтобы проверка «сегодня уже запускали» не зависела от часов сервера БД. */
+  async setSync(accountId: number, entity: string, s: { lastUpdatedAt: Date; lastError: string | null; runAt?: Date }): Promise<void> {
     await this.db.query(
-      `INSERT INTO calls_sync (account_id, entity, last_updated_at, last_run_at, last_error) VALUES ($1, $2, $3, now(), $4)
-       ON CONFLICT (account_id, entity) DO UPDATE SET last_updated_at = EXCLUDED.last_updated_at, last_run_at = now(), last_error = EXCLUDED.last_error`,
-      [accountId, entity, s.lastUpdatedAt, s.lastError],
+      `INSERT INTO calls_sync (account_id, entity, last_updated_at, last_run_at, last_error) VALUES ($1, $2, $3, coalesce($5, now()), $4)
+       ON CONFLICT (account_id, entity) DO UPDATE SET last_updated_at = EXCLUDED.last_updated_at, last_run_at = coalesce($5, now()), last_error = EXCLUDED.last_error`,
+      [accountId, entity, s.lastUpdatedAt, s.lastError, s.runAt ?? null],
     );
   }
 }

@@ -23,7 +23,7 @@ export function parseCsv(text: string): string[][] {
   let field = '';
   let quoted = false;
   for (let i = 0; i < src.length; i++) {
-    const ch = src[i]!;
+    const ch = src[i] ?? '';
     if (quoted) {
       if (ch === '"') {
         if (src[i + 1] === '"') { field += '"'; i++; } else quoted = false;
@@ -89,7 +89,7 @@ export function parseCsvDate(v: string): Date | null {
   const d = new Date(iso);
   if (!Number.isNaN(d.getTime())) return d;
   const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (m) return new Date(Date.UTC(+m[3]!, +m[2]! - 1, +m[1]!, +m[4]!, +m[5]!, +(m[6] ?? 0)));
+  if (m) return new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)));
   return null;
 }
 

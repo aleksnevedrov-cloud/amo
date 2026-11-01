@@ -193,6 +193,19 @@ const row = (p: Partial<ReactivationLead> = {}): ReactivationLead => ({
   ...p,
 });
 
+describe('classifyReply — слова на кириллице', () => {
+  it('«отказ» и «отказываюсь» в конце слова — отказ (границы слов не ASCII)', () => {
+    expect(classifyReply('Отказ').kind).toBe('refusal');
+    expect(classifyReply('Я отказываюсь, спасибо').kind).toBe('refusal');
+    expect(classifyReply('Мы отказались от ремонта').kind).toBe('refusal');
+  });
+  it('цена с точкой — не дата и не срок', () => {
+    expect(findDeadline('Если за 15.000 сделаете — возьму')).toBeNull();
+    expect(findDeadline('давайте 5.11 созвонимся')).toBe('5.11');
+    expect(classifyReply('Если за 15.000 сделаете — возьму').kind).toBe('interest');
+  });
+});
+
 describe('reasonCode', () => {
   it('набор текстов по причине отказа', () => {
     expect(reasonCode('Клиенту дорого, просил скидку')).toBe('price');
@@ -410,6 +423,19 @@ describe('handleReactivationReply: ответ клиента', () => {
     expect(tasks).toHaveLength(0);
     expect(moves).toHaveLength(0);
     expect(st.rows).toMatchObject([{ state: 'reminder', nextTouchAt: new Date(NOW.getTime() + 7 * DAY) }]);
+  });
+
+  it('сквозной: «подумаю» без срока → через 7 дней напоминание реально уходит (clientReplyAt не останавливает его)', async () => {
+    const l = lead();
+    const { d, st, sent } = deps({ rows: [row({ state: 'touched', touches: 1, nextTouchAt: null })], leads: [l] });
+    await handleReactivationReply(d, ACC, l, 'надо подумать');
+    expect(st.rows).toMatchObject([{ state: 'reminder', clientReplyAt: NOW }]);
+    // Ничего не ушло раньше срока.
+    expect(await runTouches(d, ACC)).toMatchObject({ sent: 0, stopped: 0 });
+    (d as { now: () => Date }).now = () => new Date(NOW.getTime() + 7 * DAY + 60_000);
+    expect(await runTouches(d, ACC)).toMatchObject({ sent: 1, stopped: 0 });
+    expect(sent).toMatchObject([{ details: { touch: 'reminder' } }]);
+    expect(st.rows).toMatchObject([{ state: 'stopped', stopReason: 'reminder_sent', nextTouchAt: null }]);
   });
 
   it('повторный отказ: шаблон «Отказ» в WhatsApp и письмом, сделка остаётся в отказе', async () => {

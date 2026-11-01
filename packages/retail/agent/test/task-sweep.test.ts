@@ -111,7 +111,7 @@ describe('автопостановка задач', () => {
 
   it('вечерний обход ставит задачу по сделке без движения за день', async () => {
     const ts = Math.floor(new Date('2026-10-05T09:00:00Z').getTime() / 1000);
-    const { d, created } = deps({
+    const { d } = deps({
       leads: [lead(14, { updated_at: ts })],
       sweep: { pipelineId: 10, statusIds: [100], maxPerRun: 5 },
       summary: null,

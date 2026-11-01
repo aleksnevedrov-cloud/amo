@@ -49,6 +49,7 @@ export interface SaveAttachmentsResult {
 
 /** Имя файла из письма доверять нельзя: режем пути и управляющие символы. */
 export function safeFilename(name: string | null, contentType: string): string {
+  // eslint-disable-next-line no-control-regex -- управляющие символы в имени файла режем намеренно
   const raw = (name ?? '').replace(/[\\/\u0000-\u001f]/g, '').trim();
   if (raw) return raw.slice(0, 200);
   const ext = (contentType.split('/')[1] ?? 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 8);

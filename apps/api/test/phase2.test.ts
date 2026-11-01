@@ -80,7 +80,7 @@ describe('черновики: одобрение и отправка ботом-
     expect(hook.statusCode).toBe(200);
     await new Promise((r) => setTimeout(r, 50));
     const cont = ctx.amo.calls.find((c) => c.url === RETURN);
-    expect(cont?.body).toMatchObject({ execute_handlers: [{ handler: 'show', params: { value: 'Здравствуйте! Турин 1 — 14 900 ₽, в наличии.' } }] });
+    expect(cont?.body).toMatchObject({ data: { status: 'success', reply: 'Здравствуйте! Турин 1 — 14 900 ₽, в наличии.', has_reply: '1' } });
     expect((await ctx.deps.suggestions.get(31337, id))?.status).toBe('sent');
     expect((await ctx.deps.dialog.history(31337, 900)).at(-1)).toMatchObject({ role: 'ai' });
   });

@@ -124,6 +124,7 @@ describe('справочники amo', () => {
     expect(res.json()).toEqual({
       pipelines: [{ id: 1, name: 'Продажи', statuses: [{ id: 10, name: 'Новая', sort: 10 }] }],
       taskTypes: [{ id: 1, name: 'Связаться' }],
+      users: [],
     });
   });
 });

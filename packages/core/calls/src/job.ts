@@ -233,11 +233,11 @@ export async function runDaySummaryIfDue(deps: CallsDeps, accountId: number, opt
   if (!daySummaryDue(s.daySummaryTime, sync?.lastRunAt ?? null, now)) return null;
   // Догон: дни после последнего выполненного запуска (простой воркера) — каждый своим итогом; первый запуск — только сегодня.
   const fromDay = sync?.lastRunAt ? addDays(mskDay(sync.lastRunAt), 1) : mskDay(now);
-  await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });
+  await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null, runAt: now });
   try {
     return await runDaySummary(deps, accountId, { fromDay, ...opts });
   } catch (err) {
-    await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: errorText(err) }).catch(() => undefined);
+    await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: errorText(err), runAt: now }).catch(() => undefined);
     throw err;
   }
 }
