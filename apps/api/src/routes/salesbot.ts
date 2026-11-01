@@ -1,6 +1,7 @@
-import { continueBot, isSafeReturnUrl, verifyBotToken } from '@ai-door/amo';
+import { AmoApiClient, continueBot, isSafeReturnUrl, verifyBotToken } from '@core/amo';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { hasMention } from '@core/shared';
 import type { Deps } from '../deps.ts';
 
 const bodySchema = z.object({
@@ -23,6 +24,8 @@ const dataSchema = z.object({
 });
 
 /** Приём сообщений клиента из Salesbot (`widget_request`). Отвечаем сразу, обработка — в очереди. */
+const WAZZUP_SYSTEM_RE = /===\s*SYSTEM\s+WZ\s*===|^\s*Сообщение не отправлено/iu;
+
 export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
   app.post(
     '/salesbot/v1/hook',
@@ -56,6 +59,49 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
           const draft = await deps.suggestions.takeApproved(accountId, leadId);
           try {
             const token = await deps.tokenService.getAccessToken(accountId);
+            // Нажатие «Отправить» — явная передача агенту, поэтому сам факт участия менеджера
+            // отправку не запрещает. Запрещает только сообщение менеджера ПОСЛЕ одобрения:
+            // пока черновик ждал, менеджер мог ответить клиенту сам.
+            if (draft) {
+              const api = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
+              const since = draft.decidedAt ?? draft.createdAt;
+              let events: Awaited<ReturnType<typeof api.getOutgoingChatEvents>>;
+              try {
+                events = await api.getOutgoingChatEvents(leadId, since);
+              } catch {
+                // amo отдаёт 429 при 7 запросах в секунду — одна попытка повтора.
+                try {
+                  await new Promise((r) => setTimeout(r, 400));
+                  events = await api.getOutgoingChatEvents(leadId, since);
+                } catch {
+                  // Черновик остаётся одобренным и уйдёт следующим ходом.
+                  await deps.suggestions.markApprovedAgain(accountId, draft.id);
+                  await deps.journal.add({
+                    accountId,
+                    leadId,
+                    kind: 'blocked',
+                    summary: 'Черновик не отправлен: проверка допуска не прошла',
+                    details: { draftId: draft.id, approvedBy: draft.decidedBy, text: draft.text },
+                  });
+                  await continueBot(returnUrl, token, [], deps.fetch);
+                  return;
+                }
+              }
+              const manager = events.find((e) => e.created_by > 0);
+              if (manager) {
+                await deps.suggestions.markApprovedAgain(accountId, draft.id);
+                await deps.journal.add({
+                  accountId,
+                  leadId,
+                  kind: 'blocked',
+                  summary: 'Черновик не отправлен: менеджер ответил клиенту сам',
+                  details: { draftId: draft.id, approvedBy: draft.decidedBy, createdBy: manager.created_by, text: draft.text },
+                });
+                await deps.dialog.pause(accountId, leadId, 'manager_message');
+                await continueBot(returnUrl, token, [], deps.fetch);
+                return;
+              }
+            }
             await continueBot(returnUrl, token, draft ? [draft.text] : [], deps.fetch);
             if (draft) {
               await deps.dialog.addMessage(accountId, leadId, 'ai', draft.text);
@@ -72,8 +118,42 @@ export function salesbotRoutes(app: FastifyInstance, deps: Deps) {
 
       const attachment = data.data.attachment_url ? { url: data.data.attachment_url, type: data.data.attachment_type ?? null } : null;
       const text = data.data.message.trim() || (attachment ? '' : '(клиент отправил сообщение без текста — вложение или стикер)');
-      await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
+      // Системные уведомления Wazzup (канал недоступен, сообщение не доставлено) приходят в бота как «сообщения клиента»
+      // и зацикливают диалог (RFD-AI-AGENT-DEPLOY-112): не обрабатываем и бота не продолжаем.
+      if (WAZZUP_SYSTEM_RE.test(text)) {
+        await deps.journal.add({ accountId, leadId, kind: 'skipped', summary: `Системное сообщение Wazzup пропущено: ${text.slice(0, 120)}` });
+        return reply.code(200).send({ ok: true, skipped: 'wazzup_system' });
+      }
       const { settings } = await deps.settings.get(accountId);
+      // Групповые чаты: агент отвечает только в разрешённых (RFD-AI-AGENT-GRUPPOVYE-CHATY).
+      const chat = await deps.wazzup.resolveChatKind(accountId, leadId, text);
+      const groups = settings.where.groups;
+      const groupBlocked =
+        chat.kind === 'group' &&
+        (groups.mode === 'block_all' ||
+          (groups.mode === 'allowlist' && !groups.allowedChatIds.includes(chat.chatId ?? '')));
+      if (groupBlocked) {
+        await deps.journal.add({
+          accountId,
+          leadId,
+          kind: 'skipped',
+          summary: `Групповой чат без разрешения: ${chat.chatName ?? chat.chatId ?? 'без названия'}`,
+          details: { chatId: chat.chatId, chatName: chat.chatName, chatType: chat.chatType, mode: groups.mode },
+        });
+        return reply.code(200).send({ ok: true, skipped: 'group_chat' });
+      }
+      // Пункт 8: в разрешённой группе агент отвечает только на обращение по имени.
+      if (chat.kind === 'group' && groups.mentionOnly && !hasMention(text, groups.mention)) {
+        await deps.journal.add({
+          accountId,
+          leadId,
+          kind: 'skipped',
+          summary: 'Группа: нет обращения к агенту',
+          details: { chatId: chat.chatId, chatName: chat.chatName, mention: groups.mention },
+        });
+        return reply.code(200).send({ ok: true, skipped: 'group_no_mention' });
+      }
+      await deps.dialog.enqueue(accountId, leadId, text, returnUrl, attachment);
       await deps.schedule({ accountId, leadId }, settings.where.batchWindowSec * 1000);
       return reply.code(200).send({ ok: true });
     },

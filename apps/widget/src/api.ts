@@ -1,7 +1,8 @@
-import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@ai-door/db';
-import type { CalcResult, PricingRules } from '@ai-door/pricing';
+import type { ClientMemory, Suggestion as DbSuggestion, WidgetSettings } from '@core/db';
+import type { ModelInfo, ModelRef, ProviderId } from '@core/llm/types';
+import type { CalcResult, PricingRules } from '@retail/pricing';
 
-export type { CalcResult, PricingRules };
+export type { CalcResult, PricingRules, ModelInfo, ModelRef, ProviderId };
 export type Suggestion = Omit<DbSuggestion, 'createdAt' | 'decidedAt'> & { createdAt: string; decidedAt: string | null };
 import type { AmoWidgetSelf } from './amo.ts';
 
@@ -22,6 +23,15 @@ export interface Status {
   enabled: boolean;
   mode: Mode;
   llmConfigured: boolean;
+  /** 1.1.0: провайдер и модель по умолчанию, ключи каких провайдеров есть, здоровье интеграции. */
+  llm?: {
+    provider: ProviderId;
+    model: string;
+    fallback: ModelRef | null;
+    providers: ProviderId[];
+    missingModels: string[];
+    lastError: { summary: string; createdAt: string } | null;
+  };
   spend: { todayRub: number; monthRub: number };
   dailyLimitRub: number | null;
   catalog: CatalogStats;
@@ -45,13 +55,50 @@ export interface JournalItem {
   createdAt: string;
 }
 
+export interface LeadFile {
+  id: number;
+  name: string;
+  type: string | null;
+  url: string;
+  receivedAt: string;
+  status: 'parsed' | 'error' | 'unparsed' | 'pending';
+  documentId: number | null;
+  kind: string | null;
+  summary: string;
+  openings: number;
+  positions: number;
+}
+
+export interface LeadTask {
+  id: string;
+  kind: string;
+  text: string;
+  createdAt: string;
+  source: 'tool' | 'handoff';
+}
+
+export interface LeadProduct extends Source {
+  price?: number | null;
+  available?: boolean | null;
+  picture?: string | null;
+  category?: string | null;
+}
+
 export interface LeadPanel {
   leadId: number;
+  /** 1.1.4: администратор аккаунта amo. Нет у старого бэкенда — тогда переключение модели скрыто. */
+  isAdmin?: boolean;
   ai: { enabled: boolean; mode: Mode; paused: boolean; pauseReason: string | null; pausedAt: string | null };
+  /** 1.1.0: кто отвечает в этой сделке (с учётом переопределения). Нет у старого бэкенда. */
+  llm?: { provider: ProviderId; model: string; fallback: ModelRef | null; override: ModelRef | null; providers: ProviderId[]; configured: boolean };
+  health?: { llmConfigured: boolean; dailyLimitExhausted: boolean; lastError: { summary: string; createdAt: string } | null };
   hints: Suggestion[];
-  products: Source[];
+  products: LeadProduct[];
   calculations: CalcResult[];
-  log: { id: number; kind: string; summary: string; costRub: number; createdAt: string }[];
+  files?: LeadFile[];
+  tasks?: LeadTask[];
+  summary?: { text: string; createdAt: string } | null;
+  log: { id: number; kind: string; summary: string; costRub: number; createdAt: string; provider?: string; model?: string; fallbackUsed?: boolean }[];
   costRub: number;
 }
 
@@ -78,7 +125,92 @@ export interface SandboxResult {
   memory: ClientMemory;
   calculation: CalcResult | null;
   model: string;
+  provider?: ProviderId;
+  requestedModel?: string;
+  fallbackUsed?: boolean;
+  /** Время ответов модели за ход, мс. */
+  latencyMs?: number;
+  totalMs?: number;
   cost: { usd: number; rub: number; inputTokens: number; outputTokens: number };
+}
+
+export type CompareResult = ({ model: ModelRef } & Partial<SandboxResult> & { error?: string })[];
+
+export interface LlmKeys {
+  provider: ProviderId;
+  fallbackProvider: ProviderId;
+  keys: Record<ProviderId, { saved: boolean; mask: string | null; source: 'account' | 'server' | null }>;
+  providers: ProviderId[];
+}
+
+export interface LlmModels {
+  provider: ProviderId;
+  models: ModelInfo[];
+  fetchedAt: string | null;
+  fromCache: boolean;
+  source: 'api' | 'tariff';
+  noKey: boolean;
+  error?: string;
+}
+
+export interface ModelStats {
+  provider: string;
+  model: string;
+  dialogs: number;
+  replies: number;
+  drafts: number;
+  hints: number;
+  handoffs: number;
+  sandbox: number;
+  errors: number;
+  fallbacks: number;
+  costRub: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgCostPerDialogRub: number;
+  avgLatencyMs: number | null;
+}
+
+export interface EvalReport {
+  id: string;
+  topic: string;
+  passed: boolean;
+  failures: string[];
+  fabricated: string[];
+  final: string;
+  handoffReason: string | null;
+  costUsd: number;
+  latencyMs: number[];
+  provider: string;
+  model: string;
+  fallbackUsed: boolean;
+}
+
+export interface EvalSummary {
+  total: number;
+  passed: number;
+  fabricated: number;
+  rejections: number;
+  costUsd: number;
+  avgCostUsd: number;
+  p95LatencyMs: number;
+  handoffExpected: number;
+  handoffOk: number;
+  fallbacks: number;
+}
+
+export interface EvalRun {
+  id: number;
+  status: 'running' | 'done' | 'failed';
+  models: ModelRef[];
+  dialogIds: string[];
+  results?: { ref: ModelRef; reports: EvalReport[]; summary: EvalSummary | null; error?: string }[];
+  summary: unknown;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  progress: { done: number; total: number };
 }
 
 export interface KnowledgeItem {
@@ -197,7 +329,60 @@ export interface SettingsVersion {
 export interface Dictionaries {
   pipelines: { id: number; name: string; statuses: { id: number; name: string }[] }[];
   taskTypes: { id: number; name: string }[];
+  /** Пользователи аккаунта — для выбора получателя задач. */
+  users?: { id: number; name: string; email: string | null; isActive: boolean; isAdmin: boolean }[];
 }
+
+export interface WazzupDumpInfo {
+  id: number; status: string; startAt: string; endAt: string; channelId: string | null;
+  rowsTotal: number; inserted: number; skipped: number; columns: string | null; error: string | null;
+  createdAt: string; finishedAt: string | null;
+}
+
+/** Лента переписки по сделке для окна виджета (RETAIL-WIDGET-WINDOW). */
+export interface DialogItem {
+  id: string;
+  at: string;
+  who: 'client' | 'agent' | 'manager' | 'hint' | 'system';
+  channel: string | null;
+  channelLabel: string | null;
+  text: string;
+  provider?: string | null;
+  model?: string | null;
+  managerName?: string | null;
+  notSent?: boolean;
+  suggestionId?: number;
+}
+
+export interface LeadDialog {
+  leadId: number;
+  items: DialogItem[];
+  /** Можно ли ответить клиенту из окна: да — в чат Wazzup (канал); нет — причина, запасной вариант «Скопировать / Открыть чат». */
+  send: { available: true; channel: string; channelLabel: string; reason: null } | { available: false; reason: string };
+}
+
+/**
+ * Автоповтор запросов (RETAIL-WIDGET-WINDOW, п. 4): нет ответа, таймаут, 408 / 429 / 5xx — ещё две попытки с паузой, затем
+ * ошибка с причиной. Сбой и «повтор помог» уходят в журнал API (POST /client-errors, без повтора). Тесты обнуляют паузы.
+ */
+export const RETRY = { delaysMs: [1000, 2000], timeoutMs: 30_000 };
+const CLIENT_ERRORS = '/widget/v1/client-errors';
+
+/** Причина сбоя запроса словами: «таймаут», «нет соединения», «401», «HTTP 502». */
+export function failureReason(err: unknown): string {
+  const e = err as { status?: number; statusText?: string } | null;
+  if (e?.statusText === 'timeout') return 'таймаут';
+  const status = e?.status ?? 0;
+  if (!status) return 'нет соединения';
+  return status === 401 ? '401' : `HTTP ${status}`;
+}
+
+/** Повторяется только ответ сети (jqXHR со status): 0 — нет ответа или таймаут, 408, 429, 5xx. Исключение в коде — не повторяется. */
+const retryable = (err: unknown) => {
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === 'number' && (status === 0 || status === 408 || status === 429 || status >= 500);
+};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class WidgetApi {
   constructor(
@@ -220,10 +405,18 @@ export class WidgetApi {
   catalog = () => this.call<CatalogStats>('GET', '/widget/v1/catalog');
   importCatalog = () => this.call<{ started: boolean }>('POST', '/widget/v1/catalog/import');
   knowledge = () => this.call<{ items: KnowledgeItem[] }>('GET', '/widget/v1/knowledge');
-  addKnowledge = (item: KnowledgeInput) => this.call<{ id: number }>('POST', '/widget/v1/knowledge', item);
+  addKnowledge = (item: KnowledgeInput) =>
+    this.call<{ id: number | null; listing?: boolean; added?: number; skipped?: number; total?: number }>('POST', '/widget/v1/knowledge', item);
   removeKnowledge = (id: number) => this.call<{ ok: true }>('DELETE', `/widget/v1/knowledge/${id}`);
-  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings) =>
-    this.call<SandboxResult>('POST', '/widget/v1/sandbox', settings ? { messages, settings } : { messages });
+  /** Файл в базу знаний (PDF, DOCX, XLSX, TXT) — содержимое в base64. */
+  addKnowledgeFile = (name: string, mime: string, file: string) =>
+    this.call<{ id: number; chars: number; pages: number }>('POST', '/widget/v1/knowledge/file', { name, mime, file });
+  /** Перечитать статью по ссылке. */
+  refreshKnowledge = (id: number) => this.call<{ id: number }>('POST', `/widget/v1/knowledge/${id}/refresh`);
+  refreshAllKnowledge = () =>
+    this.call<{ ok: number; failed: number }>('POST', '/widget/v1/knowledge/refresh-all');
+  sandbox = (messages: { role: 'client' | 'ai'; text: string }[], settings?: WidgetSettings, model?: ModelRef, phone?: string) =>
+    this.call<SandboxResult>('POST', '/widget/v1/sandbox', { messages, ...(settings ? { settings } : {}), ...(model ? { model } : {}), ...(phone ? { phone } : {}) });
 
   pricing = () => this.call<{ rules: PricingRules; version: number }>('GET', '/widget/v1/pricing');
   savePricing = (rules: PricingRules) => this.call<{ rules: PricingRules; version: number }>('PUT', '/widget/v1/pricing', rules);
@@ -249,9 +442,23 @@ export class WidgetApi {
   settingsVersion = (id: number) => this.call<SettingsVersion & { settings: WidgetSettings }>('GET', `/widget/v1/settings/history/${id}`);
   restoreSettings = (id: number) => this.call<{ version: number }>('POST', `/widget/v1/settings/history/${id}/restore`);
   llmStatus = () => this.call<{ hasOwnKey: boolean; configured: boolean; source: 'account' | 'server' | null }>('GET', '/widget/v1/llm/status');
-  setLlmKey = (key: string) => this.call<{ ok: true }>('PUT', '/widget/v1/llm/key', { key });
-  deleteLlmKey = () => this.call<{ ok: true }>('DELETE', '/widget/v1/llm/key');
-  testLlmKey = (key?: string) => this.call<{ ok: true; models: string[] } | { ok: false; error: string }>('POST', '/widget/v1/llm/test', key ? { key } : {});
+  llmKeys = () => this.call<LlmKeys>('GET', '/widget/v1/llm/keys');
+  // Anthropic — провайдер по умолчанию: тело и адрес как в 1.0.x (совместимость с бэкендом 1.0.x).
+  setLlmKey = (key: string, provider: ProviderId = 'anthropic') => this.call<{ ok: true }>('PUT', '/widget/v1/llm/key', provider === 'anthropic' ? { key } : { key, provider });
+  deleteLlmKey = (provider: ProviderId = 'anthropic') => this.call<{ ok: true }>('DELETE', `/widget/v1/llm/key${provider === 'anthropic' ? '' : `?provider=${provider}`}`);
+  testLlmKey = (key?: string, provider: ProviderId = 'anthropic') =>
+    this.call<{ ok: true; models: string[] } | { ok: false; error: string }>('POST', '/widget/v1/llm/test', { ...(key ? { key } : {}), ...(provider === 'anthropic' ? {} : { provider }) });
+  llmModels = (provider: ProviderId, refresh = false) => this.call<LlmModels>('GET', `/widget/v1/llm/models?provider=${provider}${refresh ? '&refresh=1' : ''}`);
+  setLeadModel = (leadId: number, model: ModelRef | null) => this.call<{ ok: true }>('PUT', `/widget/v1/leads/${leadId}/llm`, { model });
+  sandboxCompare = (messages: { role: 'client' | 'ai'; text: string }[], models: ModelRef[], settings?: WidgetSettings) =>
+    this.call<{ results: CompareResult }>('POST', '/widget/v1/sandbox/compare', settings ? { messages, models, settings } : { messages, models });
+  evalDialogs = () => this.call<{ items: { id: string; topic: string; turns: number }[] }>('GET', '/widget/v1/evals/dialogs');
+  runEval = (models: ModelRef[], opts: { ids?: string[]; limit?: number } = {}) => this.call<{ id: number }>('POST', '/widget/v1/evals/run', { models, ...opts });
+  evalRuns = () => this.call<{ items: EvalRun[] }>('GET', '/widget/v1/evals/runs');
+  evalRun = (id: number) => this.call<EvalRun>('GET', `/widget/v1/evals/runs/${id}`);
+  analyticsModels = (days: number) => this.call<{ items: ModelStats[] }>('GET', `/widget/v1/analytics/models?days=${days}`);
+  analyzeChatFile = (leadId: number, fileId: number) => this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/files/${fileId}/analyze`);
+  addLeadNote = (leadId: number, text: string) => this.call<{ ok: true }>('POST', `/widget/v1/leads/${leadId}/notes`, { text });
   purgeAccount = () => this.call<{ ok: true }>('POST', '/widget/v1/account/purge', { confirm: 'УДАЛИТЬ' });
 
   leadDocuments = (leadId: number) => this.call<{ items: DocumentListItem[] }>('GET', `/widget/v1/leads/${leadId}/documents`);
@@ -259,21 +466,78 @@ export class WidgetApi {
     this.call<DocumentResult>('POST', `/widget/v1/leads/${leadId}/documents`, body);
 
   emailStatus = () =>
-    this.call<{ enabled: boolean; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }>(
-      'GET',
-      '/widget/v1/email/status',
-    );
-  setEmailPassword = (password: string) => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password });
-  testEmail = () => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test');
+    this.call<{
+      enabled: boolean;
+      hasPassword: boolean;
+      folders: { folder: string; lastOkAt: string | null; lastError: string | null }[];
+      mailboxes: { id: string; address: string; mode: 'read' | 'reply'; hasPassword: boolean; folders: { folder: string; lastOkAt: string | null; lastError: string | null }[] }[];
+    }>('GET', '/widget/v1/email/status');
+  setEmailPassword = (password: string, mailboxId = 'main') => this.call<{ ok: true }>('PUT', '/widget/v1/email/password', { password, mailboxId });
+  deleteEmailPassword = (mailboxId: string) => this.call<{ ok: true }>('DELETE', `/widget/v1/email/password/${encodeURIComponent(mailboxId)}`);
+  wazzupStatus = () =>
+    this.call<{
+      hasKey: boolean;
+      webhookUri: string;
+      state: { webhookUri: string | null; subscribedAt: string | null; lastEventAt: string | null; eventsTotal: number; lastError: string | null; lastErrorAt: string | null };
+      stats: { total: number; last24h: number; phones: number };
+    }>('GET', '/widget/v1/wazzup/status');
+  wazzupGroups = () =>
+    this.call<{
+      items: { chatId: string; chatName: string | null; chatType: string | null; messages: number; lastAt: string | null; skipped: number }[];
+    }>('GET', '/widget/v1/wazzup/groups');
+  setWazzupKey = (apiKey: string) => this.call<{ ok: true }>('PUT', '/widget/v1/wazzup/key', { apiKey });
+  testWazzup = () =>
+    this.call<{ ok: boolean; error?: string; channels?: { id: string | null; transport: string | null; name: string | null; state: string | null }[] }>('POST', '/widget/v1/wazzup/test');
+  subscribeWazzup = () => this.call<{ ok: boolean; error?: string; webhookUri?: string }>('POST', '/widget/v1/wazzup/subscribe');
+  wazzupSubscription = () => this.call<{ ok: boolean; error?: string; current?: unknown }>('GET', '/widget/v1/wazzup/subscription');
+  wazzupDump = (startAt: string, endAt: string, channelId?: string) =>
+    this.call<{ ok: boolean; dump: WazzupDumpInfo }>('POST', '/widget/v1/wazzup/dump', { startAt, endAt, ...(channelId ? { channelId } : {}) });
+  wazzupDumps = () => this.call<{ ok: boolean; dumps: WazzupDumpInfo[] }>('GET', '/widget/v1/wazzup/dumps');
+  testEmail = (mailboxId = 'main') => this.call<{ imap: string; smtp: string; sentFolder: string | null }>('POST', '/widget/v1/email/test', { mailboxId });
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.self.$authorizedAjax({
+  /** Окно виджета: лента переписки, ответ клиенту (только по кнопке), режим агента (администратор). */
+  leadDialog = (leadId: number) => this.call<LeadDialog>('GET', `/widget/v1/leads/${leadId}/dialog`);
+  sendReply = (leadId: number, text: string) => this.call<{ ok: true; channel: string; channelLabel: string; userName: string; at: string }>('POST', `/widget/v1/leads/${leadId}/send`, { text });
+  setMode = (mode: Mode) => this.call<{ mode: Mode; version?: number }>('PUT', '/widget/v1/settings/mode', { mode });
+
+  private request(method: string, path: string, body?: unknown) {
+    return this.self.$authorizedAjax({
       url: new URL(path, this.baseUrl).toString(),
       method,
       type: method,
       dataType: 'json',
+      timeout: RETRY.timeoutMs,
       ...(body === undefined ? {} : { data: JSON.stringify(body), contentType: 'application/json' }),
     });
-    return res as T;
+  }
+
+  /** Сбой загрузки — в журнал API; сам отчёт не повторяется и ошибок не показывает. */
+  private report(e: { method: string; path: string; reason: string; status: number | null; attempts: number; recovered: boolean }) {
+    const leadId = Number(/\/leads\/(\d+)/.exec(e.path)?.[1] ?? 0) || null;
+    void Promise.resolve(this.request('POST', CLIENT_ERRORS, { ...e, leadId })).catch(() => undefined);
+  }
+
+  /**
+   * Запрос с автоповтором (п. 4): чтение (GET) и идемпотентная запись (PUT). POST не повторяется — повтор мог бы
+   * выполнить действие дважды (одобрение черновика, отправка ответа клиенту). Ошибка — исходная (status, responseJSON) с полем reason.
+   */
+  private async call<T>(method: string, path: string, body?: unknown, retry = method === 'GET' || method === 'PUT'): Promise<T> {
+    let first: string | null = null;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const res = await this.request(method, path, body);
+        if (attempt > 0 && first) this.report({ method, path, reason: first, status: null, attempts: attempt + 1, recovered: true });
+        return res as T;
+      } catch (err) {
+        const reason = failureReason(err);
+        if (err && typeof err === 'object' && typeof (err as { status?: unknown }).status === 'number') Object.assign(err, { reason, attempts: attempt + 1 });
+        if (!retry || !retryable(err) || attempt >= RETRY.delaysMs.length || path === CLIENT_ERRORS) {
+          if (retry && retryable(err) && path !== CLIENT_ERRORS) this.report({ method, path, reason, status: (err as { status?: number } | null)?.status || null, attempts: attempt + 1, recovered: false });
+          throw err;
+        }
+        first ??= reason;
+        await sleep(RETRY.delaysMs[attempt] ?? 0);
+      }
+    }
   }
 }

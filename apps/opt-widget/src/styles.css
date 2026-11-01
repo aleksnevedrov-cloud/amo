@@ -1,0 +1,303 @@
+/*
+ * Стилевой слой виджета «AI-агент продаж дверей».
+ * Верстка по макету Figma «Rf-Dveri-26 → Виджет AI РФ Двери» (фрейм 550 px),
+ * пересчитанному под ширину колонки виджетов в карточке сделки amoCRM (~280-300 px).
+ * Токены макета: фон #F7F8FA, карточка #FFF/#E1E5E9/12px, текст #28313D, приглушённый #8A949F,
+ * зелёный #61C100 (обводка) и #258500 (текст), ссылка #087BBE, пустое состояние #F5F7F9, шрифт Open Sans.
+ */
+.opt-root {
+  --ad-bg: #f7f8fa;
+  --ad-card: #fff;
+  --ad-line: #e1e5e9;
+  --ad-text: #28313d;
+  --ad-muted: #8a949f;
+  --ad-green: #61c100;
+  --ad-green-ink: #258500;
+  --ad-link: #087bbe;
+  --ad-soft: #f5f7f9;
+  --ad-radius: 8px;
+  --ad-radius-sm: 6px;
+  font-family: 'Open Sans', 'PT Sans', Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ad-text);
+  background: var(--ad-bg);
+  margin: -8px -10px;
+  padding: 10px;
+  box-sizing: border-box;
+  /* Колонка виджетов в карточке сделки ~280 px: ничего не выезжает за край, длинные строки (email, имена файлов) переносятся. */
+  max-width: calc(100% + 20px);
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.opt-root * { box-sizing: border-box; min-width: 0; }
+
+/*
+ * Шапка виджета рисуется самим amoCRM (.opt-caption передаётся в render_template):
+ * внутри — логотип logo_medium.png и стрелка сворачивания. Приводим её к макету:
+ * компактная белая полоса с логотипом нормального размера, а не картинка во всю ширину.
+ * Класс лежит ВНЕ .opt-root, поэтому селекторы здесь без вложенности в него.
+ */
+.opt-caption {
+  background: #fff !important;
+  /* Размеры как у шапки «Агент розница» (DESIGN-FIX-2): один масштаб в одной колонке. */
+  padding: 9px 34px 9px 12px !important;
+  position: relative;
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  margin: 0 !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  border-bottom: 1px solid #e1e5e9;
+  min-height: 0 !important;
+  height: auto !important;
+  line-height: 0;
+  text-align: left;
+}
+.opt-caption img.card-widgets__widget__caption__logo {
+  height: 20px !important;
+  width: auto !important;
+  max-width: 150px !important;
+  margin: 0 !important;
+  object-fit: contain;
+}
+.opt-caption img.card-widgets__widget__caption__logo_min { display: none !important; }
+/* Подпись рядом с логотипом: в правой колонке два виджета с одним логотипом «РФ ДВЕРИ», без неё их не отличить. */
+.opt-caption::after {
+  content: 'Агент опт — КП';
+  font: 600 13px/1.2 'Open Sans', 'PT Sans', Arial, sans-serif;
+  color: #28313d;
+  white-space: nowrap;
+}
+/* Стрелка сворачивания: своя «галочка», иначе на белом фоне штатная не видна. */
+.opt-caption .card-widgets__widget__caption__arrow {
+  position: absolute !important;
+  right: 12px; top: 50%; margin: 0 !important;
+  transform: translateY(-50%);
+  width: 12px !important; height: 12px !important;
+  background: none !important;
+}
+.opt-caption .card-widgets__widget__caption__arrow::after {
+  content: ''; display: block; width: 7px; height: 7px; margin: 0 0 0 1px;
+  border-right: 2px solid #8a949f; border-bottom: 2px solid #8a949f;
+  transform: rotate(45deg) translate(-2px, -2px);
+}
+.opt-caption .widgets__widget__caption__arrow_top::after { transform: rotate(-135deg) translate(-2px, -2px); }
+
+.opt-card {
+  background: var(--ad-card);
+  border: 1px solid var(--ad-line);
+  border-radius: var(--ad-radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.opt-card:last-child { margin-bottom: 0; }
+
+.opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.opt-row-tight { flex-wrap: nowrap; }
+/* Кнопки шагов КП — столбиком на всю ширину: четыре подписи в строку в колонку ~280 px не помещаются. */
+.opt-actions { display: flex; flex-direction: column; gap: 6px; }
+.opt-actions .opt-btn, .opt-btn-wide { width: 100%; white-space: normal; min-height: 30px; }
+.opt-row-top { align-items: flex-start; }
+.opt-row-tight > :first-child { min-width: 0; }
+.opt-row .opt-btn { flex: none; }
+.opt-col { display: flex; flex-direction: column; gap: 6px; }
+
+/* Заголовок виджета «AI-агент»: в макете 20/700, здесь 15/700. */
+.opt-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
+.opt-title img { width: 26px; height: 20px; object-fit: contain; border: 1px solid var(--ad-line); border-radius: 4px; padding: 1px; background: #fff; }
+
+/* Заголовок раздела карточки: в макете 17/600, здесь 13/600. */
+.opt-sect { font-size: 13px; font-weight: 600; color: var(--ad-text); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-family: inherit; }
+.opt-sect:hover { color: #000; }
+
+.opt-divider { height: 1px; background: var(--ad-line); margin: 9px 0; }
+
+/* Режим агента: в макете 18/600, здесь 13,5/600. */
+.opt-mode { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; font-weight: 600; min-width: 0; }
+.opt-mode > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.opt-dot { margin-top: 5px; }
+.opt-dot { width: 9px; height: 9px; border-radius: 5px; flex: none; display: inline-block; }
+.opt-meta { font-size: 12px; }
+.opt-muted { color: var(--ad-muted); }
+
+/* Кнопки: в макете высота 46-48, радиус 7, обводка #E1E5E9 или зелёная #61C100. */
+.opt-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm);
+  background: #fff; color: var(--ad-text);
+  font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; text-decoration: none;
+}
+.opt-btn:hover { border-color: #c9d0d6; }
+.opt-btn:disabled { opacity: .55; cursor: default; }
+.opt-btn-green { border-color: var(--ad-green); color: var(--ad-green-ink); }
+.opt-btn-green:hover { border-color: var(--ad-green-ink); background: #f6fff0; }
+.opt-icon { min-height: 26px; width: 26px; padding: 0; font-size: 13px; font-weight: 400; }
+
+/* Модель в карточке сделки: у администратора — кликабельная плашка, у менеджера просто текст. */
+.opt-model {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  min-height: 24px; padding: 2px 8px;
+  border: 1px solid var(--ad-line); border-radius: var(--ad-radius-sm);
+  background: #fff; color: var(--ad-text);
+  font-family: inherit; font-size: 12px; line-height: 1.2; cursor: pointer;
+}
+.opt-model:hover { border-color: var(--ad-green); color: var(--ad-green-ink); }
+.opt-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt-link { color: var(--ad-link); font-size: 12px; font-weight: 600; text-decoration: none; }
+.opt-link:hover { text-decoration: underline; }
+
+/* Пустое состояние раздела: плашка #F5F7F9, радиус 7 в макете. */
+.opt-empty { background: var(--ad-soft); border-radius: var(--ad-radius-sm); padding: 9px 10px; color: var(--ad-muted); font-size: 12px; }
+
+.opt-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.opt-badge-ok { background: #edf9e4; color: var(--ad-green-ink); }
+.opt-badge-warn { background: #fff4d6; color: #8a5a00; }
+.opt-badge-bad { background: #fde8e8; color: #b02a2a; }
+.opt-error { color: #b02a2a; font-size: 12px; }
+
+/* Таблица позиций: фиксированная раскладка, чтобы длинное название не растягивало таблицу шире колонки. */
+.opt-table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.opt-table td, .opt-table th { overflow-wrap: anywhere; }
+.opt-table input { width: 100%; min-width: 0; }
+
+.opt-product { display: flex; align-items: flex-start; gap: 8px; }
+.opt-product img, .opt-product .opt-thumb { width: 38px; height: 38px; border-radius: var(--ad-radius-sm); object-fit: cover; flex: none; background: #f0f2f4; }
+.opt-product a { color: var(--ad-link); text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; }
+.opt-product a:hover { text-decoration: underline; }
+.opt-grow { flex: 1; min-width: 0; }
+.opt-pre { white-space: pre-wrap; }
+.opt-skel { height: 11px; border-radius: 4px; background: #eef0f2; margin: 7px 0; }
+
+@keyframes opt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* Раздел «Письмо» (RFD-AI-AGENT-OPT-MAIL-UI): строка-статус как ссылка, по клику — служебные сведения. */
+.opt-root .opt-details { gap: 4px; }
+.opt-root .opt-details-summary {
+  background: none; border: 0; padding: 0; margin: 0; text-align: left; cursor: pointer;
+  font: inherit; color: var(--ad-link); line-height: 1.45;
+}
+.opt-root .opt-details-summary.opt-details-warn { color: #b02a2a; }
+.opt-root .opt-details-body {
+  padding: 6px 0 6px 8px;
+  border-left: 2px solid var(--ad-line);
+  font-size: 12px;
+}
+
+/*
+ * Блок «Агент опт — КП» в карточке сделки: оформление по макету Figma «10 Агент опт — КП / предложение / 2026»
+ * (карточки, бейджи, плитка позиции, маркеры), а размеры — как у блока «Агент розница» в той же колонке
+ * (RFD-AI-AGENT-OPT-WIDGET-DESIGN-FIX-2): базовый текст 12 px, заголовки карточек 13/600 (как «Найденные товары»),
+ * метки 11/600, кнопки 28 px и 12/600 (как «Загрузить»), поля 24 px (как список модели), бейджи 20 px
+ * (кнопка «Пауза» минус 8), карточки с радиусом 8, отступами 10/12 и промежутком 8 (как карточки розницы).
+ */
+.opt-root.opt-kp {
+  --kp-line: #dce2e7;
+  --kp-text: #2d3642;
+  --kp-muted: #8995a3;
+  --kp-accent: #238600;
+  --kp-accent-bg: #f0f8e9;
+  --kp-link: #0781ca;
+  --kp-soft: #f5f7f9;
+  --kp-radius: 8px;
+  --kp-radius-sm: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--kp-text);
+}
+.opt-kp .opt-kp-card {
+  background: #fff;
+  border: 1px solid var(--kp-line);
+  border-radius: var(--kp-radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+/* Заголовок карточки не переносится; бейдж справа в той же строке, в совсем узкой колонке — под ним. */
+.opt-kp .opt-kp-head { display: flex; align-items: center; justify-content: space-between; gap: 6px 8px; flex-wrap: wrap; }
+.opt-kp .opt-kp-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--kp-text); line-height: 1.3; white-space: nowrap; }
+.opt-kp .opt-kp-badge {
+  display: inline-flex; align-items: center; flex: none;
+  height: 20px; padding: 0 9px; border-radius: 10px;
+  background: var(--kp-soft); color: var(--kp-muted);
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.opt-kp .opt-kp-badge-green { background: var(--kp-accent-bg); color: var(--kp-accent); }
+.opt-kp .opt-kp-sub { font-size: 12px; color: var(--kp-muted); }
+.opt-kp .opt-kp-sep { height: 1px; background: var(--kp-line); }
+.opt-kp .opt-kp-label { font-size: 11px; font-weight: 600; color: var(--kp-muted); text-transform: uppercase; letter-spacing: .02em; }
+.opt-kp .opt-kp-buyer { display: flex; flex-direction: column; gap: 2px; }
+.opt-kp .opt-kp-name { font-size: 13px; font-weight: 600; color: var(--kp-text); overflow-wrap: anywhere; }
+/* Строка-ссылка «Письмо: …» и её раскрытие (из RFD-AI-AGENT-OPT-MAIL-UI). */
+.opt-kp .opt-details-summary { font-size: 12px; font-weight: 600; color: var(--kp-link); }
+.opt-kp .opt-details-summary.opt-details-warn { color: #b02a2a; }
+.opt-kp .opt-details-body { font-size: 12px; border-left-color: var(--kp-line); }
+/* Позиции: плитка #F5F7F9 радиус 6, название переносится по словам, поля под ним. */
+.opt-kp .opt-kp-tiles { display: flex; flex-direction: column; gap: 8px; }
+.opt-kp .opt-kp-tile { background: var(--kp-soft); border-radius: var(--kp-radius-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; container-type: inline-size; }
+/* Заголовок группы «Работы и услуги» перед первой работой (XLSX-2). */
+.opt-kp .opt-kp-group { font-size: 12px; font-weight: 600; color: var(--kp-muted); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 6px; }
+.opt-kp .opt-kp-tile-name { font-size: 12px; font-weight: 600; color: var(--kp-text); overflow-wrap: break-word; word-break: normal; }
+/*
+ * Поля позиции (DESIGN-FIX-2, п. 1): по умолчанию «Количество» и «Скидка» по 50 % в первой строке, «Цена» второй
+ * строкой во всю ширину; плитка ≥ 420 px — три в ряд (1 : 2.2 : 1.3); содержимое плитки уже 240 px (колонка < 290) — по одному в строку.
+ * Без container queries остаётся раскладка по умолчанию.
+ */
+.opt-kp .opt-kp-fields { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.opt-kp .opt-kp-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 calc(50% - 4px); min-width: 72px; }
+.opt-kp .opt-kp-field-price { flex: 1 1 100%; order: 3; }
+.opt-kp .opt-kp-field .opt-kp-label { text-transform: none; letter-spacing: 0; font-size: 11px; white-space: nowrap; }
+@container (min-width: 420px) {
+  .opt-kp .opt-kp-field { flex: 1 1 0; }
+  .opt-kp .opt-kp-field-price { flex: 2.2 1 0; order: 0; }
+  .opt-kp .opt-kp-field-discount { flex: 1.3 1 0; }
+}
+@container (max-width: 239px) {
+  .opt-kp .opt-kp-field { flex: 1 1 100%; }
+}
+.opt-kp .opt-kp-field input {
+  width: 100%; height: 24px; padding: 0 8px;
+  border: 1px solid var(--kp-line); border-radius: var(--kp-radius-sm); background: #fff;
+  font: inherit; font-size: 12px; line-height: 1.2; color: var(--kp-text);
+}
+.opt-kp .opt-kp-field input:focus { outline: none; border-color: var(--kp-accent); }
+/* Скидка со знаком «%» внутри поля, как в макете («0 %»). */
+.opt-kp .opt-kp-suffix { position: relative; display: block; }
+.opt-kp .opt-kp-suffix input { padding-right: 22px; }
+.opt-kp .opt-kp-suffix > span { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--kp-text); font-size: 12px; pointer-events: none; }
+.opt-kp .opt-kp-total { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.opt-kp .opt-kp-total b { font-size: 13px; font-weight: 600; }
+/* Вопросы: зелёная точка-маркер, тонкий разделитель между пунктами. */
+.opt-kp .opt-kp-questions { list-style: none; margin: 0; padding: 0; }
+.opt-kp .opt-kp-questions li { position: relative; padding: 7px 0 7px 14px; border-top: 1px solid var(--kp-line); font-size: 12px; }
+.opt-kp .opt-kp-questions li:first-child { border-top: 0; padding-top: 0; }
+.opt-kp .opt-kp-questions li:last-child { padding-bottom: 0; }
+.opt-kp .opt-kp-questions li::before { content: ''; position: absolute; left: 0; top: 13px; width: 6px; height: 6px; border-radius: 3px; background: var(--kp-accent); }
+.opt-kp .opt-kp-questions li:first-child::before { top: 6px; }
+/* Кнопки во всю ширину одна под другой: 28 px и 12/600 как «Загрузить» / «Создать резюме» розницы; неактивные — серый текст. */
+.opt-kp .opt-actions { gap: 6px; }
+.opt-kp .opt-actions .opt-btn { min-height: 28px; border-radius: var(--kp-radius-sm); border-color: var(--kp-line); font-size: 12px; font-weight: 600; color: var(--kp-text); }
+.opt-kp .opt-actions .opt-btn:disabled { opacity: 1; color: var(--kp-muted); border-color: var(--kp-line); background: #fff; }
+.opt-kp .opt-actions .opt-btn-green { border-color: #61c100; color: #258500; }
+.opt-kp .opt-actions .opt-btn-green:hover:not(:disabled) { background: #f6fff0; border-color: #258500; }
+.opt-kp .opt-kp-note { font-size: 12px; color: var(--kp-muted); }
+.opt-kp .opt-error { font-size: 12px; }
+
+/* Поиск цен в плитке позиции (RFD-AI-AGENT-OPT-PRICE, этап 6): строка состояния со ссылкой «Источники», малая кнопка, список предложений. */
+.opt-kp .opt-kp-price-state { gap: 4px; }
+.opt-kp .opt-kp-price-row { justify-content: space-between; align-items: center; gap: 6px 8px; }
+.opt-kp .opt-kp-price-row .opt-details-summary:disabled { color: var(--kp-muted); cursor: default; }
+.opt-kp .opt-btn-small { min-height: 22px; padding: 0 8px; font-size: 11px; font-weight: 600; border-radius: var(--kp-radius-sm); flex: none; }
+.opt-kp .opt-kp-offer { padding: 4px 0; border-top: 1px solid var(--kp-line); }
+.opt-kp .opt-kp-offer:first-of-type { border-top: 0; }
+.opt-kp .opt-kp-offer .opt-link { font-size: 12px; }

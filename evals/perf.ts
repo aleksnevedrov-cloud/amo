@@ -2,11 +2,11 @@
 // Меряет время от постановки в очередь до ответа (p50/p95) и проверяет, что ни одно сообщение не потерялось.
 // Нужен PostgreSQL (TEST_DATABASE_URL). LLM не вызывается — проверяется наш код, БД и пул соединений.
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { DialogPipeline, Orchestrator, type AmoAccess, type LlmClient, type LlmRequest, type LlmResponse } from '@ai-door/agent';
-import { AmoApiClient } from '@ai-door/amo';
-import { DialogRepo, JournalRepo, MemoryRepo, OutcomesRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema } from '@ai-door/db';
-import { PricingRepo } from '@ai-door/pricing';
-import { seeded } from '../packages/tools/test/fixtures.ts';
+import { DialogPipeline, Orchestrator, type AmoAccess, type LlmClient, type LlmRequest, type LlmResponse } from '@retail/agent';
+import { AmoApiClient } from '@core/amo';
+import { DialogRepo, JournalRepo, MemoryRepo, OutcomesRepo, SettingsRepo, SuggestionsRepo, widgetSettingsSchema } from '@core/db';
+import { PricingRepo } from '@retail/pricing';
+import { seeded } from '../packages/core/tools/test/fixtures.ts';
 
 const N = Number(process.argv[2] ?? 100);
 const LLM_LATENCY_MS = Number(process.env.PERF_LLM_MS ?? 800);

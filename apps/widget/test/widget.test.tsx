@@ -71,6 +71,7 @@ describe('панель в карточке сделки', () => {
     let paused = false;
     const { self, calls } = fakeSelf('lcard', {
       'GET /widget/v1/leads/555/panel': () => panel(paused),
+      'GET /widget/v1/leads/555/dialog': { leadId: 555, items: [], send: { available: false, reason: 'Wazzup не подключён' } },
       'POST /widget/v1/leads/555/pause': () => {
         paused = true;
         return { ok: true };
@@ -80,16 +81,23 @@ describe('панель в карточке сделки', () => {
     await act(async () => void cb.render!());
     await flush();
     expect(calls[0]?.url).toBe('https://ai.test.ru/widget/v1/leads/555/panel');
+    // Узкая колонка (RETAIL-WIDGET-WINDOW): режим, счётчики, кнопки; товары и журнал — в большом окне.
     expect(document.body.textContent).toContain('Автоматический');
-    expect(document.body.textContent).toContain('Турин 1');
-    expect(document.body.textContent).toContain('Турин 1 — 14 900 ₽');
+    expect(document.body.textContent).toContain('Задач AI 0 · Файлов 0 · Товаров 1');
+    expect(document.body.textContent).not.toContain('Турин 1');
 
     await click('Пауза');
     await flush();
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/pause'))).toBe(true);
     expect(document.body.textContent).toContain('на паузе');
     expect(document.body.textContent).toContain('Менеджер написал клиенту');
-    expect(document.body.textContent).toContain('Вернуть AI');
+    expect(document.body.textContent).toContain('Возврат AI');
+
+    await click('Развернуть ⤢');
+    await flush();
+    expect(document.querySelector('.ai-door-modal')?.textContent).toContain('Турин 1');
+    await click('Журнал');
+    expect(document.querySelector('.ai-door-modal')?.textContent).toContain('Турин 1 — 14 900 ₽');
     await act(async () => void cb.destroy!());
   });
 

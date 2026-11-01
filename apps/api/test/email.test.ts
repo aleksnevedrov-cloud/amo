@@ -1,5 +1,5 @@
-import { composeRaw, type Mailbox, type OutgoingEmail } from '@ai-door/mail';
-import { widgetSettingsSchema } from '@ai-door/db';
+import { composeRaw, type Mailbox, type OutgoingEmail } from '@retail/mail';
+import { widgetSettingsSchema } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setup, widgetToken } from './helpers.ts';
 
@@ -14,6 +14,7 @@ const mailbox: Mailbox = {
     return { uidValidity: '1', maxUid: 0 };
   },
   fetchAfter: async () => [],
+  fetchSince: async () => [],
   findSentFolder: async () => 'Отправленные',
   append: async (folder) => void appended.push(folder),
   close: async () => undefined,

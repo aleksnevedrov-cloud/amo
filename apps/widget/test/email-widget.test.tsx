@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { widgetSettingsSchema } from '@ai-door/db';
+import { widgetSettingsSchema } from '@core/db';
 import { act } from 'react';
 import { describe, expect, it } from 'vitest';
 import type { AmoWidgetSelf } from '../src/amo.ts';

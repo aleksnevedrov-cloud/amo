@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ScriptedLlm, text, toolUse } from '../../packages/agent/test/scripted-llm.ts';
-import { seeded, type Seeded } from '../../packages/tools/test/fixtures.ts';
-import { calculate, pricingRulesSchema } from '@ai-door/pricing';
+import { ScriptedLlm, text, toolUse } from '../../packages/retail/agent/test/scripted-llm.ts';
+import { seeded, type Seeded } from '../../packages/core/tools/test/fixtures.ts';
+import { calculate, pricingRulesSchema } from '@retail/pricing';
 import { dialogSchema, runDialog, summarize, withoutComment, type EvalEnv } from '../runner.ts';
 
 let s: Seeded;

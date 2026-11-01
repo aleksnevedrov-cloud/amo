@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { TokenService } from '@ai-door/amo';
+import type { TokenService } from '@core/amo';
 import { runRefreshTokens } from '../src/jobs.ts';
 
 const log = () => ({ info: vi.fn(), warn: vi.fn() });

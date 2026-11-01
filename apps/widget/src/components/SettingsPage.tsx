@@ -1,24 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Dictionaries, Mode, Status, WidgetApi, WidgetSettings } from '../api.ts';
+import { DEFAULT_PRICING } from '@core/llm/pricing';
+import type { Dictionaries, LlmKeys, Mode, ModelRef, ProviderId, Status, WidgetApi, WidgetSettings } from '../api.ts';
 import { CatalogStatus } from './Catalog.tsx';
 import { Field, linesToList, NumberInput } from './fields.tsx';
 import { Drafts } from './Drafts.tsx';
 import { EmailSettings } from './EmailSettings.tsx';
+import { TaskScopeSettings } from './TaskScope.tsx';
+import { ReactivationSettings } from './Reactivation.tsx';
+import { WazzupSettings } from './WazzupSettings.tsx';
 import { Journal } from './Journal.tsx';
 import { PricingEditor } from './PricingEditor.tsx';
 import { Knowledge } from './Knowledge.tsx';
+import { ModelTab } from './ModelSettings.tsx';
 import { Analytics } from './Analytics.tsx';
 import { Sandbox } from './Sandbox.tsx';
 import { Versions } from './Versions.tsx';
-import { ConnectionBadge, modeLabel, rub } from './StatusBadge.tsx';
+import { ConnectionBadge, modeLabel, providerShort, providerVendor, rub } from './StatusBadge.tsx';
 import { s } from './styles.ts';
 import { errorMessage, useLoad } from './useLoad.ts';
 
 const MODES: Mode[] = ['off', 'hints', 'semi', 'auto'];
-const MODELS = [
-  { id: 'claude-opus-5', name: 'Claude Opus 5 (по умолчанию)' },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 (дешевле)' },
-];
 
 const TASK_KINDS = [
   ['callback', 'Перезвонить'],
@@ -34,7 +35,9 @@ const TABS = [
   ['model', 'Модель'],
   ['where', 'Где работает'],
   ['handoff', 'Передача менеджеру'],
+  ['reactivation', 'Догон после отказа'],
   ['email', 'Почта'],
+  ['wazzup', 'Wazzup'],
   ['catalog', 'Каталог'],
   ['pricing', 'Правила цен'],
   ['knowledge', 'База знаний'],
@@ -46,7 +49,7 @@ const TABS = [
   ['versions', 'Версии'],
 ] as const;
 type Tab = (typeof TABS)[number][0];
-const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'email', 'catalog', 'limits']);
+const SETTINGS_TABS = new Set<Tab>(['status', 'behavior', 'model', 'where', 'handoff', 'reactivation', 'email', 'catalog', 'limits']);
 
 /**
  * Расширенные настройки виджета (раздел 11.1 ТЗ). Рисуется и на своей странице (advanced_settings),
@@ -85,8 +88,19 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   const [error, setError] = useState<string | null>(null);
   const [dict, setDict] = useState<Dictionaries | null>(null);
   const dirty = JSON.stringify(draft) !== JSON.stringify(base);
-  // Ключ Anthropic меняется на вкладке «Модель» — бейдж в «Статусе» обновляем без перезагрузки формы.
+  // Ключи меняются на вкладке «Модель» — бейдж в «Статусе» и блокировка «Сохранить» обновляются без перезагрузки формы.
   const [llmOk, setLlmOk] = useState(status.llmConfigured);
+  const [keys, setKeys] = useState<LlmKeys | null>(null);
+  const [compare, setCompare] = useState<ModelRef[] | undefined>(undefined);
+  const provider: ProviderId = draft.model?.provider ?? 'anthropic';
+  const providersWithKey = keys ? keys.providers : status.llm?.providers ?? null;
+  // Ключ выбранного провайдера не сохранён — «Сохранить» недоступна (раздел 3 ТЗ 1.1.0).
+  const noKey = providersWithKey !== null && !providersWithKey.includes(provider) && provider !== (base.model?.provider ?? 'anthropic');
+  const [groups, setGroups] = useState<{ chatId: string; chatName: string | null; messages: number; skipped: number }[] | null>(null);
+  const onKeys = useCallback((k: LlmKeys | null, legacyConfigured: boolean) => {
+    setKeys(k);
+    setLlmOk(k ? k.providers.includes(k.provider) : legacyConfigured);
+  }, []);
   const onRestored = async () => {
     const { settings } = await api.settings();
     setBase(settings);
@@ -94,8 +108,12 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
   };
 
   useEffect(() => {
-    if ((tab === 'where' || tab === 'handoff' || tab === 'email') && !dict) api.dictionaries().then(setDict, () => undefined);
+    if ((tab === 'where' || tab === 'handoff' || tab === 'reactivation' || tab === 'email' || tab === 'model') && !dict) api.dictionaries().then((d) => setDict(d ?? null), () => undefined);
   }, [tab, dict, api]);
+
+  useEffect(() => {
+    if (tab === ("where") && groups === null) api.wazzupGroups().then((r) => setGroups(r?.items ?? []), () => setGroups([]));
+  }, [tab, groups, api]);
 
   const set = <K extends keyof WidgetSettings>(k: K, v: Partial<WidgetSettings[K]>) =>
     setDraft((d) => ({ ...d, [k]: typeof v === 'object' && v !== null ? { ...(d[k] as object), ...v } : v }));
@@ -107,8 +125,17 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
       await api.saveSettings(draft);
       props.onSaved();
     } catch (err) {
-      const code = (err as { status?: number } | null)?.status;
-      setError(code === 403 ? 'Изменять настройки может только администратор аккаунта.' : code === 400 ? 'Проверьте заполнение полей.' : errorMessage(err));
+      const code = (err as { status?: number; responseJSON?: { error?: string; message?: string } } | null)?.status;
+      const body = (err as { responseJSON?: { error?: string; message?: string } } | null)?.responseJSON;
+      setError(
+        body?.error === 'no_key'
+          ? (body.message ?? `Введите ключ ${providerShort(provider)}`)
+          : code === 403
+            ? 'Изменять настройки может только администратор аккаунта.'
+            : code === 400
+              ? 'Проверьте заполнение полей.'
+              : errorMessage(err),
+      );
     } finally {
       setSaving(false);
     }
@@ -132,8 +159,10 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
             <div style={s.row}>
               <ConnectionBadge status={status} />
               <span style={llmOk ? s.badgeOk : s.badgeBad}>
-                {llmOk ? 'LLM подключена' : 'Нет ключа Anthropic — задайте во вкладке «Модель»'}
+                {llmOk ? `LLM подключена: ${providerShort(provider)} · ${draft.model?.model ?? ''}` : `Нет ключа ${providerVendor(provider)} — задайте во вкладке «Модель»`}
               </span>
+              {status.llm?.missingModels?.length ? <span style={s.badgeWarn}>Модель {status.llm.missingModels.join(', ')} не найдена у провайдера — выберите другую во вкладке «Модель»</span> : null}
+              {status.llm?.lastError && <span style={s.badgeWarn} title={status.llm.lastError.summary}>Последний сбой LLM: {status.llm.lastError.summary.slice(0, 80)}</span>}
               <span style={status.catalog.products > 0 ? s.badgeOk : s.badgeWarn}>Каталог: {status.catalog.products} товаров</span>
             </div>
           </Field>
@@ -187,51 +216,18 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
       )}
 
       {tab === 'model' && (
-        <>
-          <LlmKey api={api} isAdmin={props.status.isAdmin} onChanged={setLlmOk} />
-          <Field label="Провайдер">
-            <select style={s.select} value="anthropic" disabled>
-              <option value="anthropic">Anthropic Claude</option>
-            </select>
-          </Field>
-          <Field label="Модель">
-            <select style={s.select} value={draft.model.model} onChange={(e) => set('model', { model: e.target.value })}>
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Резервная модель при сбое">
-            <select
-              style={s.select}
-              value={draft.model.fallbackModel ?? ''}
-              onChange={(e) => set('model', { fallbackModel: e.target.value || null })}
-            >
-              <option value="">Нет</option>
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Глубина рассуждений" hint="Выше — точнее на сложных вопросах, но дольше и дороже.">
-            <select
-              style={s.select}
-              value={draft.model.effort}
-              onChange={(e) => set('model', { effort: e.target.value as WidgetSettings['model']['effort'] })}
-            >
-              <option value="low">Низкая (быстро)</option>
-              <option value="medium">Средняя</option>
-              <option value="high">Высокая</option>
-            </select>
-          </Field>
-          <Field label="Лимит токенов на ответ">
-            <NumberInput value={draft.model.maxTokens} min={512} max={16000} onChange={(v) => set('model', { maxTokens: v ?? 4096 })} />
-          </Field>
-        </>
+        <ModelTab
+          api={api}
+          isAdmin={props.status.isAdmin}
+          value={draft.model}
+          dict={dict}
+          onChange={(patch) => set('model', patch)}
+          onKeys={onKeys}
+          onCompare={(models) => {
+            setCompare(models);
+            setTab('sandbox');
+          }}
+        />
       )}
 
       {tab === 'where' && (
@@ -259,6 +255,7 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               <div style={s.muted}>Загрузка воронок…</div>
             )}
           </Field>
+          <TaskScopeSettings sweep={draft.taskSweep} dict={dict} onChange={(patch) => set('taskSweep', patch)} />
           <Field label="Этапы без AI" hint="На этих этапах AI не пишет клиенту.">
             <div style={s.col}>
               {statuses.map((st) => (
@@ -328,6 +325,36 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
               Задержка ответа пропорционально длине
             </label>
           </Field>
+        <Field label="Групповые чаты" hint="Агент отвечает только в отмеченных группах WhatsApp и Telegram; остальные групповые беседы пропускает и пишет об этом в журнал.">
+          <label style={s.row}>
+            <input type="checkbox" checked={draft.where.groups.mode !== 'allow_all'} onChange={(e) => set('where', { groups: { ...draft.where.groups, mode: e.target.checked ? 'allowlist' : 'allow_all' } })} />
+            Ограничивать работу в группах
+          </label>
+              <label style={s.row}>
+                <input type="checkbox" checked={draft.where.groups.mentionOnly} onChange={(e) => set('where', { groups: { ...draft.where.groups, mentionOnly: e.target.checked } })} />
+                В группах отвечать только на обращение
+              </label>
+              <label style={s.row}>
+                Слово-обращение
+                <input value={draft.where.groups.mention} maxLength={40} placeholder="@Амма" onChange={(e) => set('where', { groups: { ...draft.where.groups, mention: e.target.value } })} />
+              </label>
+          {(groups ?? []).map((g) => (
+            <label key={g.chatId} style={s.row}>
+              <input
+                type="checkbox"
+                checked={draft.where.groups.allowedChatIds.includes(g.chatId)}
+                onChange={(e) => {
+                  const cur = new Set(draft.where.groups.allowedChatIds);
+                  if (e.target.checked) cur.add(g.chatId);
+                  else cur.delete(g.chatId);
+                  set('where', { groups: { ...draft.where.groups, allowedChatIds: [...cur] } });
+                }}
+              />
+              {`${g.chatName ?? 'Без названия'} (${g.chatId}) — сообщений ${g.messages}, пропущено ${g.skipped}`}
+            </label>
+          ))}
+          {groups !== null && groups.length === 0 ? <div>Групповых чатов в данных Wazzup пока нет</div> : null}
+        </Field>
         </>
       )}
 
@@ -345,8 +372,27 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Срок задачи, минут">
             <NumberInput value={draft.handoff.taskDeadlineMin} min={5} onChange={(v) => set('handoff', { taskDeadlineMin: v ?? 60 })} />
           </Field>
-          <Field label="Ответственный (ID пользователя amo)" hint="Пусто — ответственный по сделке.">
-            <NumberInput nullable value={draft.handoff.responsibleUserId} onChange={(v) => set('handoff', { responsibleUserId: v })} />
+          <Field label="Администратор для задач" hint="Кому ставить задачу, если у сделки нет активного ответственного. Пусто — первый активный администратор аккаунта.">
+            <select style={s.select} value={draft.handoff.fallbackUserId ?? ''} onChange={(e) => set('handoff', { fallbackUserId: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">Первый активный администратор</option>
+              {(dict?.users ?? []).filter((u) => u.isActive).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+                {u.isAdmin ? ' (администратор)' : ''}
+              </option>
+            ))}
+            </select>
+          </Field>
+          <Field label="Всегда ставить задачи этому пользователю (не рекомендуется)" hint="Минуя ответственного по сделке. Пусто — задачи уходят ответственному, при его отсутствии — администратору.">
+            <select style={s.select} value={draft.handoff.responsibleUserId ?? ''} onChange={(e) => set('handoff', { responsibleUserId: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">Не задано</option>
+              {(dict?.users ?? []).filter((u) => u.isActive).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+                {u.isAdmin ? ' (администратор)' : ''}
+              </option>
+            ))}
+            </select>
           </Field>
           <Field label="Перевести сделку на этап">
             <select
@@ -420,6 +466,8 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           onChange={(patch) => set('email', patch)}
         />
       )}
+      {tab === 'reactivation' && <ReactivationSettings value={draft.reactivation} dict={dict} onChange={(patch) => set('reactivation', patch)} />}
+      {tab === 'wazzup' && <WazzupSettings api={api} />}
       {tab === 'knowledge' && <Knowledge api={api} />}
       {tab === 'pricing' && <PricingEditor api={api} />}
       {tab === 'drafts' && <Drafts api={api} />}
@@ -442,20 +490,28 @@ function SettingsForm(props: { api: WidgetApi; status: Status; initial: WidgetSe
           <Field label="Курс доллара для учёта расходов, ₽">
             <NumberInput value={draft.billing.usdRubRate} min={1} onChange={(v) => set('billing', { usdRubRate: v ?? 90 })} />
           </Field>
+          <Field label="Валюта учёта">
+            <select style={s.select} value={draft.billing.currency ?? 'rub'} onChange={(e) => set('billing', { currency: e.target.value as 'rub' | 'usd' })}>
+              <option value="rub">₽ по курсу</option>
+              <option value="usd">$</option>
+            </select>
+          </Field>
+          <PricingTable value={draft.billing.pricing ?? {}} onChange={(pricing) => set('billing', { pricing })} />
         </>
       )}
 
-      {tab === 'sandbox' && <Sandbox api={api} draft={dirty ? draft : undefined} />}
+      {tab === 'sandbox' && <Sandbox api={api} draft={dirty ? draft : undefined} compare={compare} providers={providersWithKey ?? undefined} />}
       {tab === 'journal' && <Journal api={api} />}
       {tab === 'analytics' && <Analytics api={api} />}
       {tab === 'versions' && <Versions api={api} isAdmin={props.status.isAdmin} onRestored={() => void onRestored()} />}
 
       {SETTINGS_TABS.has(tab) && (
         <div style={{ ...s.row, marginTop: 16 }}>
-          <button type="button" style={s.button} disabled={saving || !dirty} onClick={save}>
+          <button type="button" style={s.button} disabled={saving || !dirty || noKey} onClick={save}>
             {saving ? 'Сохранение…' : 'Сохранить'}
           </button>
-          {dirty && <span style={s.muted}>Есть несохранённые изменения. В песочнице проверяется черновик.</span>}
+          {noKey && <span style={s.error}>Введите ключ {providerVendor(provider)} во вкладке «Модель»</span>}
+          {dirty && !noKey && <span style={s.muted}>Есть несохранённые изменения. В песочнице проверяется черновик.</span>}
           {error && <span style={s.error}>{error}</span>}
         </div>
       )}
@@ -486,51 +542,47 @@ function PurgeAccount({ api }: { api: WidgetApi }) {
   );
 }
 
-/** Ключ Anthropic аккаунта: ввод (только запись), проверка без расходов, удаление. */
-function LlmKey({ api, isAdmin, onChanged }: { api: WidgetApi; isAdmin: boolean; onChanged: (configured: boolean) => void }) {
-  const load = useCallback(async () => {
-    const st = await api.llmStatus();
-    onChanged(st.configured);
-    return st;
-  }, [api, onChanged]);
-  const [state, reload] = useLoad(load);
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const run = async (fn: () => Promise<string>) => {
-    setBusy(true);
-    setMsg(null);
-    try {
-      setMsg(await fn());
-      reload();
-    } catch (err) {
-      setMsg(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+/** Тарифы по моделям, $ за 1M токенов (раздел 5 ТЗ 1.1.0): таблица по умолчанию с правкой заказчика. */
+function PricingTable({ value, onChange }: { value: Record<string, { input: number; output: number; cachedInput?: number }>; onChange: (v: Record<string, { input: number; output: number; cachedInput?: number }>) => void }) {
+  const rows = (['anthropic', 'openai'] as const).flatMap((p) => Object.entries(DEFAULT_PRICING[p]).map(([id, t]) => ({ key: `${p}:${id}`, provider: p, id, name: t.name, input: t.input, output: t.output })));
+  const cell = { padding: '2px 6px', borderBottom: '1px solid #e8eaeb' };
+  const setPrice = (key: string, field: 'input' | 'output', v: number | null, def: { input: number; output: number }) => {
+    const cur = value[key] ?? { input: def.input, output: def.output };
+    const updated = { ...cur, [field]: v ?? 0 };
+    const next = Object.fromEntries(Object.entries(value).filter(([k]) => k !== key));
+    if (!(updated.input === def.input && updated.output === def.output)) next[key] = updated;
+    onChange(next);
   };
-  const statusText =
-    state.status !== 'ready' ? '' : state.data.hasOwnKey ? 'Используется ключ вашего аккаунта.' : state.data.configured ? 'Используется общий ключ сервера.' : 'Ключа нет — AI не отвечает. Получите ключ на console.anthropic.com и вставьте сюда.';
   return (
-    <Field label="Ключ Anthropic" hint="Ключ хранится зашифрованным и не показывается. Расход на модель идёт с вашего счёта Anthropic.">
-      <div style={{ ...s.small, marginBottom: 6 }}>{statusText}</div>
-      {isAdmin && (
-        <div style={s.row}>
-          <input style={{ ...s.input, width: 360 }} type="password" placeholder="sk-ant-…" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
-          <button type="button" style={s.buttonGhost} disabled={busy || key.trim().length < 20} onClick={() => void run(async () => { const r = await api.testLlmKey(key.trim()); return r.ok ? `Ключ работает, моделей доступно: ${r.models.length}.` : r.error; })}>
-            Проверить
-          </button>
-          <button type="button" style={s.button} disabled={busy || key.trim().length < 20} onClick={() => void run(async () => { await api.setLlmKey(key.trim()); setKey(''); return 'Ключ сохранён.'; })}>
-            Сохранить ключ
-          </button>
-          {state.status === 'ready' && state.data.hasOwnKey && (
-            <button type="button" style={s.buttonGhost} disabled={busy} onClick={() => void run(async () => { await api.deleteLlmKey(); return 'Ключ удалён.'; })}>
-              Удалить ключ
-            </button>
-          )}
-        </div>
-      )}
-      {msg && <div style={s.small}>{msg}</div>}
+    <Field label="Тарифы моделей, $ за 1 млн токенов" hint="Значения по умолчанию — из прайс-листов провайдеров; исправьте, если ваш тариф отличается. Стоимость в журнале и аналитике считается по этой таблице.">
+      <table style={{ ...s.small, borderCollapse: 'collapse', width: '100%', maxWidth: 560 }}>
+        <thead>
+          <tr style={s.muted}>
+            <th align="left" style={cell}>Модель</th>
+            <th align="right" style={cell}>Вход</th>
+            <th align="right" style={cell}>Выход</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const cur = value[r.key] ?? { input: r.input, output: r.output };
+            const changed = Boolean(value[r.key]);
+            return (
+              <tr key={r.key}>
+                <td style={cell}>
+                  {providerShort(r.provider)} · {r.name} {changed && <span style={s.badgeWarn}>изменено</span>}
+                </td>
+                <td style={cell} align="right">
+                  <input style={{ ...s.input, width: 90, height: 28 }} type="number" step="0.01" min={0} value={cur.input} onChange={(e) => setPrice(r.key, 'input', e.target.value === '' ? null : Number(e.target.value), r)} />
+                </td>
+                <td style={cell} align="right">
+                  <input style={{ ...s.input, width: 90, height: 28 }} type="number" step="0.01" min={0} value={cur.output} onChange={(e) => setPrice(r.key, 'output', e.target.value === '' ? null : Number(e.target.value), r)} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </Field>
   );
 }

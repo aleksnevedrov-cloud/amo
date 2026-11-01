@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import type { JournalItem, WidgetApi } from '../api.ts';
-import { dateTime, kindLabel, rub } from './StatusBadge.tsx';
+import { dateTime, kindLabel, modelLabel, rub } from './StatusBadge.tsx';
 import { s } from './styles.ts';
 import { errorMessage } from './useLoad.ts';
 
@@ -53,6 +53,8 @@ export function Journal({ api }: { api: WidgetApi }) {
             <b>{kindLabel(e.kind)}</b>
             {e.leadId && <span style={s.muted}>сделка {e.leadId}</span>}
             {e.costRub > 0 && <span style={s.muted}>{rub(e.costRub)}</span>}
+            {typeof e.details.model === 'string' && <span style={s.muted}>{modelLabel(e.details.provider as string | undefined, e.details.model)}</span>}
+            {(e.details.fallbackUsed === true || e.details.fallback === true) && <span style={s.badgeWarn}>fallback</span>}
           </div>
           <div style={{ whiteSpace: 'pre-wrap' }}>{e.summary}</div>
         </div>

@@ -1,0 +1,593 @@
+import { z } from 'zod';
+import { withTransaction, type Db } from './pool.ts';
+
+const DEFAULT_PERSONA =
+  'Вы — консультант магазина дверей «РФ-Двери» (rf-dveri.ru). Общаетесь вежливо, по-деловому и коротко, ' +
+  'как опытный продавец: выясняете потребность (помещение, размеры проёма, стиль, бюджет), подбираете модели ' +
+  'из каталога и объясняете разницу между покрытиями.';
+
+const ids = z.array(z.number().int().positive());
+
+export const llmProviderSchema = z.enum(['anthropic', 'openai']);
+export type LlmProviderId = z.infer<typeof llmProviderSchema>;
+export const llmModelRefSchema = z.object({ provider: llmProviderSchema, model: z.string().min(1) }).strict();
+export type LlmModelRef = z.infer<typeof llmModelRefSchema>;
+
+/**
+ * Схема настроек виджета. Каждый раздел имеет значения по умолчанию,
+ * поэтому сохранённые ранее настройки остаются валидными при добавлении разделов.
+ */
+export const widgetSettingsSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    mode: z.enum(['auto', 'semi', 'hints', 'off']).default('off'),
+    behavior: z
+      .object({
+        persona: z.string().max(4000).default(DEFAULT_PERSONA),
+        rules: z.string().max(8000).default(''),
+        forbiddenTopics: z.array(z.string().max(200)).max(50).default([]),
+        greeting: z.string().max(1000).default(''),
+        handoffPhrase: z
+          .string()
+          .max(1000)
+          .default('Передаю ваш вопрос менеджеру — он свяжется с вами в ближайшее время.'),
+      })
+      .strict()
+      .default({}),
+    model: z
+      .object({
+        /** Провайдер LLM (1.1.0): переключается в настройках, хранится в БД, действует со следующего сообщения. */
+        provider: llmProviderSchema.default('anthropic'),
+        model: z.string().min(1).default('claude-opus-5'),
+        fallbackModel: z.string().min(1).nullable().default('claude-sonnet-5'),
+        /** Провайдер резервной модели; null — тот же, что основной. */
+        fallbackProvider: llmProviderSchema.nullable().default(null),
+        effort: z.enum(['low', 'medium', 'high']).default('low'),
+        maxTokens: z.number().int().min(512).max(16000).default(4096),
+        /** null — значение провайдера по умолчанию; моделям без поддержки параметр не передаётся. */
+        temperature: z.number().min(0).max(2).nullable().default(null),
+        /** Модель по умолчанию для каждого провайдера — подставляется при переключении. */
+        defaults: z.object({ anthropic: z.string().min(1).nullable().default(null), openai: z.string().min(1).nullable().default(null) }).strict().default({}),
+        /** Переопределения для воронок и этапов (иерархия: сделка > этап > воронка > глобально, раздел 3 ТЗ). */
+        overrides: z.object({ pipelines: z.record(llmModelRefSchema).default({}), statuses: z.record(llmModelRefSchema).default({}) }).strict().default({}),
+      })
+      .strict()
+      .default({}),
+    where: z
+      .object({
+        /** null — все воронки. */
+        pipelineIds: ids.nullable().default(null),
+        /** Этапы, на которых AI не пишет. */
+        disabledStatusIds: ids.default([]),
+        batchWindowSec: z.number().int().min(0).max(120).default(8),
+        typingDelay: z.boolean().default(false),
+        /** Групповые чаты WhatsApp/Telegram: где агенту разрешено отвечать. */
+        groups: z
+          .object({
+            /** allowlist - только разрешенные чаты; block_all - молчать во всех группах; allow_all - отвечать везде. */
+            mode: z.enum(['allowlist', 'block_all', 'allow_all']).default('allowlist'),
+            /** chatId Wazzup разрешенных групп. */
+            allowedChatIds: z.array(z.string().min(1).max(120)).max(50).default(['79296519427-1595920633']),
+            /** Слово-обращение к агенту в группе; регистр и собака не важны. */
+            mention: z.string().max(40).default('@Амма'),
+            /** В группах отвечать только на обращение. */
+            mentionOnly: z.boolean().default(true),
+          })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({}),
+    handoff: z
+      .object({
+        taskTypeId: z.number().int().positive().default(1),
+        taskDeadlineMin: z.number().int().min(5).max(7 * 24 * 60).default(60),
+        /** null — ответственный по сделке. */
+        responsibleUserId: z.number().int().positive().nullable().default(null),
+        /** «Администратор для задач»: кому ставить, если у сделки нет активного ответственного; null — первый активный администратор. */
+        fallbackUserId: z.number().int().positive().nullable().default(null),
+        /** Этап, на который переводить сделку при передаче; null — не переводить. */
+        statusId: z.number().int().positive().nullable().default(null),
+      })
+      .strict()
+      .default({}),
+    catalog: z
+      .object({
+        /** Основной фид (совместимость с ранними настройками); полный список — feedUrls. */
+        feedUrl: z.union([z.literal(''), z.string().url()]).default(''),
+        /** Дополнительные фиды того же магазина (у РФ-Двери: входные, межкомнатные, фурнитура). */
+        feedUrls: z.array(z.string().url()).max(10).default([]),
+        importEveryHours: z.number().int().min(1).max(168).default(24),
+      })
+      .strict()
+      .default({}),
+    limits: z
+      .object({
+        /** Дневной лимит расходов на LLM, ₽; null — без лимита. */
+        dailyRub: z.number().positive().nullable().default(null),
+        /** Что делать при превышении дневного лимита. */
+        onExceed: z.enum(['stop', 'handoff', 'hints']).default('stop'),
+        /** Лимит ответов AI в одной сделке; null — без лимита. */
+        maxAiMessagesPerLead: z.number().int().positive().nullable().default(null),
+      })
+      .strict()
+      .default({}),
+    /** Типы задач, которые AI ставит сам (crm.create_task): тип amo и срок. */
+    tasks: z
+      .record(
+        z.enum(['callback', 'send_offer', 'check_availability', 'measure', 'other']),
+        z.object({ taskTypeId: z.number().int().positive(), deadlineMin: z.number().int().min(5).max(30 * 24 * 60) }).strict(),
+      )
+      .default({}),
+    /** Автопостановка задач в сделки, где задач нет. */
+  taskSweep: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Через сколько минут после создания сделки проверять наличие задачи. */
+      newLeadAfterMin: z.number().int().min(5).max(24 * 60).default(60),
+      /** Ставить ли задачу сделкам в «Неразобранном». */
+      includeUnsorted: z.boolean().default(false),
+      /** Час вечернего обхода по Москве. */
+      eveningHour: z.number().int().min(0).max(23).default(20),
+      /** Воронка вечернего обхода. */
+      pipelineId: z.number().int().positive().nullable().default(null),
+      /** Этапы вечернего обхода. */
+      statusIds: z.array(z.number().int().positive()).default([]),
+      /** Тип задачи amoCRM. */
+      taskTypeId: z.number().int().positive().default(1),
+      /** Потолок задач за один обход. */
+      maxPerRun: z.number().int().min(1).max(1000).default(50),
+      /** Срок задачи в часах от постановки. */
+      dueHours: z.number().int().min(1).max(240).default(18),
+      /** Собирать комментарий моделью (дороже, но содержательнее). */
+      llmComment: z.boolean().default(true),
+    })
+    .strict()
+    .default({}),
+  hints: z
+      .object({
+        /** Готовить подсказки менеджеру, когда AI на паузе (раздел 6 ТЗ). */
+        whenPaused: z.boolean().default(true),
+      })
+      .strict()
+      .default({}),
+    salesbot: z
+      .object({
+        /** Бот-отправщик: через него уходят одобренные черновики (режим «Полуавто»). */
+        senderBotId: z.number().int().positive().nullable().default(null),
+      })
+      .strict()
+      .default({}),
+    email: z
+      .object({
+        enabled: z.boolean().default(false),
+        imapHost: z.string().max(200).default(''),
+        imapPort: z.number().int().min(1).max(65535).default(993),
+        imapSecure: z.boolean().default(true),
+        smtpHost: z.string().max(200).default(''),
+        smtpPort: z.number().int().min(1).max(65535).default(465),
+        smtpSecure: z.boolean().default(true),
+        username: z.string().max(200).default(''),
+        /** Адрес отправителя; пусто — как логин. */
+        fromAddress: z.union([z.literal(''), z.string().email()]).default(''),
+        fromName: z.string().max(200).default('РФ-Двери'),
+        inboxFolder: z.string().max(200).default('INBOX'),
+        /** Пусто — определить по специальной метке \\Sent. */
+        sentFolder: z.string().max(200).default(''),
+        saveToSent: z.boolean().default(true),
+        signature: z.string().max(2000).default('С уважением,\nРФ-Двери\nrf-dveri.ru'),
+        /**
+         * Отправитель не найден в amo:
+         *  wait_for_amo — почта уже подключена к amo: ждать, пока amo сам создаст сделку, и ответить в ней;
+         *  create_lead — создать контакт и сделку; skip — не отвечать.
+         */
+        unknownSender: z.enum(['wait_for_amo', 'create_lead', 'skip']).default('wait_for_amo'),
+        /** Сколько ждать сделку от amo (включая принятие заявки из «Неразобранного»), минут. */
+        waitForAmoMin: z.number().int().min(1).max(240).default(60),
+        /** Если amo так и не создал сделку. */
+        afterWait: z.enum(['skip', 'create_lead']).default('skip'),
+        /** Дублировать ответ AI примечанием в сделке (не нужно, если почта подключена к amo). */
+        noteInLead: z.boolean().default(false),
+        newLeadPipelineId: z.number().int().positive().nullable().default(null),
+        newLeadStatusId: z.number().int().positive().nullable().default(null),
+        /** Защита от петель с автоответчиками. */
+        maxRepliesPerAddressPerDay: z.number().int().min(1).max(100).default(10),
+        /** Адреса и домены, на которые AI не отвечает (поставщики, сервисы). */
+        ignore: z.array(z.string().max(200)).max(200).default([]),
+        /**
+         * RFD-AI-AGENT-FIX-PACK-2410, ч. 2: несколько ящиков. Первый (id main) — прежний ящик (переносится миграцией 024, mode
+         * reply: из него уходят ответы по SMTP из общих полей выше). Остальные — ящики почты amo (ek@…, info@…), mode read:
+         * агент читает письма и вложения, привязывает к сделке по отправителю, в сделки не создаёт и не отвечает. Пароль —
+         * на каждый ящик (mailbox_credentials.mailbox_id). Пусто и заданы imapHost / username — один ящик main из полей выше.
+         */
+        mailboxes: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(40).regex(/^[a-z0-9_-]+$/i),
+                address: z.string().max(200).default(''),
+                imapHost: z.string().max(200).default(''),
+                imapPort: z.number().int().min(1).max(65535).default(993),
+                imapSecure: z.boolean().default(true),
+                username: z.string().max(200).default(''),
+                inboxFolder: z.string().max(200).default('INBOX'),
+                sentFolder: z.string().max(200).default(''),
+                mode: z.enum(['read', 'reply']).default('read'),
+                /** При первом подключении дочитать письма за столько дней (без ответов); 0 — только новые. */
+                backfillDays: z.number().int().min(0).max(90).default(14),
+              })
+              .strict(),
+          )
+          .max(20)
+          .default([]),
+      })
+      .strict()
+      .default({}),
+    stt: z
+      .object({
+        provider: z.enum(['off', 'yandex', 'openai']).default('off'),
+      })
+      .strict()
+      .default({}),
+    /**
+     * RFD-AI-AGENT-CALLS-RETAIL: записи разговоров ВАТС из примечаний amo — скачивание, расшифровка, один итог за день на
+     * сделку (воронка «Двери», этапы кроме 142 / 143) или контакт. Включено по умолчанию; экрана в виджете пока нет.
+     */
+    calls: z
+      .object({
+        callsEnabled: z.boolean().default(true),
+        /** Примечание «Итог разговоров за день» в сделку / контакт. */
+        postDayNote: z.boolean().default(true),
+        /** Время запуска итога дня, ЧЧ:ММ по Москве (до вечернего обхода в 20:00). */
+        daySummaryTime: z
+          .string()
+          .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+          .default('19:30'),
+        /** Сколько ждать незавершённые расшифровки перед итогом, с. */
+        daySummaryTimeoutSec: z.number().int().min(0).max(3600).default(300),
+        /** Воронка «Двери». */
+        pipelineId: z.number().int().positive().default(1873498),
+        /** Этапы воронки для итога; пусто — все, кроме 142 («Успешно реализовано») и 143 («Отказ»). */
+        statusIds: z.array(z.number().int().positive()).max(50).default([]),
+        /** Короче — не собираем и не расшифровываем. */
+        minDurationSec: z.number().int().min(1).max(3600).default(30),
+        keepMp3Days: z.number().int().min(1).max(365).default(30),
+        sttProvider: z.enum(['speechkit', 'openai']).default('speechkit'),
+        /** RFD-AI-AGENT-CALLS-DAY-FULL: что входит в итог дня, кроме звонков. */
+        sources: z
+          .object({
+            calls: z.boolean().default(true),
+            wazzup: z.boolean().default(true),
+            amoChats: z.boolean().default(true),
+            agentDialog: z.boolean().default(true),
+            managerNotes: z.boolean().default(true),
+            email: z.boolean().default(true),
+          })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({}),
+    /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
+    refusal: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** Этап «Отказ». */
+        statusId: z.number().int().positive().default(143),
+        /** Воронки, где срабатывает (по умолчанию «Двери»). */
+        pipelineIds: z.array(z.number().int().positive()).max(50).default([1873498]),
+        /** Администраторы — ответственные по задаче автоматизации; пусто — любая новая открытая задача сделки. */
+        adminUserIds: z.array(z.number().int().positive()).max(50).default([]),
+        /** Дописывать причину отказа в задачу администратора. */
+        updateTask: z.boolean().default(true),
+        /** Первый запуск анализа — через столько минут после перехода (запись звонка приходит в amo с задержкой). */
+        delayMin: z.number().int().min(0).max(240).default(15),
+        /** Если у звонка из amo ещё нет записи — повтор через delayMin, но не дольше этого от перехода. */
+        maxDelayMin: z.number().int().min(0).max(1440).default(60),
+        /** Поля сделки, которые заполняет менеджер при отказе: причина, этап отказа, комментарий (id полей amo). */
+        fields: z
+          .object({
+            reason: z.number().int().positive().nullable().default(422103),
+            stage: z.number().int().positive().nullable().default(609893),
+            comment: z.number().int().positive().nullable().default(422109),
+          })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({}),
+    /**
+     * Реактивация отказных сделок (RFD-AI-AGENT-REAKTIVATSIYA).
+     * Агент сам пишет клиенту после отказа — два касания за неделю, затем молчит навсегда.
+     * Берёт переходы в «Отказ» из `refusal_analyses`: отдельный опрос событий не нужен.
+     */
+    reactivation: z
+      .object({
+        /** По умолчанию выключено: включает владелец аккаунта, когда тексты проверены. */
+        enabled: z.boolean().default(false),
+        /** Этап, с которого забираем сделки («Закрыто и не реализовано»). */
+        statusId: z.number().int().positive().default(143),
+        /** Воронки, где работает (по умолчанию «Двери»). */
+        pipelineIds: z.array(z.number().int().positive()).max(50).default([1873498]),
+        /**
+         * Этап «Заказ» — туда переводим сделку, когда клиент проявил интерес или назвал срок:
+         * менеджеры отказы не видят, для них они закрыты. Выбирается в виджете из справочника воронки.
+         */
+        targetStatusId: z.number().int().positive().nullable().default(null),
+        /** Не трогаем отказы старше этого срока от перехода. */
+        maxAgeDays: z.number().int().min(1).max(90).default(14),
+        /** Минимальный бюджет сделки (поле «Бюджет» amoCRM), ₽. */
+        minBudget: z.number().int().min(0).default(30_000),
+        /** Касание 1 — на этот день от перехода в отказ. */
+        firstTouchDay: z.number().int().min(1).max(30).default(2),
+        /** Касание 2 — на этот день от перехода. Молчит после него навсегда. */
+        secondTouchDay: z.number().int().min(2).max(60).default(5),
+        /** Клиент ответил «подумаю» и срок не назвал — напоминание через столько дней (последнее касание). */
+        remindDays: z.number().int().min(1).max(60).default(7),
+        /** Дублировать касание письмом на почту клиента. */
+        email: z.boolean().default(true),
+        /** Сделок за один проход. */
+        maxPerRun: z.number().int().min(1).max(100).default(20),
+        /**
+         * Шаблон «Отказ» (опрос отдела качества) — уходит последним сообщением, когда клиент
+         * отказал повторно. Ответ клиента на него сохраняется в сделку, агент на него не отвечает.
+         */
+        finalTemplate: z
+          .string()
+          .max(4000)
+          .default(
+            'Вас беспокоит отдел качества компании «Российские двери». Мы искренне заинтересованы в улучшении нашего сервиса.\n' +
+              '• Поделитесь, пожалуйста, какой именно аспект наших услуг повлиял на ваше решение отказаться от сотрудничества?\n' +
+              '• Так же нам очень поможет информация, какого поставщика вы выбрали?\n' +
+              'Заранее благодарим за обратную связь!',
+          ),
+        /**
+         * Тексты касаний. Причина отказа у агента — свободный текст модели (`refusalReason`),
+         * поэтому набор выбирается по ключевым словам; `universal` — запасной.
+         * Причины «купил у конкурента» здесь нет: такому клиенту догон не продаёт, а один раз
+         * отправляет шаблон «Отказ» — двери он уже купил.
+         * Без конкретных цен и сроков (их срезает пост-фильтр), без имени менеджера, подпись — компания.
+         */
+        texts: z
+          .object({
+            price: z
+              .object({
+                first: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! Это «Российские двери». Вы подбирали у нас двери, и по цене мы тогда не сошлись.\n' +
+                      'У нас есть модели, которые закрывают ту же задачу дешевле, — и рассрочка без переплаты. Если интересно, подберу варианты под ваш бюджет: напишите, какая сумма для вас комфортна.',
+                  ),
+                second: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! «Российские двери». Не хочу быть навязчивым — это последнее сообщение по вашей заявке.\n' +
+                      'Если вопрос с дверями ещё открыт, напишите бюджет, и я пришлю то, что в него укладывается. Если уже не актуально — тоже напишите, и я вас больше не беспокою.',
+                  ),
+              })
+              .strict()
+              .default({}),
+            stock: z
+              .object({
+                first: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! Это «Российские двери». Вы подбирали у нас двери, но нужной позиции тогда не было в наличии.\n' +
+                      'Склад с тех пор обновился, появились близкие модели в наличии. Хотите, проверю по вашей заявке, что есть сейчас?',
+                  ),
+                second: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! «Российские двери». Это последнее сообщение по вашей заявке.\n' +
+                      'Если двери ещё нужны, напишите — проверю наличие и пришлю, что можно забрать сейчас. Если вопрос закрыт, просто скажите, и я вас больше не беспокою.',
+                  ),
+              })
+              .strict()
+              .default({}),
+            changedMind: z
+              .object({
+                first: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! Это «Российские двери». Вы подбирали у нас двери, а потом решили отложить.\n' +
+                      'Если планы поменялись и вопрос снова актуален, напишите — ваш расчёт у меня сохранён, поднимать всё заново не придётся.',
+                  ),
+                second: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! «Российские двери». Это последнее сообщение по вашей заявке.\n' +
+                      'Если двери снова в планах, напишите — продолжим с того места, где остановились. Если нет, просто скажите, и я вас больше не беспокою.',
+                  ),
+              })
+              .strict()
+              .default({}),
+            universal: z
+              .object({
+                first: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! Это «Российские двери». Вы подбирали у нас двери, но до заказа мы так и не дошли.\n' +
+                      'Если вопрос ещё открыт, напишите — ваш расчёт сохранён, подберу варианты и подскажу, что есть сейчас.',
+                  ),
+                second: z
+                  .string()
+                  .max(2000)
+                  .default(
+                    'Здравствуйте! «Российские двери». Не хочу быть навязчивым — это последнее сообщение по вашей заявке.\n' +
+                      'Если двери ещё нужны, напишите, и я помогу. Если вопрос закрыт, просто скажите, и я вас больше не беспокою.',
+                  ),
+              })
+              .strict()
+              .default({}),
+          })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({}),
+    /** Разбор файлов и фото (фаза 3). */
+    vision: z
+      .object({
+        /**
+         * OCR сканов и фото: Yandex Vision (данные в РФ; без ключа — Tesseract на нашем сервере),
+         * Tesseract (бесплатно, только картинки, хуже на рукописном) или выключено.
+         */
+        provider: z.enum(['off', 'yandex', 'tesseract']).default('yandex'),
+        /** Фото без текста (дверь, проём, интерьер) показывать модели Claude. */
+        photosToClaude: z.boolean().default(true),
+        /** Разбирать вложения из чатов и писем автоматически (иначе — только кнопкой в сделке). */
+        autoParse: z.boolean().default(true),
+        /** Записывать разбор примечанием в сделку. */
+        noteInLead: z.boolean().default(true),
+        /** Лимит файлов в сутки на аккаунт — защита от расхода. */
+        maxFilesPerDay: z.number().int().min(1).max(1000).default(100),
+        /**
+         * RFD-AI-AGENT-FILES-PRIORITY: доля дневного лимита для фоновой догрузки старых файлов (старше 24 часов); новые файлы
+         * (письма, WhatsApp, чат за последние сутки) разбираются первыми и на долю не смотрят.
+         */
+        backlogShare: z.number().min(0).max(1).default(0.5),
+      })
+      .strict()
+      .default({}),
+    billing: z
+      .object({
+        usdRubRate: z.number().positive().default(90),
+        /** Валюта в интерфейсе: ₽ по курсу или $. */
+        currency: z.enum(['rub', 'usd']).default('rub'),
+        /** Тарифы по моделям, $ за 1M токенов, ключ `provider:model`; пусто — таблица по умолчанию. */
+        pricing: z
+          .record(z.object({ input: z.number().min(0), output: z.number().min(0), cachedInput: z.number().min(0).optional() }).strict())
+          .default({}),
+      })
+      .strict()
+      .default({}),
+  })
+  .strict();
+
+export type WidgetSettings = z.infer<typeof widgetSettingsSchema>;
+export type WidgetSettingsInput = z.input<typeof widgetSettingsSchema>;
+
+export const defaultSettings = (): WidgetSettings => widgetSettingsSchema.parse({});
+
+/** Все адреса фидов аккаунта без повторов. */
+export const feedUrlsOf = (s: WidgetSettings): string[] => [...new Set([s.catalog.feedUrl, ...s.catalog.feedUrls].filter(Boolean))];
+
+export interface SettingsVersion {
+  id: number;
+  userId: number | null;
+  changedAt: Date;
+  /** Какие разделы настроек изменились относительно предыдущей версии. */
+  changed: string[];
+}
+
+/** Разделы верхнего уровня, отличающиеся между двумя снимками (по JSON). */
+export function changedSections(before: Record<string, unknown> | null, after: Record<string, unknown>): string[] {
+  const keys = new Set([...Object.keys(before ?? {}), ...Object.keys(after)]);
+  return [...keys].filter((k) => JSON.stringify(before?.[k] ?? null) !== JSON.stringify(after[k] ?? null)).sort();
+}
+
+export class SettingsRepo {
+  constructor(private readonly db: Db) {}
+
+  async get(accountId: number): Promise<{ settings: WidgetSettings; version: number }> {
+    const { rows } = await this.db.query('SELECT settings, version FROM widget_settings WHERE account_id = $1', [
+      accountId,
+    ]);
+    const r = rows[0];
+    if (!r) return { settings: defaultSettings(), version: 0 };
+    return { settings: widgetSettingsSchema.parse(r.settings), version: r.version };
+  }
+
+  /** Сохраняет настройки и пишет запись аудита с автором изменения. */
+  async save(accountId: number, userId: number, next: WidgetSettings): Promise<{ version: number }> {
+    return withTransaction(this.db, async (c) => {
+      const prev = await c.query('SELECT settings FROM widget_settings WHERE account_id = $1 FOR UPDATE', [accountId]);
+      const { rows } = await c.query(
+        `INSERT INTO widget_settings (account_id, settings, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (account_id) DO UPDATE
+           SET settings = EXCLUDED.settings, updated_by = EXCLUDED.updated_by,
+               version = widget_settings.version + 1, updated_at = now()
+         RETURNING version`,
+        [accountId, next, userId],
+      );
+      await c.query('INSERT INTO settings_audit (account_id, user_id, before, after) VALUES ($1, $2, $3, $4)', [
+        accountId,
+        userId,
+        prev.rows[0]?.settings ?? null,
+        next,
+      ]);
+      return { version: rows[0].version as number };
+    });
+  }
+
+  /** История изменений (версии настроек, раздел 11.1 ТЗ). Новые — первыми. */
+  async history(accountId: number, limit = 50): Promise<SettingsVersion[]> {
+    const { rows } = await this.db.query(
+      'SELECT id, user_id, changed_at, before, after FROM settings_audit WHERE account_id = $1 ORDER BY id DESC LIMIT $2',
+      [accountId, limit],
+    );
+    return rows.map((r) => ({
+      id: Number(r.id),
+      userId: r.user_id === null ? null : Number(r.user_id),
+      changedAt: r.changed_at as Date,
+      changed: changedSections(r.before as Record<string, unknown> | null, r.after as Record<string, unknown>),
+    }));
+  }
+
+  async version(accountId: number, id: number): Promise<(SettingsVersion & { settings: WidgetSettings }) | null> {
+    const { rows } = await this.db.query('SELECT id, user_id, changed_at, before, after FROM settings_audit WHERE account_id = $1 AND id = $2', [accountId, id]);
+    const r = rows[0];
+    if (!r) return null;
+    const parsed = widgetSettingsSchema.safeParse(r.after);
+    if (!parsed.success) return null;
+    return {
+      id: Number(r.id),
+      userId: r.user_id === null ? null : Number(r.user_id),
+      changedAt: r.changed_at as Date,
+      changed: changedSections(r.before as Record<string, unknown> | null, r.after as Record<string, unknown>),
+      settings: parsed.data,
+    };
+  }
+
+  /** Откат: сохраняет снимок версии как новую версию (история не теряется). */
+  async restore(accountId: number, userId: number, id: number): Promise<{ version: number } | null> {
+    const v = await this.version(accountId, id);
+    if (!v) return null;
+    return this.save(accountId, userId, v.settings);
+  }
+
+  /** Аккаунты с включённой почтой — для опроса ящиков. */
+  /** Все аккаунты с сохранёнными настройками. */
+  async listAccountIds(): Promise<number[]> {
+    const { rows } = await this.db.query<{ account_id: number }>('SELECT account_id FROM widget_settings ORDER BY account_id');
+    return rows.map((r) => Number(r.account_id));
+  }
+
+  async listWithEmail(): Promise<number[]> {
+    const { rows } = await this.db.query(
+      `SELECT s.account_id FROM widget_settings s JOIN accounts a ON a.id = s.account_id
+        WHERE a.uninstalled_at IS NULL AND (s.settings->'email'->>'enabled')::boolean IS TRUE`,
+    );
+    return rows.map((r) => Number(r.account_id));
+  }
+
+  /** Аккаунты с включённым AI и заданным фидом — для планового импорта. */
+  async listWithFeeds(): Promise<{ accountId: number; feedUrls: string[]; everyHours: number }[]> {
+    const { rows } = await this.db.query(
+      `SELECT s.account_id, s.settings FROM widget_settings s JOIN accounts a ON a.id = s.account_id
+        WHERE a.uninstalled_at IS NULL
+          AND (coalesce(s.settings->'catalog'->>'feedUrl', '') <> '' OR jsonb_array_length(coalesce(s.settings->'catalog'->'feedUrls', '[]'::jsonb)) > 0)`,
+    );
+    return rows.map((r) => {
+      const s = widgetSettingsSchema.parse(r.settings);
+      return { accountId: Number(r.account_id), feedUrls: feedUrlsOf(s), everyHours: s.catalog.importEveryHours };
+    });
+  }
+}

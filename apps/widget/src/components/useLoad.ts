@@ -16,11 +16,14 @@ export function useLoad<T>(load: () => Promise<T>): [LoadState<T>, () => void] {
 }
 
 export function errorMessage(err: unknown): string {
-  const status = (err as { status?: number } | null)?.status;
-  if (status === 401) return 'Нет доступа к серверу AI-агента. Переустановите интеграцию.';
-  if (status === 0) return 'Сервер AI-агента недоступен.';
+  const e = err as { status?: number; reason?: string; attempts?: number } | null;
+  const status = e?.status;
+  if (status === 401) return 'Нет доступа к серверу AI-агента (401). Переустановите интеграцию.';
+  // Причина после автоповторов (RETRY): «таймаут», «нет соединения», «HTTP 502».
+  if (status === 0 || (status === undefined && e?.reason)) return `Сервер AI-агента недоступен${e?.reason ? ` (${e.reason}${(e.attempts ?? 1) > 1 ? ', после повторов' : ''})` : ''}.`;
   // Понятные ошибки сервера (например, «Формат не поддерживается») показываем как есть.
   const message = (err as { responseJSON?: { message?: unknown } } | null)?.responseJSON?.message;
   if (typeof message === 'string' && message) return message;
+  if (status !== undefined && status >= 500) return `Сервер AI-агента ответил ошибкой (HTTP ${status}).`;
   return 'Не удалось загрузить данные AI-агента.';
 }
