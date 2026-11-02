@@ -124,8 +124,8 @@ describe('kb_prices и kb_aliases на БД', () => {
     // Похожая модель по словам: «Турин» внутри длинного названия.
     const tokens = await lookupPrice(prices, aliases, ACCOUNT, { name: 'Дверь Браво Турин белая эмаль', widthMm: 800, heightMm: 2000 });
     expect(tokens).toMatchObject({ match: 'tokens', price: 8100, notes: expect.arrayContaining([expect.stringContaining('похожая модель в базе: Турин'), 'цвет уточнить: в письме «белый», в строке прайса Турин цвет не указан']) });
-    // Устарела: прайс 01.10.2026 через 100 дней.
-    const old = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 }, new Date('2027-01-20'));
+    // Устарела: через 100 дней после загрузки прайса (replacePriceList без validAt ставит дату загрузки — «сейчас»).
+    const old = await lookupPrice(prices, aliases, ACCOUNT, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 }, new Date(Date.now() + 100 * 86_400_000));
     expect(old).toMatchObject({ stale: true, validityDays: 90, notes: expect.arrayContaining([expect.stringContaining('цена устарела')]) });
     expect(await lookupPrice(prices, aliases, ACCOUNT, { name: 'Добор телескопический 100 мм' })).toBeNull();
     expect(await lookupPrice(prices, aliases, 1, { name: 'ДПГ сота', widthMm: 800, heightMm: 2000 })).toBeNull();
