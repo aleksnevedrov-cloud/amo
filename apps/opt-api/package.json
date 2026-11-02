@@ -19,6 +19,7 @@
     "@core/shared": "workspace:*",
     "@fastify/cors": "^11.3.0",
     "@fastify/rate-limit": "^10.3.0",
+    "@opt/kb": "workspace:*",
     "@opt/kp": "workspace:*",
     "bullmq": "^5.81.5",
     "fastify": "^5.12.5",

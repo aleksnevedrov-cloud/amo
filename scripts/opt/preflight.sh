@@ -40,6 +40,11 @@ if [ -f "$ENV_FILE" ]; then
   if [ -n "$sec" ] && [ "${#sec}" -lt 16 ]; then bad "AMO_CLIENT_SECRET слишком короткий (нужен секретный ключ интеграции)"; fi
   case "$(val "$ENV_FILE" DATABASE_URL)" in *ai_door_opt*) ok "DATABASE_URL указывает на ai_door_opt";; *) bad "DATABASE_URL должен вести в БД ai_door_opt";; esac
   case "$(val "$ENV_FILE" REDIS_URL)" in */1) ok "REDIS_URL — база 1";; *) bad "REDIS_URL должен заканчиваться на /1 (у розницы база 0)";; esac
+  # База знаний (RFD-AI-AGENT-OPT-KB): контейнер opt-kb-db, пароль и строка подключения согласованы.
+  kbpass=$(val "$ENV_FILE" KB_DB_PASSWORD); kburl=$(val "$ENV_FILE" KB_DATABASE_URL)
+  [ -n "$kbpass" ] && ok "KB_DB_PASSWORD задан" || bad "KB_DB_PASSWORD пустой (пароль БД базы знаний)"
+  case "$kburl" in *aidoor_opt_kb:*@opt-kb-db:5432/ai_door_opt_kb) ok "KB_DATABASE_URL указывает на opt-kb-db/ai_door_opt_kb";; "") bad "KB_DATABASE_URL пустой";; *) bad "KB_DATABASE_URL должен быть postgresql://aidoor_opt_kb:<пароль>@opt-kb-db:5432/ai_door_opt_kb";; esac
+  if [ -n "$kbpass" ] && [ -n "$kburl" ]; then case "$kburl" in *":$kbpass@"*) ok "пароль в KB_DATABASE_URL совпадает с KB_DB_PASSWORD";; *) bad "пароль в KB_DATABASE_URL не совпадает с KB_DB_PASSWORD";; esac; fi
   case "$(val "$ENV_FILE" PUBLIC_URL)" in "https://$OPT_HOST") ok "PUBLIC_URL = https://$OPT_HOST";; *) bad "PUBLIC_URL должен быть https://$OPT_HOST";; esac
   key=$(val "$ENV_FILE" TOKEN_ENCRYPTION_KEY)
   if [ -n "$key" ]; then

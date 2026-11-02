@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js && node ../../scripts/build-app.mjs src/research-one.ts dist/research-one.js && node ../../scripts/build-app.mjs src/mail-check.ts dist/mail-check.js && node ../../scripts/build-app.mjs src/price-draft.ts dist/price-draft.js",
+    "build": "node ../../scripts/build-app.mjs src/main.ts dist/main.js && node ../../scripts/build-app.mjs src/research-one.ts dist/research-one.js && node ../../scripts/build-app.mjs src/mail-check.ts dist/mail-check.js && node ../../scripts/build-app.mjs src/price-draft.ts dist/price-draft.js && node ../../scripts/build-app.mjs src/kp-build.ts dist/kp-build.js && node ../../scripts/build-app.mjs src/flow-export.ts dist/flow-export.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
     "@core/shared": "workspace:*",
+    "@opt/kb": "workspace:*",
     "@opt/kp": "workspace:*",
     "bullmq": "^5.81.5",
     "ioredis": "^5.11.1",

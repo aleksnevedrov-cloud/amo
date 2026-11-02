@@ -20,6 +20,13 @@ export interface KpBuildLine {
   qty: number;
   price: number | null;
   discount: number;
+  /** KP-LAYOUT: комплектация и обозначение по прайсу — свои плейсхолдеры {{equipment}} и {{designation}} в строке таблицы. */
+  equipment?: string;
+  designation?: string;
+  /** KB-PRICE-SHEETS: текст вместо цены, когда цены нет («уточнить у менеджера»); сумма такой строки — «—», в итог не входит. */
+  priceText?: string;
+  /** Примечания под позицией (вкладка «Подбор», нестандарт, «в цену блока входит …») — плейсхолдер {{quote_note}}. */
+  notes?: string[];
 }
 
 export interface KpBuildInput {
@@ -33,6 +40,12 @@ export interface KpBuildInput {
   vatRate: number;
   /** Фраза о ценах; пустая строка — без фразы. */
   priceNote: string;
+  /** Фраза о монтажных работах (KP-AGENT-V2, п. 6: в каждом КП); плейсхолдер {{service_note}}. */
+  serviceNote?: string;
+  /** Срок действия цены (настройки КП или ответ опросника); плейсхолдер {{price_validity}}. */
+  priceValidity?: string | null;
+  /** Доставка — отдельной строкой таблицы последней, в итоге (самовывоз — строки нет). */
+  delivery?: { address: string | null; sum: number } | null;
 }
 
 /**
@@ -40,6 +53,8 @@ export interface KpBuildInput {
  * Редактируется в настройках КП (константа priceNote), в шаблоне — плейсхолдер {{price_note}} под итогом.
  */
 export const DEFAULT_PRICE_NOTE = 'Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.';
+/** Работы в таблицу и итог КП не входят (KB-COMPONENTS, п. 5): под таблицей — эта фраза, если в заявке есть хоть одна работа. */
+export const SERVICE_NOTE = 'Стоимость монтажных работ рассчитывается после замера дверных проёмов.';
 
 export interface KpTemplateData {
   kp_number: string;
@@ -47,12 +62,16 @@ export interface KpTemplateData {
   order_basis: string;
   client_name: string;
   client_phone: string;
-  items: { n: number; name: string; size: string; qty: string; price: string; sum: string }[];
+  items: { n: number; name: string; size: string; qty: string; price: string; sum: string; equipment: string; designation: string; quote_note: string }[];
   total_in_words: string;
   vat_phrase: string;
   grand_total: string;
   total_qty: string;
   price_note: string;
+  /** Фраза о работах по замеру; пустая строка — работ в заявке нет. */
+  service_note: string;
+  /** «Срок действия цены: …»; пустая строка — срок не задан. */
+  price_validity: string;
 }
 
 const run = promisify(execFile);
@@ -117,13 +136,20 @@ export function templateData(input: KpBuildInput): KpTemplateData {
   const items = input.lines.map((l, i) => ({
     n: i + 1,
     name: l.name || '—',
-    size: l.size || '—',
+    equipment: l.equipment ?? '',
+    designation: l.designation ?? '',
+    quote_note: (l.notes ?? []).map((n) => n.trim()).filter(Boolean).join('\n'),
+    // «1010 × 2100 мм» с пробелами вокруг ×: в узкой колонке шаблона (2,1 см) перенос идёт по пробелу, а не посреди числа («1010×210|0»).
+    size: l.size ? l.size.replace(/(\d)\s*[×x]\s*(\d)/g, '$1 × $2') : '—',
     qty: `${l.qty.toLocaleString('ru-RU')} шт`,
-    price: l.price === null ? '—' : money(l.price),
-    sum: money(lineSum(l)),
+    price: l.price === null ? l.priceText || '—' : money(l.price),
+    sum: l.price === null ? '—' : money(lineSum(l)),
   }));
+  // KP-AGENT-V2, п. 6.2: доставка — последней строкой таблицы с суммой (с НДС), входит в итог; в «N позиций» не считается.
+  const deliveryKopecks = input.delivery && input.delivery.sum > 0 ? Math.round(input.delivery.sum * 100) : 0;
+  if (deliveryKopecks) items.push({ n: items.length + 1, name: `Доставка${input.delivery?.address ? ` по адресу: ${input.delivery.address}` : ''}`, equipment: '', designation: '', quote_note: '', size: '—', qty: '1 усл.', price: money(toRub(deliveryKopecks)), sum: money(toRub(deliveryKopecks)) });
   // Итог и НДС — в целых копейках: цены в КП конечные, НДС выделяется из них (этап 4 ТЗ RFD-AI-AGENT-OPT-PRICE), а не начисляется сверху.
-  const totalKopecks = input.lines.reduce((s, l) => s + lineSumKopecks(l), 0);
+  const totalKopecks = input.lines.reduce((s, l) => s + lineSumKopecks(l), 0) + deliveryKopecks;
   const total = toRub(totalKopecks);
   const vat = splitVat(totalKopecks, input.vatRate);
   const qty = input.lines.reduce((s, l) => s + l.qty, 0);
@@ -135,13 +161,26 @@ export function templateData(input: KpBuildInput): KpTemplateData {
     client_phone: input.clientPhone,
     items,
     total_in_words: rublesInWords(total),
+    // KP-AGENT-V2, п. 6.1: цены с НДС, строка «в т.ч. НДС 22 %».
     vat_phrase: input.vatRate > 0
-      ? `в том числе НДС ${input.vatRate}% — ${formatKopecks(vat.vatKopecks)}`
+      ? `в т.ч. НДС ${input.vatRate} % — ${formatKopecks(vat.vatKopecks)}`
       : 'НДС не облагается',
     grand_total: money(total),
     total_qty: `${qty} ${plural(qty, 'позиция', 'позиции', 'позиций')}`,
     price_note: input.priceNote.trim(),
+    service_note: (input.serviceNote ?? '').trim(),
+    price_validity: input.priceValidity?.trim() ? `Срок действия цены: ${input.priceValidity.trim()}` : '',
   };
+}
+
+/** Шаблон без {{price_validity}}: срок действия цены — строкой под первым из тегов, как фраза о работах (фраза о ценах, НДС, …). */
+export function withValidityFallback(tags: { priceValidity: boolean; priceNote: boolean; vatPhrase?: boolean; totalInWords?: boolean; totalQty?: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  if (tags.priceValidity || !data.price_validity) return { data, fallback: false };
+  const add = (v: string) => (v ? `${v}\n${data.price_validity}` : data.price_validity);
+  if (tags.priceNote && data.price_note) return { data: { ...data, price_note: add(data.price_note) }, fallback: true };
+  if (tags.vatPhrase ?? true) return { data: { ...data, vat_phrase: add(data.vat_phrase) }, fallback: true };
+  if (tags.totalInWords) return { data: { ...data, total_in_words: add(data.total_in_words) }, fallback: true };
+  return { data: { ...data, total_qty: add(data.total_qty) }, fallback: true };
 }
 
 /**
@@ -153,6 +192,67 @@ export function withPriceNoteFallback(hasTag: boolean, data: KpTemplateData): { 
   return { data: { ...data, vat_phrase: `${data.vat_phrase}\n${data.price_note}` }, fallback: true };
 }
 
+/**
+ * Шаблон без {{service_note}}: фраза о работах добавляется строкой под первым из имеющихся тегов — фраза о ценах, строка НДС,
+ * сумма прописью, плашка «N позиций» (у шаблона заказчика есть {{vat_phrase}}).
+ */
+export function withServiceNoteFallback(tags: { serviceNote: boolean; priceNote: boolean; vatPhrase?: boolean; totalInWords?: boolean; totalQty?: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  if (tags.serviceNote || !data.service_note) return { data, fallback: false };
+  const add = (v: string) => (v ? `${v}\n${data.service_note}` : data.service_note);
+  if (tags.priceNote && data.price_note) return { data: { ...data, price_note: add(data.price_note) }, fallback: true };
+  if (tags.vatPhrase ?? true) return { data: { ...data, vat_phrase: add(data.vat_phrase) }, fallback: true };
+  if (tags.totalInWords) return { data: { ...data, total_in_words: add(data.total_in_words) }, fallback: true };
+  return { data: { ...data, total_qty: add(data.total_qty) }, fallback: true };
+}
+
+/**
+ * Строка в три части (KP-LAYOUT): если в шаблоне нет плейсхолдеров {{equipment}} / {{designation}}, комплектация и
+ * обозначение идут строками под названием в {{name}} («Комплектация: …», «Обозначение: …»), чтобы не потеряться.
+ */
+export function withLayoutFallback(tags: { equipment: boolean; designation: boolean; quoteNote?: boolean }, data: KpTemplateData): { data: KpTemplateData; fallback: boolean } {
+  const items = data.items.map((it) => {
+    const extra = [!tags.equipment && it.equipment ? `Комплектация: ${it.equipment}` : '', !tags.designation && it.designation ? `Обозначение заказчика: ${it.designation}` : '', !(tags.quoteNote ?? false) && it.quote_note ? it.quote_note : ''].filter(Boolean);
+    return extra.length ? { ...it, name: [it.name, ...extra].join('\n') } : it;
+  });
+  const fallback = items.some((it, i) => it.name !== data.items[i]?.name);
+  return { data: { ...data, items }, fallback };
+}
+
+/** Теги денег, после которых шаблон сам ставит знак рубля: «{{grand_total}} ₽» давало «71 700 ₽ ₽» (KP-LAYOUT, дефект 4). */
+export const MONEY_TAGS = ['grand_total', 'price', 'sum'] as const;
+export type MoneyTag = (typeof MONEY_TAGS)[number];
+
+export function currencyTagsInTemplate(text: string): MoneyTag[] {
+  return MONEY_TAGS.filter((t) => new RegExp(`\\{\\{\\s*${t}\\s*\\}\\}\\s*(₽|руб\\.?|р\\.)`, 'iu').test(text));
+}
+
+/** Из значений тегов, за которыми в шаблоне уже стоит ₽, знак убирается — в документе он остаётся один. */
+export function withCurrencyFallback(tags: MoneyTag[], data: KpTemplateData): KpTemplateData {
+  if (!tags.length) return data;
+  const strip = (v: string) => v.replace(/\s*₽$/u, '');
+  return {
+    ...data,
+    grand_total: tags.includes('grand_total') ? strip(data.grand_total) : data.grand_total,
+    items: data.items.map((it) => ({ ...it, price: tags.includes('price') ? strip(it.price) : it.price, sum: tags.includes('sum') ? strip(it.sum) : it.sum })),
+  };
+}
+
+/**
+ * Разрывы страницы после таблицы позиций (KP-LAYOUT, дефект 5): плашка «N позиций» и примечание уезжали на почти пустой
+ * второй лист. Явные разрывы (<w:br w:type="page"/>, pageBreakBefore) после последней таблицы убираются; разрывы до неё
+ * и внутри не трогаются.
+ */
+export function dropPageBreaksAfterTable(xml: string): { xml: string; removed: number } {
+  const at = xml.lastIndexOf('</w:tbl>');
+  if (at < 0) return { xml, removed: 0 };
+  const head = xml.slice(0, at);
+  let tail = xml.slice(at);
+  let removed = 0;
+  tail = tail.replace(/<w:br\s+w:type="page"\s*\/>/g, () => (removed += 1, ''));
+  tail = tail.replace(/<w:pageBreakBefore(\s+w:val="(true|1|on)")?\s*\/>/g, () => (removed += 1, ''));
+  return { xml: head + tail, removed };
+}
+
 export interface KpBuildResult {
   docxPath: string;
   pdfPath: string | null;
@@ -160,6 +260,16 @@ export interface KpBuildResult {
   certificates: string[];
   /** В шаблоне нет {{price_note}} — фраза о ценах добавлена под строку НДС. */
   priceNoteFallback: boolean;
+  /** В шаблоне нет {{equipment}} / {{designation}} — комплектация и обозначение заказчика добавлены строками под названием. */
+  layoutFallback: boolean;
+  /** Теги, после которых шаблон сам ставит ₽ — из их значений знак убран. */
+  currencyStripped: MoneyTag[];
+  /** Сколько явных разрывов страницы после таблицы убрано. */
+  pageBreaksRemoved: number;
+  /** В шаблоне нет {{service_note}} — фраза о работах добавлена под фразу о ценах. */
+  serviceNoteFallback: boolean;
+  /** В шаблоне нет {{price_validity}} — срок действия цены строкой под фразой о ценах. */
+  validityFallback: boolean;
 }
 
 /**
@@ -179,11 +289,24 @@ export async function buildKp(
     linebreaks: true,
     nullGetter: () => '',
   });
-  const { data: rendered, fallback } = withPriceNoteFallback(doc.getFullText().includes('price_note'), data);
-  doc.render(rendered);
+  const text = doc.getFullText();
+  const { data: withNote, fallback } = withPriceNoteFallback(text.includes('price_note'), data);
+  const { data: withService, fallback: serviceNoteFallback } = withServiceNoteFallback({ serviceNote: text.includes('service_note'), priceNote: text.includes('price_note'), vatPhrase: text.includes('vat_phrase'), totalInWords: text.includes('total_in_words'), totalQty: text.includes('total_qty') }, withNote);
+  const { data: withValidity, fallback: validityFallback } = withValidityFallback({ priceValidity: text.includes('price_validity'), priceNote: text.includes('price_note'), vatPhrase: text.includes('vat_phrase'), totalInWords: text.includes('total_in_words'), totalQty: text.includes('total_qty') }, withService);
+  const { data: laidOut, fallback: layoutFallback } = withLayoutFallback({ equipment: text.includes('equipment'), designation: text.includes('designation'), quoteNote: text.includes('quote_note') }, withValidity);
+  const currencyStripped = currencyTagsInTemplate(text);
+  doc.render(withCurrencyFallback(currencyStripped, laidOut));
   await mkdir(outDir, { recursive: true });
   const docxPath = join(outDir, `${baseName}.docx`);
-  await writeFile(docxPath, doc.getZip().generate({ type: 'nodebuffer' }) as Buffer);
+  const out = doc.getZip();
+  const body = out.file('word/document.xml')?.asText();
+  let pageBreaksRemoved = 0;
+  if (body) {
+    const fixed = dropPageBreaksAfterTable(body);
+    pageBreaksRemoved = fixed.removed;
+    if (fixed.removed) out.file('word/document.xml', fixed.xml);
+  }
+  await writeFile(docxPath, out.generate({ type: 'nodebuffer' }) as Buffer);
 
   const pdfPath = join(outDir, `${baseName}.pdf`);
   try {
@@ -194,9 +317,9 @@ export async function buildKp(
       { timeout: 120_000 },
     );
     await access(pdfPath);
-    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback };
+    return { docxPath, pdfPath, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved, serviceNoteFallback, validityFallback };
   } catch (err) {
-    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback };
+    return { docxPath, pdfPath: null, pdfError: (err as Error).message, certificates: [], priceNoteFallback: fallback, layoutFallback, currencyStripped, pageBreaksRemoved, serviceNoteFallback, validityFallback };
   }
 }
 

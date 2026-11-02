@@ -1,8 +1,8 @@
 import type { LeadFile } from '@core/amo';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback } from '../src/build.ts';
-import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile } from '../src/draft.ts';
+import { DEFAULT_PRICE_NOTE, lineSum, plural, rublesInWords, templateData, withPriceNoteFallback, withLayoutFallback, currencyTagsInTemplate, withCurrencyFallback, dropPageBreaksAfterTable, SERVICE_NOTE, withServiceNoteFallback, withValidityFallback } from '../src/build.ts';
+import { buildKpDraft, extractEmail, mailSearchOf, parseDraft, positionToRequest, senderFromNotes, type KpDraftDeps, type ParsedFile, fullItemName, isServiceLine, kpLineName, kpLineParts, kpShortName, lineCategory, tidyName } from '../src/draft.ts';
 import { MailAuthError, type MailSearchDiag } from '../src/mail-read.ts';
 import { researchablePositions } from '../src/research-job.ts';
 
@@ -24,10 +24,12 @@ describe('сборка КП: значения для шаблона', () => {
     const data = templateData({ kpNo: 'КП-2026-1', date: new Date(2026, 9, 12), basis: 'запрос от 09.10.2026', clientName: 'ООО Ромашка', clientPhone: '+7 900', lines: [line, { ...line, price: null }], vatRate: 22, priceNote: DEFAULT_PRICE_NOTE });
     // Разделитель тысяч в ru-RU — неразрывный пробел.
     const plain = (v: string) => v.replace(/\u00a0/g, ' ');
-    expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '0 ₽']]);
+    expect(data.items.map((i) => [i.n, plain(i.price), plain(i.sum)])).toEqual([[1, '10 000 ₽', '18 000 ₽'], [2, '—', '—']]); // KB-PRICE-SHEETS: у строки без цены сумма «—», не «0 ₽»
+    // KP-LAYOUT: размер в документе с пробелами вокруг × — перенос в узкой колонке по пробелу, а не посреди числа.
+    expect(data.items[0]?.size).toBe('2000 × 800 мм');
     expect(plain(data.grand_total)).toBe('18 000 ₽');
     expect(data.total_qty).toBe('4 позиции');
-    expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 3 245,90 ₽');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 3 245,90 ₽');
     expect(templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 0, priceNote: '' }).vat_phrase).toBe('НДС не облагается');
     expect(data.price_note).toBe('Цены носят ориентировочный характер и могут быть скорректированы после уточнения всех деталей заказа.');
   });
@@ -42,24 +44,116 @@ describe('сборка КП: значения для шаблона', () => {
     expect(fb.data.vat_phrase).toBe('НДС не облагается\nЦены ориентировочные.');
     expect(withPriceNoteFallback(false, { ...data, price_note: '' })).toEqual({ data: { ...data, price_note: '' }, fallback: false });
   });
+
+  it('KP-AGENT-V2, п. 6: доставка — последней строкой и в итоге (не в «N позиций»); срок действия цены — тегом или строкой под фразой о ценах', () => {
+    const plain = (v: string) => v.replace(/\u00a0/g, ' ');
+    const line = { name: 'ДПГ', size: '800×2000 мм', qty: 2, price: 10_000, discount: 0 };
+    const base = { kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [line], vatRate: 22, priceNote: 'Цены ориентировочные.' };
+    const data = templateData({ ...base, delivery: { address: 'г. Москва, ул. Строителей, 1', sum: 4_500 }, priceValidity: '30 календарных дней' });
+    expect(data.items.map((i) => [i.n, i.name, i.qty, plain(i.sum)])).toEqual([[1, 'ДПГ', '2 шт', '20 000 ₽'], [2, 'Доставка по адресу: г. Москва, ул. Строителей, 1', '1 усл.', '4 500 ₽']]);
+    expect(plain(data.grand_total)).toBe('24 500 ₽');
+    expect(data.total_qty).toBe('2 позиции');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 4 418,03 ₽');
+    expect(data.price_validity).toBe('Срок действия цены: 30 календарных дней');
+    // Самовывоз — строки нет; срок не задан — пусто.
+    const pickup = templateData({ ...base, delivery: null });
+    expect(pickup.items).toHaveLength(1);
+    expect(pickup.price_validity).toBe('');
+    // Нет тега — под фразой о ценах; нет и её тега — под строкой НДС.
+    expect(withValidityFallback({ priceValidity: true, priceNote: true }, data)).toEqual({ data, fallback: false });
+    expect(withValidityFallback({ priceValidity: false, priceNote: true }, data).data.price_note).toBe('Цены ориентировочные.\nСрок действия цены: 30 календарных дней');
+    expect(plain(withValidityFallback({ priceValidity: false, priceNote: false, vatPhrase: true }, data).data.vat_phrase)).toBe('в т.ч. НДС 22 % — 4 418,03 ₽\nСрок действия цены: 30 календарных дней');
+  });
 });
 
 describe('черновик: разбор ответа модели и позиций спецификации', () => {
   it('обёртка ```json и мусор вокруг объекта допускаются, лишнее отсекается', () => {
     const p = parseDraft('Вот JSON:\n```json\n{"client":{"org":" ООО Ромашка ","fio":"","email":"a@b.ru","phone":""},"request_items":[{"raw":"Дверь 2100*900 — 3 шт","name":"дверь белая","width_mm":"900","height_mm":2100,"qty":"3"},{"raw":"","name":""}],"required_blocks":["price","foo"],"questions":["Цвет?",""]}\n```');
     expect(p.client).toEqual({ org: 'ООО Ромашка', fio: '', email: 'a@b.ru', phone: '' });
-    expect(p.request_items).toEqual([{ raw: 'Дверь 2100*900 — 3 шт', name: 'дверь белая', width_mm: 900, height_mm: 2100, qty: 3 }]);
+    expect(p.request_items).toEqual([{ raw: 'Дверь 2100*900 — 3 шт', name: 'дверь белая', width_mm: 900, height_mm: 2100, qty: 3, category: 'door' }]);
     expect(p.required_blocks).toEqual(['price']);
     expect(p.questions).toEqual(['Цвет?']);
     expect(parseDraft('не json').request_items).toEqual([]);
+    // KB-MATCH: признаки двери от модели — только названные (словами или кодами), пустые/неизвестные отбрасываются, без признаков поля нет.
+    const f = parseDraft('{"request_items":[{"raw":"Дверной блок деревянный глухой CPL 1010×2100","name":"дверной блок","width_mm":1010,"height_mm":2100,"qty":1,"features":{"type":"block","material":"деревянный","glazing":"solid","leaves":null,"threshold":"без порога","opening":"","coating":"CPL","fire":null,"closer":true,"lock":"нет"}},{"raw":"Добор","name":"добор","qty":2,"features":{"type":null}}]}');
+    // KP-NAME: короткое название модели заменено строкой письма без размера.
+    expect(f.request_items[0]).toEqual({ raw: 'Дверной блок деревянный глухой CPL 1010×2100', name: 'Дверной блок деревянный глухой CPL', width_mm: 1010, height_mm: 2100, qty: 1, category: 'door', features: { type: 'block', material: 'wood', glazing: 'solid', threshold: 'without', coating: 'cpl', closer: true } });
+    expect(f.request_items[1]).toEqual({ raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2, category: 'component' });
+  });
+
+  it('KP-NAME: полное наименование как у клиента — сокращение модели заменяется строкой письма без размера и количества; наименование КП с моделью прайса', () => {
+    const raw = 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый 1010×2100 — 1 шт';
+    const full = 'Дверной блок деревянный внутренний глухой однопольный распашной без порога, с доводчиком, внутренним механическим замком с ключом снаружи и изнутри, облицовка CPL светло-серый';
+    expect(fullItemName(raw, 'Дверной блок деревянный внутренний глухой однопольный без порога распашной')).toBe(full);
+    expect(fullItemName('3. ' + raw, 'дверной блок')).toBe(full);
+    // Модель ответила полнее строки письма или строка — одно слово: остаётся ответ модели.
+    expect(fullItemName('Дверь 2100*900 — 3 шт', 'дверь белая')).toBe('дверь белая');
+    expect(fullItemName('п. 4 полотно 2000х800х40 мм 12 штук', 'полотно межкомнатное')).toBe('полотно межкомнатное');
+    // Слова письма не пересекаются с ответом модели (модель назвала другое) — ответ модели.
+    expect(fullItemName('ДПГ сота 800×2000 — 2 шт', 'дверь глухая ламинированная')).toBe('дверь глухая ламинированная');
+    expect(fullItemName('', 'добор')).toBe('добор');
+    const p = parseDraft(JSON.stringify({ request_items: [{ raw, name: 'Дверной блок деревянный внутренний глухой однопольный без порога распашной', width_mm: 1010, height_mm: 2100, qty: 1 }] }));
+    expect(p.request_items[0]?.name).toBe(full);
+    expect(kpLineName({ name: full, priceModel: 'ДВ CPL 0,2 мм' })).toBe(`${full} — по прайсу: ДВ CPL 0,2 мм`);
+    expect(kpLineName({ name: full, priceModel: null })).toBe(full);
+    // KP-LAYOUT, п. 2: ячейка в три уровня — короткое название по прайсу без «по прайсу» / комплектация / обозначение заказчика (его строка).
+    const item = { raw: `${full} 1010×2100 — 1 шт`, name: full, features: { material: 'wood' as const } };
+    expect(kpShortName({ name: full, priceModel: 'ДВ CPL 0,2 мм' }, item)).toBe('Дверной блок ДВ CPL 0,2 мм, глухой, светло-серый');
+    expect(kpLineParts({ name: full, priceModel: 'ДВ CPL 0,2 мм', equipment: 'коробка, 3 петли' }, item)).toEqual({ name: 'Дверной блок ДВ CPL 0,2 мм, глухой, светло-серый', equipment: 'коробка, 3 петли', designation: `${full} 1010×2100 — 1 шт` });
+    // Полотно — средний род; двупольная противопожарная — признаки через запятую; модель, начинающаяся с типа, не дублируется.
+    expect(kpShortName({ name: 'ДПГ + УПД, сота', priceModel: 'ДПГ сота ламинат' }, { raw: 'ДПГ + УПД, сота 2000×800 — 5 шт', name: 'ДПГ + УПД, сота' })).toBe('Полотно ДПГ сота ламинат, глухое');
+    expect(kpShortName({ name: 'Дверь противопожарная металлическая EI60 двупольная серая', priceModel: 'ДМ EI60 2Рп' }, null)).toBe('Дверь ДМ EI60 2Рп, двупольная, EI60, серый');
+    expect(kpShortName({ name: 'Дверной блок деревянный глухой', priceModel: 'Дверной блок ДГ 21-9' }, null)).toBe('Дверной блок ДГ 21-9, глухой');
+    // Без строки прайса: название клиента как есть, третьего уровня нет.
+    expect(kpShortName({ name: 'Врезка замка', priceModel: null }, { raw: 'Врезка замка — 3 шт', name: 'Врезка замка' })).toBe('Врезка замка');
+    expect(kpLineParts({ name: 'Врезка замка', priceModel: null, equipment: null }, { raw: 'Врезка замка — 3 шт', name: 'Врезка замка' })).toEqual({ name: 'Врезка замка', equipment: '', designation: '' });
+    expect(kpLineParts({ name: 'Добор', priceModel: null, equipment: null }, null)).toEqual({ name: 'Добор', equipment: '', designation: '' });
+    // Шаблон без {{equipment}} / {{designation}}: уровни идут строками под названием; с ними — название остаётся чистым.
+    const data = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'Дверной блок ДВ CPL 0,2 мм, глухой', size: '', qty: 1, price: 100, discount: 0, equipment: 'коробка', designation: 'Дверной блок деревянный глухой CPL 1010×2100 — 1 шт' }, { name: 'Добор', size: '', qty: 1, price: 10, discount: 0 }], vatRate: 0, priceNote: '' });
+    expect(data.items.map((i) => [i.name, i.equipment, i.designation])).toEqual([['Дверной блок ДВ CPL 0,2 мм, глухой', 'коробка', 'Дверной блок деревянный глухой CPL 1010×2100 — 1 шт'], ['Добор', '', '']]);
+    const legacy = withLayoutFallback({ equipment: false, designation: false }, data);
+    expect(legacy.fallback).toBe(true);
+    expect(legacy.data.items.map((i) => i.name)).toEqual(['Дверной блок ДВ CPL 0,2 мм, глухой\nКомплектация: коробка\nОбозначение заказчика: Дверной блок деревянный глухой CPL 1010×2100 — 1 шт', 'Добор']);
+    expect(withLayoutFallback({ equipment: true, designation: false }, data).data.items[0]?.name).toBe('Дверной блок ДВ CPL 0,2 мм, глухой\nОбозначение заказчика: Дверной блок деревянный глухой CPL 1010×2100 — 1 шт');
+    expect(withLayoutFallback({ equipment: true, designation: true }, data)).toEqual({ data, fallback: false });
+    // KP-LAYOUT, дефект 4: «{{grand_total}} ₽» в шаблоне — знак из значения убирается, у {{price}} без знака остаётся.
+    expect(currencyTagsInTemplate('Итого: {{grand_total}} ₽, цена {{price}}, сумма {{ sum }}руб.')).toEqual(['grand_total', 'sum']);
+    const money = withCurrencyFallback(['grand_total', 'sum'], data);
+    expect(money.grand_total.replace(/\u00a0/g, ' ')).toBe('110');
+    expect(money.items.map((i) => [i.price.replace(/\u00a0/g, ' '), i.sum])).toEqual([['100 ₽', '100'], ['10 ₽', '10']]);
+    expect(withCurrencyFallback([], data)).toBe(data);
+    // Дефект 5: явные разрывы страницы после последней таблицы убираются, до неё — нет.
+    const xml = '<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:tbl><w:tr><w:tc><w:p>x</w:p></w:tc></w:tr></w:tbl><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>3 позиции</w:t></w:r></w:p><w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+    const cut = dropPageBreaksAfterTable(xml);
+    expect(cut.removed).toBe(2);
+    expect(cut.xml).toBe('<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:tbl><w:tr><w:tc><w:p>x</w:p></w:tc></w:tr></w:tbl><w:p><w:pPr></w:pPr><w:r><w:t>3 позиции</w:t></w:r></w:p><w:p><w:r></w:r></w:p>');
+    expect(dropPageBreaksAfterTable('<w:p/>')).toEqual({ xml: '<w:p/>', removed: 0 });
+    // KB-COMPONENTS, п. 5: фраза о работах — свой тег или строкой под фразой о ценах / НДС / плашкой.
+    const withSvc = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'Дверь', size: '', qty: 1, price: 100, discount: 0 }], vatRate: 0, priceNote: 'Цены ориентировочные.', serviceNote: SERVICE_NOTE });
+    expect(withSvc.service_note).toBe(SERVICE_NOTE);
+    expect(withServiceNoteFallback({ serviceNote: true, priceNote: true }, withSvc)).toEqual({ data: withSvc, fallback: false });
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: true }, withSvc).data.price_note).toBe(`Цены ориентировочные.\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false, vatPhrase: true }, withSvc).data.vat_phrase).toBe(`НДС не облагается\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false, vatPhrase: false, totalInWords: false, totalQty: true }, withSvc).data.total_qty).toBe(`1 позиция\n${SERVICE_NOTE}`);
+    expect(withServiceNoteFallback({ serviceNote: false, priceNote: false }, { ...withSvc, service_note: '' })).toEqual({ data: { ...withSvc, service_note: '' }, fallback: false });
+    // Категория строки черновика: поле, старый kind или текст.
+    expect(isServiceLine({ name: 'Монтаж', kind: 'service' })).toBe(true);
+    expect(isServiceLine({ name: 'Доставка по Москве' })).toBe(true);
+    expect(isServiceLine({ name: 'Аква 01 ПГ + УПД окут Белый ПВХ/врезка замка под цилиндр', category: 'door' })).toBe(false);
+    expect(lineCategory({ name: 'Добор телескопический' })).toBe('component');
+    // KP-REBUILD-MAIL, п. 3: пометка «(h)» из спецификации клиента не попадает в название и строку.
+    expect(tidyName('Дверь ДПГ 2100 (h) × 900 , белая')).toBe('Дверь ДПГ 2100 × 900, белая');
+    expect(tidyName('Полотно 2000(H)х800')).toBe('Полотно 2000 х800');
+    expect(positionToRequest({ name: 'Дверь глухая 2100 (h) х 900', marking: null, width_mm: 900, height_mm: 2100, qty: 2, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null })).toMatchObject({ name: 'Дверь глухая 2100 х 900', raw: 'Дверь глухая 2100 х 900 900×2100 2 шт' });
+    expect(parseDraft(JSON.stringify({ request_items: [{ raw: 'Дверь глухая 2100 (h) х 900 — 2 шт', name: 'дверь глухая', qty: 2 }] })).request_items[0]).toMatchObject({ raw: 'Дверь глухая 2100 х 900 — 2 шт', name: 'дверь глухая' });
   });
 
   it('позиция спецификации → позиция запроса; цена клиента из документа не берётся', () => {
     const r = positionToRequest({ name: 'Дверь противопожарная', marking: 'ДПС 01 EI30', width_mm: 900, height_mm: 2100, qty: 3, unit: 'компл.', price_rub: 25_000, material: 'сталь', color: 'RAL 7035', fireproof: true, note: null });
-    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3 });
-    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1 });
+    expect(r).toEqual({ raw: 'ДПС 01 EI30 Дверь противопожарная 900×2100 3 компл.', name: 'Дверь противопожарная, сталь, RAL 7035', width_mm: 900, height_mm: 2100, qty: 3, category: 'door' });
+    expect(positionToRequest({ name: 'Добор', marking: null, width_mm: null, height_mm: null, qty: null, unit: null, price_rub: null, material: null, color: null, fireproof: null, note: null })).toEqual({ raw: 'Добор 1 шт', name: 'Добор', width_mm: null, height_mm: null, qty: 1, category: 'component', qtyUnknown: true });
     // XLSX-2: работы — без размера и с признаком service; дробное количество из заявки сохраняется.
-    expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, kind: 'service' });
+    expect(positionToRequest({ ...position('Врезка замка на производстве', 900, 2100, 21), kind: 'service' })).toEqual({ raw: 'Врезка замка на производстве 21 шт', name: 'Врезка замка на производстве', width_mm: null, height_mm: null, qty: 21, category: 'service', kind: 'service' });
     expect(positionToRequest(position('Наличник ТЕЛЕСКОП', 70, 2150, 24.5))).toMatchObject({ raw: 'Наличник ТЕЛЕСКОП 70×2150 24.5 шт', qty: 24.5 });
   });
 
@@ -161,8 +255,10 @@ describe('черновик КП опта: источник — карточка 
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 89835, route, pricing: {} }, { amo, analyze });
     expect(amo.downloaded).toEqual(['Двери (3).docx', 'кривой.xlsx']);
     expect(r.payload.items).toEqual([
-      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0 },
-      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0 },
+      // KP-AGENT-V2: у двери — ГОСТ-профиль из текста позиции (ДПС 01 — однопольная противопожарная, класс EI не указан).
+      { request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '900×2100 мм', qty: 11, price: null, lead_time: '', discount: 0, category: 'door', gostProfile: expect.objectContaining({ gost: 'Р 57327-2016', kind: 'ДПС', leaves: 1, fire: 'EI?', heightMm: 2100, widthMm: 900 }) },
+      // KP-AGENT-V2, п. 2.3: количества в файле нет — 1 до ответа менеджера, флаг «уточнить».
+      { request_index: 1, page_id: null, name: 'Добор', size: '', qty: 1, price: null, lead_time: '', discount: 0, category: 'component', qtyUnknown: true },
     ]);
     expect(r.payload.needs_manager).toEqual([{ request_index: 0, reason: 'цена не задана' }, { request_index: 1, reason: 'цена не задана' }]);
     // Письмо прочитано моделью ради реквизитов и блоков; позиции из письма не используются, когда есть спецификация.
@@ -177,6 +273,18 @@ describe('черновик КП опта: источник — карточка 
     expect(r).toMatchObject({ provider: 'openai', model: 'gpt-5.5' });
   });
 
+  it('KP-DOCX-APPENDIX: комплектация из ТЗ, приложенная к позиции спецификации, идёт в строку черновика и в пометку менеджеру', async () => {
+    const { gateway } = fakeGateway(modelAnswer);
+    const amo = fakeAmo({ files: [file('u1', '№ 204 68 двери и комп-ющие_ТЗ.docx')], mails: [letter] });
+    const eq = 'раздел «15. Базовая комплектация»: коробка, 3 петли, противопожарный замок, доводчик';
+    const analyze: KpDraftDeps['analyze'] = async (f) => ({ id: 801, filename: f.filename, kind: 'request', positions: [{ ...position('Дверь ДПС 01 EI60', 900, 2100, 1), tzEquipment: eq }, position('Блок ДСН двупольный', 1430, 2300, 1)], questions: [], requirements: [] });
+    const r = await buildKpDraft(gateway, { accountId: 1, leadId: 90091, route, pricing: {} }, { amo, analyze });
+    expect(r.payload.items.map((l) => l.tzEquipment ?? null)).toEqual([eq, null]);
+    expect(r.payload.request_items[0]?.tzEquipment).toBe(eq);
+    expect(r.payload.needs_manager).toContainEqual({ request_index: 0, reason: `комплектация по ТЗ: ${eq} — сверьте с ценой` });
+    expect(r.payload.needs_manager.filter((n) => n.request_index === 1).map((n) => n.reason)).toEqual(['цена не задана']);
+  });
+
   it('аналог — только пометка менеджеру с критерием; строка без цены и без замены; требования ГОСТ из письма', async () => {
     const { gateway } = fakeGateway(JSON.stringify({ client: { org: 'ООО Ромашка', fio: '', email: '', phone: '' }, request_items: [{ raw: 'Дверь шпон венге 2000*800 по ГОСТ 6629-88', name: 'дверь шпон венге', width_mm: 800, height_mm: 2000, qty: 1 }, { raw: 'Добор', name: 'добор', width_mm: null, height_mm: null, qty: 2 }], required_blocks: [], questions: [] }));
     const asked: string[] = [];
@@ -188,9 +296,10 @@ describe('черновик КП опта: источник — карточка 
       return item.name.includes('венге') ? [{ id: 'p1', name: 'Милан', vendor: 'Фабрика В', price: 8_500, design: ['шпон', 'венге'], standards: [] }] : [];
     };
     const r = await buildKpDraft(gateway, { accountId: 1, leadId: 1, route }, { amo: fakeAmo({ mails: [{ ...letter, text: 'Нужны двери по ГОСТ 6629-88, см. список' }] }), analyze: null, analogs });
-    expect(asked).toEqual(['дверь шпон венге', 'добор']);
+    // KP-NAME: название как в письме (без размера), требование ГОСТ при этом выделено отдельно.
+    expect(asked).toEqual(['Дверь шпон венге по ГОСТ 6629-88', 'добор']);
     expect(r.payload.requirements).toEqual(['ГОСТ 6629-88']);
-    expect(r.payload.items.map((l) => [l.name, l.price])).toEqual([['дверь шпон венге', null], ['добор', null]]);
+    expect(r.payload.items.map((l) => [l.name, l.price])).toEqual([['Дверь шпон венге по ГОСТ 6629-88', null], ['добор', null]]);
     expect(r.payload.needs_manager.map((n) => [n.request_index, n.reason.replace(/\u00a0/g, ' ')])).toEqual([
       [0, 'цена не задана'],
       [1, 'цена не задана'],
@@ -246,7 +355,8 @@ describe('черновик КП опта: источник — карточка 
       { name: 'tz.pdf', size: 621_000, inline: false, status: 'uploaded', reason: null },
       { name: 'already.pdf', size: spec.byteLength, inline: false, status: 'not_uploaded', reason: 'уже есть в файлах сделки' },
     ]);
-    expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная']);
+    // KP-NAME: название как в письме (массив и окраска сохранены), без размера и количества.
+    expect(r.payload.items.map((l) => l.name)).toEqual(['дверь двухпольная, массив лиственницы, L429 Indigo']);
     expect(r.payload.needs_manager.some((n) => n.reason.includes('письмо в ящике'))).toBe(false);
     // Привязка файла в amo упала (405) — вложение всё равно разбирается из памяти, причина — в skipped (RFD-AI-AGENT-OPT-MAIL-READ-7).
     const broken = fakeAmo({ mails: [{ ...letter, from: 'stoptpostavka@yandex.ru', subject: 'Запрос', text: 'Добрый день!' }] });
@@ -323,7 +433,7 @@ describe('черновик КП опта: источник — карточка 
       },
     });
     expect(r3.payload.source.mail).toMatchObject({ status: 'error', error: 'вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК', retryAt: retryAt.toISOString() });
-    expect(r3.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'почта: вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК' });
+    expect(r3.payload.needs_manager).toContainEqual({ request_index: -1, reason: 'ящик не прочитан: вход в ящик shop@rf-dveri.ru не удался, следующая попытка не раньше 14:30 МСК — черновик собран по файлам и письму из сделки' });
     expect(r3.payload.items.map((l) => l.name)).toEqual(['добор']);
   });
 

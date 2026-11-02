@@ -45,6 +45,11 @@ export interface MailSearch {
   window?: { since: Date; before: Date; source: MailWindowSource };
   /** Тема, если известна: при совпадении берётся письмо с ней, иначе — самое свежее от отправителя. */
   subject?: string | null;
+  /**
+   * Письмо прошлой сборки (KP-REBUILD-MAIL): папка и UID из черновика — сначала читается оно одной командой, без обхода
+   * папок и порций; если по UID его больше нет или отправитель другой — обычный поиск.
+   */
+  known?: { folder: string; uid: number; messageId: string | null } | null;
 }
 
 export interface MailAttachment {
@@ -100,6 +105,8 @@ export interface MailSearchDiag {
   partial?: { where: string; ranges: string[] } | null;
   /** Сбои SEARCH по дате по папкам (сервер ответил NO/BAD) — иначе ноль совпадений выглядел бы как «писем нет». */
   errors: string[];
+  /** Быстрый путь к письму прошлой сборки по папке и UID: ok — прочитано им, иначе причина и обычный поиск. */
+  fastPath?: { folder: string; uid: number; ok: boolean; reason?: string } | null;
 }
 
 export interface MailReadResult {
@@ -115,7 +122,7 @@ export interface MailReadOptions {
   commandMs?: number;
   /** Одна порция FETCH ENVELOPE, мс (20 с): Яндекс отдаёт ≈3,5 конверта/с, порция в 20 UID укладывается с запасом. */
   fetchBatchMs?: number;
-  /** Весь поиск по ящику, мс (90 с). */
+  /** Весь поиск по ящику, мс (150 с; было 90 — Яндекс 16.10.2026 не укладывался: 18 писем, ни одной порции). */
   totalMs?: number;
   /** Строка прогресса на каждую папку — в консоль mail-check и в debug-лог задания. */
   onProgress?: (line: string) => void;
@@ -125,7 +132,7 @@ export interface MailReadOptions {
 
 export const MAIL_CONNECT_MS = 20_000;
 export const MAIL_COMMAND_MS = 30_000;
-export const MAIL_TOTAL_MS = 90_000;
+export const MAIL_TOTAL_MS = 150_000;
 export const MAIL_FETCH_BATCH_MS = 20_000;
 
 /** imapflow отверг команду, потому что соединение уже закрыто (простой сокета, BYE сервера). */
@@ -197,6 +204,8 @@ const pauseKey = (c: MailReadConfig) => `${c.username}@${c.host}:${c.port}`;
 /** Сброс пауз после ошибок входа (для тестов). */
 export function resetMailAuthPauses(): void {
   authPause.clear();
+  failures.clear();
+  pauseWhy.clear();
 }
 
 const moscowTime = (ms: number) => new Date(ms).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -212,6 +221,50 @@ const isAuthFailure = (err: unknown) => {
   const e = (err ?? {}) as ImapError;
   return e.authenticationFailed === true || AUTH_RE.test([e.message, e.serverResponseCode, e.responseText].filter(Boolean).join(' '));
 };
+
+/**
+ * KP-PARSE-RETRY, п. 4: imapflow на любой отказ сервера при входе (NO на LOGIN) пишет в message только «Command failed» и
+ * ставит authenticationFailed — даже если это не пароль, а временный отказ (частые входы, лимит соединений). Настоящий текст
+ * ответа — в responseText / serverResponseCode. Неверный пароль — только с кодом AUTHENTICATIONFAILED (или его текстом).
+ */
+export function imapFailureText(err: unknown): string {
+  const e = (err ?? {}) as ImapError;
+  const server = [e.serverResponseCode ? `[${e.serverResponseCode}]` : '', e.responseText ?? ''].filter(Boolean).join(' ').trim();
+  return server ? `${e.message || 'отказ сервера'}: ${server}` : e.message || 'отказ сервера';
+}
+/** Временный отказ: код UNAVAILABLE / LIMIT / INUSE или текст про лимит, повтор позже, временную ошибку. */
+const TEMPORARY_RE = /\b(UNAVAILABLE|LIMIT|INUSE|SERVERBUG|OVERQUOTA)\b|too many|limit|try again|temporar|later|busy|unavailable|подожд|позже|лимит/i;
+const WRONG_PASSWORD_RE = /AUTHENTICATIONFAILED|authentication fail|invalid credentials|invalid user|password|Login denied|\b535\b/i;
+/** Неверный логин или пароль — только по признакам в ответе сервера; безликий отказ («Command failed») — временный. */
+export const isWrongPassword = (err: unknown): boolean => {
+  const e = (err ?? {}) as ImapError;
+  const server = [e.serverResponseCode, e.responseText].filter(Boolean).join(' ');
+  if (TEMPORARY_RE.test(server)) return false;
+  return WRONG_PASSWORD_RE.test(server) || (!server && WRONG_PASSWORD_RE.test(e.message ?? ''));
+};
+
+/** Нарастающая пауза после временного отказа входа: 1, 2, 4, 8, 16, 30 мин; успешный вход — сброс. */
+export const MAIL_BACKOFF_MS = [60_000, 120_000, 240_000, 480_000, 960_000, MAIL_AUTH_PAUSE_MS];
+const failures = new Map<string, number>();
+/** Причина паузы — в текст отказа, пока пауза не прошла (а не безликое «не удался»). */
+const pauseWhy = new Map<string, string>();
+
+/**
+ * Одна сессия IMAP на ящик в процессе: сборки черновиков одной сделки или разных сделок не входят в ящик параллельно
+ * (Яндекс отвечает отказом на частые и одновременные входы); следующая ждёт, пока предыдущая выйдет (LOGOUT).
+ */
+const sessions = new Map<string, Promise<unknown>>();
+export async function withMailboxSession<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessions.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  sessions.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (sessions.get(key) === tail) sessions.delete(key);
+  }
+}
 
 /** Тема без префиксов ответа и пересылки, в нижнем регистре. */
 export function normalizeSubject(s: string | null | undefined): string {
@@ -413,7 +466,7 @@ export class ImapMailReader {
   async findLatest(search: MailSearch, opts: MailReadOptions = {}): Promise<MailReadResult & { readOnly: boolean }> {
     const key = pauseKey(this.cfg);
     const until = authPause.get(key);
-    if (until && Date.now() < until) throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался, следующая попытка не раньше ${moscowTime(until)} МСК`, new Date(until));
+    if (until && Date.now() < until) throw new MailAuthError(`${pauseWhy.get(key) ?? `вход в ящик ${this.cfg.username} не удался`}, следующая попытка не раньше ${moscowTime(until)} МСК`, new Date(until));
 
     const connectMs = opts.connectMs ?? MAIL_CONNECT_MS;
     const commandMs = opts.commandMs ?? MAIL_COMMAND_MS;
@@ -466,13 +519,26 @@ export class ImapMailReader {
         c.close();
         if (err instanceof MailTimeoutError) throw err;
         if (isAuthFailure(err)) {
-          const retry = Date.now() + MAIL_AUTH_PAUSE_MS;
+          const why = imapFailureText(err);
+          // Неверный пароль — 30 мин (Яндекс блокирует IP при частых неверных входах); временный отказ — нарастающая пауза.
+          if (isWrongPassword(err)) {
+            const retry = Date.now() + MAIL_AUTH_PAUSE_MS;
+            authPause.set(key, retry);
+            pauseWhy.set(key, `вход в ящик ${this.cfg.username} не удался (${why})`);
+            throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался (${why}); проверьте логин и пароль приложения во вкладке «Письмо», следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
+          }
+          const n = (failures.get(key) ?? 0) + 1;
+          failures.set(key, n);
+          const retry = Date.now() + (MAIL_BACKOFF_MS[Math.min(n, MAIL_BACKOFF_MS.length) - 1] as number);
           authPause.set(key, retry);
-          throw new MailAuthError(`вход в ящик ${this.cfg.username} не удался (${(err as Error).message}); проверьте логин и пароль во вкладке «Письмо», следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
+          pauseWhy.set(key, `ящик ${this.cfg.username} временно не пускает (${why})`);
+          throw new MailAuthError(`ящик ${this.cfg.username} временно не пускает (${why}) — сервер отказал во входе, хотя пароль не отвергнут (частые входы или лишние соединения); следующая попытка не раньше ${moscowTime(retry)} МСК`, new Date(retry));
         }
         throw err;
       }
       authPause.delete(key);
+      failures.delete(key);
+      pauseWhy.delete(key);
       return c;
     };
 
@@ -502,6 +568,31 @@ export class ImapMailReader {
     let readOnly = true;
     let c = await connect();
     try {
+      // Быстрый путь (KP-REBUILD-MAIL, п. 1): письмо прошлой сборки по папке и UID — EXAMINE + FETCH BODY, без обхода папок.
+      if (search.known) {
+        const k = search.known;
+        try {
+          await run(`EXAMINE ${k.folder}`, commandMs, () => c.mailboxOpen(k.folder, { readOnly: true }));
+          const fetched = await run(`FETCH BODY ${k.folder}/${k.uid}`, commandMs, () => c.fetchOne(String(k.uid), { uid: true, source: true, envelope: true }, { uid: true }));
+          const one = fetched || null;
+          const sender = (one?.envelope?.from?.[0]?.address ?? '').trim().toLowerCase();
+          const mid = one?.envelope?.messageId ?? null;
+          const matched = one && one.source ? matchSender(sender) : null;
+          if (one && one.source && matched && (!k.messageId || !mid || mid === k.messageId)) {
+            const mail = await parseMail(k.uid, one.source, k.folder);
+            diag.fastPath = { folder: k.folder, uid: k.uid, ok: true };
+            progress(`письмо прошлой сборки прочитано сразу: ${k.folder}/${k.uid}, «${mail.subject}» — папки и порции не просматривались`);
+            return { mail: { ...mail, matchedBy: matched }, diag, readOnly };
+          }
+          diag.fastPath = { folder: k.folder, uid: k.uid, ok: false, reason: !one || !one.source ? 'письма с этим UID в папке больше нет' : !matched ? `по UID другой отправитель (${sender || 'пусто'})` : 'другой Message-ID' };
+        } catch (err) {
+          if (err instanceof MailAuthError) throw err;
+          diag.fastPath = { folder: k.folder, uid: k.uid, ok: false, reason: (err as Error).message };
+          // После таймаута соединение закрыто — для обычного поиска открываем новое.
+          if (err instanceof MailTimeoutError || isConnectionLost(err)) c = await connect();
+        }
+        progress(`письмо прошлой сборки по ${k.folder}/${k.uid} не прочитано (${diag.fastPath?.reason ?? ''}) — обычный поиск`);
+      }
       const listed = await run('LIST', commandMs, () => c.list());
       const { use, skipped } = searchableFolders(listed);
       diag.skippedFolders = skipped;
@@ -533,11 +624,14 @@ export class ImapMailReader {
         const found: Candidate[] = [];
         // Свежие письма первыми: и UID, и номера сообщений растут со временем.
         const sorted = [...ids].sort((a, b) => b - a);
-        const batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
+        let batch = Math.max(1, opts.fetchBatch ?? FETCH_BATCH);
         const ranges = (stat.ranges ??= []);
         const batches = (stat.batches ??= []);
-        const total = Math.ceil(sorted.length / batch);
-        for (let i = 0; i < sorted.length; i += batch) {
+        let total = Math.ceil(sorted.length / batch);
+        // Порция не уложилась в лимит — один раз переподключаемся и читаем её вдвое меньшими порциями (KP-REBUILD-MAIL, п. 1).
+        let retried = false;
+        let i = 0;
+        while (i < sorted.length) {
           const part = sorted.slice(i, i + batch);
           const range = compressUids(part);
           const label = range.length > 60 ? `${Math.min(...part)}…${Math.max(...part)}` : range;
@@ -554,10 +648,21 @@ export class ImapMailReader {
             if (!(err instanceof MailTimeoutError) && !isConnectionLost(err)) throw err;
             const where = err instanceof MailTimeoutError ? err.where : `FETCH ENVELOPE ${folder} (${label}) — соединение оборвано`;
             batches.push({ range: label, envelopes: 0, ms: Date.now() - t0 });
+            if (!retried && batch > 1 && Date.now() + fetchBatchMs < deadline) {
+              retried = true;
+              batch = Math.max(1, Math.floor(batch / 2));
+              total = batches.length + Math.ceil((sorted.length - i) / batch);
+              diag.errors.push(`${folder}: порция ${label} не прочитана (${where}) — переподключение, дальше порции по ${batch}`);
+              progress(`${folder}: порция ${label} не прочитана — переподключение, дальше порции по ${batch}`);
+              c = await connect();
+              await run(`EXAMINE ${folder}`, commandMs, () => c.mailboxOpen(folder, { readOnly: true }));
+              continue;
+            }
             diag.partial = { where, ranges: diag.folders.flatMap((f) => (f.ranges ?? []).map((r) => `${f.path}: ${r}`)).concat(ranges.map((r) => `${folder}: ${r}`)) };
             return { scanned, found, timedOut: true };
           }
-          if (foundHere(found) && i + batch < sorted.length) {
+          i += part.length;
+          if (foundHere(found) && i < sorted.length) {
             stat.stoppedEarly = true;
             progress(`${folder}: письмо отправителя найдено в порции ${batches.length} — остальные ${total - batches.length} не читаем`);
             break;
@@ -650,6 +755,7 @@ export class ImapMailReader {
 
 /** Удобная обёртка для черновика: письмо (или null) и диагностика поиска. */
 export async function readLatestMail(cfg: MailReadConfig, search: MailSearch, opts: MailReadOptions = {}): Promise<MailReadResult> {
-  const { mail, diag } = await new ImapMailReader(cfg).findLatest(search, opts);
+  // Одна сессия на ящик: параллельные сборки ждут друг друга, а не входят одновременно.
+  const { mail, diag } = await withMailboxSession(pauseKey(cfg), () => new ImapMailReader(cfg).findLatest(search, opts));
   return { mail, diag };
 }

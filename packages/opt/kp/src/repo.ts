@@ -13,6 +13,8 @@ export interface KpConstants {
   signature?: string;
   /** Фраза о ценах под итогом КП (плейсхолдер {{price_note}}); не задана — текст по умолчанию из build.ts. */
   priceNote?: string;
+  /** KP-AGENT-V2, п. 6.3: срок действия цены в КП («30 календарных дней»); пусто — вопрос в опроснике. */
+  priceValidity?: string;
   /** Допуск цены аналога, % (не больше 10); не задан — 10. */
   analogPriceTolerancePct?: number;
   /** Домены производителей: источник с таким доменом всегда считается сайтом производителя; пусто по умолчанию. */
@@ -29,7 +31,12 @@ export interface KpConstants {
   maxPositionsPerRun?: number;
   /** Объём текста источников в контексте модели (search_context_size) и лимит вызовов поиска — удешевление. */
   searchContext?: 'low' | 'medium' | 'high';
+  /** Не больше N вызовов web_search на позицию; не задан — 5 (RFD-AI-AGENT-OPT-KB). */
   maxSearchCalls?: number;
+  /** Дневной лимит веб-поиска, $; не задан — 5. Достигнут — агент останавливается, пишет в журнал и в блок. */
+  webSearchDailyUsd?: number;
+  /** Цены из базы знаний не искать (всегда веб); по умолчанию база первая. */
+  skipKnowledgeBase?: boolean;
 }
 
 export interface KpNumbering {
@@ -215,17 +222,19 @@ export class KpRepo {
     return (rowCount ?? 0) > 0;
   }
 
+  /** Пути — относительно KP_FILES_ROOT (paths.ts). false — черновика с таким id нет (дефект 2в: запись проверяется, а не считается сделанной). */
   async setBuilt(
     id: number,
     b: { docxPath: string; pdfPath: string | null; kpNo: string },
-  ): Promise<void> {
-    await this.db.query(
+  ): Promise<boolean> {
+    const { rowCount } = await this.db.query(
       `UPDATE kp_drafts
           SET status = 'built', docx_path = $2, pdf_path = $3,
               kp_no = COALESCE(kp_no, $4), built_at = now()
         WHERE id = $1`,
       [id, b.docxPath, b.pdfPath, b.kpNo],
     );
+    return (rowCount ?? 0) > 0;
   }
 
   async setStatus(id: number, status: KpDraftStatus): Promise<void> {

@@ -6,6 +6,7 @@ import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';
 import { oauthRoutes } from './routes/oauth.ts';
 import { widgetRoutes } from './routes/widget.ts';
+import { kpPublicRoutes } from './routes/kp.ts';
 
 /** API «Агента опт»: здоровье, OAuth своей интеграции amoCRM и маршруты виджета. Ни чатов, ни почты, ни вебхуков (ТЗ 6.5). */
 export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
@@ -38,5 +39,6 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
   healthRoutes(app, deps);
   oauthRoutes(app, deps);
   widgetRoutes(app, deps);
+  kpPublicRoutes(app, deps);
   return app;
 }

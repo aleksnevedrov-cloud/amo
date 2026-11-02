@@ -102,7 +102,7 @@ describe('НДС КП', () => {
     expect(p.priceKopecks).not.toBe(1_220_000);
     const data = templateData({ kpNo: 'КП-2026-1', date: new Date(2026, 9, 13), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'Дверь', size: '', qty: 1, price: p.price, discount: 0 }], vatRate: 22, priceNote: '' });
     expect(plain(data.grand_total)).toBe('10 000 ₽');
-    expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 1 803,28 ₽');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 1 803,28 ₽');
     expect(data.total_in_words).toBe('Десять тысяч рублей 00 копеек');
   });
 
@@ -113,6 +113,6 @@ describe('НДС КП', () => {
     const data = templateData({ kpNo: '1', date: new Date(), basis: '', clientName: '', clientPhone: '', lines: [{ name: 'a', size: '', qty: 3, price: 0.1, discount: 0 }, { name: 'b', size: '', qty: 3, price: 10_000, discount: 33 }], vatRate: 22, priceNote: '' });
     expect(plain(data.grand_total)).toBe('20 100 ₽');
     // 2 010 030 коп / 1,22 = 1 647 566 коп без НДС → НДС 362 464 коп.
-    expect(plain(data.vat_phrase)).toBe('в том числе НДС 22% — 3 624,64 ₽');
+    expect(plain(data.vat_phrase)).toBe('в т.ч. НДС 22 % — 3 624,64 ₽');
   });
 });

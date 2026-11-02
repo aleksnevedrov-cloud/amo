@@ -63,9 +63,13 @@ describe('архив виджета «Агент опт»', () => {
     for (const marker of ['Песочница', 'Правила цен', 'salesbot']) expect(text('script.js')).not.toContain(marker);
   });
 
-  it('размер архива около 135 КБ: React 19 ≈ 215 КБ в script.js, свой код и стили ≈ 40 КБ, логотипы 40 КБ', () => {
-    // После стилей по макету (DESIGN, DESIGN-FIX) архив 134 КБ; запас до 150.
-    expect(zipBytes).toBeLessThan(150 * 1024);
-    expect(files['script.js']!.length).toBeLessThan(320 * 1024);
+  it('размер архива около 145 КБ: React 19 ≈ 215 КБ в script.js, свой код и стили ≈ 60 КБ, логотипы 40 КБ', () => {
+    // После стилей по макету (DESIGN, DESIGN-FIX) архив 134 КБ; вкладка «База знаний» (RFD-AI-AGENT-OPT-KB: источники, ссылки,
+    // прайсы, синонимы) добавила ≈ 20 КБ к script.js — архив 144 КБ, script.js 341 КБ; запас до 160 / 360.
+    // KB-MARKUP, KB-ALIASES-UI, KP-SENT-COPY (наценка, блок синонимов, «Посмотреть письмо», проверка IMAP) — архив 162 КБ; запас до 180.
+    expect(zipBytes).toBeLessThan(180 * 1024);
+    // KP-AGENT-V2: окно КП с вкладками, таблица, опросник, сайты и кандидаты — script.js ≈ 392 КБ; запас до 420.
+    // KP-SENT-COPY — 418 КБ; KP-PARSE-RETRY (пометки об источниках, сводка по файлам, «Разобрать заново») — 424 КБ; запас до 450.
+    expect(files['script.js']!.length).toBeLessThan(450 * 1024); // KB-PRICE-SHEETS: пометки статусов и счётчики прайса, 1.2.1 — 361 КБ
   });
 });
