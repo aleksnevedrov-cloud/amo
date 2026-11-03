@@ -1,0 +1,6 @@
+# Отдельный проект: свой workspace и lock-файл, не связан с AI-агентом из корня репозитория.
+packages:
+  - server
+  - widget
+onlyBuiltDependencies:
+  - esbuild

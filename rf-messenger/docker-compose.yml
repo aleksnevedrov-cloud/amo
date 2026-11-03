@@ -1,0 +1,72 @@
+# RFD-MESSENGER — отдельный проект на сервере «Amo Widget», папка /opt/rf-messenger.
+# Свои postgres и redis: падение мессенджеров не затрагивает AI-агента, и наоборот.
+# Порты только на 127.0.0.1; наружу — через nginx на chat.rf-dveri.ru (docs/deploy.md).
+name: rf-messenger
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rfm
+      POSTGRES_USER: rfm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=30", "-c", "work_mem=2MB"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 160m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rfm -d rfm"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "48mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://rfm:${POSTGRES_PASSWORD}@postgres:5432/rfm
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "127.0.0.1:${API_PORT:-3100}:3100"
+    volumes:
+      - files:/data/files
+    mem_limit: 160m
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3100/health"]
+      interval: 15s
+      retries: 3
+
+  connectors:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://rfm:${POSTGRES_PASSWORD}@postgres:5432/rfm
+      REDIS_URL: redis://redis:6379
+    command: ["node", "dist/connectors.js"]
+    volumes:
+      - files:/data/files
+    mem_limit: 256m
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
+  files:

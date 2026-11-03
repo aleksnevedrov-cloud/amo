@@ -1,0 +1,59 @@
+import { z } from 'zod';
+
+const hex32 = z.string().regex(/^[0-9a-fA-F]{64}$/, 'должен быть 32-байтовым ключом в hex (64 символа)');
+const list = (s: string) => s.split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);
+
+export const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+
+  HOST: z.string().default('0.0.0.0'),
+  PORT: z.coerce.number().int().positive().default(3100),
+  /** Публичный адрес сервиса: https://chat.rf-dveri.ru. От него ссылки на файлы и aud токена виджета. */
+  PUBLIC_URL: z.string().url(),
+
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().url(),
+
+  /** Интеграция amoCRM, в которую загружен виджет мессенджеров (не интеграция AI-агента). */
+  AMO_CLIENT_ID: z.string().uuid(),
+  AMO_CLIENT_SECRET: z.string().min(16),
+  AMO_ALLOWED_DOMAINS: z.string().default('amocrm.ru,amocrm.com,kommo.com').transform(list),
+  /** id аккаунтов amo, которым разрешён виджет (через запятую). Пусто — любой аккаунт с валидным токеном. */
+  AMO_ACCOUNT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => list(s).map(Number).filter((n) => Number.isInteger(n) && n > 0)),
+
+  /** API чатов amoCRM. id канала и секрет выдаёт техподдержка amo после регистрации канала. */
+  AMOJO_BASE_URL: z.string().url().default('https://amojo.amocrm.ru'),
+  AMOJO_CHANNEL_ID: z.string().optional(),
+  AMOJO_CHANNEL_SECRET: z.string().optional(),
+  AMOJO_CHANNEL_TITLE: z.string().default('РФ-Мессенджер'),
+
+  /** AES-256-GCM: токены ботов, сессии WhatsApp/Telegram в БД. */
+  ENCRYPTION_KEY: hex32,
+  /** Подпись ссылок на файлы. */
+  FILE_URL_SECRET: z.string().min(32),
+  FILES_DIR: z.string().default('/data/files'),
+  FILE_URL_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  MAX_FILE_MB: z.coerce.number().int().min(1).max(200).default(50),
+
+  /** Пауза между исходящими в один чат (раздел 6 ТЗ). */
+  OUTBOUND_PAUSE_MIN_MS: z.coerce.number().int().min(0).default(1000),
+  OUTBOUND_PAUSE_MAX_MS: z.coerce.number().int().min(0).default(3000),
+});
+
+export type Env = z.infer<typeof envSchema>;
+
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  const parsed = envSchema.safeParse(source);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
+    throw new Error(`Некорректная конфигурация окружения:\n${issues}`);
+  }
+  if (parsed.data.OUTBOUND_PAUSE_MAX_MS < parsed.data.OUTBOUND_PAUSE_MIN_MS) {
+    throw new Error('OUTBOUND_PAUSE_MAX_MS меньше OUTBOUND_PAUSE_MIN_MS');
+  }
+  return parsed.data;
+}

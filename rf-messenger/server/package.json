@@ -1,0 +1,27 @@
+{
+  "name": "@rf-messenger/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:api": "tsx watch src/main-api.ts",
+    "dev:connectors": "tsx watch src/main-connectors.ts",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate": "tsx src/migrate-cli.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "bullmq": "^5.81.5",
+    "fastify": "^5.12.5",
+    "ioredis": "^5.11.1",
+    "jose": "^6.2.12",
+    "pg": "^8.23.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

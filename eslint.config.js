@@ -3,7 +3,8 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
+  // rf-messenger — отдельный проект со своим eslint.config.js и `pnpm check`.
+  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**', 'rf-messenger/**'] },
   js.configs.recommended,
   ...tseslint.configs.strict,
   {

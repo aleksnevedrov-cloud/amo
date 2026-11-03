@@ -22,6 +22,7 @@ AI-агент ведёт переписку с клиентом в amoCRM как
 | `packages/db` | PostgreSQL: миграции, аккаунты, токены, настройки + аудит, диалоги, журнал |
 | `packages/shared` | Конфиг (zod), AES-256-GCM, маскирование ПДн, алерты в Telegram |
 | `evals` | 52 эталонных диалога и прогон на реальной модели; нагрузочный прогон (`perf.ts`); обезличенные примеры накладных; приёмка разбора файлов (`evals/documents`) |
+| `rf-messenger` | Отдельный проект: свой виджет мессенджеров вместо Wazzup (ТЗ RFD-MESSENGER), см. [rf-messenger/README.md](rf-messenger/README.md) |
 | `docs` | [Архитектура](docs/architecture.md), [установка](docs/install.md), [материалы для amoМаркета](docs/marketplace/) |
 
 ## Разработка

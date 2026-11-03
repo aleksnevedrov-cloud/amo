@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "РФ-Мессенджер",
+    "short_description": "Telegram, WhatsApp, MAX, VK и Авито в чате сделки",
+    "description": "Подключает мессенджеры к amoCRM: переписка с клиентом идёт в чате карточки сделки, менеджер отвечает из amoCRM."
+  },
+  "settings": {
+    "custom": "Каналы"
+  },
+  "advanced": {
+    "title": "РФ-Мессенджер: каналы"
+  }
+}

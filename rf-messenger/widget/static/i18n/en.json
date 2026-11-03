@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "RF-Messenger",
+    "short_description": "Telegram, WhatsApp, MAX, VK and Avito in the lead chat",
+    "description": "Connects messengers to amoCRM: client conversations appear in the lead chat, managers reply from amoCRM."
+  },
+  "settings": {
+    "custom": "Channels"
+  },
+  "advanced": {
+    "title": "RF-Messenger: channels"
+  }
+}
