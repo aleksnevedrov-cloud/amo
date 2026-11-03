@@ -12,10 +12,16 @@ import { buildCallsDeps } from './calls-deps.ts';
  * уйдёт в историю сделки и в открытую задачу «…из-за дневного лимита». Ничего в amo не меняет.
  *
  *   docker compose exec worker node apps/worker/dist/files-defer.js --lead <id сделки> [--name <часть имени файла>] [--account <id>]
+ *
+ * RFD-AI-AGENT-RETAIL-OCR: вернуть в очередь сканы PDF, упавшие на старом Tesseract («распознаётся только через Yandex Vision»),
+ * за последние 30 дней — один раз:
+ *
+ *   docker compose exec worker node apps/worker/dist/files-defer.js --retry-scan-errors [--lead <id сделки>]
  */
 const args = parseArgs(process.argv.slice(2));
+const retryScans = args['retry-scan-errors'] === true;
 const leadId = Number(args.lead);
-if (!Number.isInteger(leadId) || leadId <= 0) fail('укажите --lead <id сделки>');
+if (!retryScans && (!Number.isInteger(leadId) || leadId <= 0)) fail('укажите --lead <id сделки> или --retry-scan-errors [--lead <id>]');
 const nameFilter = typeof args.name === 'string' ? args.name.toLowerCase() : null;
 
 const env = loadEnv();
@@ -26,6 +32,16 @@ try {
   if (!accountId) fail('подключённых аккаунтов нет');
   const account = await deps.accounts.get(accountId);
   if (!account || account.uninstalledAt) fail(`аккаунт ${accountId} не подключён`);
+  if (retryScans) {
+    // RFD-AI-AGENT-RETAIL-OCR, п. 5: сканы, упавшие с «скан PDF без текста распознаётся только через Yandex Vision» за 30 дней,
+    // один раз обратно в очередь (повтор меняет текст ошибки — второй раз не попадут).
+    const rows = await new MailAttachmentsRepo(db).requeueByError(accountId, 'распознаётся только через Yandex Vision', 30, Number.isInteger(leadId) && leadId > 0 ? leadId : null);
+    console.log(`Возвращено в очередь отложенного разбора: ${rows.length}`);
+    for (const r of rows) console.log(`  строка ${r.id}, сделка ${r.leadId ?? '—'}: ${r.filename}`);
+    if (rows.length) console.log('Разбор — ближайшим проходом wazzup-files (до 5 минут), теперь своим распознаванием (poppler + Tesseract + модель).');
+    await close();
+    process.exit(0);
+  }
   const api = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
   // Общая часть с заданием deal-files (RFD-AI-AGENT-DEAL-FILES): те же ключи amo-file:<uuid>, те же пропуски дублей.
   const r = await queueLeadFiles({ attachments: new MailAttachmentsRepo(db), journal: deps.journal, root: process.env.MAIL_FILES_ROOT ?? '/data' }, accountId, leadId, api, { reason: 'поставлен в очередь командой files-defer', maxFileMb: (await deps.settingsFor(accountId)).dealFiles.maxFileMb, nameFilter, journal: true });

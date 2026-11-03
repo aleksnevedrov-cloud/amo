@@ -20,6 +20,7 @@
     "@retail/knowledge": "workspace:*",
     "@core/llm": "workspace:*",
     "@retail/mail": "workspace:*",
+    "@retail/ocr": "workspace:*",
     "@core/media": "workspace:*",
     "@retail/pricing": "workspace:*",
     "@core/shared": "workspace:*",

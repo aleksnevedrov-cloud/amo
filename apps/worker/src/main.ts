@@ -18,7 +18,8 @@ import { CatalogImporter, CatalogRepo } from '@retail/catalog';
 import { AccountsRepo, createPool, DealFileLinksRepo, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
   MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
-import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
+import { DocumentService, YandexVision } from '@core/docs';
+import { RetailDocuments, RetailOcr } from '@retail/ocr';
 import { DEAL_FILES_EVERY_MS, DEAL_FILES_JOB, deferFileToDisk, EmailChannel, ImapMailbox, MailRepo, runDealFilesAll, runDeferredMailFiles, SmtpSender } from '@retail/mail';
 import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
@@ -96,20 +97,23 @@ const ai = createAiProvider({
   serverKeys: { anthropic: env.ANTHROPIC_API_KEY, openai: env.OPENAI_API_KEY },
 });
 // Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
-let tesseract: TesseractOcr | null = null;
-const docs = new DocumentService({
-  llm,
-  llmFor: async (id) => (await ai(id))?.llm ?? null,
-  catalog,
-  documents: new DocumentsRepo(db),
-  ocr(provider) {
-    if (provider === 'off') return null;
-    const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
-    if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID);
-    // Без ключа Yandex — Tesseract на сервере (бесплатно, только картинки).
-    return (tesseract ??= new TesseractOcr());
-  },
-});
+// RFD-AI-AGENT-RETAIL-OCR: собственное распознавание розницы (poppler + Tesseract + модель аккаунта по картинке) вместо
+// TesseractOcr из @core/docs; контекст аккаунта для него несёт обёртка RetailDocuments.
+const retailOcr = new RetailOcr({ llmFor: async (id) => (await ai(id))?.llm ?? null });
+const docs = new RetailDocuments(
+  new DocumentService({
+    llm,
+    llmFor: async (id) => (await ai(id))?.llm ?? null,
+    catalog,
+    documents: new DocumentsRepo(db),
+    ocr(provider) {
+      if (provider === 'off') return null;
+      const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
+      if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID);
+      return retailOcr;
+    },
+  }),
+);
 const emailChannel = new EmailChannel({
   settings,
   mail,

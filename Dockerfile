@@ -21,6 +21,7 @@ COPY packages/core/media/package.json packages/core/media/
 COPY packages/core/calls/package.json packages/core/calls/
 COPY packages/core/docs/package.json packages/core/docs/
 COPY packages/retail/mail/package.json packages/retail/mail/
+COPY packages/retail/ocr/package.json packages/retail/ocr/
 COPY packages/opt/kp/package.json packages/opt/kp/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
@@ -35,6 +36,8 @@ WORKDIR /app
 RUN apk add --no-cache libredwg || true
 # Сборка КП: DOCX -> PDF через LibreOffice (тема RFD-AI-AGENT-KP, этап 4).
 RUN apk add --no-cache libreoffice-writer ttf-dejavu font-noto || true
+# RFD-AI-AGENT-RETAIL-OCR: растеризация сканов PDF (pdftoppm, pdfinfo) и HEIC / TIFF → PNG (ImageMagick) для своего распознавания.
+RUN apk add --no-cache poppler-utils imagemagick && (apk add --no-cache imagemagick-heic || true)
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations
 COPY --from=build /out/api apps/api
 COPY --from=build /out/worker apps/worker

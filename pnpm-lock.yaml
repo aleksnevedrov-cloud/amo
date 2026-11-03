@@ -83,6 +83,9 @@ importers:
       '@retail/mail':
         specifier: workspace:*
         version: link:../../packages/retail/mail
+      '@retail/ocr':
+        specifier: workspace:*
+        version: link:../../packages/retail/ocr
       '@retail/pricing':
         specifier: workspace:*
         version: link:../../packages/retail/pricing
@@ -367,6 +370,9 @@ importers:
       '@retail/mail':
         specifier: workspace:*
         version: link:../../packages/retail/mail
+      '@retail/ocr':
+        specifier: workspace:*
+        version: link:../../packages/retail/ocr
       '@retail/pricing':
         specifier: workspace:*
         version: link:../../packages/retail/pricing
@@ -842,6 +848,24 @@ importers:
       smtp-server:
         specifier: ^3.19.13
         version: 3.19.13
+
+  packages/retail/ocr:
+    dependencies:
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../core/llm
+      '@retail/agent':
+        specifier: workspace:*
+        version: link:../agent
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
 
   packages/retail/pricing:
     dependencies:

@@ -33,7 +33,8 @@ import {
   type Db,
   DoorComponentsRepo,
 } from '@core/db';
-import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@core/docs';
+import { DocumentService, YandexVision, type OcrProvider } from '@core/docs';
+import { RetailDocuments, RetailOcr, type RetailOcrDeps } from '@retail/ocr';
 import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@retail/mail';
 import { PricingRepo } from '@retail/pricing';
 import { AmoApiClient } from '@core/amo';
@@ -73,7 +74,7 @@ export interface Deps {
   outcomes: OutcomesRepo;
   analytics: AnalyticsRepo;
   /** Разбор файлов (фаза 3); без ключа LLM бросает понятную ошибку. */
-  docs: DocumentService;
+  docs: Pick<DocumentService, 'analyze'>;
   /** Серверные LLM/оркестратор (ANTHROPIC_API_KEY); null — не задан. */
   orchestrator: Orchestrator | null;
   llm: LlmClient | null;
@@ -165,7 +166,9 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     serverKeys: testLlm !== undefined ? { anthropic: testLlm ? 'override' : undefined } : serverKeys,
     make: (provider, key) => (provider === 'anthropic' && testLlm ? new AnthropicProvider(testLlm as LlmClient) : createProvider(provider, key, { fetch: fetchImpl })),
   });
-  const docs = new DocumentService({ llm, llmFor: async (id) => (await ai(id))?.llm ?? null, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
+  const llmFor = async (id: number) => (await ai(id))?.llm ?? null;
+  // RFD-AI-AGENT-RETAIL-OCR: собственное распознавание розницы при provider tesseract; контекст аккаунта — RetailDocuments.
+  const docs = new RetailDocuments(new DocumentService({ llm, llmFor, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl, llmFor) }));
 
   return {
     env,
@@ -233,12 +236,13 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
  * OCR по настройке аккаунта: Yandex Vision, если задан ключ (свой или от SpeechKit);
  * без ключа и при явном выборе — Tesseract на нашем сервере (один воркер на процесс).
  */
-export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch): (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null {
-  let tesseract: TesseractOcr | null = null;
+export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch, llmFor: RetailOcrDeps['llmFor'] = async () => null): (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null {
+  let retail: RetailOcr | null = null;
   return (provider) => {
     if (provider === 'off') return null;
     const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
     if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID, fetchImpl);
-    return (tesseract ??= new TesseractOcr());
+    // RFD-AI-AGENT-RETAIL-OCR: своё распознавание розницы (poppler + Tesseract + модель аккаунта по картинке).
+    return (retail ??= new RetailOcr({ llmFor }));
   };
 }

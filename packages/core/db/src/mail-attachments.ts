@@ -99,6 +99,18 @@ export class MailAttachmentsRepo {
     return rows.map((r) => ({ ...mapRow(r), messageId: r.message_id, createdAt: r.created_at }));
   }
 
+  /** RFD-AI-AGENT-RETAIL-OCR, п. 5: вложения с ошибкой разбора (по тексту) за days дней — один раз обратно в очередь отложенных. */
+  async requeueByError(accountId: number, needle: string, days: number, leadId?: number | null): Promise<{ id: number; leadId: number | null; filename: string }[]> {
+    const { rows } = await this.db.query<{ id: string; lead_id: string | null; filename: string }>(
+      `UPDATE mail_attachments SET extract_status = 'deferred', extract_error = 'повтор после ' || left(extract_error, 300), extracted_at = NULL
+        WHERE account_id = $1 AND extract_status = 'error' AND extract_error ILIKE '%' || $2 || '%' AND storage_path <> ''
+          AND created_at >= now() - ($3::int || ' days')::interval AND ($4::bigint IS NULL OR lead_id = $4)
+        RETURNING id, lead_id, filename`,
+      [accountId, needle, days, leadId ?? null],
+    );
+    return rows.map((r) => ({ id: Number(r.id), leadId: r.lead_id === null ? null : Number(r.lead_id), filename: r.filename }));
+  }
+
   /** RFD-AI-AGENT-DEAL-FILES: есть ли уже строка с этим ключом (deferred:<hash>) — файл сделки / ссылка уже в очереди или разобрана. */
   async hasMessageId(accountId: number, messageId: string): Promise<boolean> {
     const { rows } = await this.db.query('SELECT 1 FROM mail_attachments WHERE account_id = $1 AND message_id = $2 LIMIT 1', [accountId, messageId]);
