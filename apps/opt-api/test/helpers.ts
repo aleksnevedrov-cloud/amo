@@ -25,6 +25,18 @@ export interface AmoMock {
   files: unknown[];
   /** Содержимое файлов сделки по uuid (скачивание по ссылке из карточки файла). */
   blobs?: Record<string, { bytes: Uint8Array; mime: string }>;
+  /** Карточки файлов в Files API на drive_url (часть 0 OPT-DEAL-FILES): uuid → ответ GET {drive}/v1.0/files/{uuid}. */
+  cards?: Record<string, unknown>;
+}
+
+/**
+ * RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: файл сделки в реальном формате живого аккаунта — в /leads/{id}/files только id и
+ * file_uuid, карточка (имя, размер, ссылка) — в Files API на drive_url (AmoMock.cards); без карточки — 404.
+ */
+export function leadFileCard(mock: AmoMock, uuid: string, name: string | null, bytes: Uint8Array, mime: string) {
+  mock.files.push({ id: 8_000_000 + mock.files.length, file_uuid: uuid });
+  if (name !== null) (mock.cards ??= {})[uuid] = { uuid, name, size: bytes.byteLength, metadata: { mime_type: mime }, _links: { download: { href: `https://drive-b.amocrm.ru/download/${uuid}` } } };
+  (mock.blobs ??= {})[uuid] = { bytes, mime };
 }
 
 /** Файл сделки для AmoMock.files и его содержимое для AmoMock.blobs (эталонный набор KP-AGENT-V2). */
@@ -53,6 +65,10 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/files`) && method === 'PUT') return json(200, {});
     if (url.includes(`/api/v4/leads/${LEAD_ID}`)) return json(200, { id: LEAD_ID, name: 'Двери для офиса', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
     if (url.endsWith('/api/v4/contacts/77')) return json(200, { id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }] });
+    if (url.startsWith('https://drive-b.amocrm.ru/v1.0/files/') && method === 'GET') {
+      const card = mock.cards?.[url.slice('https://drive-b.amocrm.ru/v1.0/files/'.length)];
+      return card ? json(200, card) : json(404, {});
+    }
     if (url.startsWith('https://drive-b.amocrm.ru/download/')) {
       const blob = mock.blobs?.[url.slice('https://drive-b.amocrm.ru/download/'.length)];
       return blob ? new Response(blob.bytes, { status: 200, headers: { 'content-type': blob.mime } }) : json(404, {});

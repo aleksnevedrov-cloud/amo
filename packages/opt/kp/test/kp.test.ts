@@ -228,7 +228,7 @@ function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftD
     getContact: async () => ({ id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }, { field_id: 2, field_code: 'PHONE', values: [{ value: '+7 900 000-00-00' }] }] }),
     leadMailNotes: async () => opts.mails ?? [],
     getLeadNotes: async () => opts.notes ?? [],
-    listLeadFiles: async () => opts.files ?? [],
+    listLeadFileEntries: async () => ({ files: opts.files ?? [], missing: [] }),
     downloadFile: async (f) => {
       downloaded.push(f.name);
       return { bytes: new Uint8Array([1, 2, 3]), mime: f.mime };

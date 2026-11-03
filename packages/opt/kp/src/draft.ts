@@ -307,7 +307,7 @@ export interface ParsedFile {
 }
 
 export interface KpDraftDeps {
-  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'getLeadNotes' | 'listLeadFiles' | 'downloadFile' | 'uploadFileToLead'>;
+  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'getLeadNotes' | 'listLeadFileEntries' | 'downloadFile' | 'uploadFileToLead'>;
   /**
    * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
    * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
@@ -407,6 +407,8 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, load: () => d.amo.downloadFile(f) })),
   ];
   const files = await parseFiles(d, sources, { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES });
+  // RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: файл сделки без карточки (Files API ответил 404 и т. п.) — в «пропущено», не молча.
+  files.skipped.push(...card.filesMissing);
   const letter = card.letter ? await parseLetter(llm, input, card.letter.text) : null;
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
@@ -495,7 +497,9 @@ interface Card {
   contact: { fio: string; email: string; phone: string };
   letter: { text: string; createdAt: Date; from: string; subject: string } | null;
   mails: number;
-  files: Awaited<ReturnType<AmoApiClient['listLeadFiles']>>;
+  files: Awaited<ReturnType<AmoApiClient['listLeadFileEntries']>>['files'];
+  /** Файлы сделки, чью карточку amo не отдал (часть 0): в «пропущено» с причиной «карточка файла не получена: HTTP N». */
+  filesMissing: { name: string; reason: string }[];
   /** Дата создания сделки — опора для окна дат, когда у письма в карточке даты нет. */
   leadCreatedAt: Date | null;
   /** Адрес из примечания розницы «Запрос КП … От: Имя <адрес>» — когда ни в письме, ни у контакта адреса нет. */
@@ -640,7 +644,8 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
   const mails = await amo.leadMailNotes(leadId, 20).catch(() => []);
   const incoming = mails.filter((m) => m.income).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const last = incoming.at(-1) ?? null;
-  const files = await amo.listLeadFiles(leadId).catch(() => []);
+  const entries = await amo.listLeadFileEntries(leadId).catch(() => ({ files: [], missing: [] }));
+  const files = entries.files;
   // Примечания розницы читаются только когда адреса нет ни в письме, ни у контакта — лишний запрос к amo не нужен.
   const contactEmail = contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '';
   const noteFrom = extractEmail(last?.from) || extractEmail(contactEmail) ? null : senderFromNotes(await amo.getLeadNotes(leadId, 50).catch(() => []));
@@ -656,6 +661,7 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
     letter: last ? { text: [last.subject ? `Тема: ${last.subject}` : '', last.text].filter(Boolean).join('\n'), createdAt: last.createdAt, from: last.from, subject: last.subject } : null,
     mails: mails.length,
     files,
+    filesMissing: entries.missing.map((m) => ({ name: `файл ${m.uuid}`, reason: m.reason })),
   };
 }
 

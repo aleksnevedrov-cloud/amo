@@ -106,10 +106,12 @@ describe('AmoApiClient: файлы сделки (для «Агента опт»)
   it('список файлов: uuid из списка, карточка файла — отдельным запросом; скачивание по ссылке из карточки с Bearer', async () => {
     const s = scripted([
       { status: 200, body: { _embedded: { files: [{ file_uuid: 'aaa' }, { file_uuid: 'bbb', file: { uuid: 'bbb', name: 'Двери (3).docx', size: 1234, created_at: 1_700_000_000, metadata: { mime_type: 'application/msword', extension: 'docx' }, _links: { download: { href: 'https://drive-b.amocrm.ru/download/bbb' } } } }] } } },
+      { status: 200, body: { drive_url: 'https://drive-b.amocrm.ru' } },
+      { status: 404 },
       { status: 404 },
     ]);
     const files = await client(s.fn).listLeadFiles(5);
-    expect(s.calls.map((c) => c.url)).toEqual(['https://acc.amocrm.ru/api/v4/leads/5/files?limit=20', 'https://acc.amocrm.ru/api/v4/files/aaa']);
+    expect(s.calls.map((c) => c.url)).toEqual(['https://acc.amocrm.ru/api/v4/leads/5/files?limit=20', 'https://acc.amocrm.ru/api/v4/account?with=drive_url', 'https://drive-b.amocrm.ru/v1.0/files/aaa', 'https://acc.amocrm.ru/api/v4/files/aaa']);
     // Файл без карточки (404) пропускается, а не роняет список.
     expect(files).toEqual([{ uuid: 'bbb', name: 'Двери (3).docx', size: 1234, mime: 'application/msword', createdAt: new Date(1_700_000_000_000), downloadUrl: 'https://drive-b.amocrm.ru/download/bbb' }]);
 
@@ -122,6 +124,28 @@ describe('AmoApiClient: файлы сделки (для «Агента опт»)
     expect(calls).toEqual([{ url: 'https://drive-b.amocrm.ru/download/bbb', auth: 'Bearer TOKEN' }]);
     expect([...got.bytes]).toEqual([80, 75]);
     expect(got.mime).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
+  it('реальный формат /leads/{id}/files — только id и file_uuid: карточка файла с drive-url (RFD-AI-AGENT-OPT-DEAL-FILES, часть 0); без карточки — в missing с HTTP-статусом', async () => {
+    const s = scripted([
+      { status: 200, body: { _embedded: { files: [{ id: 8891492, file_uuid: '2a5408d7-f411-4919-88cc-b714b9f6f2ac' }, { id: 8891493, file_uuid: '5fb0943d-f045-4edf-897d-a87cc3118b12' }, { id: 8891494, file_uuid: 'dead-beef' }] } } },
+      { status: 200, body: { drive_url: 'https://drive-a.amocrm.ru/' } },
+      { status: 200, body: { uuid: '2a5408d7-f411-4919-88cc-b714b9f6f2ac', name: 'Двери внутренние Данилково (4).pdf', size: 680_816, metadata: { mime_type: 'application/pdf', extension: 'pdf' }, _links: { download: { href: 'https://drive-a.amocrm.ru/download/2a5408d7' } } } },
+      { status: 200, body: { uuid: '5fb0943d-f045-4edf-897d-a87cc3118b12', name: 'Двери наружные Данилково (4).pdf', size: 335_130, metadata: { mime_type: 'application/pdf', extension: 'pdf' }, _links: { download: { href: 'https://drive-a.amocrm.ru/download/5fb0943d' } } } },
+      { status: 404 },
+      { status: 404 },
+    ]);
+    const r = await client(s.fn).listLeadFileEntries(30038356, 100);
+    expect(s.calls.map((c) => c.url)).toEqual([
+      'https://acc.amocrm.ru/api/v4/leads/30038356/files?limit=100',
+      'https://acc.amocrm.ru/api/v4/account?with=drive_url',
+      'https://drive-a.amocrm.ru/v1.0/files/2a5408d7-f411-4919-88cc-b714b9f6f2ac',
+      'https://drive-a.amocrm.ru/v1.0/files/5fb0943d-f045-4edf-897d-a87cc3118b12',
+      'https://drive-a.amocrm.ru/v1.0/files/dead-beef',
+      'https://acc.amocrm.ru/api/v4/files/dead-beef',
+    ]);
+    expect(r.files.map((f) => [f.name, f.size, f.downloadUrl])).toEqual([['Двери внутренние Данилково (4).pdf', 680_816, 'https://drive-a.amocrm.ru/download/2a5408d7'], ['Двери наружные Данилково (4).pdf', 335_130, 'https://drive-a.amocrm.ru/download/5fb0943d']]);
+    expect(r.missing).toEqual([{ uuid: 'dead-beef', status: 404, reason: 'карточка файла не получена: HTTP 404' }]);
   });
 
   it('204 на пустой список файлов → []', async () => {

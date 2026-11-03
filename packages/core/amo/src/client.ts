@@ -427,24 +427,66 @@ export class AmoApiClient {
    * Формат ответов «Файлов» amo сверить на живом аккаунте при приёмке опта (этап 5).
    */
   async listLeadFiles(leadId: number, limit = 20): Promise<LeadFile[]> {
+    return (await this.listLeadFileEntries(leadId, limit)).files;
+  }
+
+  /**
+   * RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: список файлов вместе с теми, чью карточку получить не удалось (uuid и HTTP-статус) —
+   * опт показывает их в «пропущено» с причиной, а не теряет молча.
+   */
+  async listLeadFileEntries(leadId: number, limit = 20): Promise<LeadFilesResult> {
     const res = await this.request<{ _embedded?: { files?: { file_uuid?: string; uuid?: string; file?: AmoFileInfo }[] } }>(
       'GET',
       `/api/v4/leads/${leadId}/files?limit=${Math.min(limit, 100)}`,
     );
-    const out: LeadFile[] = [];
+    const files: LeadFile[] = [];
+    const missing: LeadFilesResult['missing'] = [];
     for (const row of res?._embedded?.files ?? []) {
       const uuid = row.file_uuid ?? row.uuid ?? row.file?.uuid;
       if (!uuid) continue;
-      const info = row.file ?? (await this.request<AmoFileInfo>('GET', `/api/v4/files/${uuid}`, undefined, { allow404: true }));
-      if (!info) continue;
-      out.push(toLeadFile(uuid, info));
+      const found = row.file ? { info: row.file, status: 200 } : await this.fileInfoDetailed(uuid);
+      if (!found.info) {
+        missing.push({ uuid, status: found.status, reason: `карточка файла не получена: ${found.status === null ? 'сеть' : `HTTP ${found.status}`}` });
+        continue;
+      }
+      files.push(toLeadFile(uuid, found.info));
     }
-    return out;
+    return { files, missing };
+  }
+
+  /**
+   * Карточка файла по uuid: на живом аккаунте /api/v4/leads/{id}/files отдаёт только id и file_uuid (RFD-AI-AGENT-FIX-PACK-2410,
+   * ч. 3; в опте — RFD-AI-AGENT-OPT-DEAL-FILES, часть 0), а имя, размер и ссылка на скачивание живут в Files API на drive-url
+   * (GET {drive}/v1.0/files/{uuid}); запасной путь — /api/v4/files/{uuid} на домене аккаунта. Нет ни там, ни там — null.
+   */
+  async fileInfo(uuid: string): Promise<AmoFileInfo | null> {
+    return (await this.fileInfoDetailed(uuid)).info;
+  }
+
+  private async fileInfoDetailed(uuid: string): Promise<{ info: AmoFileInfo | null; status: number | null }> {
+    let status: number | null = null;
+    const tryPath = async (path: string): Promise<AmoFileInfo | null> => {
+      try {
+        const info = await this.request<AmoFileInfo>('GET', path, undefined, { allow404: true });
+        if (!info) status = 404;
+        return info;
+      } catch (err) {
+        status = err instanceof AmoError ? (err.status ?? null) : null;
+        return null;
+      }
+    };
+    const drive = await this.getDriveUrl();
+    if (drive) {
+      const info = await tryPath(`${drive}/v1.0/files/${uuid}`);
+      if (info) return { info, status: 200 };
+    }
+    const info = await tryPath(`/api/v4/files/${uuid}`);
+    return { info, status: info ? 200 : status };
   }
 
   /** Содержимое файла сделки по ссылке из его карточки. */
   async downloadFile(file: LeadFile): Promise<{ bytes: Uint8Array; mime: string | null }> {
-    const url = file.downloadUrl ?? (await this.request<AmoFileInfo>('GET', `/api/v4/files/${file.uuid}`))?._links?.download?.href;
+    const url = file.downloadUrl ?? (await this.fileInfo(file.uuid))?._links?.download?.href;
     if (!url) throw new AmoError(`amo: у файла ${file.name} нет ссылки на скачивание`, 404, '');
     const res = await this.fetchImpl(url, {
       headers: { authorization: `Bearer ${await this.getAccessToken()}` },
@@ -558,6 +600,12 @@ export interface AmoFileInfo {
   created_at?: number;
   metadata?: { mime_type?: string | null; extension?: string | null };
   _links?: { download?: { href?: string } };
+}
+
+export interface LeadFilesResult {
+  files: LeadFile[];
+  /** Файлы из списка сделки без карточки: uuid, HTTP-статус (null — сеть) и причина для «пропущено». */
+  missing: { uuid: string; status: number | null; reason: string }[];
 }
 
 export interface LeadFile {
