@@ -1,13 +1,17 @@
-import { withMarkup } from '@opt/kb';
-import type { OptCore } from './deps.ts';
+import type { JournalRepo } from '@core/db';
+import { withMarkup, type KbPricesRepo, type KbRepo } from '@opt/kb';
 import type { KpLine, KpPayload } from './draft.ts';
+import type { KpRepo } from './repo.ts';
 import { KP_PRICE_RESEARCH_KIND } from './research-job.ts';
 
 /**
- * KB-MARKUP: «Пересчитать» — новая наценка источника к ценам из прайса уже созданного черновика. Сам черновик при смене наценки
- * не пересчитывается. Берутся только строки с ценой прайса, которую менеджер не менял (priceSource price_file / kb, цена = итог
+ * KB-MARKUP: новая наценка источника к ценам из прайса уже созданного черновика. Сам черновик при смене наценки не
+ * пересчитывается. Берутся только строки с ценой прайса, которую менеджер не менял (priceSource price_file / kb, цена = итог
  * наценки); цена фабрики — из строки (до KB-MARKUP наценки не было — цена строки и есть цена фабрики). Цены интернета и ручные
- * не трогаются.
+ * не трогаются. Нестандарт: у строки цена фабрики уже с надбавкой (factoryPrice), наценка — поверх неё.
+ *
+ * RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопки «Пересчитать» в окне КП больше нет — тот же пересчёт делает сборка документа
+ * (buildDraftDocument, trigger 'build') до проверок цен и рендера; маршрут POST /kp/draft/:id/recalc-markup оставлен.
  */
 export interface MarkupRecalcResult {
   changed: { requestIndex: number; name: string; before: number; after: number; pct: number }[];
@@ -15,7 +19,21 @@ export interface MarkupRecalcResult {
   skipped: number[];
 }
 
-export async function recalcDraftMarkup(core: OptCore, accountId: number, draftId: number, userId: number | null): Promise<MarkupRecalcResult> {
+/** Что нужно пересчёту: черновики, цены и наценки базы знаний, журнал (OptCore подходит целиком). */
+export interface MarkupDeps {
+  kp: Pick<KpRepo, 'byId' | 'setPayloadIfVersion'>;
+  kb: { prices: Pick<KbPricesRepo, 'byId'>; repo: Pick<KbRepo, 'markupOf'> };
+  journal: Pick<JournalRepo, 'add'>;
+}
+
+export interface MarkupRecalcOptions {
+  /** button — маршрут recalc-markup (как раньше); build — сборка документа: другая запись в журнале. */
+  trigger?: 'button' | 'build';
+  /** Номер КП для записи «при сборке КП N» (у черновика без номера — «по черновику N»). */
+  kpNo?: string | null;
+}
+
+export async function recalcDraftMarkup(core: MarkupDeps, accountId: number, draftId: number, userId: number | null, opts: MarkupRecalcOptions = {}): Promise<MarkupRecalcResult> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const draft = await core.kp.byId(accountId, draftId);
     if (!draft) throw new Error(`черновик ${draftId} не найден`);
@@ -46,12 +64,13 @@ export async function recalcDraftMarkup(core: OptCore, accountId: number, draftI
     if (!changed.length) return { changed, skipped };
     if (!(await core.kp.setPayloadIfVersion(draftId, draft.version, { ...payload, items } as unknown as Record<string, unknown>))) continue;
     const list = changed.slice(0, 10).map((c) => `«${c.name}» ${c.before.toLocaleString('ru-RU')} → ${c.after.toLocaleString('ru-RU')} ₽`).join('; ');
+    const where = opts.trigger === 'build' ? `при сборке КП ${opts.kpNo ?? `по черновику ${draftId}`}` : `по черновику ${draftId}`;
     await core.journal.add({
       accountId,
       leadId: draft.leadId,
       kind: KP_PRICE_RESEARCH_KIND,
-      summary: `Пересчёт наценки по черновику ${draftId}: изменено позиций ${changed.length}${list ? ` — ${list}${changed.length > 10 ? ` и ещё ${changed.length - 10}` : ''}` : ''}`,
-      details: { draftId, source: 'kb_markup', changed, skipped, userId },
+      summary: `Пересчёт наценки ${where}: изменено позиций ${changed.length}${list ? ` — ${list}${changed.length > 10 ? ` и ещё ${changed.length - 10}` : ''}` : ''}`,
+      details: { draftId, source: 'kb_markup', trigger: opts.trigger ?? 'button', changed, skipped, userId },
     });
     return { changed, skipped };
   }

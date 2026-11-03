@@ -4,6 +4,7 @@ import type { AmoApiClient } from '@core/amo';
 import type { JournalRepo } from '@core/db';
 import { buildKp, DEFAULT_PRICE_NOTE, findCertificates, SERVICE_NOTE, templateData } from './build.ts';
 import { DEFAULT_VAT_RATE } from './offer-price.ts';
+import { recalcDraftMarkup, type MarkupDeps } from './markup.ts';
 import { blockingOpen, buildQuestions, hasSourcedPrice } from './questions.ts';
 import { isServiceLine, kpLineParts, lineCategory, tidyName, type KpLine, type KpPayload } from './draft.ts';
 import { describeFsError, kpLeadDirRel, relativeKpPath, resolveKpPath } from './paths.ts';
@@ -37,6 +38,14 @@ export interface KpBuildDeps {
   filesRoot: string;
   journal: Pick<JournalRepo, 'add'>;
   amoFor(accountId: number): Promise<Pick<AmoApiClient, 'uploadFileToLead'>>;
+  /** RFD-AI-AGENT-OPT-AUTO-MARKUP: наценки прайсов базы знаний — пересчёт цен из прайса перед сборкой. */
+  kb: MarkupDeps['kb'];
+}
+
+/** RFD-AI-AGENT-OPT-AUTO-MARKUP: что изменил пересчёт наценки перед сборкой (changed 0 — цены не менялись, пометки нет). */
+export interface KpBuildMarkupRecalc {
+  changed: number;
+  lines: { name: string; before: number; after: number }[];
 }
 
 export interface KpBuildFile {
@@ -58,12 +67,13 @@ export interface KpBuildResultInfo {
   attached: string[];
   priceNoteFallback: boolean;
   ms: number;
+  markupRecalc: KpBuildMarkupRecalc;
 }
 
 export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: number; draftId: number; userId: number | null; now?: Date }): Promise<KpBuildResultInfo> {
   const started = Date.now();
   const { accountId, draftId } = input;
-  const draft = await d.kp.byId(accountId, draftId);
+  let draft = await d.kp.byId(accountId, draftId);
   if (!draft) throw new KpBuildError('not_found', `черновик ${draftId} не найден`);
   if (draft.status === 'sent') throw new KpBuildError('already_sent', `КП по черновику ${draftId} уже отправлено`);
   // Последний черновик сделки — единственный, по которому собирают: иначе файлы и номер уйдут в запись, которую виджет не показывает.
@@ -79,6 +89,12 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
   } catch (err) {
     throw new KpBuildError('no_template', `шаблон КП: ${describeFsError(err, template)}`);
   }
+  // RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопки «Пересчитать» нет — текущая наценка прайсов применяется к ценам из прайса здесь, до проверок
+  // цен и рендера; результат уже в черновике, документ строится по пересчитанным строкам. Ручные цены, цены интернета, «входит
+  // в цену блока» и «нет цены» не трогаются (recalcDraftMarkup). Ничего не изменилось — пометки и записи в журнале нет.
+  const recalc = await recalcDraftMarkup(d, accountId, draft.id, input.userId, { trigger: 'build', kpNo: draft.kpNo });
+  const markupRecalc: KpBuildMarkupRecalc = { changed: recalc.changed.length, lines: recalc.changed.map((c) => ({ name: c.name, before: c.before, after: c.after })) };
+  if (recalc.changed.length) draft = (await d.kp.byId(accountId, draft.id)) ?? draft;
   const payload = draft.payload as unknown as KpPayload;
   // KB-COMPONENTS, п. 5: работы (монтаж, врезка, доставка) в таблицу и итог не входят — под таблицей фраза о расчёте после замера.
   // KB-HW-NULL: строка из базы с ценой 0, которая не «входит в блок» (черновик искал цену, когда тариф без цены хранился как 0,00), —
@@ -201,10 +217,11 @@ export async function buildDraftDocument(d: KpBuildDeps, input: { accountId: num
       (data.price_validity ? `; ${data.price_validity.toLowerCase()}${built.validityFallback ? ' (в шаблоне нет {{price_validity}} — строкой под фразой о ценах)' : ''}` : '') +
       (included.length ? `; входит в цену блока (под дверью, не в таблице): ${included.length}` : '') +
       (lines.some((l) => l.price === null) ? `; без цены в прайсе («уточнить у менеджера», не в итоге): ${lines.filter((l) => l.price === null).length}` : '') +
+      (markupRecalc.changed ? `; цены пересчитаны по текущей наценке: ${markupRecalc.changed} поз.` : '') +
       `; ${(ms / 1000).toFixed(1)} с`,
-    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, services: (payload.items ?? []).length - goods.length, serviceNoteFallback: built.serviceNoteFallback, userId: input.userId, ms },
+    details: { draftId: draft.id, kpNo, files, certificates: certs.length, attached, pdfError: built.pdfError ?? null, priceNoteFallback: built.priceNoteFallback, layoutFallback: built.layoutFallback, currencyStripped: built.currencyStripped, pageBreaksRemoved: built.pageBreaksRemoved, services: (payload.items ?? []).length - goods.length, serviceNoteFallback: built.serviceNoteFallback, markupRecalc: markupRecalc.changed, userId: input.userId, ms },
   });
-  return { draft: fresh, kpNo, pdf: Boolean(built.pdfPath), pdfError: built.pdfError ?? null, files, certificates: certs, attached, priceNoteFallback: built.priceNoteFallback, ms };
+  return { draft: fresh, kpNo, pdf: Boolean(built.pdfPath), pdfError: built.pdfError ?? null, files, certificates: certs, attached, priceNoteFallback: built.priceNoteFallback, ms, markupRecalc };
 }
 
 /** Файлы — в карточку сделки: менеджер открывает их там же, где письмо. Сбой загрузки не ломает сборку. */

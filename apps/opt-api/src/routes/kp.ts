@@ -388,30 +388,39 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     return { draft: fresh ? await viewOf(p.accountId, fresh) : null, research: applied.research };
   });
 
-  /** Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда. */
+  /**
+   * Правки менеджера в таблице позиций. Цены и количества дальше берутся отсюда.
+   * RFD-AI-AGENT-OPT-AUTO-MARKUP: виджет шлёт их сам через 1,5 с после последнего ввода (кнопки «Сохранить правки» нет).
+   */
   api.put('/kp/draft/:id', async (req, reply) => {
     const p = principal(req);
     const id = Number((req.params as { id?: string }).id);
     if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
     const b = linesSchema.safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'bad_body' });
-    const d = await repo.byId(p.accountId, id);
-    if (!d) return reply.code(404).send({ error: 'not_found' });
-    if (d.status !== 'draft' && d.status !== 'built') return reply.code(409).send({ error: 'locked' });
-    // Цена, которую менеджер поменял руками, становится ручной: автозаполнение её не затирает (этап 5, 9.3).
-    const before = (d.payload as unknown as Partial<KpPayload>).items ?? [];
-    const items = (b.data.items as KpLine[]).map((l) => {
-      const prev = before.find((x) => x.request_index === l.request_index);
-      const changed = l.price !== (prev?.price ?? null);
-      if (changed && l.price !== null) {
-        return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null, markup: null } as KpLine;
-      }
-      return { ...prev, ...l, priceSource: l.priceSource ?? prev?.priceSource } as KpLine;
-    });
-    await repo.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
-    // KB-WEB-ROWS: правка менеджера остаётся в этом черновике и в базу знаний не пишется — цены других КП только из прайсов.
-    const fresh = await repo.byId(p.accountId, id);
-    return { draft: fresh ? await viewOf(p.accountId, fresh) : null };
+    const r = await saveDraftLines(deps, p.accountId, id, b.data.items as KpLine[]);
+    if (r === 'not_found') return reply.code(404).send({ error: 'not_found' });
+    if (r === 'locked') return reply.code(409).send({ error: 'locked' });
+    return { draft: await viewOf(p.accountId, r) };
+  });
+
+  /**
+   * RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 3а.6: ссылка для сохранения правок при уходе со страницы amoCRM (beforeunload →
+   * fetch keepalive). Заголовок X-Auth-Token из iframe при выгрузке не подставить, поэтому — подписанная ссылка на открытый
+   * маршрут POST /kp/draft/save?…&t=<подпись> (kpPublicRoutes), 10 минут, привязана к аккаунту и черновику; тело — text/plain
+   * с JSON строк (простой запрос без preflight — браузер его дошлёт).
+   */
+  api.get('/kp/draft/:id/save-link', async (req, reply) => {
+    const p = principal(req);
+    const id = Number((req.params as { id?: string }).id);
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'bad_id' });
+    const draft = await repo.byId(p.accountId, id);
+    if (!draft) return reply.code(404).send({ error: 'not_found' });
+    const exp = Math.floor(Date.now() / 1000) + FILE_LINK_TTL_SEC;
+    const url = new URL('/kp/draft/save', deps.env.PUBLIC_URL);
+    url.searchParams.set('draftId', String(draft.id));
+    url.searchParams.set('t', signFileLink(deps.env.TOKEN_ENCRYPTION_KEY, p.accountId, draft.id, 'save', exp));
+    return { url: url.toString(), expiresAt: new Date(exp * 1000).toISOString() };
   });
 
   /**
@@ -493,7 +502,8 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
       const before = await repo.byId(p.accountId, b.data.draftId);
       if (before && before.status === 'draft') await dropNonPriceListPrices(deps, p.accountId, before);
       const r = await buildDraftDocument(deps, { accountId: p.accountId, draftId: b.data.draftId, userId: p.userId });
-      return { draft: await viewOf(p.accountId, r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })) };
+      // RFD-AI-AGENT-OPT-AUTO-MARKUP: что пересчитала наценка перед сборкой — жёлтая пометка в окне КП (changed 0 — пометки нет).
+      return { draft: await viewOf(p.accountId, r.draft), pdf: r.pdf, attached: r.attached, files: r.files.map((f) => ({ kind: f.kind, name: f.name, bytes: f.bytes })), markupRecalc: r.markupRecalc };
     } catch (err) {
       if (err instanceof KpBuildError) {
         const status = err.code === 'not_found' ? 404 : err.code === 'build_failed' ? 502 : 409;
@@ -699,6 +709,27 @@ const KP_SENT_COPY_FAILED = 'kp_sent_copy_failed' as JournalKind;
 
 /** Открытые маршруты файлов КП: ссылка с подписью из GET /widget/v1/kp/file/link. */
 export function kpPublicRoutes(app: FastifyInstance, deps: Deps) {
+  // RFD-AI-AGENT-OPT-AUTO-MARKUP: правки таблицы при уходе со страницы — по подписанной ссылке (см. GET /kp/draft/:id/save-link).
+  app.addContentTypeParser('text/plain', { parseAs: 'string' }, (_req, body, done) => done(null, body));
+  app.post('/kp/draft/save', async (req, reply) => {
+    const q = z.object({ draftId: z.coerce.number().int().positive(), t: z.string().min(1).max(200) }).safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: 'bad_query' });
+    const accountId = verifyFileLink(deps.env.TOKEN_ENCRYPTION_KEY, q.data.t, q.data.draftId, 'save');
+    if (accountId === null) return reply.code(403).send({ error: 'bad_link', message: 'ссылка для сохранения устарела или испорчена — откройте карточку заново' });
+    let parsed: unknown;
+    try {
+      parsed = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch {
+      return reply.code(400).send({ error: 'bad_body' });
+    }
+    const b = linesSchema.safeParse(parsed);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    const r = await saveDraftLines(deps, accountId, q.data.draftId, b.data.items as KpLine[]);
+    if (r === 'not_found') return reply.code(404).send({ error: 'not_found' });
+    if (r === 'locked') return reply.code(409).send({ error: 'locked' });
+    return { ok: true };
+  });
+
   app.get('/kp/file', async (req, reply) => {
     const q = fileQuery.extend({ t: z.string().min(1).max(200) }).safeParse(req.query);
     if (!q.success) return reply.code(400).send({ error: 'bad_query' });
@@ -727,6 +758,28 @@ async function sendKpFile(deps: Deps, reply: FastifyReply, accountId: number, dr
     .send(bytes);
 }
 
+/**
+ * Правки менеджера в строках черновика (PUT /kp/draft/:id и POST /kp/draft/save). Цена, которую менеджер поменял руками,
+ * становится ручной: автозаполнение её не затирает (этап 5, 9.3). KB-WEB-ROWS: правка остаётся в этом черновике и в базу
+ * знаний не пишется — цены других КП только из прайсов.
+ */
+async function saveDraftLines(deps: Deps, accountId: number, id: number, lines: KpLine[]): Promise<KpDraft | 'not_found' | 'locked'> {
+  const d = await deps.kp.byId(accountId, id);
+  if (!d) return 'not_found';
+  if (d.status !== 'draft' && d.status !== 'built') return 'locked';
+  const before = (d.payload as unknown as Partial<KpPayload>).items ?? [];
+  const items = lines.map((l) => {
+    const prev = before.find((x) => x.request_index === l.request_index);
+    const changed = l.price !== (prev?.price ?? null);
+    if (changed && l.price !== null) {
+      return { ...prev, ...l, priceSource: 'manager', priceLabel: 'изменено менеджером', priceStale: false, kbPriceId: null, markup: null } as KpLine;
+    }
+    return { ...prev, ...l, priceSource: l.priceSource ?? prev?.priceSource } as KpLine;
+  });
+  await deps.kp.setPayload(id, { ...(d.payload as unknown as KpPayload), items } as unknown as Record<string, unknown>);
+  return (await deps.kp.byId(accountId, id)) ?? 'not_found';
+}
+
 const linkPayload = (accountId: number, draftId: number, kind: string, exp: number) => `${accountId}.${draftId}.${kind}.${exp}`;
 
 export function signFileLink(secret: string, accountId: number, draftId: number, kind: string, exp: number): string {
@@ -743,7 +796,7 @@ export function verifyFileLink(secret: string, token: string, draftId: number, k
   } catch {
     return null;
   }
-  const m = /^(\d+)\.(\d+)\.(pdf|docx)\.(\d+)\.([A-Za-z0-9_-]+)$/.exec(decoded);
+  const m = /^(\d+)\.(\d+)\.(pdf|docx|save)\.(\d+)\.([A-Za-z0-9_-]+)$/.exec(decoded);
   if (!m) return null;
   const [, acc, dId, k, expS, mac] = m as unknown as [string, string, string, string, string, string];
   if (Number(dId) !== draftId || k !== kind) return null;

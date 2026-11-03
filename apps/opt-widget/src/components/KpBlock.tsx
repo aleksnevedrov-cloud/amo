@@ -142,22 +142,79 @@ export function openDownload(url: string, filename: string) {
   a.remove();
 }
 
-/** Черновик, задание воркера и действия над ними; ответ сервера всегда заменяет локальное состояние. */
+const SAVE_DEBOUNCE_MS = 1500;
+const SAVE_RETRY_MS = 5000;
+const SAVE_RETRIES = 3;
+type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'error'; message: string; attempts: number };
+type LineField = 'qty' | 'price' | 'discount';
+/** П. 3а.7: пустое или неверное значение в поле — не сохраняем, пока не исправят; ключ «строка:поле» → введённый текст. */
+export type InvalidFields = Record<string, string>;
+export interface MarkupRecalcInfo {
+  changed: number;
+  lines: { name: string; before: number; after: number }[];
+}
+
+/**
+ * Черновик, задание воркера и действия над ними; ответ сервера заменяет локальное состояние — кроме правок, введённых после
+ * отправки сохранения. RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 3а: кнопки «Сохранить правки» нет — правки таблицы уходят сами
+ * через 1,5 с после последнего ввода (PUT /kp/draft/:id), одно сохранение за раз; правка во время сохранения — следующее
+ * сразу после текущего с последними строками; ошибка — повтор через 5 с, не больше 3 раз, затем «Повторить»; действия с
+ * кнопок и закрытие окна сначала дожидаются сохранения; уход со страницы — fetch keepalive по подписанной ссылке.
+ */
 function useKpDraft(api: KpApi, leadId: number) {
   const [draft, setDraft] = useState<KpDraftInfo | null>(null);
   const [job, setJob] = useState<DraftJob>(null);
-  const [lines, setLines] = useState<KpDraftLine[]>([]);
-  const [dirty, setDirty] = useState(false);
+  const [lines, setLinesState] = useState<KpDraftLine[]>([]);
+  const [dirty, setDirtyState] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
+  const [invalid, setInvalidState] = useState<InvalidFields>({});
   const alive = useRef(true);
+  // Синхронные копии для сохранения: строки, признак правок, номер правки (ответ сервера не затирает более поздние правки).
+  const linesRef = useRef<KpDraftLine[]>([]);
+  const dirtyRef = useRef(false);
+  const invalidRef = useRef<InvalidFields>({});
+  const editSeq = useRef(0);
+  const draftRef = useRef<KpDraftInfo | null>(null);
+  const inFlight = useRef<Promise<void> | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attempts = useRef(0);
+  const lastSaveError = useRef<string | null>(null);
+  const saveLink = useRef<{ draftId: number; url: string; expiresAt: number } | null>(null);
+  const saveLinkPending = useRef(false);
 
-  const take = useCallback((raw: KpDraftInfo | null) => {
-    const d = normalizeDraft(raw);
-    setDraft(d);
-    setLines(d?.items ?? []);
-    setDirty(false);
+  const setLines = useCallback((xs: KpDraftLine[]) => {
+    linesRef.current = xs;
+    setLinesState(xs);
   }, []);
+  const setDirty = useCallback((v: boolean) => {
+    dirtyRef.current = v;
+    setDirtyState(v);
+  }, []);
+  const setInvalid = useCallback((v: InvalidFields) => {
+    invalidRef.current = v;
+    setInvalidState(v);
+  }, []);
+  const stopTimers = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    timer.current = null;
+    retryTimer.current = null;
+  }, []);
+
+  const take = useCallback(
+    (raw: KpDraftInfo | null) => {
+      const d = normalizeDraft(raw);
+      draftRef.current = d;
+      setDraft(d);
+      setLines(d?.items ?? []);
+      setDirty(false);
+      setInvalid({});
+    },
+    [setLines, setDirty, setInvalid],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -176,8 +233,9 @@ function useKpDraft(api: KpApi, leadId: number) {
     void refresh();
     return () => {
       alive.current = false;
+      stopTimers();
     };
-  }, [refresh]);
+  }, [refresh, stopTimers]);
 
   // Опрос, пока воркер собирает черновик.
   const pending = job?.state === 'queued' || job?.state === 'running';
@@ -187,10 +245,112 @@ function useKpDraft(api: KpApi, leadId: number) {
     return () => clearInterval(t);
   }, [pending, refresh]);
 
+  /**
+   * Сохранение правок: одно за раз, с последними строками; true — несохранённых правок не осталось. Ответ сервера заменяет
+   * черновик и строки только если после отправки правок не было; иначе обновляется один черновик, а сохранение повторяется.
+   */
+  const save = useCallback(async (): Promise<boolean> => {
+    // Пока идёт сохранение — ждём его (и следующее, если оно стартовало сразу за ним), иначе было бы два запроса подряд.
+    while (inFlight.current) await inFlight.current;
+    if (!alive.current) return false;
+    if (!dirtyRef.current) return true;
+    const d = draftRef.current;
+    if (!d || d.status !== 'draft') return false;
+    if (Object.keys(invalidRef.current).length) return false;
+    stopTimers();
+    const seq = editSeq.current;
+    const snapshot = linesRef.current;
+    setSaveState({ kind: 'saving' });
+    let ok = false;
+    inFlight.current = (async () => {
+      try {
+        const r = await api.saveDraftItems(d.id, snapshot);
+        if (!alive.current) return;
+        attempts.current = 0;
+        lastSaveError.current = null;
+        ok = true;
+        if (editSeq.current === seq) {
+          take(r.draft);
+          setSaveState({ kind: 'saved' });
+        } else if (r.draft) {
+          // Правки после отправки: ответ строки не затирает, обновляется только черновик; следующее сохранение — сразу.
+          const fresh = normalizeDraft(r.draft);
+          draftRef.current = fresh;
+          setDraft(fresh);
+        }
+      } catch (err) {
+        if (!alive.current) return;
+        attempts.current += 1;
+        lastSaveError.current = errorMessage(err);
+        setSaveState({ kind: 'error', message: lastSaveError.current, attempts: attempts.current });
+        if (attempts.current <= SAVE_RETRIES) retryTimer.current = setTimeout(() => void save(), SAVE_RETRY_MS);
+      }
+    })();
+    await inFlight.current;
+    inFlight.current = null;
+    if (ok && dirtyRef.current) return save();
+    return ok;
+  }, [api, take, stopTimers]);
+
+  const scheduleSave = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      void save();
+    }, SAVE_DEBOUNCE_MS);
+  }, [save]);
+
+  // П. 3а.6: ссылка для сохранения при уходе со страницы — берётся при первой правке, обновляется за минуту до истечения.
+  const ensureSaveLink = useCallback(
+    (draftId: number) => {
+      const cur = saveLink.current;
+      if (saveLinkPending.current || (cur && cur.draftId === draftId && cur.expiresAt - Date.now() > 60_000)) return;
+      saveLinkPending.current = true;
+      api
+        .saveLink(draftId)
+        .then((r) => {
+          saveLink.current = { draftId, url: r.url, expiresAt: new Date(r.expiresAt).getTime() };
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          saveLinkPending.current = false;
+        });
+    },
+    [api],
+  );
+  useEffect(() => {
+    const onUnload = () => {
+      const d = draftRef.current;
+      const link = saveLink.current;
+      if (!d || !dirtyRef.current || !link || link.draftId !== d.id || link.expiresAt < Date.now()) return;
+      try {
+        // Простой запрос (text/plain, без preflight) — браузер дошлёт его после выгрузки страницы.
+        void fetch(link.url, { method: 'POST', keepalive: true, headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ items: linesRef.current }) });
+      } catch {
+        // Страница закрывается — показать ошибку некому.
+      }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+  }, []);
+
+  /** Перед действием с кнопки (п. 3а.4) и закрытием окна (п. 3а.5): дождаться сохранения; false — правки не сохранены. */
+  const ready = async (): Promise<boolean> => {
+    if (!dirtyRef.current && !inFlight.current) return true;
+    if (Object.keys(invalidRef.current).length) {
+      setError('Исправьте поля, выделенные красным — правки не сохранены');
+      return false;
+    }
+    const ok = await save();
+    if (!ok && alive.current) setError(`Правки не сохранены${lastSaveError.current ? `: ${lastSaveError.current}` : ''}`);
+    return ok;
+  };
+
   const act = async (fn: () => Promise<{ draft: KpDraftInfo | null } | { queued: true }>) => {
     setBusy(true);
     setError(null);
     try {
+      if (!(await ready())) return;
       const r = await fn();
       if (!alive.current) return;
       if ('draft' in r) take(r.draft);
@@ -203,9 +363,28 @@ function useKpDraft(api: KpApi, leadId: number) {
   };
 
   const edit = (i: number, patch: Partial<KpDraftLine>) => {
+    const d = draftRef.current;
+    // П. 3а.9: собранное КП — таблица только для чтения, автосохранение не срабатывает.
+    if (!d || d.status !== 'draft') return;
     // Цена, которую менеджер поменял руками, становится ручной (сервер делает то же при сохранении).
-    setLines((xs) => xs.map((l, k) => (k === i ? { ...l, ...patch, ...('price' in patch && patch.price !== l.price && patch.price !== null ? { priceSource: 'manager' as const, priceLabel: 'изменено менеджером' } : {}) } : l)));
+    const next = linesRef.current.map((l, k) => (k === i ? { ...l, ...patch, ...('price' in patch && patch.price !== l.price && patch.price !== null ? { priceSource: 'manager' as const, priceLabel: 'изменено менеджером' } : {}) } : l));
+    editSeq.current += 1;
+    setLines(next);
     setDirty(true);
+    setSaveState((st) => (st.kind === 'saved' ? { kind: 'idle' } : st));
+    const fixed = new Set(Object.keys(patch).map((f) => `${i}:${f}`));
+    const rest = Object.fromEntries(Object.entries(invalidRef.current).filter(([key]) => !fixed.has(key)));
+    setInvalid(rest);
+    ensureSaveLink(d.id);
+    if (!Object.keys(rest).length) scheduleSave();
+  };
+
+  const markInvalid = (i: number, field: LineField, raw: string) => {
+    const d = draftRef.current;
+    if (!d || d.status !== 'draft') return;
+    setInvalid({ ...invalidRef.current, [`${i}:${field}`]: raw });
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
   };
 
   // Поиск цен (RFD-AI-AGENT-OPT-PRICE, этап 6): состояние по позициям, опрос раз в 3 с, пока есть queued / running.
@@ -222,16 +401,17 @@ function useKpDraft(api: KpApi, leadId: number) {
       setResearch(r);
       // Поиск закончился — цены легли в черновик: перечитываем его (KP-WIDGET-REFRESH). wasPending ставится и при постановке
       // задания, поэтому мгновенно завершённый поиск (все цены из базы) тоже перечитывает черновик; правки, сделанные во
-      // время поиска, перекрываются свежим черновиком (dirty сбрасывается).
+      // время поиска, перед этим досохраняются.
       if (!r.pending && wasPending.current) {
         wasPending.current = false;
+        if (dirtyRef.current) await save();
         await refresh();
         setRunTotal(0);
       } else wasPending.current = r.pending;
     } catch (err) {
       if (alive.current) setError(errorMessage(err));
     }
-  }, [api, draftId, refresh]);
+  }, [api, draftId, refresh, save]);
   useEffect(() => {
     setResearch(null);
     void loadResearch();
@@ -249,6 +429,7 @@ function useKpDraft(api: KpApi, leadId: number) {
     setBusy(true);
     setError(null);
     try {
+      if (!(await ready())) return;
       const r = await api.research(draftId, which);
       if (!alive.current) return;
       if (!r.queued.length && r.reason) setError(r.reason);
@@ -263,7 +444,7 @@ function useKpDraft(api: KpApi, leadId: number) {
     }
   };
 
-  return { draft, job, lines, dirty, busy, error, setError, pending, act, edit, take, research, researching, progress, findPrices };
+  return { draft, job, lines, dirty, busy, error, setError, pending, act, ready, edit, markInvalid, invalid, saveState, save, take, research, researching, progress, findPrices };
 }
 
 type Counters = NonNullable<KpDraftInfo['counters']>;
@@ -305,9 +486,11 @@ function CountersRow({ c, draft }: { c: Counters; draft?: KpDraftInfo }) {
 
 export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const k = useKpDraft(api, leadId);
-  const { draft, job, lines, dirty, busy, error, setError, pending, act, take } = k;
+  const { draft, job, lines, busy, error, setError, pending, act, take, invalid } = k;
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState(false);
+  // RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 4: что пересчитала наценка при сборке — жёлтая пометка в окне КП по этому черновику.
+  const [markupNote, setMarkupNote] = useState<(MarkupRecalcInfo & { draftId: number }) | null>(null);
   // KP-SENT-COPY: «Посмотреть письмо» — слоем поверх окна КП, как окно отправки.
   const [mailView, setMailView] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
@@ -342,8 +525,14 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const goods = lines.filter((l) => !isServiceLine(l) && !l.excluded);
   const c = countersOf(draft, goods);
   const hasPrice = goods.some((l) => l.price !== null);
-  const why = dirty ? 'Сначала сохраните правки' : c.blocking ? `Ответьте на вопросы опросника, которые блокируют КП: ${c.blocking}` : !hasPrice ? 'Ни у одной позиции нет цены' : null;
-  const build = () => void act(() => api.buildDoc(draft.id));
+  // Несохранённые правки сборке не мешают: она сначала дожидается сохранения (п. 3а.4); мешают только поля с неверным значением.
+  const why = Object.keys(invalid).length ? 'Исправьте поля, выделенные красным' : c.blocking ? `Ответьте на вопросы опросника, которые блокируют КП: ${c.blocking}` : !hasPrice ? 'Ни у одной позиции нет цены' : null;
+  const build = () =>
+    void act(async () => {
+      const r = await api.buildDoc(draft.id);
+      setMarkupNote(r.markupRecalc && r.markupRecalc.changed > 0 ? { draftId: draft.id, ...r.markupRecalc } : null);
+      return r;
+    });
   const download = async (kind: 'pdf' | 'docx') => {
     try {
       const { url, filename } = await api.fileLink(draft.id, kind);
@@ -432,6 +621,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
           onDraft={start}
           onCheckMail={checkMail}
           onBuild={build}
+          markupNote={markupNote && markupNote.draftId === draft.id ? markupNote : null}
           onSend={() => {
             setMailView(false);
             setPreview(true);
@@ -465,27 +655,31 @@ type Tab = (typeof TABS)[number][0];
  * Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть.
  * sendLayer — окно письма «Отправить клиенту» слоем поверх содержимого окна; Esc при нём закрывает только письмо.
  */
-function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onCheckMail, onBuild, onSend, onShowMail, onClose, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onCheckMail?: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
-  const { draft, lines, dirty, busy, error, pending, act, edit, research, researching, progress, findPrices } = k;
+function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onCheckMail, onBuild, onSend, onShowMail, onClose, markupNote = null, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onCheckMail?: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; markupNote?: MarkupRecalcInfo | null; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
+  const { draft, lines, dirty, busy, error, pending, act, ready, edit, markInvalid, invalid, saveState, save, research, researching, progress, findPrices } = k;
   const [tab, setTab] = useState<Tab>('lines');
   const sending = Boolean(sendLayer);
+  // П. 3а.5: ✕, Esc и клик мимо окна — несохранённая правка уходит сразу, без ожидания таймера; при ошибке окно остаётся.
+  const close = () => void ready().then((ok) => ok && onClose());
+  const closeRef = useRef(close);
+  closeRef.current = close;
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (sending) onSendClose?.();
-      else onClose();
+      else closeRef.current();
     };
     document.addEventListener('keydown', esc);
     return () => document.removeEventListener('keydown', esc);
-  }, [onClose, onSendClose, sending]);
+  }, [onSendClose, sending]);
   if (!draft) return null;
-  const locked = draft.status !== 'draft' || busy || pending || dirty;
+  const locked = draft.status !== 'draft' || busy || pending;
   const survey = draft.survey ?? [];
   const answer = (body: KpAnswerBody) => void act(() => api.answer(draft.id, body));
   const { total, vat, rate } = totalsOf(goods, draft);
-  const canSend = (draft.status === 'built' || draft.status === 'sent') && !dirty;
+  const canSend = draft.status === 'built' || draft.status === 'sent';
   return createPortal(
-    <div className="opt-root opt-kp opt-kp-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="opt-root opt-kp opt-kp-overlay" onClick={(e) => e.target === e.currentTarget && close()}>
       <div className="opt-kp-modal" role="dialog" aria-modal="true" aria-label="КП по сделке">
         <div className="opt-kp-modal-head">
           <div className="opt-kp-head">
@@ -496,19 +690,12 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
             </Section>
           </div>
           <div className="opt-kp-modal-actions">
+            {/* RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопок «Пересчитать» и «Сохранить правки» нет — наценка пересчитывается при сборке, правки сохраняются сами. */}
             {draft.status === 'draft' && (
-              <button type="button" className="opt-btn" disabled={busy || pending || researching || dirty} title={dirty ? 'Сначала сохраните правки' : 'Цены по позициям без цены: прайс → интернет (выбор менеджера) → вопрос'} onClick={() => void findPrices('all')}>
+              <button type="button" className="opt-btn" disabled={busy || pending || researching} title="Цены по позициям без цены: прайс → интернет (выбор менеджера) → вопрос" onClick={() => void findPrices('all')}>
                 {researching ? `Ищу цены…${progress ? ` ${progress}` : ''}` : 'Найти цены'}
               </button>
             )}
-            {draft.status === 'draft' && (
-              <button type="button" className="opt-btn" disabled={busy || pending || researching || dirty} title={dirty ? 'Сначала сохраните правки' : 'Применить текущую наценку прайсов из «Базы знаний» к ценам из прайса; ручные цены и цены интернета не меняются'} onClick={() => void act(() => api.recalcMarkup(draft.id))}>
-                Пересчитать
-              </button>
-            )}
-            <button type="button" className="opt-btn" disabled={busy || !dirty} onClick={() => void act(() => api.saveDraftItems(draft.id, lines))}>
-              Сохранить правки
-            </button>
             <button type="button" className="opt-btn" disabled={busy || pending} onClick={onDraft} title="Прочитать карточку заново; файлы заявки, уже загруженные в сделку, — без чтения ящика; ответы опросника переносятся">
               Собрать заново
             </button>
@@ -524,7 +711,7 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
               </button>
             )}
             {downloads}
-            <button type="button" className="opt-btn opt-icon opt-kp-close" aria-label="Закрыть" title="Закрыть (Esc)" onClick={onClose}>
+            <button type="button" className="opt-btn opt-icon opt-kp-close" aria-label="Закрыть" title="Закрыть (Esc)" onClick={close}>
               ✕
             </button>
           </div>
@@ -533,6 +720,7 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           <CopyFailed draft={draft} />
           <SourceNotes draft={draft} disabled={busy || pending} onRebuild={onDraft} onCheckMail={onCheckMail} />
         </Section>
+        {markupNote && <MarkupRecalcNote note={markupNote} />}
         <div className="opt-kp-tabs" role="tablist">
           {TABS.map(([id, label]) => (
             <button key={id} type="button" role="tab" aria-selected={tab === id} className={`opt-kp-tab${tab === id ? ' opt-kp-tab-active' : ''}`} onClick={() => setTab(id)}>
@@ -552,7 +740,8 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
                   </div>
                 )}
                 <Section name="Позиции">
-                  <KpTable lines={lines} draft={draft} research={research} locked={locked} onEdit={edit} onFind={(i) => void findPrices([i])} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
+                  {draft.status === 'draft' && <SaveIndicator state={saveState} dirty={dirty} invalid={Object.keys(invalid).length} onRetry={() => void save()} />}
+                  <KpTable lines={lines} draft={draft} research={research} locked={locked} invalid={invalid} onEdit={edit} onInvalid={markInvalid} onFind={(i) => void findPrices([i])} onDoor={(i, door) => void act(() => api.componentDoor(draft.id, i, door))} />
                 </Section>
                 <Section name="Ещё в проекте">
                   <ProjectRest draft={draft} locked={locked} onAdd={(i) => void act(() => api.addProjectItem(draft.id, i))} />
@@ -603,6 +792,36 @@ function CopyFailed({ draft }: { draft: KpDraftInfo }) {
   const copy = draft.sentMail?.copy;
   if (copy?.status !== 'failed') return null;
   return <div className="opt-kp-copy-failed">Копия в «Отправленные» не сохранена: {copy.error ?? 'причина неизвестна'}</div>;
+}
+
+/** RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 4: после сборки — какие цены из прайса пересчитаны по текущей наценке (жёлтая пометка). */
+function MarkupRecalcNote({ note }: { note: MarkupRecalcInfo }) {
+  const shown = note.lines.slice(0, 5).map((l) => `«${l.name}» ${rub(l.before)} → ${rub(l.after)}`);
+  const more = note.lines.length > 5 ? ` и ещё ${note.lines.length - 5}` : '';
+  return (
+    <div className="opt-kp-copy-failed opt-kp-markup-note">
+      Цены пересчитаны по текущей наценке: {note.changed} поз.{shown.length ? ` — ${shown.join('; ')}${more}` : ''}
+    </div>
+  );
+}
+
+/** П. 3а.3: состояние автосохранения рядом с таблицей — «Сохраняю…», «Сохранено», «Не сохранено: причина» + «Повторить». */
+function SaveIndicator({ state, dirty, invalid, onRetry }: { state: SaveState; dirty: boolean; invalid: number; onRetry: () => void }) {
+  if (invalid) return <div className="opt-kp-save opt-kp-save-error">Исправьте поля, выделенные красным — правки не сохраняются</div>;
+  if (state.kind === 'saving') return <div className="opt-kp-save">Сохраняю…</div>;
+  if (state.kind === 'error') {
+    return (
+      <div className="opt-kp-save opt-kp-save-error">
+        Не сохранено: {state.message}
+        {state.attempts <= SAVE_RETRIES ? ' — повторю через 5 с' : ''}
+        <button type="button" className="opt-btn opt-btn-small" onClick={onRetry}>
+          Повторить
+        </button>
+      </div>
+    );
+  }
+  if (state.kind === 'saved' && !dirty) return <div className="opt-kp-save">Сохранено</div>;
+  return null;
 }
 
 /** Сводка по файлам: найдено, взято в разбор, разобрано, пропущено, не разобрано. */
@@ -930,11 +1149,28 @@ function DoorChoice({ line, doors, locked, onDoor }: { line: KpDraftLine; doors:
  * по ТЗ, пометки), размер, количество, цена с НДС с цветной меткой источника, скидка, сумма. Работы — под заголовком, без цены;
  * последняя строка — доставка (сумма, самовывоз или «вопрос в опроснике»).
  */
-function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { lines: KpDraftLine[]; draft: KpDraftInfo; research: ResearchState | null; locked: boolean; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onFind: (requestIndex: number) => void; onDoor?: (requestIndex: number, doorRequestIndex: number) => void }) {
+function KpTable({ lines, draft, research, locked, invalid = {}, onEdit, onInvalid, onFind, onDoor }: { lines: KpDraftLine[]; draft: KpDraftInfo; research: ResearchState | null; locked: boolean; invalid?: InvalidFields; onEdit: (i: number, patch: Partial<KpDraftLine>) => void; onInvalid?: (i: number, field: LineField, raw: string) => void; onFind: (requestIndex: number) => void; onDoor?: (requestIndex: number, doorRequestIndex: number) => void }) {
   // «Цена не задана» под позицией не показываем: это видно по метке «нет цены».
   const reasons = (i: number) => (draft.needsManager ?? []).filter((n) => n.request_index === i && n.reason !== 'цена не задана').map((n) => n.reason);
   if (!lines.length) return <div className="opt-kp-note">Позиций не нашлось ни в файлах, ни в письме — добавьте их в карточку и соберите заново</div>;
   const d = draft.delivery;
+  // П. 3а.9: собранное КП (built, sent) — поля только для чтения. П. 3а.7: цена ≥ 0 или пусто, количество ≥ 0,5, скидка 0–100;
+  // неверное значение остаётся в поле красным и не сохраняется, пока его не исправят.
+  const readOnly = draft.status !== 'draft';
+  const num = (raw: string): number | null => (raw.trim() === '' ? null : Number(raw.replace(',', '.')));
+  const field = (i: number, f: LineField, ok: (v: number | null) => boolean, patch: (v: number | null) => Partial<KpDraftLine>) => {
+    const key = `${i}:${f}`;
+    return {
+      className: key in invalid ? 'opt-kp-input-invalid' : undefined,
+      disabled: readOnly,
+      onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+        const v = num(e.target.value);
+        if (ok(v)) onEdit(i, patch(v));
+        else onInvalid?.(i, f, e.target.value);
+      },
+    };
+  };
+  const raw = (i: number, f: LineField, value: number | string) => invalid[`${i}:${f}`] ?? value;
   let n = 0;
   return (
     <table className="opt-kp-table">
@@ -986,7 +1222,7 @@ function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { l
               </td>
               <td className="opt-kp-col-size">{l.size ? sizeLabel(l.size) : '—'}</td>
               <td className="opt-kp-col-qty">
-                <input type="number" min={0.5} step="any" aria-label="Количество" value={l.qty} disabled={locked && draft.status !== 'draft'} onChange={(e) => onEdit(i, { qty: Math.max(0.5, Number(e.target.value) || 1) })} />
+                <input type="number" min={0.5} step="any" aria-label="Количество" value={raw(i, 'qty', l.qty)} {...field(i, 'qty', (v) => v !== null && Number.isFinite(v) && v >= 0.5, (v) => ({ qty: v as number }))} />
               </td>
               <td className="opt-kp-col-price">
                 {service ? (
@@ -994,14 +1230,14 @@ function KpTable({ lines, draft, research, locked, onEdit, onFind, onDoor }: { l
                 ) : (
                   <>
                     {/* KB-DOOR-MATCH-2, п. 5: «входит в цену блока» и «нет цены» — подсказкой в поле, не 0 ₽. */}
-                    <input type="number" min={0} aria-label="Цена" value={l.priceOutcome === 'included' ? '' : (l.price ?? '')} placeholder={l.priceOutcome === 'included' ? 'в цене блока' : 'нет цены'} onChange={(e) => onEdit(i, { price: e.target.value === '' ? null : Number(e.target.value) })} />
+                    <input type="number" min={0} aria-label="Цена" value={raw(i, 'price', l.priceOutcome === 'included' ? '' : (l.price ?? ''))} placeholder={l.priceOutcome === 'included' ? 'в цене блока' : 'нет цены'} {...field(i, 'price', (v) => v === null || (Number.isFinite(v) && v >= 0), (v) => ({ price: v }))} />
                     <span className={`opt-kp-src opt-kp-src-${src.kind}`} title={src.label}>{src.label}</span>
                     {priceIsStale(l) && <span className="opt-kp-stale"> · цена устарела</span>}
                   </>
                 )}
               </td>
               <td className="opt-kp-col-disc">
-                {!service && <input type="number" min={0} max={100} aria-label="Скидка" value={l.discount} onChange={(e) => onEdit(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />}
+                {!service && <input type="number" min={0} max={100} aria-label="Скидка" value={raw(i, 'discount', l.discount)} {...field(i, 'discount', (v) => v !== null && Number.isFinite(v) && v >= 0 && v <= 100, (v) => ({ discount: v as number }))} />}
               </td>
               <td className="opt-kp-col-sum">{rub(sum)}</td>
             </tr>,

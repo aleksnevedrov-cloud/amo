@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AmoWidgetSelf } from '@core/widget-core';
 import { createCallbacks } from '../src/index.tsx';
 import { Section } from '../src/components/KpBlock.tsx';
@@ -171,9 +171,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(modal()).not.toBeNull();
     expect(modal()?.getAttribute('aria-label')).toBe('КП по сделке');
     expect([...document.querySelectorAll('.opt-kp-tab')].map((t) => t.textContent)).toEqual(['Позиции', 'Опросник (0)', 'Письмо и файлы', 'База знаний', 'Журнал']);
-    expect([...document.querySelectorAll('.opt-kp-modal-actions > .opt-btn')].map((b) => b.textContent)).toEqual(['Найти цены', 'Пересчитать', 'Сохранить правки', 'Собрать заново', 'Собрать документ', 'Отправить клиенту', '✕']);
+    // RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопок «Пересчитать» и «Сохранить правки» нет — наценка пересчитывается при сборке, правки уходят сами.
+    expect([...document.querySelectorAll('.opt-kp-modal-actions > .opt-btn')].map((b) => b.textContent)).toEqual(['Найти цены', 'Собрать заново', 'Собрать документ', 'Отправить клиенту', '✕']);
+    expect(modalButton('Пересчитать')).toBeUndefined();
+    expect(modalButton('Сохранить правки')).toBeUndefined();
     expect(modalButton('Найти цены')?.disabled).toBe(false);
-    expect(modalButton('Сохранить правки')?.disabled).toBe(true);
     expect(modalButton('Отправить клиенту')?.disabled).toBe(true);
     expect([...document.querySelectorAll('.opt-kp-table th')].map((t) => t.textContent)).toEqual(['№', 'Позиция', 'Размер', 'Кол-во', 'Цена с НДС', 'Скидка, %', 'Сумма']);
     const row = document.querySelector('.opt-kp-row')!;
@@ -294,6 +296,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     const posts: string[] = [];
     const { self } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'PUT /widget/v1/kp/draft/7': () => ({ draft: current }),
       'GET /widget/v1/kp/research': () => ({ draftId: 7, pending: stage === 'running', positions: [{ requestIndex: 0, job: stage === 'running' ? { state: 'running' } : null, research: null }] }),
       'POST /widget/v1/kp/research': (data?: string) => {
         posts.push(data ?? '');
@@ -340,11 +343,11 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await act(async () => cbs.render!());
     await flush();
     await expand();
-    // Правка цены руками — метка «изменено менеджером», сохранение включается.
+    // Правка цены руками — метка «изменено менеджером»; сборка не блокируется (правки сохраняются сами, сборка их дожидается).
     await setInput(priceInputs()[0]!, '100000');
     expect(badges()).toEqual([['manager', 'изменено менеджером']]);
-    expect(modalButton('Сохранить правки')?.disabled).toBe(false);
-    expect(modalButton('Собрать документ')?.title).toBe('Сначала сохраните правки');
+    expect(modalButton('Собрать документ')?.disabled).toBe(false);
+    expect(modalButton('Собрать документ')?.title).toBe('Собрать DOCX и PDF по шаблону');
   });
 
   it('KP-WIDGET-REFRESH: поиск завершился мгновенно (цены из прайса) — после POST research виджет перечитывает черновик и показывает цены без F5', async () => {
@@ -642,7 +645,7 @@ describe('виджет «Агент опт»: карточка сделки', ()
     expect(button('Собрать КП')?.disabled).toBe(false);
   });
 
-  it('цена → сохранить → собрать документ → окно предпросмотра → отправка только по кнопке', async () => {
+  it('цена → сразу «Собрать документ»: сначала сохранение правок, затем сборка (в документе новая цена) → окно предпросмотра → отправка только по кнопке', async () => {
     let current = { ...draft };
     const sent: string[] = [];
     const { self, calls } = fakeSelf('lcard', {
@@ -668,12 +671,14 @@ describe('виджет «Агент опт»: карточка сделки', ()
     await flush();
     await expand();
     await setInput(priceInputs()[0]!, '14900');
-    expect(modalButton('Собрать документ')?.disabled).toBe(true);
-    await clickIn('Сохранить правки');
-    await flush();
-    expect(document.querySelector('.opt-kp-modal-foot .opt-kp-total')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Итого с НДС 163 900 ₽ · в т.ч. НДС 22 % — 29 556 ₽');
+    expect(modalButton('Собрать документ')?.disabled).toBe(false);
+    calls.length = 0;
     await clickIn('Собрать документ');
     await flush();
+    // П. 3а.4: не дожидаясь таймера автосохранения — PUT строк, затем POST сборки; сервер собирает по сохранённой цене.
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual(['PUT /widget/v1/kp/draft/7', 'POST /widget/v1/kp/build']);
+    expect(current.items[0]?.price).toBe(14_900);
+    expect(document.querySelector('.opt-kp-modal-foot .opt-kp-total')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Итого с НДС 163 900 ₽ · в т.ч. НДС 22 % — 29 556 ₽');
     expect(document.querySelector('.opt-kp-modal .opt-kp-title')?.textContent).toBe('КП КП-2026-1');
     expect(document.querySelector('.opt-kp-narrow .opt-kp-sub')?.textContent).toBe('КП-2026-1');
     expect(document.querySelector('.opt-kp-badge')?.textContent).toBe('Документ собран');
@@ -1153,33 +1158,43 @@ describe('виджет «Агент опт»: сайты и кандидаты �
 });
 
 describe('виджет «Агент опт»: наценка прайса (KB-MARKUP)', () => {
-  it('в черновике — «фабрика · наценка · цена» у строки прайса; ручная цена — без неё; «Пересчитать» — POST recalc-markup', async () => {
+  it('в черновике — «фабрика · наценка · цена» у строки прайса; ручная цена — без неё; кнопки «Пересчитать» нет — после «Собрать документ» жёлтая пометка о пересчёте по текущей наценке', async () => {
     const line = (i: number, name: string, factory: number, price: number) => ({ request_index: i, page_id: null, name, size: '', qty: 1, price, lead_time: '', discount: 0, priceSource: 'price_file', priceLabel: 'по двери ONX-0001', markup: price === factory ? null : { factoryPrice: factory, pct: 20, price, sourceId: 3, priceKey: 'оникс прайс' } });
     let current = { ...draft, items: [line(0, 'Оникс Авангард', 16_400, 16_400), line(1, 'Коробка', 3125, 3125)], needsManager: [] };
-    const posted: string[] = [];
+    let builds = 0;
     const { self } = fakeSelf('lcard', {
       'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
-      'POST /widget/v1/kp/draft/7/recalc-markup': () => {
-        posted.push('recalc');
-        current = { ...current, items: [line(0, 'Оникс Авангард', 16_400, 19_680), line(1, 'Коробка', 3125, 3750)] };
-        return { draft: current, changed: 2, skipped: [] };
+      'PUT /widget/v1/kp/draft/7': () => ({ draft: current }),
+      'POST /widget/v1/kp/build': () => {
+        builds += 1;
+        // Первая сборка: наценку подняли до 20 % после создания черновика — сервер пересчитал две строки; вторая — без изменений.
+        if (builds === 1) current = { ...current, status: 'built', kpNo: 'КП-2026-9', hasDocx: true, hasPdf: true, items: [line(0, 'Оникс Авангард', 16_400, 19_680), line(1, 'Коробка', 3125, 3750)] };
+        return { draft: current, pdf: true, attached: [], markupRecalc: builds === 1 ? { changed: 2, lines: [{ name: 'Оникс Авангард', before: 16_400, after: 19_680 }, { name: 'Коробка', before: 3125, after: 3750 }] } : { changed: 0, lines: [] } };
       },
     });
     const cbs = createCallbacks(self, 'https://opt.test.ru');
     await act(async () => cbs.render!());
     await flush();
     await expand();
-    // Черновик собран при наценке 0 — подписи нет; наценку поменяли в «Базе знаний» — сам черновик не пересчитывается.
+    // Черновик собран при наценке 0 — подписи нет; кнопки «Пересчитать» в окне нет (пересчёт делает сборка).
     expect(document.querySelectorAll('.opt-kp-row-markup')).toHaveLength(0);
-    await clickIn('Пересчитать');
+    expect(modalButton('Пересчитать')).toBeUndefined();
+    expect(document.querySelector('.opt-kp-markup-note')).toBeNull();
+    await clickIn('Собрать документ');
     await flush();
-    expect(posted).toEqual(['recalc']);
     const marks = () => [...document.querySelectorAll('.opt-kp-row-markup')].map((x) => x.textContent?.replace(/\u00a0/g, ' '));
     expect(marks()).toEqual(['фабрика 16 400 ₽ · наценка 20 % · цена 19 680 ₽', 'фабрика 3 125 ₽ · наценка 20 % · цена 3 750 ₽']);
     expect(priceInputs().map((x) => x.value)).toEqual(['19680', '3750']);
-    // Менеджер поменял цену — подпись наценки у строки пропадает (в КП — его цена).
-    await setInput(priceInputs()[0]!, '20000');
-    expect(marks()).toEqual(['фабрика 3 125 ₽ · наценка 20 % · цена 3 750 ₽']);
+    expect(document.querySelector('.opt-kp-markup-note')?.textContent?.replace(/\u00a0/g, ' ')).toBe('Цены пересчитаны по текущей наценке: 2 поз. — «Оникс Авангард» 16 400 ₽ → 19 680 ₽; «Коробка» 3 125 ₽ → 3 750 ₽');
+    // Повторная сборка без изменений — пометки нет.
+    current = { ...current, status: 'draft', kpNo: null };
+    await act(async () => cbs.render!());
+    await flush();
+    await expand();
+    await clickIn('Собрать документ');
+    await flush();
+    expect(builds).toBe(2);
+    expect(document.querySelector('.opt-kp-markup-note')).toBeNull();
   });
 
   it('«База знаний»: у прайса — «Наценка, %» с подписью «Цены фабрики × (1 + N %)»; −50…300, шаг 0,1; «Сохранить» — PUT /kb/sources/:id/markup; у сайта поля нет', async () => {
@@ -1221,7 +1236,7 @@ describe('виджет «Агент опт»: наценка прайса (KB-MA
     await act(async () => save().click());
     await flush();
     expect(put).toEqual([{ markupPct: 20 }]);
-    expect(document.body.textContent).toContain('Прайс «Оникс»: наценка 20 % сохранена — применяется к новым черновикам и по кнопке «Пересчитать»');
+    expect(document.body.textContent).toContain('Прайс «Оникс»: наценка 20 % сохранена — применяется к новым черновикам и при сборке документа');
     expect((box().querySelector('input') as HTMLInputElement).value).toBe('20');
     expect(save().disabled).toBe(true);
     // Пусто — 0.
@@ -1229,5 +1244,187 @@ describe('виджет «Агент опт»: наценка прайса (KB-MA
     await act(async () => save().click());
     await flush();
     expect(put).toEqual([{ markupPct: 20 }, { markupPct: null }]);
+  });
+});
+
+describe('автосохранение правок таблицы (RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 3а)', () => {
+  const line = (price: number | null, qty = 11) => ({ request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '2100×900 мм', qty, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'price_file' as const, priceLabel: 'по прайсу: ДПС (строка 3)' } : {}) });
+  type Body = { items: { price: number | null; qty: number; discount: number }[] };
+  const tick = (ms: number) => act(async () => vi.advanceTimersByTimeAsync(ms));
+  const saveText = () => document.querySelector('.opt-kp-save')?.textContent?.replace(/\u00a0/g, ' ') ?? '';
+  const qtyInput = () => document.querySelector<HTMLInputElement>('.opt-kp-table input[aria-label="Количество"]')!;
+  const discInput = () => document.querySelector<HTMLInputElement>('.opt-kp-table input[aria-label="Скидка"]')!;
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** Карточка с черновиком и открытым окном; PUT по умолчанию принимает строки (или переопределяется). */
+  async function open(put?: (body: Body) => unknown, extra: Record<string, Responder> = {}) {
+    let current = { ...draft, items: [line(16_400)], needsManager: [] as { request_index: number; reason: string }[] };
+    const puts: Body[] = [];
+    const { self, calls } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: current, job: null }),
+      'PUT /widget/v1/kp/draft/7': (data?: string) => {
+        const body = JSON.parse(data ?? '{}') as Body;
+        puts.push(body);
+        if (put) return put(body);
+        current = { ...current, items: body.items as typeof current.items };
+        return { draft: current };
+      },
+      ...extra,
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await tick(20);
+    await expand();
+    return { puts, calls, current: () => current };
+  }
+
+  it('правка цены → через 1,5 с один PUT с новой ценой, индикатор «Сохранено»; кнопки «Сохранить правки» нет', async () => {
+    const { puts } = await open();
+    expect(modalButton('Сохранить правки')).toBeUndefined();
+    await setInput(priceInputs()[0]!, '20000');
+    expect(saveText()).toBe('');
+    await tick(1000);
+    expect(puts).toHaveLength(0);
+    await tick(500);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]?.items[0]).toMatchObject({ price: 20_000, priceSource: 'manager' });
+    expect(saveText()).toBe('Сохранено');
+    expect(badges()).toEqual([['manager', 'изменено менеджером']]);
+  });
+
+  it('три правки подряд быстрее 1,5 с → один вызов с последними значениями', async () => {
+    const { puts } = await open();
+    await setInput(priceInputs()[0]!, '1');
+    await tick(500);
+    await setInput(priceInputs()[0]!, '12');
+    await tick(500);
+    await setInput(qtyInput(), '3');
+    await tick(1400);
+    expect(puts).toHaveLength(0);
+    await tick(200);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]?.items[0]).toMatchObject({ price: 12, qty: 3 });
+  });
+
+  it('правка во время сохранения: второй PUT сразу после первого с последними строками; ответ первого поле не откатывает', async () => {
+    let release: (() => void) | null = null;
+    const snapshots: Body[] = [];
+    const { puts } = await open((body) => {
+      snapshots.push(body);
+      // Первый запрос «висит», пока тест его не отпустит; второй отвечает сразу.
+      if (snapshots.length === 1) return new Promise((res) => (release = () => res({ draft: { ...draft, items: body.items, needsManager: [] } })));
+      return { draft: { ...draft, items: body.items, needsManager: [] } };
+    });
+    await setInput(priceInputs()[0]!, '20000');
+    await tick(1500);
+    expect(puts).toHaveLength(1);
+    expect(saveText()).toBe('Сохраняю…');
+    await setInput(qtyInput(), '12');
+    await tick(1500);
+    // Пока первое сохранение не ответило, второго нет.
+    expect(puts).toHaveLength(1);
+    await act(async () => release!());
+    await tick(0);
+    expect(qtyInput().value).toBe('12');
+    expect(puts).toHaveLength(2);
+    expect(puts[1]?.items[0]).toMatchObject({ price: 20_000, qty: 12 });
+    expect(saveText()).toBe('Сохранено');
+  });
+
+  it('правка → ✕ (и Esc): сохранение без ожидания таймера, затем окно закрыто', async () => {
+    const { puts } = await open();
+    await setInput(priceInputs()[0]!, '20000');
+    await clickIn('✕');
+    await tick(0);
+    expect(puts).toHaveLength(1);
+    expect(modal()).toBeNull();
+    await expand();
+    await setInput(priceInputs()[0]!, '21000');
+    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
+    await tick(0);
+    expect(puts).toHaveLength(2);
+    expect(puts[1]?.items[0]?.price).toBe(21_000);
+    expect(modal()).toBeNull();
+  });
+
+  it('ошибка сохранения: «Не сохранено: причина», 3 повтора через 5 с, окно при ✕ не закрывается; «Повторить» после починки — «Сохранено»', async () => {
+    let fail = true;
+    const { puts } = await open((body) => {
+      if (fail) throw { status: 500, responseJSON: { message: 'база недоступна' } };
+      return { draft: { ...draft, items: body.items, needsManager: [] } };
+    });
+    await setInput(priceInputs()[0]!, '20000');
+    await tick(1500);
+    expect(puts).toHaveLength(1);
+    expect(saveText()).toContain('Не сохранено: база недоступна');
+    for (const n of [2, 3, 4]) {
+      await tick(5000);
+      expect(puts).toHaveLength(n);
+    }
+    await tick(5000);
+    expect(puts).toHaveLength(4);
+    expect(saveText()).toContain('Повторить');
+    await clickIn('✕');
+    await tick(0);
+    expect(modal()).not.toBeNull();
+    expect(puts).toHaveLength(5);
+    expect(document.querySelector('.opt-kp-modal .opt-error')?.textContent).toBe('Правки не сохранены: база недоступна');
+    fail = false;
+    await clickIn('Повторить');
+    await tick(0);
+    expect(puts).toHaveLength(6);
+    expect(saveText()).toBe('Сохранено');
+    await clickIn('✕');
+    await tick(0);
+    expect(modal()).toBeNull();
+  });
+
+  it('количество 0 или скидка 150 — не сохраняется, поле красное, сборка заблокирована; исправили — сохранилось', async () => {
+    const { puts } = await open();
+    await setInput(qtyInput(), '0');
+    await tick(2000);
+    expect(puts).toHaveLength(0);
+    expect(qtyInput().className).toContain('opt-kp-input-invalid');
+    expect(qtyInput().value).toBe('0');
+    expect(saveText()).toContain('Исправьте поля, выделенные красным');
+    expect(modalButton('Собрать документ')?.disabled).toBe(true);
+    expect(modalButton('Собрать документ')?.title).toBe('Исправьте поля, выделенные красным');
+    await setInput(qtyInput(), '2');
+    expect(qtyInput().className).not.toContain('opt-kp-input-invalid');
+    await tick(1500);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]?.items[0]?.qty).toBe(2);
+    await setInput(discInput(), '150');
+    await tick(2000);
+    expect(puts).toHaveLength(1);
+    expect(discInput().className).toContain('opt-kp-input-invalid');
+    await setInput(discInput(), '10');
+    await tick(1500);
+    expect(puts).toHaveLength(2);
+    expect(puts[1]?.items[0]?.discount).toBe(10);
+  });
+
+  it('уход со страницы amoCRM: несохранённая правка уходит fetch keepalive по подписанной ссылке', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response('{"ok":true}')));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const { puts } = await open(undefined, { 'GET /widget/v1/kp/draft/7/save-link': { url: 'https://opt.test.ru/kp/draft/save?draftId=7&t=tok', expiresAt: '2099-01-01T00:00:00Z' } });
+      await setInput(priceInputs()[0]!, '20000');
+      await tick(0);
+      await act(async () => window.dispatchEvent(new Event('beforeunload')));
+      expect(puts).toHaveLength(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe('https://opt.test.ru/kp/draft/save?draftId=7&t=tok');
+      expect(init).toMatchObject({ method: 'POST', keepalive: true, headers: { 'content-type': 'text/plain' } });
+      expect(JSON.parse(init.body as string).items[0].price).toBe(20_000);
+      // Без правок при выгрузке ничего не шлётся.
+      await tick(1500);
+      await act(async () => window.dispatchEvent(new Event('beforeunload')));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

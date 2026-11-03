@@ -148,6 +148,72 @@ describe('наценка прайса-источника (KB-MARKUP)', () => {
     expect(prices(d)).toEqual([16_400, 3125, 5050, 2525, 1520, 21_320]);
     expect(d.items.every((l) => !l.markup)).toBe(true);
   });
+
+  // RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопки «Пересчитать» нет — сборка документа сама применяет текущую наценку.
+  it('наценка 0 → черновик → наценка 20 % → «Собрать документ»: в файле КП 19 680 ₽, нестандарт 16 400 × 1,3 × 1,2 = 25 584; ручная цена и цена интернета не тронуты; markupRecalc и запись в журнале', async () => {
+    const d = await draft();
+    expect(prices(d)).toEqual([16_400, 3125, 5050, 2525, 1520, 21_320]);
+    // Коробка — ручная цена менеджера, наличник — цена из интернета, выбранная менеджером.
+    const edited = d.items.map((l, i) => (i === 1 ? { ...l, price: 3000 } : i === 2 ? { ...l, priceSource: 'web_confirmed', priceLabel: 'по рынку', kbPriceId: null } : l));
+    await ctx.app.inject({ method: 'PUT', url: `/widget/v1/kp/draft/${d.id}`, headers, payload: { items: edited } });
+    const sources = (await ctx.app.inject({ url: '/widget/v1/kb/sources', headers })).json().sources as Src[];
+    const current = sources.filter((s) => s.title.startsWith('Оникс прайс')).sort((a, b) => b.id - a.id)[0]!;
+    await setMarkup(current.id, 20);
+    expect(prices(await draft())).toEqual([16_400, 3000, 5050, 2525, 1520, 21_320]);
+    await answerSurvey(ctx.app, headers, LEAD_ID);
+    const built = (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d.id } })).json();
+    expect(built).toMatchObject({ draft: { status: 'built' }, markupRecalc: { changed: 4 } });
+    expect((built.markupRecalc.lines as { name: string; before: number; after: number }[]).map((l) => [l.before, l.after])).toEqual([[16_400, 19_680], [2525, 3030], [1520, 1824], [21_320, 25_584]]);
+    expect(built.markupRecalc.lines[0]).toMatchObject({ name: expect.stringContaining('Оникс Авангард') });
+    const after = await draft();
+    expect(prices(after)).toEqual([19_680, 3000, 5050, 3030, 1824, 25_584]);
+    expect(after.items[1]).toMatchObject({ priceSource: 'manager', markup: null });
+    expect(after.items[2]).toMatchObject({ priceSource: 'web_confirmed', price: 5050 });
+    expect(after.items[5]?.markup).toMatchObject({ factoryPrice: 21_320, pct: 20, price: 25_584 });
+    const doc = await ctx.deps.kp.byId(ACCOUNT_ID, d.id);
+    const text = new PizZip(readFileSync(resolveKpPath(ctx.deps.filesRoot, doc!.docxPath!))).file('word/document.xml')!.asText().replace(/<[^>]+>/g, '').replace(/\s/g, ' ');
+    expect(text).toContain('19 680');
+    expect(text).toContain('25 584');
+    expect(text).not.toContain('16 400');
+    const log = (await ctx.app.inject({ url: '/widget/v1/journal?kind=kp_price_research', headers })).json().items as { summary: string; details: Record<string, unknown> }[];
+    expect(log[0]?.summary.replace(/\s/g, ' ')).toMatch(/^Пересчёт наценки при сборке КП .+: изменено позиций 4 — «.+» 16 400 → 19 680 ₽/);
+    expect(log[0]?.details).toMatchObject({ draftId: d.id, source: 'kb_markup', trigger: 'build' });
+    const build = (await ctx.app.inject({ url: '/widget/v1/journal?kind=kp_build', headers })).json().items as { summary: string }[];
+    expect(build[0]?.summary).toContain('цены пересчитаны по текущей наценке: 4 поз.');
+  }, 30_000);
+
+  it('наценка не менялась: markupRecalc.changed = 0, записи «Пересчёт наценки» в журнале нет', async () => {
+    const d = await newDraft();
+    expect(prices(d)).toEqual([19_680, 3750, 6060, 3030, 1824, 25_584]);
+    const before = (await ctx.app.inject({ url: '/widget/v1/journal?kind=kp_price_research', headers })).json().items as { summary: string }[];
+    await answerSurvey(ctx.app, headers, LEAD_ID);
+    const built = (await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/build', headers, payload: { draftId: d.id } })).json();
+    expect(built).toMatchObject({ draft: { status: 'built' }, markupRecalc: { changed: 0, lines: [] } });
+    const after = (await ctx.app.inject({ url: '/widget/v1/journal?kind=kp_price_research', headers })).json().items as { summary: string }[];
+    expect(after.filter((j) => j.summary.startsWith('Пересчёт наценки при сборке'))).toHaveLength(before.filter((j) => j.summary.startsWith('Пересчёт наценки при сборке')).length);
+    expect(prices(await draft())).toEqual([19_680, 3750, 6060, 3030, 1824, 25_584]);
+  }, 30_000);
+
+  it('п. 3а.6: GET /kp/draft/:id/save-link → подписанная ссылка; POST по ней с text/plain сохраняет строки; чужая подпись — 403', async () => {
+    const d = await newDraft();
+    const link = (await ctx.app.inject({ url: `/widget/v1/kp/draft/${d.id}/save-link`, headers })).json() as { url: string; expiresAt: string };
+    const u = new URL(link.url);
+    expect(u.pathname).toBe('/kp/draft/save');
+    expect(u.searchParams.get('draftId')).toBe(String(d.id));
+    expect(new Date(link.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    const items = d.items.map((l, i) => (i === 0 ? { ...l, price: 17_000 } : l));
+    // Без заголовка amo (при выгрузке страницы его не подставить): открытый маршрут, тело — текст с JSON.
+    const saved = await ctx.app.inject({ method: 'POST', url: `${u.pathname}${u.search}`, headers: { 'content-type': 'text/plain' }, payload: JSON.stringify({ items }) });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toEqual({ ok: true });
+    expect((await draft()).items[0]).toMatchObject({ price: 17_000, priceSource: 'manager' });
+    const bad = await ctx.app.inject({ method: 'POST', url: `${u.pathname}?draftId=${d.id}&t=${u.searchParams.get('t')}x`, headers: { 'content-type': 'text/plain' }, payload: JSON.stringify({ items }) });
+    expect(bad.statusCode).toBe(403);
+    const other = await ctx.app.inject({ method: 'POST', url: `${u.pathname}?draftId=${d.id + 1}&t=${u.searchParams.get('t')}`, headers: { 'content-type': 'text/plain' }, payload: JSON.stringify({ items }) });
+    expect(other.statusCode).toBe(403);
+    const broken = await ctx.app.inject({ method: 'POST', url: `${u.pathname}${u.search}`, headers: { 'content-type': 'text/plain' }, payload: '{не json' });
+    expect(broken.statusCode).toBe(400);
+  });
 });
 
 function templateDocx(): string {

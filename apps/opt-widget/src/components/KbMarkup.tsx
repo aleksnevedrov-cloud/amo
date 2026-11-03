@@ -19,7 +19,7 @@ export function parseMarkup(text: string): number | null {
 
 /**
  * Наценка прайса-источника в карточке «Базы знаний»: цены в базе остаются ценами фабрики, наценка применяется при расчёте
- * КП (новые черновики и «Пересчитать» в окне КП). «Сохранить» — запись в журнал «было → стало».
+ * КП (новые черновики и пересчёт при сборке документа — RFD-AI-AGENT-OPT-AUTO-MARKUP). «Сохранить» — запись в журнал «было → стало».
  */
 export function PriceMarkup({ api, src, onSaved }: { api: KpApi; src: KbSourceInfo; onSaved: (msg: string) => void }) {
   const saved = src.markupPct ?? 0;
@@ -36,7 +36,7 @@ export function PriceMarkup({ api, src, onSaved }: { api: KpApi; src: KbSourceIn
     setErr(null);
     try {
       await api.kbSetMarkup(src.id, value === 0 ? null : value);
-      onSaved(`Прайс «${src.priceTitle ?? src.title}»: наценка ${pctText(value)} % сохранена — применяется к новым черновикам и по кнопке «Пересчитать»`);
+      onSaved(`Прайс «${src.priceTitle ?? src.title}»: наценка ${pctText(value)} % сохранена — применяется к новым черновикам и при сборке документа`);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
