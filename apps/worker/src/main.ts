@@ -15,11 +15,11 @@ import {
 } from '@retail/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@core/amo';
 import { CatalogImporter, CatalogRepo } from '@retail/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
+import { AccountsRepo, createPool, DealFileLinksRepo, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
   MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
-import { deferFileToDisk, EmailChannel, ImapMailbox, MailRepo, runDeferredMailFiles, SmtpSender } from '@retail/mail';
+import { DEAL_FILES_EVERY_MS, DEAL_FILES_JOB, deferFileToDisk, EmailChannel, ImapMailbox, MailRepo, runDealFilesAll, runDeferredMailFiles, SmtpSender } from '@retail/mail';
 import { WhisperStt, YandexStt } from '@core/media';
 import { PricingRepo } from '@retail/pricing';
 import { KnowledgeRepo } from '@retail/knowledge';
@@ -28,7 +28,7 @@ import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail
 import { handleReactivationReply, REACTIVATION_EVERY_MS, REACTIVATION_JOB, runReactivationAll } from '@retail/agent';
 import { reactivationDeps } from './reactivation-deps.ts';
 import { buildLocalSources } from './local-sources.ts';
-import { CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, REFUSAL_EVERY_MS, REFUSAL_JOB, RefusalsRepo, runCallsPollAll, runDaySummaryIfDue, runRefusalPollAll, type CallsDeps } from '@core/calls';
+import { amoRaw, CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, REFUSAL_EVERY_MS, REFUSAL_JOB, RefusalsRepo, runCallsPollAll, runDaySummaryIfDue, runRefusalPollAll, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -209,6 +209,8 @@ await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVER
 await callsQueue.upsertJobScheduler(WAZZUP_FILES_JOB, { every: WAZZUP_FILES_EVERY_MS }, { name: WAZZUP_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 // Анализ сделки при переносе в «Отказ» (RFD-AI-AGENT-REFUSAL-ANALYSIS): события lead_status_changed раз в 5 минут.
 await callsQueue.upsertJobScheduler(REFUSAL_JOB, { every: REFUSAL_EVERY_MS }, { name: REFUSAL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Файлы сделки и ссылки Яндекс Диска из примечаний (RFD-AI-AGENT-DEAL-FILES): события amo раз в 5 минут, разбор — очередью wazzup-files.
+await callsQueue.upsertJobScheduler(DEAL_FILES_JOB, { every: DEAL_FILES_EVERY_MS }, { name: DEAL_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 // Догон клиента после отказа (RFD-AI-AGENT-REAKTIVATSIYA): отбор и касания раз в 10 минут.
 await callsQueue.upsertJobScheduler(REACTIVATION_JOB, { every: REACTIVATION_EVERY_MS }, { name: REACTIVATION_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
 const callsWorker = new Worker(
@@ -224,6 +226,25 @@ const callsWorker = new Worker(
       // RFD-AI-AGENT-FILES-PRIORITY: вложения писем, отложенные по дневному лимиту, — тем же проходом.
       const deferred = await runDeferredMailFiles({ attachments: new MailAttachmentsRepo(db), settings, journal, dialog, amo: amoClient, documents: docs }, log);
       return { files, deferred };
+    }
+    if (job.name === DEAL_FILES_JOB) {
+      const results = await runDealFilesAll(
+        {
+          attachments: new MailAttachmentsRepo(db),
+          links: new DealFileLinksRepo(db),
+          settings,
+          journal,
+          sync: { get: (a, e) => callsRepo.getSync(a, e), set: (a, e, st) => callsRepo.setSync(a, e, st) },
+          amo: async (accountId) => {
+            const account = await accounts.get(accountId);
+            if (!account) throw new Error(`аккаунт ${accountId} не найден`);
+            return { api: await amoClient(accountId), get: amoRaw(account.accountDomain, () => tokenService.getAccessToken(accountId), fetch).get };
+          },
+          root: process.env.MAIL_FILES_ROOT ?? '/data',
+        },
+        log,
+      );
+      return { accounts: results.length, queued: results.reduce((n, r) => n + r.queued, 0) };
     }
     if (job.name === REFUSAL_JOB) {
       const results = await runRefusalPollAll(callsDeps);
@@ -315,6 +336,8 @@ const pipeline = new DialogPipeline({
     llm,
     ai,
     documents: docs,
+    // RFD-AI-AGENT-DEAL-FILES: разобранные файлы сделки и ссылок Диска — в «Файлы в переписке» агента.
+    dealFiles: (accountId, leadId, since) => new MailAttachmentsRepo(db).listDealFiles(accountId, leadId, since),
     // RFD-AI-AGENT-FILES-PRIORITY: файл, упёршийся в лимит (в т. ч. вложение письма из карточки amo через Salesbot), — на том и в очередь отложенных.
     deferFile: async (f) => {
       await deferFileToDisk({ attachments: new MailAttachmentsRepo(db), root: process.env.MAIL_FILES_ROOT ?? '/data' }, { accountId: f.accountId, leadId: f.leadId, filename: f.filename, mime: f.mime, bytes: f.bytes, key: f.url, error: f.error });

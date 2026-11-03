@@ -242,6 +242,8 @@ describe('итог дня по всему общению на БД розниц�
     state.mailFiles[90145] = [
       { id: '7', at: msk('12:01'), messageId: 'mm1', name: 'смета.xlsx', text: 'Лист «Смета»: дверь 800×2000 — 3 шт., короб, наличники, монтаж.', status: 'done' },
       { id: '8', at: msk('14:00'), messageId: 'mm2', name: 'план.pdf', text: null, status: 'pending' },
+      // RFD-AI-AGENT-DEAL-FILES: файл, приложенный менеджером к сделке, — своей записью, как файл WhatsApp от менеджера.
+      { id: '9', at: msk('15:30'), messageId: 'deferred:x', name: 'Проект.pdf', text: 'Лист 1: 12 дверей по проекту', status: 'done', source: 'deal_file' },
     ];
     state.active = [90145];
     llm = fakeLlm();
@@ -253,9 +255,10 @@ describe('итог дня по всему общению на БД розниц�
     expect(prompt).toContain('11:05 WhatsApp Клиент — прислал файл [wz:f3]: [image]\nФайл IMG_3.jpg (не разобран: скачивание: файл недоступен: HTTP 404)');
     expect(prompt).toContain('12:00 Письмо вх. [mail:91] Тема: Смета\nСмета во вложении\nФайл смета.xlsx: Лист «Смета»: дверь 800×2000 — 3 шт., короб, наличники, монтаж.');
     expect(prompt).toContain('14:00 Письмо вх. [mailfile:8] Тема: вложение план.pdf\n\nФайл план.pdf (разбор ещё идёт)');
+    expect(prompt).toContain('15:30 Примечание менеджера [mailfile:9]: файл приложен к сделке\nФайл Проект.pdf: Лист 1: 12 дверей по проекту');
     expect(prompt).not.toContain('Вложения: смета.xlsx'); // имя вложения с текстом не дублируется строкой «Вложения:»
     expect(state.posts.at(-1)?.path).toBe('/api/v4/leads/90145/notes');
-    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 22.10.2026: 4 сообщения, 2 письма');
+    expect(state.posts.at(-1)?.text.split('\n')[0]).toBe('Итог дня по сделке за 22.10.2026: 4 сообщения, 2 письма, 1 примечание');
     state.active = [];
   });
 

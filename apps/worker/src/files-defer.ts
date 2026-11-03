@@ -2,7 +2,7 @@
 import { AmoApiClient } from '@core/amo';
 import { MailAttachmentsRepo } from '@core/db';
 import { loadEnv } from '@core/shared';
-import { deferFileToDisk } from '@retail/mail';
+import { queueLeadFiles } from '@retail/mail';
 import { buildCallsDeps } from './calls-deps.ts';
 
 /**
@@ -27,21 +27,14 @@ try {
   const account = await deps.accounts.get(accountId);
   if (!account || account.uninstalledAt) fail(`аккаунт ${accountId} не подключён`);
   const api = new AmoApiClient(account.accountDomain, () => deps.tokenService.getAccessToken(accountId), deps.fetch);
-  const files = await api.listLeadFiles(leadId, 100);
-  const picked = files.filter((f) => !nameFilter || f.name.toLowerCase().includes(nameFilter));
-  console.log(`Сделка ${leadId}: файлов в карточке ${files.length}${nameFilter ? `, по фильтру «${args.name}» — ${picked.length}` : ''}`);
-  const attachments = new MailAttachmentsRepo(db);
-  for (const f of picked) {
-    try {
-      const { bytes, mime } = await api.downloadFile(f);
-      const row = await deferFileToDisk({ attachments, root: process.env.MAIL_FILES_ROOT ?? '/data' }, { accountId, leadId, filename: f.name, mime: mime ?? f.mime ?? 'application/octet-stream', bytes, key: `amo-file:${f.uuid}`, error: 'поставлен в очередь командой files-defer (дневной лимит)' });
-      console.log(`  ${f.name} (${bytes.byteLength} байт, ${mime ?? f.mime ?? '—'}): ${row.created ? `в очереди отложенных, строка ${row.id}` : `уже в очереди (строка ${row.id})`}`);
-    } catch (err) {
-      console.log(`  ${f.name}: не скачан — ${(err as Error).message}`);
-    }
-  }
-  if (!picked.length) console.log('  ничего не поставлено');
-  else console.log('Разбор — ближайшим проходом wazzup-files (до 5 минут); проверить: calls-inspect.js --files-usage и журнал «Разобрано отложенное вложение».');
+  // Общая часть с заданием deal-files (RFD-AI-AGENT-DEAL-FILES): те же ключи amo-file:<uuid>, те же пропуски дублей.
+  const r = await queueLeadFiles({ attachments: new MailAttachmentsRepo(db), journal: deps.journal, root: process.env.MAIL_FILES_ROOT ?? '/data' }, accountId, leadId, api, { reason: 'поставлен в очередь командой files-defer', maxFileMb: (await deps.settingsFor(accountId)).dealFiles.maxFileMb, nameFilter, journal: true });
+  console.log(`Сделка ${leadId}: файлов в карточке${nameFilter ? ` по фильтру «${args.name}»` : ''} — ${r.files}`);
+  for (const f of r.queued) console.log(`  ${f.name} (${f.bytes} байт): в очереди отложенных, строка ${f.id}`);
+  for (const f of r.skipped) console.log(`  ${f.name}: пропущен — ${f.reason}`);
+  for (const f of r.failed) console.log(`  ${f.name}: не скачан — ${f.error}`);
+  if (!r.files) console.log('  ничего не поставлено');
+  else console.log('Разбор — ближайшим проходом wazzup-files (до 5 минут); проверить: calls-inspect.js --files-usage и журнал deal_file.');
 } finally {
   await close();
 }

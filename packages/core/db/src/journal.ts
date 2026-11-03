@@ -33,7 +33,10 @@ export type JournalKind =
   | 'call_day'
   | 'call_day_run'
   /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
-  | 'refusal';
+  | 'refusal'
+  /** RFD-AI-AGENT-DEAL-FILES: файл сделки / ссылка Диска поставлены в разбор, разобраны или пропущены; ошибка — deal_file_error. */
+  | 'deal_file'
+  | 'deal_file_error';
 
 export interface JournalEntry {
   accountId: number;

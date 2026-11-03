@@ -11,7 +11,11 @@ export interface MailAttachmentRow {
   amoFileUuid: string | null;
   extractStatus: string;
   extractedText: string | null;
+  /** RFD-AI-AGENT-DEAL-FILES: mail — письмо; deal_file — файл сделки amo; yadisk — ссылка Яндекс Диска из примечания. */
+  source: MailAttachmentSource;
 }
+
+export type MailAttachmentSource = 'mail' | 'deal_file' | 'yadisk';
 
 export interface NewMailAttachment {
   accountId: number;
@@ -22,7 +26,22 @@ export interface NewMailAttachment {
   mime: string;
   sizeBytes: number;
   storagePath: string;
+  source?: MailAttachmentSource;
 }
+
+const mapRow = (r: Record<string, unknown>): MailAttachmentRow => ({
+  id: Number(r.id),
+  accountId: Number(r.account_id),
+  leadId: r.lead_id === null || r.lead_id === undefined ? null : Number(r.lead_id),
+  filename: r.filename as string,
+  mime: r.mime as string,
+  sizeBytes: Number(r.size_bytes),
+  storagePath: r.storage_path as string,
+  amoFileUuid: (r.amo_file_uuid as string | null) ?? null,
+  extractStatus: r.extract_status as string,
+  extractedText: (r.extracted_text as string | null) ?? null,
+  source: ((r.source as string | null) ?? 'mail') as MailAttachmentSource,
+});
 
 export class MailAttachmentsRepo {
   constructor(private readonly db: Db) {}
@@ -34,11 +53,11 @@ export class MailAttachmentsRepo {
   async insert(a: NewMailAttachment): Promise<{ id: number; created: boolean }> {
     const { rows } = await this.db.query<{ id: string; created: boolean }>(
       `INSERT INTO mail_attachments
-         (account_id, lead_id, message_uid, message_id, filename, mime, size_bytes, storage_path)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (account_id, lead_id, message_uid, message_id, filename, mime, size_bytes, storage_path, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (account_id, message_id, filename, size_bytes) DO NOTHING
        RETURNING id, true AS created`,
-      [a.accountId, a.leadId, a.messageUid, a.messageId, a.filename, a.mime, a.sizeBytes, a.storagePath],
+      [a.accountId, a.leadId, a.messageUid, a.messageId, a.filename, a.mime, a.sizeBytes, a.storagePath, a.source ?? 'mail'],
     );
     if (rows[0]) return { id: Number(rows[0].id), created: true };
     const old = await this.db.query<{ id: string }>(
@@ -73,11 +92,47 @@ export class MailAttachmentsRepo {
   /** RFD-AI-AGENT-FILES-PRIORITY: вложения, отложенные по дневному лимиту, — на повторный разбор (старые раньше). */
   async listDeferred(accountId: number, limit = 20): Promise<(MailAttachmentRow & { messageId: string; createdAt: Date })[]> {
     const { rows } = await this.db.query(
-      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at
+      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at, source
          FROM mail_attachments WHERE account_id = $1 AND extract_status = 'deferred' AND storage_path <> '' ORDER BY created_at ASC LIMIT $2`,
       [accountId, limit],
     );
-    return rows.map((r) => ({ id: Number(r.id), accountId: Number(r.account_id), leadId: r.lead_id === null ? null : Number(r.lead_id), messageId: r.message_id, filename: r.filename, mime: r.mime, sizeBytes: Number(r.size_bytes), storagePath: r.storage_path, amoFileUuid: r.amo_file_uuid, extractStatus: r.extract_status, extractedText: r.extracted_text, createdAt: r.created_at }));
+    return rows.map((r) => ({ ...mapRow(r), messageId: r.message_id, createdAt: r.created_at }));
+  }
+
+  /** RFD-AI-AGENT-DEAL-FILES: есть ли уже строка с этим ключом (deferred:<hash>) — файл сделки / ссылка уже в очереди или разобрана. */
+  async hasMessageId(accountId: number, messageId: string): Promise<boolean> {
+    const { rows } = await this.db.query('SELECT 1 FROM mail_attachments WHERE account_id = $1 AND message_id = $2 LIMIT 1', [accountId, messageId]);
+    return rows.length > 0;
+  }
+
+  /** Файл карточки amo, который агент сам туда загрузил (вложение письма) — amo_file_uuid известен. */
+  async findByAmoFileUuid(accountId: number, uuid: string): Promise<MailAttachmentRow | null> {
+    const { rows } = await this.db.query(
+      `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, source
+         FROM mail_attachments WHERE account_id = $1 AND amo_file_uuid = $2 LIMIT 1`,
+      [accountId, uuid],
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  }
+
+  /** Тот же файл у сделки по имени и размеру (из письма, файла сделки или ссылки) — второй раз не разбираем. */
+  async findByNameSize(accountId: number, leadId: number, filename: string, sizeBytes: number): Promise<MailAttachmentRow | null> {
+    const { rows } = await this.db.query(
+      `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, source
+         FROM mail_attachments WHERE account_id = $1 AND lead_id = $2 AND lower(filename) = lower($3) AND size_bytes = $4 ORDER BY id ASC LIMIT 1`,
+      [accountId, leadId, filename, sizeBytes],
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  }
+
+  /** Разобранные файлы сделки и ссылок Диска за период — для контекста агента («Менеджер приложил файл к сделке»). */
+  async listDealFiles(accountId: number, leadId: number, since: Date, limit = 30): Promise<(MailAttachmentRow & { createdAt: Date })[]> {
+    const { rows } = await this.db.query(
+      `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, source, created_at
+         FROM mail_attachments WHERE account_id = $1 AND lead_id = $2 AND source IN ('deal_file', 'yadisk') AND created_at >= $3 ORDER BY created_at ASC LIMIT $4`,
+      [accountId, leadId, since, limit],
+    );
+    return rows.map((r) => ({ ...mapRow(r), createdAt: r.created_at }));
   }
 
   async markUploaded(id: number, fileUuid: string): Promise<void> {
@@ -97,59 +152,36 @@ export class MailAttachmentsRepo {
   async byId(id: number): Promise<MailAttachmentRow | null> {
     const { rows } = await this.db.query(
       `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path,
-              amo_file_uuid, extract_status, extracted_text
+              amo_file_uuid, extract_status, extracted_text, source
          FROM mail_attachments WHERE id = $1`,
       [id],
     );
     const r = rows[0];
-    if (!r) return null;
-    return {
-      id: Number(r.id),
-      accountId: Number(r.account_id),
-      leadId: r.lead_id === null ? null : Number(r.lead_id),
-      filename: r.filename,
-      mime: r.mime,
-      sizeBytes: Number(r.size_bytes),
-      storagePath: r.storage_path,
-      amoFileUuid: r.amo_file_uuid,
-      extractStatus: r.extract_status,
-      extractedText: r.extracted_text,
-    };
+    return r ? mapRow(r) : null;
   }
 
   /** RFD-AI-AGENT-WA-FILES: вложения писем сделки за период с извлечённым текстом — для ленты итога дня. */
   async listByLeadBetween(accountId: number, leadId: number, since: Date, until: Date, limit = 50): Promise<(MailAttachmentRow & { messageId: string; createdAt: Date })[]> {
     const { rows } = await this.db.query(
-      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at
+      `SELECT id, account_id, lead_id, message_id, filename, mime, size_bytes, storage_path, amo_file_uuid, extract_status, extracted_text, created_at, source
          FROM mail_attachments
          WHERE account_id = $1 AND lead_id = $2 AND created_at >= $3 AND created_at < $4
          ORDER BY created_at ASC LIMIT $5`,
       [accountId, leadId, since, until, limit],
     );
-    return rows.map((r) => ({ id: Number(r.id), accountId: Number(r.account_id), leadId: r.lead_id === null ? null : Number(r.lead_id), messageId: r.message_id, filename: r.filename, mime: r.mime, sizeBytes: Number(r.size_bytes), storagePath: r.storage_path, amoFileUuid: r.amo_file_uuid, extractStatus: r.extract_status, extractedText: r.extracted_text, createdAt: r.created_at }));
+    return rows.map((r) => ({ ...mapRow(r), messageId: r.message_id, createdAt: r.created_at }));
   }
 
   async listByLead(accountId: number, leadId: number, limit = 50): Promise<MailAttachmentRow[]> {
     const { rows } = await this.db.query(
       `SELECT id, account_id, lead_id, filename, mime, size_bytes, storage_path,
-              amo_file_uuid, extract_status, extracted_text
+              amo_file_uuid, extract_status, extracted_text, source
          FROM mail_attachments
          WHERE account_id = $1 AND lead_id = $2
          ORDER BY created_at DESC LIMIT $3`,
       [accountId, leadId, limit],
     );
-    return rows.map((r) => ({
-      id: Number(r.id),
-      accountId: Number(r.account_id),
-      leadId: r.lead_id === null ? null : Number(r.lead_id),
-      filename: r.filename,
-      mime: r.mime,
-      sizeBytes: Number(r.size_bytes),
-      storagePath: r.storage_path,
-      amoFileUuid: r.amo_file_uuid,
-      extractStatus: r.extract_status,
-      extractedText: r.extracted_text,
-    }));
+    return rows.map(mapRow);
   }
 
   /** Пути файлов старше N дней — для чистки диска; строки остаются как след. */

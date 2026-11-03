@@ -148,7 +148,8 @@ describe('опрос звонков на БД розницы (миграции �
     expect((await new JournalRepo(db).list(ACCOUNT, { limit: 20 })).filter((e) => e.kind === CALL_FETCH_KIND)).toHaveLength(1);
     const ok = (await deps.calls.list(ACCOUNT)).find((c) => c.status === 'downloaded')!;
     const abs = join(filesRoot, ok.filePath!);
-    await db.query(`UPDATE calls SET downloaded_at = $2::timestamptz - interval '40 days' WHERE id = $1`, [ok.id, now()]);
+    // Срок — от «сейчас» теста, а не от часов БД: тест не зависит от реальной даты (одинаковая правка обеих веток).
+    await db.query('UPDATE calls SET downloaded_at = $2 WHERE id = $1', [ok.id, new Date(now().getTime() - 40 * 86_400_000)]);
     f.contactNotes = [];
     f.leadNotes = [];
     const all = await runCallsPollAll(deps, { now, sleep: async () => undefined, transcribe: false });

@@ -205,6 +205,11 @@ export class AmoApiClient {
     return (res?._embedded?.notes ?? []).slice(-limit);
   }
 
+  /** Одно примечание сделки или контакта по id (RFD-AI-AGENT-DEAL-FILES: текст примечания со ссылками Диска). */
+  async getNote(entity: 'leads' | 'contacts', entityId: number, noteId: number): Promise<AmoNote | null> {
+    return this.request<AmoNote>('GET', `/api/v4/${entity}/${entityId}/notes/${noteId}`, undefined, { allow404: true });
+  }
+
   async addLeadNote(leadId: number, text: string): Promise<number> {
     const res = await this.request<{ _embedded: { notes: { id: number }[] } }>('POST', `/api/v4/leads/${leadId}/notes`, [
       { note_type: 'common', params: { text } },

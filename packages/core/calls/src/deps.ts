@@ -62,6 +62,8 @@ export interface LocalMailFile {
   name: string;
   text: string | null;
   status: string;
+  /** RFD-AI-AGENT-DEAL-FILES: mail — вложение письма; deal_file — файл сделки от менеджера; yadisk — ссылка Яндекс Диска. */
+  source?: string;
 }
 
 export interface LocalSources {
