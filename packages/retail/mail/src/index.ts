@@ -8,3 +8,4 @@ export * from './poller.ts';
 export * from './attachments.ts';
 export * from './deferred.ts';
 export * from './deal-files.ts';
+export * from './yadisk.ts';

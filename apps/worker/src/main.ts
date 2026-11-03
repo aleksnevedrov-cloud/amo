@@ -15,7 +15,7 @@ import {
 } from '@retail/agent';
 import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@core/amo';
 import { CatalogImporter, CatalogRepo } from '@retail/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
+import { AccountsRepo, createPool, DealFileLinksRepo, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
   MailAttachmentsRepo,
   WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
 import { DocumentService, TesseractOcr, YandexVision } from '@core/docs';
@@ -231,6 +231,7 @@ const callsWorker = new Worker(
       const results = await runDealFilesAll(
         {
           attachments: new MailAttachmentsRepo(db),
+          links: new DealFileLinksRepo(db),
           settings,
           journal,
           sync: { get: (a, e) => callsRepo.getSync(a, e), set: (a, e, st) => callsRepo.setSync(a, e, st) },

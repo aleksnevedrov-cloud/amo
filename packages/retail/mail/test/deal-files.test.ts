@@ -6,10 +6,10 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LeadFile } from '@core/amo';
-import { AccountsRepo, JournalRepo, MailAttachmentsRepo, SettingsRepo, widgetSettingsSchema, type Db } from '@core/db';
+import { AccountsRepo, DealFileLinksRepo, JournalRepo, MailAttachmentsRepo, SettingsRepo, widgetSettingsSchema, type Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { freshDb } from '../../../core/db/test/setup.ts';
-import { DEAL_FILES_SYNC_ENTITY, deferredKeyId, queueLeadFiles, runDealFiles, runDeferredMailFiles, type DealAmo, type DealFilesDeps } from '../src/index.ts';
+import { DEAL_FILES_SYNC_ENTITY, deferredKeyId, otherCloudLinks, queueLeadFiles, runDealFiles, runDeferredMailFiles, yadiskLinks, type DealAmo, type DealFilesDeps } from '../src/index.ts';
 
 const ACC = 1;
 const PIPE = 1873498;
@@ -24,6 +24,10 @@ const state = {
   files: {} as Record<number, (LeadFile & { bytes: Uint8Array })[]>,
   downloads: [] as string[],
   sync: {} as Record<string, { lastUpdatedAt: Date; lastError: string | null }>,
+  notes: {} as Record<number, { id: number; text: string }[]>,
+  /** Ответы cloud-api Диска по адресу (без сети): JSON или { status } для ошибки; скачивание — по href. */
+  disk: {} as Record<string, unknown>,
+  diskCalls: [] as string[],
 };
 const file = (uuid: string, name: string, bytes: Uint8Array, mime = 'application/pdf'): LeadFile & { bytes: Uint8Array } => ({ uuid, name, size: bytes.byteLength, mime, createdAt: null, downloadUrl: `https://drive-b.amocrm.ru/download/${uuid}`, bytes });
 const pdf = (text: string) => new TextEncoder().encode(`%PDF ${text}`);
@@ -39,11 +43,14 @@ const amo: DealAmo = {
       if (!found) throw new Error(`amo: файл ${f.name} не найден`);
       return { bytes: found.bytes, mime: found.mime };
     },
-    async getNote() {
-      return null;
+    async getNote(_entity, entityId, noteId) {
+      const n = (state.notes[entityId] ?? []).find((x) => x.id === noteId);
+      return n ? { id: n.id, note_type: 'common', created_at: 0, created_by: 3571888, params: { text: n.text } } : null;
     },
   },
   async get<T>(path: string): Promise<T | null> {
+    const notes = /^\/api\/v4\/(leads|contacts)\/(\d+)\/notes\?filter\[note_type\]\[\]=common/.exec(path);
+    if (notes) return { _embedded: { notes: (state.notes[Number(notes[2])] ?? []).map((n) => ({ id: n.id, note_type: 'common', params: { text: n.text } })) } } as T;
     if (path.startsWith('/api/v4/events?')) {
       const from = Number(/from\]=(\d+)/.exec(path)?.[1] ?? 0);
       const to = Number(/to\]=(\d+)/.exec(path)?.[1] ?? 0);
@@ -190,5 +197,158 @@ describe('файлы сделки (deal-files, часть А)', () => {
       ['Паспорт объекта.pdf', 'deal_file', 'done'],
     ]);
     expect(ctx[0]?.extractedText).toBe('[Документ «Двери внутренние Данилково (4).pdf»] 12 дверей, размеры по проекту');
+  });
+});
+
+/** Сеть Диска в тестах: cloud-api и ссылки скачивания — из state.disk; всё остальное — запрещено. */
+const diskFetch = (async (input: string | URL | Request) => {
+  const url = String(input);
+  state.diskCalls.push(url);
+  const key = decodeURIComponent(url);
+  const r = state.disk[key] ?? state.disk[url];
+  if (r === undefined) throw new Error(`нет ответа для ${key}`);
+  if (r instanceof Uint8Array) return new Response(r, { status: 200, headers: { 'content-type': 'application/pdf', 'content-length': String(r.byteLength) } });
+  const o = r as { status?: number; body?: unknown };
+  if (o.status && o.status !== 200) return new Response(JSON.stringify(o.body ?? { message: 'Не удалось найти запрошенный ресурс.', error: 'DiskNotFoundError' }), { status: o.status, headers: { 'content-type': 'application/json' } });
+  return new Response(JSON.stringify(o.body ?? r), { status: 200, headers: { 'content-type': 'application/json' } });
+}) as typeof fetch;
+const API = 'https://cloud-api.yandex.net/v1/disk/public/resources';
+const meta = (link: string, body: unknown) => void (state.disk[`${API}?public_key=${link}&limit=50`] = { body });
+const dl = (link: string, path: string | null, href: string, bytes: Uint8Array) => {
+  state.disk[`${API}/download?public_key=${link}${path ? `&path=${path}` : ''}`] = { body: { href, method: 'GET', templated: false } };
+  state.disk[href] = bytes;
+};
+
+describe('ссылки Яндекс Диска в примечаниях (deal-files, часть Б)', () => {
+  let db: Db;
+  let drop: () => Promise<void>;
+  let attachments: MailAttachmentsRepo;
+  let journal: JournalRepo;
+  let links: DealFileLinksRepo;
+  let deps: DealFilesDeps;
+  const root = mkdtempSync(join(tmpdir(), 'deal-links-'));
+  const poll = (now: Date) => runDealFiles(deps, ACC, { now: () => now });
+  const L1 = 'https://yadi.sk/d/Pt38kxURjV3Fkg';
+  const L2 = 'https://yadi.sk/d/AaBbCcDdEe1122';
+  const L3 = 'https://disk.yandex.ru/i/ZzYyXx9988';
+  const DIR = 'https://disk.yandex.ru/d/FolderKey777';
+
+  beforeAll(async () => {
+    ({ db, drop } = await freshDb());
+    await new AccountsRepo(db).upsertInstalled({ id: ACC, subdomain: 'acc', accountDomain: 'acc.amocrm.ru' });
+    await new SettingsRepo(db).save(ACC, 1, widgetSettingsSchema.parse({}));
+    attachments = new MailAttachmentsRepo(db);
+    journal = new JournalRepo(db);
+    links = new DealFileLinksRepo(db);
+    state.events.length = 0;
+    state.sync = {};
+    state.files = {};
+    state.downloads.length = 0;
+    state.leads = { 30038356: { status_id: 28643038, pipeline_id: PIPE } };
+    deps = { attachments, links, settings: new SettingsRepo(db), journal, sync: { get: async (_a, e) => state.sync[e] ?? null, set: async (_a, e, s) => void (state.sync[e] = s) }, amo: async () => amo, root, fetch: diskFetch };
+    // «90287», 12:14 МСК: примечание «Робота» с тремя ссылками yadi.sk и одной на Google Drive.
+    state.notes[30038356] = [{ id: 601, text: `Загружен файл: Двери наружные Данилково (4).pdf ${L1}\nЗагружен файл: Двери внутренние Данилково (4).pdf ${L2}.\nСчёт: ${L3}\nЕщё: https://drive.google.com/file/d/abc/view` }];
+    state.events.push({ id: 'n1', type: 'common_note_added', entity_type: 'lead', entity_id: 30038356, created_at: unix(at('2026-11-03T09:14:00Z')), note: 601 });
+    meta(L1, { type: 'file', name: 'Двери наружные Данилково (4).pdf', size: 11, mime_type: 'application/pdf' });
+    dl(L1, null, 'https://downloader.disk.yandex.ru/disk/aaa/Двери наружные.pdf', pdf('наружн'));
+    meta(L2, { type: 'file', name: 'Двери внутренние Данилково (4).pdf', size: 12, mime_type: 'application/pdf' });
+    dl(L2, null, 'https://downloader.disk.yandex.ru/disk/bbb/Двери внутренние.pdf', pdf('внутренн'));
+    meta(L3, { type: 'file', name: 'Счет покупателю № 126.pdf', size: 9, mime_type: 'application/pdf' });
+    dl(L3, null, 'https://downloader.disk.yandex.ru/disk/ccc/Счет.pdf', pdf('счёт'));
+  });
+  afterAll(() => drop());
+
+  it('разбор ссылок из текста: yadi.sk / disk.yandex.*, без хвостовых знаков, до 10; другие облака — только домен', () => {
+    expect(yadiskLinks(state.notes[30038356]![0]!.text)).toEqual([L1, L2, L3]);
+    expect(yadiskLinks(Array.from({ length: 12 }, (_, i) => `https://yadi.sk/d/k${i}`).join(' '))).toHaveLength(10);
+    expect(otherCloudLinks(state.notes[30038356]![0]!.text)).toEqual(['drive.google.com']);
+  });
+
+  it('примечание с 3 ссылками → 3 файла в очереди с именами из Диска (ключ yadisk:<key>:<path>), Google Drive — отметка «не поддерживается»', async () => {
+    const r = await poll(at('2026-11-03T09:20:00Z'));
+    expect(r).toMatchObject({ events: 1, links: 3, linkFiles: 3, errors: [] });
+    const rows = await attachments.listDeferred(ACC);
+    // Размер строки — фактические байты файла (по ним же отсекаются дубли с файлами сделки).
+    expect(rows.map((a) => [a.filename, a.source, a.sizeBytes, a.messageId])).toEqual([
+      ['Двери наружные Данилково (4).pdf', 'yadisk', pdf('наружн').byteLength, deferredKeyId(`yadisk:${L1}:`)],
+      ['Двери внутренние Данилково (4).pdf', 'yadisk', pdf('внутренн').byteLength, deferredKeyId(`yadisk:${L2}:`)],
+      ['Счет покупателю № 126.pdf', 'yadisk', pdf('счёт').byteLength, deferredKeyId(`yadisk:${L3}:`)],
+    ]);
+    expect(readFileSync(rows[2]!.storagePath).toString()).toBe('%PDF счёт');
+    expect((await links.forLead(ACC, 30038356)).map((l) => [l.url, l.status, l.files])).toEqual([[L1, 'done', 1], [L2, 'done', 1], [L3, 'done', 1]]);
+    const log1 = await journal.list(ACC, { kind: 'deal_file', leadId: 30038356 });
+    expect(log1.some((e) => e.summary === 'ссылка на облако не поддерживается: drive.google.com')).toBe(true);
+    // Ходили только на cloud-api и на href скачивания Диска.
+    expect(state.diskCalls.every((u) => u.startsWith(API) || u.startsWith('https://downloader.disk.yandex.ru/'))).toBe(true);
+    // Повтор того же события (окно с перекрытием) — ссылки уже заняты, ничего нового.
+    expect(await poll(at('2026-11-03T09:25:00Z'))).toMatchObject({ links: 0, linkFiles: 0 });
+    expect(await attachments.listDeferred(ACC)).toHaveLength(3);
+  });
+
+  it('3 ссылки + 3 тех же файла сделки (часть А) → разбор 3 раза, не 6: совпадение по имени и размеру', async () => {
+    state.files[30038356] = [file('u-1', 'Двери наружные Данилково (4).pdf', pdf('наружн')), file('u-2', 'Двери внутренние Данилково (4).pdf', pdf('внутренн')), file('u-3', 'Счет покупателю № 126.pdf', pdf('счёт'))];
+    state.events.push({ id: 'a1', type: 'attachment_note_added', entity_type: 'lead', entity_id: 30038356, created_at: unix(at('2026-11-03T09:28:00Z')) });
+    const r = await poll(at('2026-11-03T09:30:00Z'));
+    expect(r).toMatchObject({ leads: 1, queued: 0, skipped: 3 });
+    expect(await attachments.listDeferred(ACC)).toHaveLength(3);
+    expect(state.downloads).toEqual([]); // файлы сделки даже не скачивались
+  });
+
+  it('ссылка на папку → файлы первого уровня, не больше maxFilesPerNote (10); аудио — отметка', async () => {
+    const items = Array.from({ length: 12 }, (_, i) => ({ type: 'file', name: `лист-${i + 1}.pdf`, path: `/лист-${i + 1}.pdf`, size: 5, mime_type: 'application/pdf' }));
+    items.push({ type: 'dir', name: 'вложенная', path: '/вложенная', size: 0, mime_type: null as unknown as string });
+    items.push({ type: 'file', name: 'голос.mp3', path: '/голос.mp3', size: 5, mime_type: 'audio/mpeg' });
+    meta(DIR, { type: 'dir', name: 'Проект Данилково', size: 0, _embedded: { items, limit: 50, total: items.length } });
+    for (let i = 1; i <= 12; i++) dl(DIR, `/лист-${i}.pdf`, `https://downloader.disk.yandex.ru/disk/dir/${i}.pdf`, new TextEncoder().encode(`л-${i}`));
+    state.notes[30038356]!.push({ id: 602, text: `Папка проекта: ${DIR}` });
+    state.events.push({ id: 'n2', type: 'common_note_added', entity_type: 'lead', entity_id: 30038356, created_at: unix(at('2026-11-03T09:40:00Z')), note: 602 });
+    const r = await poll(at('2026-11-03T09:45:00Z'));
+    expect(r).toMatchObject({ links: 1, linkFiles: 10 });
+    expect((await attachments.listDeferred(ACC)).filter((a) => a.filename.startsWith('лист-'))).toHaveLength(10);
+    expect((await journal.list(ACC, { kind: 'deal_file', leadId: 30038356 })).some((e) => e.summary === 'Папка Диска «Проект Данилково»: файлов 13, берём первые 10')).toBe(true);
+  });
+
+  it('файл 40 МБ — не скачан, причина в журнале; 404 — журнал с текстом Диска, без повторов; 429 — повтор следующим проходом, не больше 3 раз', async () => {
+    const BIG = 'https://yadi.sk/d/BigFile40';
+    const GONE = 'https://yadi.sk/d/GoneFile404';
+    const BUSY = 'https://yadi.sk/d/Busy429';
+    meta(BIG, { type: 'file', name: 'Большой проект.pdf', size: 40 * 1024 * 1024, mime_type: 'application/pdf' });
+    state.disk[`${API}?public_key=${GONE}&limit=50`] = { status: 404, body: { message: 'Не удалось найти запрошенный ресурс.', description: 'Resource not found.', error: 'DiskNotFoundError' } };
+    state.disk[`${API}?public_key=${BUSY}&limit=50`] = { status: 429, body: { message: 'Слишком много запросов.', error: 'TooManyRequestsError' } };
+    state.notes[30038356]!.push({ id: 603, text: `${BIG} ${GONE} ${BUSY}` });
+    state.events.push({ id: 'n3', type: 'common_note_added', entity_type: 'lead', entity_id: 30038356, created_at: unix(at('2026-11-03T10:00:00Z')), note: 603 });
+    const downloadsBefore = state.diskCalls.filter((u) => u.includes('/download')).length;
+    const r = await poll(at('2026-11-03T10:05:00Z'));
+    expect(r).toMatchObject({ links: 3, linkFiles: 0 });
+    expect(state.diskCalls.filter((u) => u.includes('/download')).length).toBe(downloadsBefore); // большой файл не качали
+    const byUrl = async () => Object.fromEntries((await links.forLead(ACC, 30038356)).map((l) => [l.url, [l.status, l.attempts, l.error]]));
+    expect((await byUrl())[BIG]).toEqual(['done', 0, null]);
+    expect((await byUrl())[GONE]).toEqual(['failed', 1, 'Диск: Не удалось найти запрошенный ресурс. (HTTP 404)']);
+    expect((await byUrl())[BUSY]).toEqual(['retry', 1, 'Диск: Слишком много запросов. (HTTP 429)']);
+    const log1 = await journal.list(ACC, { leadId: 30038356 });
+    expect(log1.some((e) => e.kind === 'deal_file' && e.summary === 'Файл по ссылке Диска «Большой проект.pdf» не скачан: файл больше 25 МБ (40 МБ)')).toBe(true);
+    expect(log1.some((e) => e.kind === 'deal_file_error' && e.summary === `Ссылка Диска ${GONE}: Диск: Не удалось найти запрошенный ресурс. (HTTP 404)`)).toBe(true);
+    // Следующие проходы: 404 не трогаем, 429 повторяем до 3 попыток, затем — попытки исчерпаны.
+    const metaCalls = () => state.diskCalls.filter((u) => u.includes(GONE)).length;
+    const gone = metaCalls();
+    await poll(at('2026-11-03T10:10:00Z'));
+    expect((await byUrl())[BUSY]).toEqual(['retry', 2, 'Диск: Слишком много запросов. (HTTP 429)']);
+    await poll(at('2026-11-03T10:15:00Z'));
+    expect((await byUrl())[BUSY]).toEqual(['failed', 3, 'Диск: Слишком много запросов. (HTTP 429)']);
+    await poll(at('2026-11-03T10:20:00Z'));
+    expect((await byUrl())[BUSY]?.[1]).toBe(3);
+    expect(metaCalls()).toBe(gone);
+    // Диск ожил после 429 → ссылка сработала бы с первого же повтора: проверяем на новой ссылке.
+    const LATE = 'https://yadi.sk/d/LateOk';
+    state.disk[`${API}?public_key=${LATE}&limit=50`] = { status: 429, body: { message: 'Слишком много запросов.' } };
+    state.notes[30038356]!.push({ id: 604, text: LATE });
+    state.events.push({ id: 'n4', type: 'common_note_added', entity_type: 'lead', entity_id: 30038356, created_at: unix(at('2026-11-03T10:25:00Z')), note: 604 });
+    await poll(at('2026-11-03T10:30:00Z'));
+    expect((await byUrl())[LATE]?.[0]).toBe('retry');
+    meta(LATE, { type: 'file', name: 'Поздний.pdf', size: 7, mime_type: 'application/pdf' });
+    dl(LATE, null, 'https://downloader.disk.yandex.ru/disk/late/Поздний.pdf', pdf('п'));
+    const r2 = await poll(at('2026-11-03T10:35:00Z'));
+    expect(r2).toMatchObject({ linkFiles: 1 });
+    expect((await byUrl())[LATE]).toEqual(['done', 1, null]);
   });
 });

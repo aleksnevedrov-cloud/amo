@@ -1,6 +1,8 @@
 import type { AmoApiClient, LeadFile } from '@core/amo';
 import type { JournalRepo, MailAttachmentsRepo, SettingsRepo, WidgetSettings } from '@core/db';
+import type { DealFileLinksRepo } from '@core/db';
 import { deferFileToDisk, deferredKeyId } from './deferred.ts';
+import { otherCloudLinks, yadiskDownload, yadiskLinks, yadiskMeta, YadiskError } from './yadisk.ts';
 
 /**
  * RFD-AI-AGENT-DEAL-FILES, часть А: агент сам читает файлы, которые менеджер прикрепил к сделке.
@@ -23,6 +25,10 @@ const EVENTS_PAGE = 100;
 const MAX_EVENT_PAGES = 20;
 /** Аудио и видео не разбираются — только отметка в журнале. */
 const MEDIA_RE = /\.(mp3|wav|ogg|oga|opus|m4a|aac|amr|flac|mp4|mov|avi|mkv|webm|3gp|wmv)$/i;
+/** Часть Б: ссылка Диска — не больше попыток при 429 / сетевых ошибках. */
+const LINK_MAX_ATTEMPTS = 3;
+/** Суммарно по одному примечанию скачиваем не больше (ТЗ Б5). */
+const NOTE_TOTAL_MB = 60;
 
 export type DealFilesSettings = WidgetSettings['dealFiles'];
 
@@ -34,6 +40,10 @@ export interface DealAmo {
 
 export interface DealFilesDeps {
   attachments: Pick<MailAttachmentsRepo, 'insert' | 'setExtract' | 'hasMessageId' | 'findByNameSize' | 'findByAmoFileUuid'>;
+  /** Часть Б: ссылки Яндекс Диска из примечаний (статус, попытки). Нет — ссылки не обрабатываются. */
+  links?: Pick<DealFileLinksRepo, 'claim' | 'setDone' | 'setFailed' | 'listRetry'>;
+  /** Сеть для cloud-api.yandex.net и скачивания (в тестах — заглушка). */
+  fetch?: typeof fetch;
   settings: Pick<SettingsRepo, 'get' | 'listAccountIds'>;
   journal: Pick<JournalRepo, 'add'>;
   /** Отметка опроса (calls_sync). */
@@ -215,7 +225,7 @@ export async function runDealFiles(d: DealFilesDeps, accountId: number, o: DealF
   const amo = await d.amo(accountId);
   let events: DealEvent[];
   try {
-    events = await fetchDealEvents(amo, since, started, ['attachment_note_added']);
+    events = await fetchDealEvents(amo, since, started, s.yandexDisk && d.links ? ['attachment_note_added', 'common_note_added'] : ['attachment_note_added']);
   } catch (err) {
     await d.sync.set(accountId, DEAL_FILES_SYNC_ENTITY, { lastUpdatedAt: sync?.lastUpdatedAt ?? started, lastError: (err as Error).message });
     throw err;
@@ -247,7 +257,99 @@ export async function runDealFiles(d: DealFilesDeps, accountId: number, o: DealF
       await d.journal.add({ accountId, leadId: lead.leadId, kind: 'deal_file_error', summary: `Файлы сделки не прочитаны: ${(err as Error).message}`, details: { eventId: e.id } });
     }
   }
+  // Часть Б: ссылки Яндекс Диска в текстовых примечаниях + повтор ссылок с 429 / сетевыми ошибками.
+  if (s.yandexDisk && d.links) {
+    // Ссылки, тронутые в этом проходе, на повтор в нём же не идут (429 — следующим проходом).
+    const touched = new Set<number>();
+    for (const e of events.filter((x) => x.type === 'common_note_added')) {
+      const lead = await resolveLead(amo, e, s, cache).catch((err: Error) => ({ skip: `сделка не определена: ${err.message}` }));
+      if ('skip' in lead) continue;
+      try {
+        const text = await noteText(amo, e);
+        if (!text) continue;
+        for (const host of otherCloudLinks(text)) await d.journal.add({ accountId, leadId: lead.leadId, kind: 'deal_file', summary: `ссылка на облако не поддерживается: ${host}`, details: { noteId: e.noteId, eventId: e.id } });
+        for (const url of yadiskLinks(text, s.maxFilesPerNote)) {
+          const { row, created } = await d.links.claim({ accountId, leadId: lead.leadId, noteId: e.noteId, url });
+          if (!created) continue;
+          touched.add(row.id);
+          r.links++;
+          r.linkFiles += await processLink(d, d.links, accountId, s, row, now);
+        }
+      } catch (err) {
+        r.errors.push(`примечание ${e.noteId ?? e.id}: ${(err as Error).message}`);
+        await d.journal.add({ accountId, leadId: lead.leadId, kind: 'deal_file_error', summary: `Примечание со ссылками не прочитано: ${(err as Error).message}`, details: { eventId: e.id, noteId: e.noteId } });
+      }
+    }
+    for (const row of await d.links.listRetry(accountId, LINK_MAX_ATTEMPTS)) {
+      if (touched.has(row.id)) continue;
+      r.links++;
+      r.linkFiles += await processLink(d, d.links, accountId, s, row, now);
+    }
+  }
   return r;
+}
+
+/** Текст примечания из события: по id примечания, иначе — последние текстовые примечания сущности в окне события. */
+async function noteText(amo: DealAmo, e: DealEvent): Promise<string | null> {
+  const entity = e.entityType === 'lead' ? 'leads' : 'contacts';
+  if (e.noteId) {
+    const note = await amo.api.getNote(entity, e.entityId, e.noteId);
+    const text = note?.params?.text;
+    return typeof text === 'string' ? text : null;
+  }
+  const from = Math.floor(e.createdAt.getTime() / 1000) - 120;
+  const res = await amo.get<{ _embedded?: { notes?: { id: number; note_type: string; params?: { text?: string } }[] } }>(`/api/v4/${entity}/${e.entityId}/notes?filter[note_type][]=common&filter[updated_at][from]=${from}&order[updated_at]=asc&limit=50`);
+  return (res?._embedded?.notes ?? []).map((n) => n.params?.text).filter((t): t is string => typeof t === 'string').join('\n') || null;
+}
+
+/** Одна ссылка Диска: метаданные → файл или файлы первого уровня папки → в очередь. Возвращает число поставленных файлов. */
+async function processLink(d: DealFilesDeps, links: NonNullable<DealFilesDeps['links']>, accountId: number, s: DealFilesSettings, row: { id: number; leadId: number; url: string; noteId: number | null; attempts: number }, now: () => Date): Promise<number> {
+  const fetchImpl = d.fetch ?? fetch;
+  const maxBytes = s.maxFileMb * 1024 * 1024;
+  let queued = 0;
+  try {
+    const meta = await yadiskMeta(fetchImpl, row.url);
+    const items = meta.type === 'file' ? [{ name: meta.name, path: null as string | null, size: meta.size, mime: meta.mime }] : meta.items.slice(0, s.maxFilesPerNote).map((i) => ({ name: i.name, path: i.path as string | null, size: i.size, mime: i.mime }));
+    if (meta.type === 'dir' && meta.items.length > s.maxFilesPerNote) await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Папка Диска «${meta.name}»: файлов ${meta.items.length}, берём первые ${s.maxFilesPerNote}`, details: { url: row.url } });
+    let total = 0;
+    for (const it of items) {
+      const key = `yadisk:${row.url}:${it.path ?? ''}`;
+      if (await d.attachments.hasMessageId(accountId, deferredKeyId(key))) continue;
+      if (it.size > 0 && (await d.attachments.findByNameSize(accountId, row.leadId, it.name, it.size))) {
+        await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» пропущен: файл с тем же именем и размером у сделки уже разобран`, details: { url: row.url, path: it.path } });
+        continue;
+      }
+      if (MEDIA_RE.test(it.name)) {
+        await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» пропущен: аудио и видео не разбираются`, details: { url: row.url, path: it.path } });
+        continue;
+      }
+      if (it.size > maxBytes) {
+        await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» не скачан: файл больше ${s.maxFileMb} МБ (${Math.round(it.size / 1024 / 1024)} МБ)`, details: { url: row.url, path: it.path, size: it.size } });
+        continue;
+      }
+      if (total + it.size > NOTE_TOTAL_MB * 1024 * 1024) {
+        await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» не скачан: по примечанию уже ${Math.round(total / 1024 / 1024)} МБ из ${NOTE_TOTAL_MB}`, details: { url: row.url, path: it.path } });
+        continue;
+      }
+      const { bytes, mime } = await yadiskDownload(fetchImpl, row.url, it.path, maxBytes);
+      total += bytes.byteLength;
+      if (bytes.byteLength > 0 && (await d.attachments.findByNameSize(accountId, row.leadId, it.name, bytes.byteLength))) {
+        await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» пропущен: файл с тем же именем и размером у сделки уже разобран`, details: { url: row.url, path: it.path } });
+        continue;
+      }
+      const saved = await deferFileToDisk({ attachments: d.attachments, root: d.root, now }, { accountId, leadId: row.leadId, filename: it.name, mime: mime ?? it.mime ?? 'application/octet-stream', bytes, key, error: 'файл по ссылке Яндекс Диска из примечания', source: 'yadisk' });
+      if (!saved.created) continue;
+      queued++;
+      await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file', summary: `Файл по ссылке Диска «${it.name}» поставлен в разбор`, details: { url: row.url, path: it.path, bytes: bytes.byteLength, attachmentId: saved.id, noteId: row.noteId } });
+    }
+    await links.setDone(row.id, queued);
+  } catch (err) {
+    const e = err instanceof YadiskError ? err : new YadiskError((err as Error).message, false);
+    const retry = !e.final && row.attempts + 1 < LINK_MAX_ATTEMPTS;
+    await links.setFailed(row.id, e.message, retry);
+    await d.journal.add({ accountId, leadId: row.leadId, kind: 'deal_file_error', summary: `Ссылка Диска ${row.url}: ${e.message}${retry ? ' — повтор следующим проходом' : e.final ? '' : ' — попытки исчерпаны'}`, details: { url: row.url, status: e.status, attempts: row.attempts + 1, retry } });
+  }
+  return queued;
 }
 
 export async function runDealFilesAll(d: DealFilesDeps, log: { info(obj: object, msg: string): void; warn(obj: object, msg: string): void }, o: DealFilesRunOptions = {}): Promise<DealFilesResult[]> {
