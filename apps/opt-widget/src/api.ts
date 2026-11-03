@@ -286,6 +286,8 @@ export interface KpDraftInfo {
     files?: { name: string; status: 'parsed' | 'skipped' | 'failed'; positions: number; reason: string | null }[];
     /** Чтение письма из ящика (вариант А); нет — ящик не настроен. */
     mail?: MailSourceInfo;
+    /** RFD-AI-AGENT-OPT-DEAL-FILES, часть Б: ссылки Яндекс Диска из полей сделки и примечаний — имя, взято, пропущено, ошибка. */
+    yadisk?: { url: string; where: string; name: string; type: 'file' | 'dir' | 'error' | 'unsupported'; taken: number; skipped: number; error: string | null }[];
   } | null;
   /** KP-AGENT-V2: опросник, счётчики для узкой колонки и шапки окна, доставка, срок действия цены, требования, фото, текст письма. */
   survey?: KpQuestionInfo[];

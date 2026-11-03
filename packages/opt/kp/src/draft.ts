@@ -1,4 +1,5 @@
 import { fieldValues, type AmoApiClient } from '@core/amo';
+import { otherCloudLinks, yadiskLinks, YadiskError, type YadiskClient } from './yadisk.ts';
 import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
@@ -226,6 +227,8 @@ export interface KpPayload {
     files?: { name: string; status: 'parsed' | 'skipped' | 'failed'; positions: number; reason: string | null }[];
     /** Чтение письма из ящика по IMAP (вариант А); нет поля — ящик не настроен. */
     mail?: MailSource;
+    /** Часть Б: ссылки Яндекс Диска из полей сделки и примечаний — по каждой: имя папки / файла, взято, пропущено, ошибка. */
+    yadisk?: YadiskSourceLink[];
   };
   generatedAt: string;
   /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
@@ -307,7 +310,12 @@ export interface ParsedFile {
 }
 
 export interface KpDraftDeps {
-  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'getLeadNotes' | 'listLeadFileEntries' | 'downloadFile' | 'uploadFileToLead'>;
+  amo: Pick<AmoApiClient, 'getLead' | 'getContact' | 'leadMailNotes' | 'getLeadNotes' | 'getEntityNotes' | 'listLeadFileEntries' | 'downloadFile' | 'uploadFileToLead'>;
+  /**
+   * RFD-AI-AGENT-OPT-DEAL-FILES, часть Б: файлы по ссылкам Яндекс Диска из полей сделки и примечаний сделки и контакта —
+   * читаются в момент сборки черновика (фонового опроса у опта нет); null — ссылки не читаются.
+   */
+  yadisk?: YadiskClient | null;
   /**
    * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
    * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
@@ -392,7 +400,7 @@ const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const NO_PRICE = 'цена не задана';
 
 export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
-  const card = await readCard(d.amo, input.leadId);
+  const card = await readCard(d.amo, input.leadId, Boolean(d.yadisk));
   // Письмо из ящика: полный текст вместо первой строки из amo и вложения, которых в файлах сделки нет.
   // Файлы заявки уже в сделке (загружены прошлой сборкой или менеджером) — ящик не читаем: сбой IMAP не обнуляет черновик,
   // лишних входов в ящик нет. Текст письма — полный, из прошлой сборки, если она его брала из ящика.
@@ -402,13 +410,17 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     card.letter = { text: input.prevLetter.text, createdAt: input.prevLetter.date ? new Date(input.prevLetter.date) : (card.letter?.createdAt ?? new Date()), from: input.prevLetter.from, subject: input.prevLetter.subject };
   }
   const mail = readMail && d.mail ? await fetchMail(d.mail, d.amo, input.leadId, card) : { source: d.mail ? mailSkipped(card, requestFiles.length) : null, files: [] as SourceFile[] };
+  const limits = { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES };
   const sources: SourceFile[] = [
     ...mail.files,
     ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, load: () => d.amo.downloadFile(f) })),
   ];
-  const files = await parseFiles(d, sources, { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES });
+  // Часть Б: файлы по ссылкам Яндекс Диска — после файлов письма и сделки (общий лимит maxFiles), дубли по имени и размеру не берутся.
+  const disk = d.yadisk ? await collectYadisk(d.yadisk, card.links, sources, limits.maxBytes) : { files: [], skipped: [], summary: [] };
+  sources.push(...disk.files);
+  const files = await parseFiles(d, sources, limits);
   // RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: файл сделки без карточки (Files API ответил 404 и т. п.) — в «пропущено», не молча.
-  files.skipped.push(...card.filesMissing);
+  files.skipped.push(...card.filesMissing, ...disk.skipped);
   const letter = card.letter ? await parseLetter(llm, input, card.letter.text) : null;
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
@@ -478,6 +490,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         skipped: files.skipped,
         files: filesSummary(files.parsed, files.skipped, mail.source?.skipped ?? []),
         ...(mail.source ? { mail: mail.source } : {}),
+        ...(disk.summary.length ? { yadisk: disk.summary } : {}),
       },
       generatedAt: new Date().toISOString(),
       requirements,
@@ -500,6 +513,8 @@ interface Card {
   files: Awaited<ReturnType<AmoApiClient['listLeadFileEntries']>>['files'];
   /** Файлы сделки, чью карточку amo не отдал (часть 0): в «пропущено» с причиной «карточка файла не получена: HTTP N». */
   filesMissing: { name: string; reason: string }[];
+  /** Часть Б: ссылки на облака из полей сделки и примечаний сделки и главного контакта (откуда — для сводки). */
+  links: { url: string; where: string }[];
   /** Дата создания сделки — опора для окна дат, когда у письма в карточке даты нет. */
   leadCreatedAt: Date | null;
   /** Адрес из примечания розницы «Запрос КП … От: Имя <адрес>» — когда ни в письме, ни у контакта адреса нет. */
@@ -547,6 +562,101 @@ interface SourceFile {
 }
 
 const sameFile = (a: { name: string; size: number }, b: { name: string; size: number }) => a.name === b.name && a.size === b.size;
+
+/** Любая ссылка на облако в тексте — чтобы не разбирать примечания без ссылок. */
+const CLOUD_ANY_RE = /https?:\/\/(?:yadi\.sk|disk\.yandex\.|(?:www\.)?(?:drive|docs)\.google\.com|cloud\.mail\.ru|(?:www\.)?dropbox\.com|1drv\.ms|onedrive\.live\.com|(?:www\.)?icloud\.com)/iu;
+const MAX_DISK_LINKS = 10;
+const DISK_LIST_LIMIT = 50;
+
+/** Часть Б, Б10: строка сводки по ссылке Диска — для «Письма и файлов» в окне КП. */
+export interface YadiskSourceLink {
+  url: string;
+  /** Откуда ссылка: поле сделки, примечание сделки или контакта. */
+  where: string;
+  name: string;
+  type: 'file' | 'dir' | 'error' | 'unsupported';
+  taken: number;
+  skipped: number;
+  error: string | null;
+}
+
+/**
+ * Часть Б: ссылки Диска из полей и примечаний → файлы для разбора. Папка — файлы первого уровня и вложенных папок (второй
+ * уровень, не глубже), до 50 элементов на листинг; до 10 ссылок на черновик. Файл больше maxBytes или уже имеющийся среди
+ * файлов сделки / письма (то же имя и размер) — в «пропущено». Ошибки Диска (404, закрытый доступ, 429, сеть) — в «пропущено»
+ * текстом Диска, сборка продолжается. Другие облака — только пометка. Скачанное в «Файлы» сделки не грузится (Б7).
+ */
+async function collectYadisk(disk: YadiskClient, links: Card['links'], existing: SourceFile[], maxBytes: number): Promise<{ files: SourceFile[]; skipped: KpPayload['source']['skipped']; summary: YadiskSourceLink[] }> {
+  const files: SourceFile[] = [];
+  const skipped: KpPayload['source']['skipped'] = [];
+  const summary: YadiskSourceLink[] = [];
+  const seenUrls = new Set<string>();
+  const seenHosts = new Set<string>();
+  const taken = (f: { name: string; size: number }) => existing.some((e) => sameFile(e, f)) || files.some((e) => sameFile(e, f));
+  let count = 0;
+  for (const l of links) {
+    // Б11: другие облака — пометка с доменом, по ссылке не ходим.
+    for (const host of otherCloudLinks(l.url)) {
+      if (seenHosts.has(host)) continue;
+      seenHosts.add(host);
+      skipped.push({ name: host, reason: `ссылка на облако не поддерживается: ${host}` });
+      summary.push({ url: host, where: l.where, name: host, type: 'unsupported', taken: 0, skipped: 0, error: `ссылка на облако не поддерживается: ${host}` });
+    }
+    for (const url of yadiskLinks(l.url, MAX_DISK_LINKS)) {
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      if (count >= MAX_DISK_LINKS) {
+        skipped.push({ name: url, reason: `больше ${MAX_DISK_LINKS} ссылок Диска на черновик не читаем` });
+        summary.push({ url, where: l.where, name: url, type: 'error', taken: 0, skipped: 0, error: `больше ${MAX_DISK_LINKS} ссылок на черновик` });
+        continue;
+      }
+      count++;
+      const row: YadiskSourceLink = { url, where: l.where, name: url, type: 'file', taken: 0, skipped: 0, error: null };
+      summary.push(row);
+      try {
+        const meta = await disk.meta(url);
+        row.name = meta.name || url;
+        row.type = meta.type;
+        const candidates: { name: string; size: number; mime: string | null; path: string | null }[] = [];
+        if (meta.type === 'file') candidates.push({ name: meta.name, size: meta.size, mime: meta.mime, path: null });
+        else {
+          for (const it of meta.items.slice(0, DISK_LIST_LIMIT)) {
+            if (it.type === 'file') candidates.push({ name: it.name, size: it.size, mime: it.mime, path: it.path });
+            else {
+              // Вложенная папка — второй уровень, глубже не ходим.
+              try {
+                const sub = await disk.meta(url, it.path);
+                for (const f of sub.items.slice(0, DISK_LIST_LIMIT)) if (f.type === 'file') candidates.push({ name: f.name, size: f.size, mime: f.mime, path: f.path });
+              } catch (err) {
+                row.skipped++;
+                skipped.push({ name: `${row.name}/${it.name}`, reason: `Яндекс Диск: ${(err as Error).message}` });
+              }
+            }
+          }
+        }
+        for (const c of candidates) {
+          if (taken(c)) {
+            row.skipped++;
+            skipped.push({ name: c.name, reason: 'уже есть в файлах сделки или во вложениях письма — разбор один раз' });
+            continue;
+          }
+          if (c.size > maxBytes) {
+            row.skipped++;
+            skipped.push({ name: c.name, reason: `файл больше ${Math.round(maxBytes / 1024 / 1024)} МБ (Яндекс Диск)` });
+            continue;
+          }
+          row.taken++;
+          files.push({ name: c.name, size: c.size, mime: c.mime, load: () => disk.download(url, c.path, maxBytes) });
+        }
+      } catch (err) {
+        row.type = 'error';
+        row.error = err instanceof YadiskError ? err.message : `Яндекс Диск: ${(err as Error).message}`;
+        skipped.push({ name: row.name, reason: row.error });
+      }
+    }
+  }
+  return { files, skipped, summary };
+}
 
 /**
  * E-mail из строки отправителя amo («Имя <addr>», «Имя addr», просто addr): в поиск по ящику идёт
@@ -636,8 +746,8 @@ export async function leadMailSearch(amo: KpDraftDeps['amo'], leadId: number): P
   return { search: mailSearchOf(card), letterFrom: card.letter?.from ?? null, contactEmail: card.contact.email, noteFrom: card.noteFrom, leadCreatedAt: card.leadCreatedAt, mails: card.mails };
 }
 
-/** Карточка сделки: главный контакт, последнее входящее письмо из примечаний amo, список файлов. */
-async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> {
+/** Карточка сделки: главный контакт, последнее входящее письмо из примечаний amo, список файлов; withLinks — и ссылки на облака. */
+async function readCard(amo: KpDraftDeps['amo'], leadId: number, withLinks = false): Promise<Card> {
   const lead = await amo.getLead(leadId);
   const contactId = lead?._embedded?.contacts?.find((c) => c.is_main)?.id ?? lead?._embedded?.contacts?.[0]?.id ?? null;
   const contact = contactId ? await amo.getContact(contactId).catch(() => null) : null;
@@ -650,9 +760,29 @@ async function readCard(amo: KpDraftDeps['amo'], leadId: number): Promise<Card> 
   const contactEmail = contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '';
   const noteFrom = extractEmail(last?.from) || extractEmail(contactEmail) ? null : senderFromNotes(await amo.getLeadNotes(leadId, 50).catch(() => []));
   const leadCreatedAt = lead?.created_at ? new Date(Number(lead.created_at) * 1000) : null;
+  // Часть Б, Б1: ссылки на облака — из полей сделки (любое поле, чьё значение — ссылка; id поля не хардкодится) и из текстовых
+  // примечаний сделки и главного контакта (последние 50, включая примечания робота).
+  const links: Card['links'] = [];
+  if (withLinks) {
+    for (const f of lead?.custom_fields_values ?? []) {
+      for (const v of f.values) {
+        const text = String(v.value ?? '');
+        if (CLOUD_ANY_RE.test(text)) links.push({ url: text.trim(), where: `поле «${f.field_name ?? f.field_code ?? f.field_id}»` });
+      }
+    }
+    const leadNotes = await amo.getEntityNotes('leads', leadId, 50).catch(() => []);
+    const contactNotes = contactId ? await amo.getEntityNotes('contacts', contactId, 50).catch(() => []) : [];
+    for (const [where, notes] of [['примечание сделки', leadNotes], ['примечание контакта', contactNotes]] as const) {
+      for (const n of notes) {
+        const text = typeof n.params?.text === 'string' ? n.params.text : '';
+        if (CLOUD_ANY_RE.test(text)) links.push({ url: text, where });
+      }
+    }
+  }
   return {
     leadCreatedAt,
     noteFrom,
+    links,
     contact: {
       fio: contact?.name ?? '',
       email: contact ? (fieldValues(contact.custom_fields_values, 'EMAIL')[0] ?? '') : '',

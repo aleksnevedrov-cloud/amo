@@ -198,9 +198,14 @@ export class AmoApiClient {
 
   /** Последние примечания сделки (без системных). */
   async getLeadNotes(leadId: number, limit = 10): Promise<AmoNote[]> {
+    return this.getEntityNotes('leads', leadId, limit);
+  }
+
+  /** Текстовые примечания (common) сделки или контакта, последние limit (RFD-AI-AGENT-OPT-DEAL-FILES, часть Б: ссылки Диска). */
+  async getEntityNotes(entity: 'leads' | 'contacts', entityId: number, limit = 10): Promise<AmoNote[]> {
     const res = await this.request<{ _embedded?: { notes?: AmoNote[] } }>(
       'GET',
-      `/api/v4/leads/${leadId}/notes?limit=50&filter[note_type][]=common`,
+      `/api/v4/${entity}/${entityId}/notes?limit=50&filter[note_type][]=common`,
     );
     return (res?._embedded?.notes ?? []).slice(-limit);
   }

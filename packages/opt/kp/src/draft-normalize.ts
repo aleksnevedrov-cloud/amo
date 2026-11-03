@@ -23,6 +23,7 @@ export function normalizeDraftPayload(raw: unknown): KpPayload {
         skipped: arr<{ name: string; reason: string; failed?: boolean }>(src.skipped).filter((x) => x && typeof x === 'object'),
         ...(Array.isArray(src.files) ? { files: src.files as NonNullable<KpPayload['source']['files']> } : {}),
         ...(obj(src.mail) ? { mail: normalizeMail(src.mail as Record<string, unknown>) } : {}),
+        ...(Array.isArray(src.yadisk) ? { yadisk: (src.yadisk as NonNullable<KpPayload['source']['yadisk']>).filter((x) => x && typeof x === 'object') } : {}),
       }
     : null;
   const items = arr<Record<string, unknown>>(p.items)

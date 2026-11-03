@@ -229,6 +229,7 @@ function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftD
     leadMailNotes: async () => opts.mails ?? [],
     getLeadNotes: async () => opts.notes ?? [],
     listLeadFileEntries: async () => ({ files: opts.files ?? [], missing: [] }),
+    getEntityNotes: async () => [],
     downloadFile: async (f) => {
       downloaded.push(f.name);
       return { bytes: new Uint8Array([1, 2, 3]), mime: f.mime };

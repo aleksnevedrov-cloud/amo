@@ -6,6 +6,7 @@ import { analyzeDraftFile } from './file-analyze.ts';
 import { recordingGateway } from './request-parse.ts';
 import { carryAnswers } from './questions.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
+import { createYadiskClient } from './yadisk.ts';
 
 /** Подпись способа разбора файла для журнала. */
 const METHOD_LABEL: Record<NonNullable<ParsedFile['method']>, string> = { docs: 'модель одним запросом', columns: 'по колонкам, без модели', 'columns+model': 'по колонкам + модель', 'model-chunks': 'модель порциями', matrix: 'матрица характеристик, без модели', skipped: 'не заявка, не разбирался' };
@@ -90,7 +91,8 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     // KP-PARSE-RETRY, п. 3: письмо прошлой сборки из ящика — полный текст, когда в этот раз ящик не читается.
     const prevLetter = prevMail?.status === 'found' && prevPayload.letterText ? { text: prevPayload.letterText, subject: prevMail.subject, from: prevMail.from ?? prevMail.searchedFrom, date: prevMail.date } : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter }, { amo, analyze, mail });
+    // Часть Б (OPT-DEAL-FILES): ссылки Яндекс Диска из полей сделки и примечаний читаются здесь же, через fetch ядра (в тестах — фикстура).
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter }, { amo, analyze, mail, yadisk: createYadiskClient(core.fetch) });
     const ms = r.payload.source.mail;
     if (ms?.status === 'skipped') {
       await core.journal.add({ accountId, leadId, kind: 'mail_fetch', summary: `Ящик не читали: ${ms.error}`, details: { userId: job.userId, status: 'skipped' } });

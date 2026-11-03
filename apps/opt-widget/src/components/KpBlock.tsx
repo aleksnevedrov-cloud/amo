@@ -995,7 +995,9 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
           : src.letterAt
             ? `Письмо: ${date(src.letterAt)} (из карточки, ящик не настроен)`
             : 'Письмо: в карточке нет';
-  const warn = (m?.status !== 'found' && m?.status !== 'skipped') || (m.files ?? []).some((f) => f.status === 'not_uploaded' && f.reason) || parseErrors.length > 0 || cardErrors.length > 0;
+  // RFD-AI-AGENT-OPT-DEAL-FILES, часть Б (Б10): ссылки Яндекс Диска из полей сделки и примечаний — отдельной строкой.
+  const disk = src.yadisk ?? [];
+  const warn = (m?.status !== 'found' && m?.status !== 'skipped') || (m.files ?? []).some((f) => f.status === 'not_uploaded' && f.reason) || parseErrors.length > 0 || cardErrors.length > 0 || disk.some((l) => l.error);
   return (
     <div className="opt-col opt-details">
       <button type="button" className={`opt-details-summary${warn ? ' opt-details-warn' : ''}`} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
@@ -1012,6 +1014,13 @@ function MailSection({ draft }: { draft: KpDraftInfo }) {
             </>
           )}
           {(m?.status === 'not_found' || m?.status === 'partial') && <SearchDiag m={m} />}
+          {disk.map((l) => (
+            <div key={`${l.where}:${l.url}`} className={`opt-kp-yadisk${l.error ? ' opt-error' : ''}`}>
+              Яндекс Диск: {l.type === 'dir' ? 'папка ' : ''}
+              {l.name}
+              {l.error ? ` — ${l.error}` : `, взято ${l.taken}, пропущено ${l.skipped}`} <span className="opt-muted">({l.where})</span>
+            </div>
+          ))}
           {m?.status === 'error' && (
             <div className="opt-error">Ящик не прочитан: {mailFailure(m)}</div>
           )}

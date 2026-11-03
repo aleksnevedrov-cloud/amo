@@ -28,3 +28,4 @@ export * from './sent-copy.ts';
 export * from './settings.ts';
 export * from './table-parse.ts';
 export * from './docx-spec.ts';
+export * from './yadisk.ts';

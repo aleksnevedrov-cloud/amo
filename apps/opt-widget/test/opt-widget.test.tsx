@@ -1247,6 +1247,29 @@ describe('виджет «Агент опт»: наценка прайса (KB-MA
   });
 });
 
+describe('ссылки Яндекс Диска в «Письме и файлах» (RFD-AI-AGENT-OPT-DEAL-FILES, часть Б, виджет 2.0.10)', () => {
+  it('строка «Яндекс Диск: папка …, взято N, пропущено M (откуда)»; ошибка Диска — красным', async () => {
+    const yadisk = [
+      { url: 'https://yadi.sk/d/Pj7JaZqDEJJA1Q', where: 'поле «Яндекс.Диск - Ссылка на папку»', name: 'Данилково', type: 'dir', taken: 2, skipped: 2, error: null },
+      { url: 'https://yadi.sk/d/gone', where: 'примечание сделки', name: 'https://yadi.sk/d/gone', type: 'error', taken: 0, skipped: 0, error: 'Диск: Не удалось найти запрошенный ресурс. (HTTP 404)' },
+    ];
+    const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': { draft: { ...draft, source: { ...draft.source, yadisk } }, job: null } });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    await expand();
+    await tab('Письмо и файлы');
+    const summary = [...document.querySelectorAll<HTMLButtonElement>('.opt-kp-modal .opt-details-summary')].find((b) => b.textContent?.startsWith('Письмо:'))!;
+    expect(summary.className).toContain('opt-details-warn');
+    await act(async () => summary.click());
+    const rows = [...document.querySelectorAll('.opt-kp-modal .opt-kp-yadisk')].map((r) => [r.textContent?.replace(/\u00a0/g, ' '), r.className.includes('opt-error')]);
+    expect(rows).toEqual([
+      ['Яндекс Диск: папка Данилково, взято 2, пропущено 2 (поле «Яндекс.Диск - Ссылка на папку»)', false],
+      ['Яндекс Диск: https://yadi.sk/d/gone — Диск: Не удалось найти запрошенный ресурс. (HTTP 404) (примечание сделки)', true],
+    ]);
+  });
+});
+
 describe('автосохранение правок таблицы (RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 3а)', () => {
   const line = (price: number | null, qty = 11) => ({ request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '2100×900 мм', qty, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'price_file' as const, priceLabel: 'по прайсу: ДПС (строка 3)' } : {}) });
   type Body = { items: { price: number | null; qty: number; discount: number }[] };

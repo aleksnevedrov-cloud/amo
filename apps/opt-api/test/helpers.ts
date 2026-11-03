@@ -27,6 +27,12 @@ export interface AmoMock {
   blobs?: Record<string, { bytes: Uint8Array; mime: string }>;
   /** Карточки файлов в Files API на drive_url (часть 0 OPT-DEAL-FILES): uuid → ответ GET {drive}/v1.0/files/{uuid}. */
   cards?: Record<string, unknown>;
+  /** Часть Б: поля сделки (ссылка на папку Диска), текстовые примечания сделки и контакта. */
+  leadFields?: { field_id: number; field_name?: string; field_code?: string | null; values: { value: unknown }[] }[];
+  notes?: { id: number; note_type: string; created_at: number; created_by: number; params?: { text?: string } }[];
+  contactNotes?: { id: number; note_type: string; created_at: number; created_by: number; params?: { text?: string } }[];
+  /** Часть Б: фикстура cloud-api.yandex.net — ресурсы по public_key(+path) и файлы по тому же ключу (скачивание). */
+  yadisk?: { resources: Record<string, unknown>; files: Record<string, { bytes: Uint8Array; mime: string }> };
 }
 
 /**
@@ -57,13 +63,13 @@ export function amoFetch(mock: AmoMock): typeof fetch {
     if (url.endsWith('/oauth2/access_token')) return json(200, { token_type: 'Bearer', expires_in: 86400, access_token: 'ACCESS', refresh_token: 'REFRESH' });
     if (url.endsWith('/api/v4/account?with=drive_url')) return json(200, { id: ACCOUNT_ID, drive_url: 'https://drive-b.amocrm.ru' });
     if (url.endsWith('/api/v4/account')) return json(200, { id: ACCOUNT_ID, name: 'РУС-ДВЕРИ', subdomain: 'aleksnevedrov' });
-    if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`) && url.includes('note_type%5D%5B%5D=common')) return new Response(null, { status: 204 });
-    if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`) && url.includes('note_type][]=common')) return new Response(null, { status: 204 });
+    if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`) && (url.includes('note_type%5D%5B%5D=common') || url.includes('note_type][]=common'))) return mock.notes?.length ? json(200, { _embedded: { notes: mock.notes } }) : new Response(null, { status: 204 });
+    if (url.includes('/api/v4/contacts/77/notes?')) return mock.contactNotes?.length ? json(200, { _embedded: { notes: mock.contactNotes } }) : new Response(null, { status: 204 });
     if (url.includes(`/api/v4/leads/${LEAD_ID}/notes?`)) return mock.mail ? json(200, { _embedded: { notes: [mock.mail] } }) : new Response(null, { status: 204 });
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/notes`) && method === 'POST') return json(200, { _embedded: { notes: [{ id: 1 }] } });
     if (url.includes(`/api/v4/leads/${LEAD_ID}/files`) && method === 'GET') return mock.files.length ? json(200, { _embedded: { files: mock.files } }) : new Response(null, { status: 204 });
     if (url.endsWith(`/api/v4/leads/${LEAD_ID}/files`) && method === 'PUT') return json(200, {});
-    if (url.includes(`/api/v4/leads/${LEAD_ID}`)) return json(200, { id: LEAD_ID, name: 'Двери для офиса', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
+    if (url.includes(`/api/v4/leads/${LEAD_ID}`)) return json(200, { id: LEAD_ID, name: 'Двери для офиса', price: 0, status_id: 10, pipeline_id: 1, responsible_user_id: 3, created_at: 0, custom_fields_values: mock.leadFields ?? null, _embedded: { contacts: [{ id: 77, is_main: true }] } });
     if (url.endsWith('/api/v4/contacts/77')) return json(200, { id: 77, name: 'Иванов Иван', custom_fields_values: [{ field_id: 1, field_code: 'EMAIL', values: [{ value: 'ivanov@romashka.ru' }] }] });
     if (url.startsWith('https://drive-b.amocrm.ru/v1.0/files/') && method === 'GET') {
       const card = mock.cards?.[url.slice('https://drive-b.amocrm.ru/v1.0/files/'.length)];
@@ -74,6 +80,19 @@ export function amoFetch(mock: AmoMock): typeof fetch {
       return blob ? new Response(blob.bytes, { status: 200, headers: { 'content-type': blob.mime } }) : json(404, {});
     }
     if (url === 'https://drive-b.amocrm.ru/v1.0/sessions' && method === 'POST') return json(200, { upload_url: 'https://upload.amocrm.ru/part/1', max_part_size: 10_000_000 });
+    // Часть Б: открытый API Яндекс Диска — метаданные по public_key (+path), ссылка на скачивание, сам файл.
+    if (url.startsWith('https://cloud-api.yandex.net/v1/disk/public/resources')) {
+      const u = new URL(url);
+      const key = `${u.searchParams.get('public_key') ?? ''}${u.searchParams.get('path') ?? ''}`;
+      const notFound = () => json(404, { message: 'Не удалось найти запрошенный ресурс.', description: 'Resource not found.', error: 'DiskNotFoundError' });
+      if (u.pathname.endsWith('/download')) return mock.yadisk?.files[key] ? json(200, { href: `https://downloader.disk.yandex.ru/disk/${encodeURIComponent(key)}`, method: 'GET' }) : notFound();
+      const r = mock.yadisk?.resources[key];
+      return r ? json(200, r) : notFound();
+    }
+    if (url.startsWith('https://downloader.disk.yandex.ru/disk/')) {
+      const f = mock.yadisk?.files[decodeURIComponent(url.slice('https://downloader.disk.yandex.ru/disk/'.length))];
+      return f ? new Response(f.bytes, { status: 200, headers: { 'content-type': f.mime } }) : json(404, {});
+    }
     if (url.startsWith('https://upload.amocrm.ru/')) return json(200, { uuid: 'file-uuid-1' });
     return json(404, {});
   }) as typeof fetch;
