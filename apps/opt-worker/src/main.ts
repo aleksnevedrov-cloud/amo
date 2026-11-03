@@ -1,6 +1,6 @@
 import { loadEnv } from '@core/shared';
 import { KB_INDEX_JOB, KB_QUEUE, kbIndexJobId, type KbIndexJob } from '@opt/kb';
-import { createOptCore, DRAFT_JOB, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
+import { createOptCore, DRAFT_JOB, draftCancelKey, DraftLockedError, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, runDraftJob, runResearchJob, type DraftJob, type ResearchJob } from '@opt/kp';
 import { Queue, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -38,7 +38,13 @@ const worker = new Worker<DraftJob>(
   KP_QUEUE,
   async (job) => {
     if (job.name !== DRAFT_JOB) throw new Error(`Неизвестная задача ${job.name}`);
-    const r = await runDraftJob(core, job.data, { onProgress: (line) => log.debug({ ...job.data }, `kp: ящик — ${line}`), enqueueResearch });
+    // DEAL-FILES-2, 2.5: ход сборки — в BullMQ (виджет читает через GET /kp/draft); «Перезапустить сборку» ставит ключ отмены.
+    const r = await runDraftJob(core, job.data, {
+      onProgress: (line) => log.debug({ ...job.data }, `kp: ящик — ${line}`),
+      enqueueResearch,
+      onProgressState: (p) => void job.updateProgress(p).catch((err: Error) => log.warn({ err: err.message }, 'kp: ход сборки не записан')),
+      isCancelled: async () => Boolean(job.id && (await connection.exists(draftCancelKey(job.id)))),
+    });
     log.info({ ...job.data, draftId: r.draftId }, 'kp: черновик собран');
     return r;
   },

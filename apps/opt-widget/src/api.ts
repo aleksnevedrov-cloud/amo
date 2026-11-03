@@ -334,7 +334,26 @@ export interface MailSourceInfo {
 }
 
 /** Состояние задания воркера «собрать черновик». */
-export type DraftJob = { state: 'queued' | 'running' } | { state: 'failed'; error: string } | null;
+/** RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.5: ход сборки черновика — шаг, файл, страница, прошло / осталось, файлы со статусами. */
+export interface DraftProgressInfo {
+  step: string;
+  stepNo: number;
+  steps: number;
+  file: string | null;
+  page: number | null;
+  pages: number | null;
+  done: number;
+  total: number;
+  files: { name: string; status: 'queued' | 'downloading' | 'recognizing' | 'parsing' | 'parsed' | 'repeat' | 'own' | 'failed' | 'skipped'; positions?: number; reason?: string }[];
+  startedAt: string;
+  updatedAt: string;
+  elapsedSec: number;
+  /** Минуты; null — до первой страницы («около 1–5 минут»). */
+  etaMin: number | null;
+  fraction: number;
+  stuck: boolean;
+}
+export type DraftJob = { state: 'queued' | 'running'; progress?: DraftProgressInfo | null } | { state: 'failed'; error: string } | null;
 
 export interface KpSettingsInfo {
   constants: KpConstants;
@@ -590,6 +609,8 @@ export class KpApi extends ApiClient {
   /** Кнопка «Собрать КП»: задание в очередь, ответ сразу. */
   /** checkMail — «Проверить почту заново»: при пересборке прочитать ящик, даже если файлы заявки уже в сделке. */
   makeDraft = (leadId: number, opts: { checkMail?: boolean } = {}) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft', opts.checkMail ? { leadId, checkMail: true } : { leadId });
+  /** DEAL-FILES-2, 2.5.9: «Перезапустить сборку» — зависшее задание снимается, ставится новое. */
+  restartDraft = (leadId: number) => this.call<{ queued: true }>('POST', '/widget/v1/kp/draft/restart', { leadId });
   /** KB-COMPONENT-DOOR: ответ менеджера — к какой двери заявки считать комплектующее. */
   /** KB-COMPONENT-DOOR-GROUP: ответ на группу похожих комплектующих — ко всем её строкам. */
   componentDoorGroup = (draftId: number, groupKey: string, doorRequestIndex: number) => this.call<{ draft: KpDraftInfo | null; applied: number }>('POST', `/widget/v1/kp/draft/${draftId}/component-door`, { groupKey, doorRequestIndex });

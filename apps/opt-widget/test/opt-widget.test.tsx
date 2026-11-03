@@ -1270,6 +1270,94 @@ describe('ссылки Яндекс Диска в «Письме и файлах
   });
 });
 
+describe('индикатор хода сборки (RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.5, виджет 2.0.11)', () => {
+  const progress = (over: Record<string, unknown> = {}) => ({ step: 'Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6', stepNo: 4, steps: 8, file: 'Двери наружные Данилково (4).pdf', page: 3, pages: 6, done: 1, total: 3, files: [{ name: 'Двери внутренние Данилково (4).pdf', status: 'parsed', positions: 14 }, { name: 'Двери наружные Данилково (4).pdf', status: 'parsing' }, { name: 'Счет покупателю № 126.pdf', status: 'queued' }], startedAt: '2026-11-03T16:21:06Z', updatedAt: '2026-11-03T16:23:21Z', elapsedSec: 135, etaMin: 2, fraction: 0.44, stuck: false, ...over });
+
+  it('идёт сборка (черновика ещё нет): полоса, строка шага, «прошло 2:15, осталось ≈ 2 мин», файлы со статусами; «Собрать КП» неактивна с подсказкой', async () => {
+    const { self } = fakeSelf('lcard', { 'GET /widget/v1/kp/draft': () => ({ draft: null, job: { state: 'running', progress: progress() } }) });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect(document.querySelector<HTMLElement>('.opt-kp-card .opt-kp-progress-fill')?.style.width).toBe('44%');
+    expect(document.querySelector('.opt-kp-card .opt-kp-progress-step')?.textContent).toBe('Шаг 4 из 8: Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6');
+    expect(document.querySelector('.opt-kp-card .opt-kp-progress-time')?.textContent).toBe('прошло 2:15, осталось ≈ 2 мин');
+    expect([...document.querySelectorAll('.opt-kp-card .opt-kp-progress-file')].map((f) => f.textContent)).toEqual(['Двери внутренние Данилково (4).pdf — разобран: 14 поз.', 'Двери наружные Данилково (4).pdf — распознаётся', 'Счет покупателю № 126.pdf — в очереди']);
+    expect(button('Собрать КП')?.disabled).toBe(true);
+    expect(button('Собрать КП')?.title).toBe('Идёт сборка черновика');
+  });
+
+  it('пересборка при открытом черновике: ход в колонке и в окне, кнопки окна (кроме ✕) неактивны с подсказкой; закрыть и открыть — ход виден; повторное «Собрать заново» задание не плодит', async () => {
+    let stage: 'idle' | 'running' = 'idle';
+    const posts: string[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft, job: stage === 'running' ? { state: 'running', progress: progress() } : null }),
+      'POST /widget/v1/kp/draft': () => {
+        posts.push('draft');
+        stage = 'running';
+        return { queued: true };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    await expand();
+    await clickIn('Собрать заново');
+    await flush();
+    expect(posts).toEqual(['draft']);
+    expect(document.querySelector<HTMLElement>('.opt-kp-narrow .opt-kp-progress-fill')?.style.width).toBe('44%');
+    expect(document.querySelector('.opt-kp-modal .opt-kp-progress-step')?.textContent).toBe('Шаг 4 из 8: Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6');
+    expect([...document.querySelectorAll('.opt-kp-modal .opt-kp-progress-file')]).toHaveLength(3);
+    for (const name of ['Найти цены', 'Собрать заново', 'Собрать документ', 'Отправить клиенту']) {
+      expect(modalButton(name)?.disabled, name).toBe(true);
+      expect(modalButton(name)?.title, name).toBe('Идёт сборка черновика');
+    }
+    expect(modalButton('✕')?.disabled).toBe(false);
+    expect(button('Собрать документ')?.title).toBe('Идёт сборка черновика');
+    await clickIn('✕');
+    expect(modal()).toBeNull();
+    await expand();
+    expect(document.querySelector('.opt-kp-modal .opt-kp-progress-step')?.textContent).toContain('Шаг 4 из 8');
+    // Кнопка неактивна — второе задание не ставится (на сервере тот же id задания тоже не плодит).
+    expect(modalButton('Собрать заново')?.disabled).toBe(true);
+    expect(posts).toEqual(['draft']);
+  });
+
+  it('в очереди — «В очереди…» и «около 1–5 минут»; зависание — «Сборка зависла на шаге …» и «Перезапустить сборку» → POST /kp/draft/restart; ошибка — красная строка с «Собрать заново»', async () => {
+    let job: unknown = { state: 'queued', progress: null };
+    const calls: string[] = [];
+    const { self } = fakeSelf('lcard', {
+      'GET /widget/v1/kp/draft': () => ({ draft: null, job }),
+      'POST /widget/v1/kp/draft/restart': () => {
+        calls.push('restart');
+        job = { state: 'queued', progress: null };
+        return { queued: true };
+      },
+      'POST /widget/v1/kp/draft': () => {
+        calls.push('draft');
+        return { queued: true };
+      },
+    });
+    const cbs = createCallbacks(self, 'https://opt.test.ru');
+    await act(async () => cbs.render!());
+    await flush();
+    expect(document.querySelector('.opt-kp-progress-step')?.textContent).toBe('В очереди… сборка начнётся через несколько секунд');
+    job = { state: 'running', progress: progress({ stuck: true, updatedAt: '2026-11-03T16:10:00Z' }) };
+    await act(async () => cbs.render!());
+    await flush();
+    expect(document.querySelector('.opt-kp-progress-stuck')?.textContent).toContain('Сборка зависла на шаге «Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6»');
+    await click('Перезапустить сборку');
+    await flush();
+    expect(calls).toEqual(['restart']);
+    job = { state: 'failed', error: 'LLM не настроена' };
+    await act(async () => cbs.render!());
+    await flush();
+    expect(document.querySelector('.opt-kp-job-failed')?.textContent).toContain('Черновик не собран: LLM не настроена');
+    await act(async () => (document.querySelector('.opt-kp-job-failed button') as HTMLButtonElement).click());
+    await flush();
+    expect(calls).toEqual(['restart', 'draft']);
+  });
+});
+
 describe('автосохранение правок таблицы (RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 3а)', () => {
   const line = (price: number | null, qty = 11) => ({ request_index: 0, page_id: null, name: 'Дверь ДПС 01', size: '2100×900 мм', qty, price, lead_time: '', discount: 0, ...(price ? { priceSource: 'price_file' as const, priceLabel: 'по прайсу: ДПС (строка 3)' } : {}) });
   type Body = { items: { price: number | null; qty: number; discount: number }[] };

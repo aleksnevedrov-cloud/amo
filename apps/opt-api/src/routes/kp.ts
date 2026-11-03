@@ -241,7 +241,24 @@ export function kpRoutes(api: FastifyInstance, deps: Deps, principal: Principal,
     if (!q.success) return reply.code(400).send({ error: 'bad_query' });
     const accountId = principal(req).accountId;
     const [d, job] = await Promise.all([repo.latestByLead(accountId, q.data.leadId), deps.queue.state(accountId, q.data.leadId)]);
+    // DEAL-FILES-2, 2.5.9: задание дольше 10 минут без нового шага — «Сборка зависла», одна запись kp_error в журнал.
+    if (job?.state === 'running' && job.progress?.stuck && !job.progress.stuckReportedAt) {
+      await deps.journal.add({ accountId, leadId: q.data.leadId, kind: 'kp_error', summary: `Сборка черновика зависла на шаге «${job.progress.step}» (без нового шага с ${new Date(job.progress.updatedAt).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' })} МСК) — менеджеру доступна кнопка «Перезапустить сборку»`, details: { step: job.progress.step, stepNo: job.progress.stepNo, file: job.progress.file, updatedAt: job.progress.updatedAt, startedAt: job.progress.startedAt } });
+      await deps.queue.markStuckReported(accountId, q.data.leadId);
+      job.progress.stuckReportedAt = new Date().toISOString();
+    }
     return { draft: d ? await viewOf(accountId, d) : null, job };
+  });
+
+  /** DEAL-FILES-2, 2.5.9: «Перезапустить сборку» — зависшее задание снимается (отменяется), ставится новое. */
+  api.post('/kp/draft/restart', async (req, reply) => {
+    const p = principal(req);
+    const b = leadBody.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'bad_body' });
+    if (!(await deps.ai(p.accountId))) return reply.code(409).send({ error: 'no_llm' });
+    await deps.queue.restart({ accountId: p.accountId, leadId: b.data.leadId, userId: p.userId });
+    await deps.journal.add({ accountId: p.accountId, leadId: b.data.leadId, kind: 'kp_error', summary: 'Сборка черновика перезапущена менеджером («Перезапустить сборку»)', details: { userId: p.userId, restarted: true } });
+    return reply.code(202).send({ queued: true });
   });
 
   /**

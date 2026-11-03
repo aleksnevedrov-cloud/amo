@@ -301,3 +301,59 @@ describe('дубли файлов и наш документ (RFD-AI-AGENT-OPT-D
     expect(d.survey.find((q) => q.type === 'own_document')).toBeUndefined();
   }, 30_000);
 });
+
+describe('индикатор хода сборки в API (RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.5)', () => {
+  const g = gateway();
+  let ctx: Awaited<ReturnType<typeof setup>>;
+  let headers: Record<string, string>;
+  const txt = (title: string) => new TextEncoder().encode(`${title}\nЗаявка на двери: дверной блок 900×2100, 1 шт.`);
+  const journal = async (kind: string) => (await ctx.app.inject({ url: `/widget/v1/journal?kind=${kind}`, headers })).json().items as { summary: string; details: Record<string, unknown> }[];
+
+  beforeAll(async () => {
+    ctx = await setup({ ai: g.ai });
+    headers = { 'x-auth-token': await widgetToken() };
+    await ctx.app.inject({ method: 'GET', url: '/oauth/amo/callback', query: { code: 'c', referer: 'aleksnevedrov.amocrm.ru', from_widget: '1' } });
+    ctx.amo.mail = { id: 5, created_at: 1_760_000_000, params: { income: true, subject: 'Заявка', text: 'Файлы в сделке', from: 'client@example.ru' } };
+  });
+  afterAll(() => ctx.close());
+
+  it('задание пишет ход на каждом шаге и по каждому файлу; журнал kp_draft — шаги и их длительность', async () => {
+    leadFileCard(ctx.amo, 'u-1', 'Заявка 1.txt', txt('Заявка 1.txt'), 'text/plain');
+    leadFileCard(ctx.amo, 'u-2', 'Заявка 2.txt', txt('Заявка 2.txt'), 'text/plain');
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    const log = ctx.progressLog;
+    expect(log.length).toBeGreaterThan(8);
+    expect(log[0]).toMatchObject({ stepNo: 1, step: 'Читаю карточку сделки', steps: 8 });
+    expect(log.map((p) => p.stepNo)).toEqual(expect.arrayContaining([1, 2, 3, 6, 8]));
+    expect(log.some((p) => p.step === 'Скачиваю файлы (1 из 2)')).toBe(true);
+    expect(log.some((p) => p.step === 'Разбираю позиции «Заявка 2.txt»')).toBe(true);
+    const last = log.at(-1)!;
+    expect(last).toMatchObject({ stepNo: 8, step: 'Готово', done: 2, total: 2 });
+    expect(last.files).toEqual([{ name: 'Заявка 1.txt', status: 'parsed', positions: 1 }, { name: 'Заявка 2.txt', status: 'parsed', positions: 1 }]);
+    const kp = (await journal('kp_draft'))[0]!;
+    expect(kp.summary).toMatch(/; шаги: 1 Читаю карточку сделки \d+\.\d с, 2 Ищу файлы/);
+    expect((kp.details.steps as { stepNo: number }[]).map((s) => s.stepNo)).toEqual([1, 2, 3, 6, 8]);
+  }, 30_000);
+
+  it('GET /kp/draft при идущем задании отдаёт шаг, файл, страницу, прошло и осталось; 10 минут без нового шага — stuck, одна запись kp_error; POST /kp/draft/restart ставит новое задание', async () => {
+    const now = Date.now();
+    const progress = { step: 'Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6', stepNo: 4, steps: 8, file: 'Двери наружные Данилково (4).pdf', page: 3, pages: 6, done: 0, total: 2, files: [{ name: 'Двери наружные Данилково (4).pdf', status: 'parsing' as const }, { name: 'Счет.pdf', status: 'queued' as const }], startedAt: new Date(now - 135_000).toISOString(), updatedAt: new Date(now - 11 * 60_000).toISOString(), elapsedSec: 135, etaMin: 2, fraction: 0.44, stuck: true, stuckReportedAt: null };
+    ctx.forcedState.value = { state: 'running', progress };
+    const before = (await journal('kp_error')).length;
+    const r1 = (await ctx.app.inject({ url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json();
+    expect(r1.job).toMatchObject({ state: 'running', progress: { stepNo: 4, file: 'Двери наружные Данилково (4).pdf', page: 3, pages: 6, elapsedSec: 135, etaMin: 2, stuck: true } });
+    expect(r1.job.progress.stuckReportedAt).toBeTruthy();
+    const errs = await journal('kp_error');
+    expect(errs.length).toBe(before + 1);
+    expect(errs[0]?.summary).toContain('Сборка черновика зависла на шаге «Распознаю «Двери наружные Данилково (4).pdf», стр. 3 из 6»');
+    await ctx.app.inject({ url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers });
+    expect((await journal('kp_error')).length).toBe(before + 1);
+    expect(ctx.stuckReported.count).toBe(1);
+    const restart = await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft/restart', headers, payload: { leadId: LEAD_ID } });
+    expect(restart.statusCode).toBe(202);
+    expect(ctx.restarts).toHaveLength(1);
+    expect((await journal('kp_error'))[0]?.summary).toBe('Сборка черновика перезапущена менеджером («Перезапустить сборку»)');
+    ctx.forcedState.value = null;
+    expect((await ctx.app.inject({ url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().job).toBeNull();
+  }, 30_000);
+});

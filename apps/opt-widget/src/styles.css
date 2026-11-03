@@ -369,6 +369,18 @@
 .opt-kp .opt-kp-save { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 12px; color: #6b7280; }
 .opt-kp .opt-kp-save-error { color: #b02a2a; }
 .opt-kp .opt-kp-markup-note { margin: 6px 14px 0; }
+/* RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.5: индикатор хода сборки черновика. */
+.opt-kp .opt-kp-progress { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; font-size: 12px; }
+.opt-kp .opt-kp-modal > .opt-kp-progress-wide { margin: 6px 14px 0; }
+.opt-kp .opt-kp-progress-bar { height: 6px; border-radius: 3px; background: #e6e8ec; overflow: hidden; }
+.opt-kp .opt-kp-progress-fill { height: 100%; background: #2e8b57; transition: width 0.4s ease; }
+.opt-kp .opt-kp-progress-step { font-weight: 600; }
+.opt-kp .opt-kp-progress-stuck { display: flex; align-items: center; gap: 8px; }
+.opt-kp .opt-kp-progress-files { margin: 0; padding-left: 16px; color: var(--kp-muted); }
+.opt-kp .opt-kp-progress-file-parsed { color: #1d6b3a; }
+.opt-kp .opt-kp-progress-file-failed { color: #b02a2a; }
+.opt-kp .opt-kp-progress-file-downloading, .opt-kp .opt-kp-progress-file-parsing, .opt-kp .opt-kp-progress-file-recognizing { color: #1f2937; }
+.opt-kp .opt-kp-job-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .opt-kp .opt-kp-row-name { font-weight: 600; }
 .opt-kp .opt-kp-row-gost { color: #8995a3; }
 .opt-kp .opt-kp-row-excluded td { opacity: .55; }

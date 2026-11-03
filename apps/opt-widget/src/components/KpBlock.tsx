@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { errorMessage } from '@core/widget-core';
-import type { DraftJob, GostProfileInfo, KpAnswerBody, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo, ResearchPosition, ResearchState } from '../api.ts';
+import type { DraftJob, DraftProgressInfo, GostProfileInfo, KpAnswerBody, KpApi, KpDraftInfo, KpDraftLine, MailSourceInfo, ResearchPosition, ResearchState } from '../api.ts';
 import { Journal } from './Journal.tsx';
 import { KbAnswer } from './KbAnswer.tsx';
 import { SendPreview } from './SendPreview.tsx';
@@ -27,6 +27,9 @@ const plural = (n: number, one: string, few: string, many: string) => {
 /** Размер по макету: «1400 × 2700 мм». */
 const sizeLabel = (size: string) => size.replace(/\s*[×x]\s*/i, ' × ');
 const POLL_MS = 3000;
+/** DEAL-FILES-2, 2.5.5: ход сборки обновляется раз в 2 с. */
+const DRAFT_POLL_MS = 2000;
+const BUILDING = 'Идёт сборка черновика';
 
 /**
  * Ошибка рендера одного раздела не роняет весь блок (виджет 2.0.7 падал целиком на старых черновиках): раздел показывается
@@ -241,7 +244,7 @@ function useKpDraft(api: KpApi, leadId: number) {
   const pending = job?.state === 'queued' || job?.state === 'running';
   useEffect(() => {
     if (!pending) return;
-    const t = setInterval(() => void refresh(), POLL_MS);
+    const t = setInterval(() => void refresh(), DRAFT_POLL_MS);
     return () => clearInterval(t);
   }, [pending, refresh]);
 
@@ -495,6 +498,8 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
   const [mailView, setMailView] = useState(false);
   const start = () => void act(() => api.makeDraft(leadId));
   const checkMail = () => void act(() => api.makeDraft(leadId, { checkMail: true }));
+  // DEAL-FILES-2, 2.5.9: «Перезапустить сборку» у зависшего задания.
+  const restart = () => void act(() => api.restartDraft(leadId));
 
   // Макет Figma «10 Агент опт — КП»: карточки с рамкой и радиусом 13 px на сером фоне. Шапку с логотипом рисует amoCRM (.opt-caption).
   if (!draft) {
@@ -505,14 +510,21 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
             <h3 className="opt-kp-title">Черновик КП</h3>
           </div>
           {pending ? (
-            <div className="opt-kp-note">{job?.state === 'queued' ? 'В очереди…' : 'Собираю черновик: читаю карточку, письма и файлы…'}</div>
+            <BuildProgress job={job} onRestart={restart} />
           ) : (
             <div className="opt-kp-note">КП по этой сделке ещё не собирали</div>
           )}
-          {job?.state === 'failed' && <div className="opt-error">Черновик не собран: {job.error}</div>}
+          {job?.state === 'failed' && (
+            <div className="opt-error opt-kp-job-failed">
+              Черновик не собран: {job.error}
+              <button type="button" className="opt-btn opt-btn-small" disabled={busy} onClick={start}>
+                Собрать заново
+              </button>
+            </div>
+          )}
           {error && <div className="opt-error">{error}</div>}
           <div className="opt-actions">
-            <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending} onClick={start}>
+            <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending} title={pending ? BUILDING : undefined} onClick={start}>
               Собрать КП
             </button>
           </div>
@@ -585,14 +597,21 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
         <Section name="Сводка">
           <CountersRow c={c} draft={draft} />
         </Section>
-        {pending && <div className="opt-kp-sub">{job?.state === 'queued' ? 'Новый черновик в очереди…' : 'Собираю новый черновик…'}</div>}
-        {job?.state === 'failed' && <div className="opt-error">Новый черновик не собран: {job.error}</div>}
+        {pending && <BuildProgress job={job} onRestart={restart} />}
+        {job?.state === 'failed' && (
+          <div className="opt-error opt-kp-job-failed">
+            Новый черновик не собран: {job.error}
+            <button type="button" className="opt-btn opt-btn-small" disabled={busy} onClick={start}>
+              Собрать заново
+            </button>
+          </div>
+        )}
         {error && !open && <div className="opt-error">{error}</div>}
         <div className="opt-actions">
           <button type="button" className="opt-btn opt-btn-green" onClick={() => setOpen(true)}>
             Развернуть ⤢
           </button>
-          <button type="button" className="opt-btn" disabled={busy || pending || Boolean(why)} title={why ?? 'Собрать DOCX и PDF по шаблону'} onClick={build}>
+          <button type="button" className="opt-btn" disabled={busy || pending || Boolean(why)} title={pending ? BUILDING : (why ?? 'Собрать DOCX и PDF по шаблону')} onClick={build}>
             Собрать документ
           </button>
         </div>
@@ -631,6 +650,7 @@ export function KpBlock({ api, leadId }: { api: KpApi; leadId: number }) {
             setMailView(true);
           }}
           onClose={() => setOpen(false)}
+          onRestart={restart}
           // Окно письма — слоем поверх окна КП: отдельно (в колонке amoCRM) его закрывало окно на 88 %, «Отправить» было не нажать.
           sendLayer={layer}
           onSendClose={closeLayer}
@@ -655,8 +675,8 @@ type Tab = (typeof TABS)[number][0];
  * Окно КП на 88 % экрана (п. 6а): шапка со счётчиками и кнопками, вкладки, итог внизу. Esc и ✕ — закрыть.
  * sendLayer — окно письма «Отправить клиенту» слоем поверх содержимого окна; Esc при нём закрывает только письмо.
  */
-function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onCheckMail, onBuild, onSend, onShowMail, onClose, markupNote = null, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onCheckMail?: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; markupNote?: MarkupRecalcInfo | null; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
-  const { draft, lines, dirty, busy, error, pending, act, ready, edit, markInvalid, invalid, saveState, save, research, researching, progress, findPrices } = k;
+function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, onDraft, onCheckMail, onBuild, onSend, onShowMail, onClose, onRestart, markupNote = null, sendLayer = null, onSendClose }: { api: KpApi; leadId: number; k: ReturnType<typeof useKpDraft>; counters: Counters; goods: KpDraftLine[]; why: string | null; kpStatus: string; downloads: React.ReactNode; onDraft: () => void; onCheckMail?: () => void; onBuild: () => void; onSend: () => void; onShowMail?: () => void; onClose: () => void; onRestart?: () => void; markupNote?: MarkupRecalcInfo | null; sendLayer?: React.ReactNode; onSendClose?: () => void }) {
+  const { draft, job, lines, dirty, busy, error, pending, act, ready, edit, markInvalid, invalid, saveState, save, research, researching, progress, findPrices } = k;
   const [tab, setTab] = useState<Tab>('lines');
   const sending = Boolean(sendLayer);
   // П. 3а.5: ✕, Esc и клик мимо окна — несохранённая правка уходит сразу, без ожидания таймера; при ошибке окно остаётся.
@@ -691,18 +711,19 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           </div>
           <div className="opt-kp-modal-actions">
             {/* RFD-AI-AGENT-OPT-AUTO-MARKUP: кнопок «Пересчитать» и «Сохранить правки» нет — наценка пересчитывается при сборке, правки сохраняются сами. */}
+            {/* DEAL-FILES-2, 2.5.7: во время сборки кнопки окна, кроме ✕, неактивны с подсказкой «Идёт сборка черновика». */}
             {draft.status === 'draft' && (
-              <button type="button" className="opt-btn" disabled={busy || pending || researching} title="Цены по позициям без цены: прайс → интернет (выбор менеджера) → вопрос" onClick={() => void findPrices('all')}>
+              <button type="button" className="opt-btn" disabled={busy || pending || researching} title={pending ? BUILDING : 'Цены по позициям без цены: прайс → интернет (выбор менеджера) → вопрос'} onClick={() => void findPrices('all')}>
                 {researching ? `Ищу цены…${progress ? ` ${progress}` : ''}` : 'Найти цены'}
               </button>
             )}
-            <button type="button" className="opt-btn" disabled={busy || pending} onClick={onDraft} title="Прочитать карточку заново; файлы заявки, уже загруженные в сделку, — без чтения ящика; ответы опросника переносятся">
+            <button type="button" className="opt-btn" disabled={busy || pending} onClick={onDraft} title={pending ? BUILDING : 'Прочитать карточку заново; файлы заявки, уже загруженные в сделку, — без чтения ящика; ответы опросника переносятся'}>
               Собрать заново
             </button>
-            <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending || Boolean(why)} title={why ?? 'Собрать DOCX и PDF по шаблону'} onClick={onBuild}>
+            <button type="button" className="opt-btn opt-btn-green" disabled={busy || pending || Boolean(why)} title={pending ? BUILDING : (why ?? 'Собрать DOCX и PDF по шаблону')} onClick={onBuild}>
               Собрать документ
             </button>
-            <button type="button" className="opt-btn" disabled={busy || !canSend} title={canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
+            <button type="button" className="opt-btn" disabled={busy || pending || !canSend} title={pending ? BUILDING : canSend ? 'Открыть письмо перед отправкой' : 'Доступно после сборки документа'} onClick={onSend}>
               Отправить клиенту
             </button>
             {(draft.status === 'sent' || draft.sentAt) && onShowMail && (
@@ -721,6 +742,15 @@ function KpWindow({ api, leadId, k, counters, goods, why, kpStatus, downloads, o
           <SourceNotes draft={draft} disabled={busy || pending} onRebuild={onDraft} onCheckMail={onCheckMail} />
         </Section>
         {markupNote && <MarkupRecalcNote note={markupNote} />}
+        {pending && <BuildProgress job={job} onRestart={onRestart} wide />}
+        {job?.state === 'failed' && (
+          <div className="opt-error opt-kp-job-failed">
+            Новый черновик не собран: {job.error}
+            <button type="button" className="opt-btn opt-btn-small" disabled={busy} onClick={onDraft}>
+              Собрать заново
+            </button>
+          </div>
+        )}
         <div className="opt-kp-tabs" role="tablist">
           {TABS.map(([id, label]) => (
             <button key={id} type="button" role="tab" aria-selected={tab === id} className={`opt-kp-tab${tab === id ? ' opt-kp-tab-active' : ''}`} onClick={() => setTab(id)}>
@@ -792,6 +822,55 @@ function CopyFailed({ draft }: { draft: KpDraftInfo }) {
   const copy = draft.sentMail?.copy;
   if (copy?.status !== 'failed') return null;
   return <div className="opt-kp-copy-failed">Копия в «Отправленные» не сохранена: {copy.error ?? 'причина неизвестна'}</div>;
+}
+
+/** м:сс для «прошло 2:15». */
+const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+const FILE_STATUS: Record<DraftProgressInfo['files'][number]['status'], string> = { queued: 'в очереди', downloading: 'скачивается', recognizing: 'распознаётся', parsing: 'распознаётся', parsed: 'разобран', repeat: 'повтор', own: 'наш документ', failed: 'не разобран', skipped: 'пропущен' };
+
+/**
+ * RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.5: индикатор хода сборки — полоса (доля = пройденные шаги и страницы), строка шага,
+ * «прошло 2:15, осталось ≈ 2 мин», список файлов со статусами; дольше 10 минут без нового шага — «Сборка зависла» и
+ * «Перезапустить сборку». До первого шага (в очереди) — «В очереди…».
+ */
+function BuildProgress({ job, onRestart, wide = false }: { job: DraftJob; onRestart?: () => void; wide?: boolean }) {
+  if (!job || job.state === 'failed') return null;
+  const p = job.progress ?? null;
+  const fraction = p ? Math.round(p.fraction * 100) : 0;
+  const eta = p ? (p.etaMin === null ? 'около 1–5 минут' : p.etaMin <= 0 ? 'меньше минуты' : `≈ ${p.etaMin} мин`) : 'около 1–5 минут';
+  return (
+    <div className={`opt-kp-progress${wide ? ' opt-kp-progress-wide' : ''}`} role="status" aria-live="polite">
+      <div className="opt-kp-progress-bar" aria-hidden="true">
+        <div className="opt-kp-progress-fill" style={{ width: `${fraction}%` }} />
+      </div>
+      <div className="opt-kp-progress-step">{job.state === 'queued' || !p ? 'В очереди… сборка начнётся через несколько секунд' : `Шаг ${p.stepNo} из ${p.steps}: ${p.step}`}</div>
+      {p && (
+        <div className="opt-kp-sub opt-kp-progress-time">
+          прошло {mmss(p.elapsedSec)}, осталось {eta}
+        </div>
+      )}
+      {p && p.stuck && (
+        <div className="opt-error opt-kp-progress-stuck">
+          Сборка зависла на шаге «{p.step}»
+          {onRestart && (
+            <button type="button" className="opt-btn opt-btn-small" onClick={onRestart}>
+              Перезапустить сборку
+            </button>
+          )}
+        </div>
+      )}
+      {p && p.files.length > 0 && (
+        <ul className="opt-kp-progress-files">
+          {p.files.map((f) => (
+            <li key={f.name} className={`opt-kp-progress-file opt-kp-progress-file-${f.status}`}>
+              {f.name} — {FILE_STATUS[f.status]}
+              {f.status === 'parsed' ? `: ${f.positions ?? 0} поз.` : f.reason ? `: ${f.reason}` : ''}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /** RFD-AI-AGENT-OPT-AUTO-MARKUP, п. 4: после сборки — какие цены из прайса пересчитаны по текущей наценке (жёлтая пометка). */

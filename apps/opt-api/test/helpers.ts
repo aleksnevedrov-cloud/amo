@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { LlmGateway, RoutedRequest, RoutedResponse } from '@core/llm';
 import { loadEnv } from '@core/shared';
 import type { Embedder, KbIndexJob, UrlFetcher } from '@opt/kb';
-import { buildRawMail, pickSentFolder, recipientsOf, runDraftJob, runResearchJob, type ImapConfig, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SentCopier, type SmtpConfig } from '@opt/kp';
+import { buildRawMail, pickSentFolder, recipientsOf, runDraftJob, runResearchJob, type ImapConfig, type KpMail, type KpMailSender, type OptAiProvider, type ResearchJob, type SentCopier, type SmtpConfig, type DraftJob, type DraftProgress } from '@opt/kp';
 import { SignJWT } from 'jose';
 import { freshKbDb } from '../../../packages/opt/kb/test/setup.ts';
 import { freshOptDb } from '../../../packages/opt/kp/test/setup.ts';
@@ -170,6 +170,11 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
   };
   // Очередь в тестах выполняет задание сразу, в том же процессе: состояние — как после работы воркера.
   const jobs: { state: DraftJobState }[] = [];
+  /** DEAL-FILES-2, 2.5: ход сборки, записанный заданием; подменённое состояние; перезапуски; отметки о зависании. */
+  const progressLog: DraftProgress[] = [];
+  const forcedState: { value: DraftJobState | null } = { value: null };
+  const restarts: DraftJob[] = [];
+  const stuckReported = { count: 0 };
   const researchStates = new Map<string, DraftJobState>();
   let core: Deps | null = null;
   const deps: Deps = createDeps(env, {
@@ -191,14 +196,24 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
     queue: {
       async enqueue(job) {
         try {
-          await runDraftJob(core!, job);
+          await runDraftJob(core!, job, { onProgressState: (p) => progressLog.push(structuredClone(p)) });
           jobs.push({ state: null });
         } catch (err) {
           jobs.push({ state: { state: 'failed', error: (err as Error).message } });
         }
       },
+      // DEAL-FILES-2, 2.5: тест может подменить состояние задания (идёт / зависло), иначе — как после воркера.
       async state() {
-        return jobs.at(-1)?.state ?? null;
+        return forcedState.value ?? jobs.at(-1)?.state ?? null;
+      },
+      async restart(job) {
+        restarts.push(job);
+        forcedState.value = null;
+        await this.enqueue(job);
+      },
+      async markStuckReported() {
+        stuckReported.count++;
+        if (forcedState.value && forcedState.value.state === 'running' && forcedState.value.progress) forcedState.value.progress.stuckReportedAt = new Date().toISOString();
       },
       close: async () => undefined,
     },
@@ -233,7 +248,7 @@ export async function setup(opts: { ai?: OptAiProvider; failSend?: string; embed
   });
   core = deps;
   const app = await buildApp(deps);
-  return { app, deps, amo, sent, imap, close: async () => (await app.close(), await drop(), await kb.drop()) };
+  return { progressLog, forcedState, restarts, stuckReported, app, deps, amo, sent, imap, close: async () => (await app.close(), await drop(), await kb.drop()) };
 }
 
 export function widgetToken(claims: Record<string, unknown> = {}, key = CLIENT_SECRET) {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { fieldValues, type AmoApiClient } from '@core/amo';
 import { otherCloudLinks, yadiskLinks, YadiskError, type YadiskClient } from './yadisk.ts';
 import { isOurDocument, sellerLabel, type SellerInfo } from './seller-doc.ts';
+import type { ProgressReporter } from './progress.ts';
 import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
@@ -328,6 +329,8 @@ export interface KpDraftDeps {
    * читаются в момент сборки черновика (фонового опроса у опта нет); null — ссылки не читаются.
    */
   yadisk?: YadiskClient | null;
+  /** DEAL-FILES-2, 2.5: ход сборки для индикатора (шаги, файлы, страницы). */
+  progress?: ProgressReporter | null;
   /**
    * Чтение письма заявки из ящика по IMAP, только на чтение (mail-read.ts); null — ящик во вкладке
    * «Письмо» не настроен. Вызывается только при сборке черновика, фонового опроса нет.
@@ -414,7 +417,9 @@ const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const NO_PRICE = 'цена не задана';
 
 export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDraftDeps): Promise<KpDraftResult> {
+  d.progress?.step(1);
   const card = await readCard(d.amo, input.leadId, Boolean(d.yadisk));
+  d.progress?.step(2);
   // Письмо из ящика: полный текст вместо первой строки из amo и вложения, которых в файлах сделки нет.
   // Файлы заявки уже в сделке (загружены прошлой сборкой или менеджером) — ящик не читаем: сбой IMAP не обнуляет черновик,
   // лишних входов в ящик нет. Текст письма — полный, из прошлой сборки, если она его брала из ящика.
@@ -435,6 +440,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   // Часть Б: файлы по ссылкам Яндекс Диска — после файлов письма и сделки (общий лимит maxFiles), дубли по имени и размеру не берутся.
   const disk = d.yadisk ? await collectYadisk(d.yadisk, card.links, sources, limits.maxBytes) : { files: [], skipped: [], summary: [] };
   sources.push(...disk.files);
+  d.progress?.files(sources.map((f) => f.name));
   const files = await parseFiles(d, sources, limits);
   // RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: файл сделки без карточки (Files API ответил 404 и т. п.) — в «пропущено», не молча.
   files.skipped.push(...card.filesMissing, ...disk.skipped);
@@ -445,6 +451,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
       f.ourDocument = true;
       f.warnings = [...(f.warnings ?? []), `наш документ (продавец ${sellerLabel(input.seller)}), позиции не берутся`];
       ownDocs.push({ name: f.filename, title: f.title || f.filename, positions: f.positions });
+      d.progress?.file(f.filename, 'own', { reason: `наш документ (продавец ${sellerLabel(input.seller)})` });
     } else if (f.kind === 'estimate' && f.positions.length) {
       f.warnings = [...(f.warnings ?? []), `из сметы другого поставщика: ${f.title || f.filename}`];
     }
@@ -862,33 +869,43 @@ async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFile
     }
     if (f.size > limits.maxBytes) {
       skipped.push({ name: f.name, reason: `файл больше ${Math.round(limits.maxBytes / 1024 / 1024)} МБ` });
+      d.progress?.file(f.name, 'skipped', { reason: `файл больше ${Math.round(limits.maxBytes / 1024 / 1024)} МБ` });
       continue;
     }
     let file: { bytes: Uint8Array; mime: string | null };
+    d.progress?.file(f.name, 'downloading');
     try {
       file = await f.load();
     } catch (err) {
       skipped.push({ name: f.name, reason: (err as Error).message, failed: true });
       failed.push({ name: f.name, reason: (err as Error).message, attempts: [] });
+      d.progress?.file(f.name, 'failed', { reason: (err as Error).message });
       continue;
     }
     const hash = sha256(file.bytes);
     const same = seen.get(hash);
     if (same) {
-      skipped.push({ name: f.name, reason: `повтор файла «${same.name}» ${ORIGIN_LABEL[same.origin]}` });
+      const reason = `повтор файла «${same.name}» ${ORIGIN_LABEL[same.origin]}`;
+      skipped.push({ name: f.name, reason });
+      d.progress?.file(f.name, 'repeat', { reason });
       continue;
     }
     seen.set(hash, f);
     if (i++ >= limits.maxFiles) {
       skipped.push({ name: f.name, reason: `больше ${limits.maxFiles} файлов за раз не разбираем` });
+      d.progress?.file(f.name, 'skipped', { reason: `больше ${limits.maxFiles} файлов за раз не разбираем` });
       continue;
     }
     try {
-      parsed.push(await d.analyze({ filename: f.name, mime: file.mime ?? f.mime ?? 'application/octet-stream', bytes: file.bytes }));
+      d.progress?.file(f.name, 'parsing');
+      const p = await d.analyze({ filename: f.name, mime: file.mime ?? f.mime ?? 'application/octet-stream', bytes: file.bytes });
+      parsed.push(p);
+      d.progress?.file(f.name, 'parsed', { positions: p.positions.length });
     } catch (err) {
       // KP-PARSE-RETRY: файл не выбрасывается молча — «не разобран» с причиной и попытками (журнал), в окне «Разобрать заново».
       skipped.push({ name: f.name, reason: (err as Error).message, failed: true });
       failed.push({ name: f.name, reason: (err as Error).message, attempts: err instanceof FileParseError ? err.attempts : [] });
+      d.progress?.file(f.name, 'failed', { reason: (err as Error).message });
     }
   }
   return { parsed, skipped, failed };

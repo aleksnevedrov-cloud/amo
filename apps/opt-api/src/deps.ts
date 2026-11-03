@@ -1,15 +1,19 @@
 import type { Env } from '@core/shared';
-import { createOptCore, DRAFT_JOB, ImapSentCopier, type SentCopier, draftJobId, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, SmtpKpSender, type DraftJob, type KpMailSender, type OptCore, type OptCoreOverrides, type ResearchJob } from '@opt/kp';
+import { createOptCore, DRAFT_JOB, ImapSentCopier, type SentCopier, draftJobId, KP_QUEUE, KP_RESEARCH_QUEUE, RESEARCH_JOB, researchJobId, SmtpKpSender, type DraftJob, type KpMailSender, type OptCore, type OptCoreOverrides, type ResearchJob, draftCurrentKey, draftCancelKey, progressView, type DraftProgress, type DraftProgressView } from '@opt/kp';
 import { KB_INDEX_JOB, KB_QUEUE, kbIndexJobId, type KbIndexJob } from '@opt/kb';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
-export type DraftJobState = { state: 'queued' | 'running' } | { state: 'failed'; error: string } | null;
+export type DraftJobState = { state: 'queued' | 'running'; progress?: DraftProgressView | null } | { state: 'failed'; error: string } | null;
 
 /** Очередь черновиков: API только ставит задание и смотрит его состояние, работу делает opt-worker. */
 export interface DraftQueue {
   enqueue(job: DraftJob): Promise<void>;
   state(accountId: number, leadId: number): Promise<DraftJobState>;
+  /** DEAL-FILES-2, 2.5.9: «Перезапустить сборку» — прежнее задание отменяется (ключ отмены), ставится новое. */
+  restart(job: DraftJob): Promise<void>;
+  /** Запись kp_error о зависании сделана — не дублировать при следующих опросах. */
+  markStuckReported(accountId: number, leadId: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -67,9 +71,12 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
 
 function bullQueue(connection: Redis): DraftQueue {
   const q = new Queue<DraftJob>(KP_QUEUE, { connection });
+  // Текущее задание сделки: по умолчанию draft-<acc>-<lead>; после «Перезапустить сборку» — новый id в Redis (сутки).
+  const currentId = async (accountId: number, leadId: number) => (await connection.get(draftCurrentKey(accountId, leadId))) ?? draftJobId(accountId, leadId);
+  const add = (job: DraftJob, id: string) => q.add(DRAFT_JOB, job, { jobId: id, removeOnComplete: 200, removeOnFail: 200, attempts: 1 });
   return {
     async enqueue(job) {
-      const id = draftJobId(job.accountId, job.leadId);
+      const id = await currentId(job.accountId, job.leadId);
       // Завершённое или упавшее задание с тем же id BullMQ не перезапустит — убираем его; активное не трогаем.
       const existing = await q.getJob(id);
       if (existing) {
@@ -77,16 +84,33 @@ function bullQueue(connection: Redis): DraftQueue {
         if (st === 'completed' || st === 'failed') await existing.remove();
         else return;
       }
-      await q.add(DRAFT_JOB, job, { jobId: id, removeOnComplete: 200, removeOnFail: 200, attempts: 1 });
+      await add(job, id);
     },
     async state(accountId, leadId) {
-      const job = await q.getJob(draftJobId(accountId, leadId));
+      const job = await q.getJob(await currentId(accountId, leadId));
       if (!job) return null;
       const st = await job.getState();
-      if (st === 'active') return { state: 'running' };
+      const progress = job.progress && typeof job.progress === 'object' ? progressView(job.progress as DraftProgress) : null;
+      if (st === 'active') return { state: 'running', progress };
       if (st === 'failed') return { state: 'failed', error: job.failedReason || 'ошибка' };
       if (st === 'completed') return null;
-      return { state: 'queued' };
+      return { state: 'queued', progress: null };
+    },
+    async restart(job) {
+      const oldId = await currentId(job.accountId, job.leadId);
+      const existing = await q.getJob(oldId);
+      if (existing) {
+        const st = await existing.getState();
+        if (st === 'completed' || st === 'failed') await existing.remove();
+        else await connection.set(draftCancelKey(oldId), '1', 'EX', 24 * 3600);
+      }
+      const id = `${draftJobId(job.accountId, job.leadId)}-${Date.now()}`;
+      await connection.set(draftCurrentKey(job.accountId, job.leadId), id, 'EX', 24 * 3600);
+      await add(job, id);
+    },
+    async markStuckReported(accountId, leadId) {
+      const job = await q.getJob(await currentId(accountId, leadId));
+      if (job?.progress && typeof job.progress === 'object') await job.updateProgress({ ...(job.progress as DraftProgress), stuckReportedAt: new Date().toISOString() }).catch(() => undefined);
     },
     close: () => q.close(),
   };

@@ -7,6 +7,8 @@ import { recordingGateway } from './request-parse.ts';
 import { carryAnswers } from './questions.ts';
 import { resolveOptRoute, toWidgetSettings } from './settings.ts';
 import { createYadiskClient } from './yadisk.ts';
+import { ocrProgress } from '@opt/ocr';
+import { ProgressReporter, stepDurations, type DraftProgress } from './progress.ts';
 
 /** Подпись способа разбора файла для журнала. */
 const METHOD_LABEL: Record<NonNullable<ParsedFile['method']>, string> = { docs: 'модель одним запросом', columns: 'по колонкам, без модели', 'columns+model': 'по колонкам + модель', 'model-chunks': 'модель порциями', matrix: 'матрица характеристик, без модели', skipped: 'не заявка, не разбирался' };
@@ -25,6 +27,9 @@ export interface DraftJob {
 
 /** Один черновик на сделку в очереди: повторное нажатие не плодит задания. */
 export const draftJobId = (accountId: number, leadId: number) => `draft-${accountId}-${leadId}`;
+/** DEAL-FILES-2, 2.5.9: ключ Redis «текущее задание сделки» (после перезапуска — новый id) и ключ отмены прежнего задания. */
+export const draftCurrentKey = (accountId: number, leadId: number) => `kp:draft-current:${accountId}:${leadId}`;
+export const draftCancelKey = (jobId: string) => `kp:draft-cancel:${jobId}`;
 
 /**
  * Черновик КП из карточки сделки: письма и файлы читаются через API amoCRM, спецификации
@@ -38,10 +43,15 @@ export const draftJobId = (accountId: number, leadId: number) => `draft-${accoun
 export interface DraftJobHooks {
   onProgress?: (line: string) => void;
   enqueueResearch?: (jobs: ResearchJob[]) => Promise<void>;
+  /** DEAL-FILES-2, 2.5: ход сборки (шаг, файл, страница) — воркер пишет его в BullMQ (job.updateProgress). */
+  onProgressState?: (p: DraftProgress) => void;
+  /** 2.5.9: сборку перезапустили («Перезапустить сборку») — результат этого задания не нужен, черновик не создаём. */
+  isCancelled?: () => Promise<boolean>;
 }
 
 export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobHooks = {}): Promise<{ draftId: number }> {
   const { accountId, leadId } = job;
+  const progress = new ProgressReporter((p) => hooks.onProgressState?.(p));
   try {
     const ai = await core.ai(accountId);
     if (!ai) throw new Error('LLM не настроена: задайте ключ провайдера в настройках «Модель»');
@@ -95,7 +105,14 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     // DEAL-FILES-2, 2.2: наша компания из настроек КП — наш счёт / КП в сделке позиций не даёт.
     const { constants } = await core.kp.getSettings(accountId);
     const seller = { name: constants.sellerName ?? null, requisites: constants.sellerRequisites ?? null };
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter, seller }, { amo, analyze, mail, yadisk: createYadiskClient(core.directFetch) });
+    // Ход по страницам распознавания (OptOcr → onPage) — через контекст на время сборки.
+    const r = await ocrProgress.run({ onPage: ({ page, pages, byModel }) => progress.page(progress.state.file, page, pages, byModel) }, () =>
+      buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter, seller }, { amo, analyze, mail, yadisk: createYadiskClient(core.directFetch), progress }),
+    );
+    if (hooks.isCancelled && (await hooks.isCancelled())) {
+      await core.journal.add({ accountId, leadId, kind: 'kp_error', summary: 'Сборка черновика перезапущена менеджером — результат прежнего задания отброшен', details: { userId: job.userId, cancelled: true } });
+      throw new Error('сборка перезапущена — результат отброшен');
+    }
     const ms = r.payload.source.mail;
     if (ms?.status === 'skipped') {
       await core.journal.add({ accountId, leadId, kind: 'mail_fetch', summary: `Ящик не читали: ${ms.error}`, details: { userId: job.userId, status: 'skipped' } });
@@ -138,9 +155,12 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const draftId = await core.kp.createDraft(accountId, leadId, payload as unknown as Record<string, unknown>, job.userId);
     // Поиск цен при сборке — только если включено в настройках КП (по умолчанию выключено: поиск по кнопке «Найти цены»).
     if (constants.autoResearch && hooks.enqueueResearch) {
+      progress.step(7);
       const idx = researchablePositions(payload, 'all', constants.maxPositionsPerRun ?? DEFAULT_MAX_POSITIONS_PER_RUN);
       if (idx.length) await hooks.enqueueResearch(idx.map((requestIndex) => ({ accountId, draftId, requestIndex, userId: job.userId })));
     }
+    progress.done();
+    const steps = stepDurations(progress.state);
     await core.journal.add({
       accountId,
       leadId,
@@ -149,9 +169,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
         `Черновик КП: позиций ${r.payload.items.length}, документов ${r.payload.source.documents.length}` +
         (r.payload.source.skipped.length ? `, пропущено файлов ${r.payload.source.skipped.length}` : '') +
         (r.failedFiles.length ? `, не разобрано ${r.failedFiles.length} (${r.failedFiles.map((f) => `«${f.name}»: ${f.reason}`).join('; ')})` : '') +
-        (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''}${f.knownFromKb ? `, из базы знаний ${f.knownFromKb}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : ''),
+        (r.files.length ? `; файлы: ${r.files.map((f) => `${f.name} — позиций ${f.positions}${f.ms !== null ? `, ${(f.ms / 1000).toFixed(1)} с` : ''}${f.method ? ` (${METHOD_LABEL[f.method]}${f.chunks && f.chunks > 1 ? `, порций ${f.chunks}` : ''}${f.knownFromKb ? `, из базы знаний ${f.knownFromKb}` : ''})` : ''}${f.warnings.length ? `, пометок ${f.warnings.length}` : ''}`).join('; ')}` : '') +
+        // DEAL-FILES-2, 2.5.11: шаги и их длительность — для разбора медленных сборок.
+        `; шаги: ${steps.map((s) => `${s.stepNo} ${s.step} ${(s.ms / 1000).toFixed(1)} с`).join(', ')}`,
       // Попытки разбора с сырыми ответами модели (до 4 КБ) — здесь, в черновик не попадают.
-      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files, failedFiles: r.failedFiles, checkMail: Boolean(job.checkMail) },
+      details: { draftId, model: r.model, provider: r.provider, userId: job.userId, skipped: r.payload.source.skipped, files: r.files, failedFiles: r.failedFiles, checkMail: Boolean(job.checkMail), steps, startedAt: progress.state.startedAt, finishedAt: progress.state.updatedAt },
       inputTokens: r.cost.inputTokens,
       outputTokens: r.cost.outputTokens,
       costUsd: r.cost.usd,
