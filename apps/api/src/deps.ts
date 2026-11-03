@@ -7,30 +7,39 @@ import {
   type AiProvider,
   type IncomingJob,
   type LlmClient,
-} from '@ai-door/agent';
-import { AmoOAuth, TokenService } from '@ai-door/amo';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
+} from '@retail/agent';
+import { evalFixtures, type EvalFixtures } from '@ai-door/evals/seed';
+import { AnthropicProvider, createProvider, type ProviderId } from '@core/llm';
+import { downloadAttachment } from '@core/media';
+import { AmoOAuth, TokenService } from '@core/amo';
+import { CatalogImporter, CatalogRepo, fetchDoorComponents } from '@retail/catalog';
 import {
   AccountsRepo,
   AnalyticsRepo,
   createPool,
   DialogRepo,
+  GroupTurnsRepo,
   DocumentsRepo,
+  EvalRunsRepo,
   JournalRepo,
   MemoryRepo,
+  ModelsCacheRepo,
   OutcomesRepo,
   PgTokenStore,
   SecretsRepo,
+  WazzupDumpRepo, WazzupRepo,
   SettingsRepo,
   SuggestionsRepo,
   type Db,
-} from '@ai-door/db';
-import { DocumentService, TesseractOcr, YandexVision, type OcrProvider } from '@ai-door/docs';
-import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@ai-door/mail';
-import { PricingRepo } from '@ai-door/pricing';
-import { AmoApiClient } from '@ai-door/amo';
-import { KnowledgeRepo } from '@ai-door/knowledge';
-import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@ai-door/shared';
+  DoorComponentsRepo,
+} from '@core/db';
+import { DocumentService, YandexVision, type OcrProvider } from '@core/docs';
+import { RetailDocuments, RetailOcr, type RetailOcrDeps } from '@retail/ocr';
+import { EmailChannel, ImapMailbox, MailRepo, SmtpSender, type Mailbox, type MailSender, type MailServerConfig } from '@retail/mail';
+import { PricingRepo } from '@retail/pricing';
+import { AmoApiClient } from '@core/amo';
+import { KnowledgeRepo } from '@retail/knowledge';
+import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import type { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
@@ -47,6 +56,8 @@ export interface Deps {
   accounts: AccountsRepo;
   settings: SettingsRepo;
   dialog: DialogRepo;
+  /** Нить переписки в групповых чатах Wazzup (RFD-AI-AGENT-GRUPPOVYE-CHATY). */
+  groupTurns: GroupTurnsRepo;
   journal: JournalRepo;
   catalog: CatalogRepo;
   importer: CatalogImporter;
@@ -63,13 +74,32 @@ export interface Deps {
   outcomes: OutcomesRepo;
   analytics: AnalyticsRepo;
   /** Разбор файлов (фаза 3); без ключа LLM бросает понятную ошибку. */
-  docs: DocumentService;
+  docs: Pick<DocumentService, 'analyze'>;
   /** Серверные LLM/оркестратор (ANTHROPIC_API_KEY); null — не задан. */
   orchestrator: Orchestrator | null;
   llm: LlmClient | null;
-  /** LLM по аккаунту: свой ключ (Маркетплейс) или серверный. */
+  /** LLM по аккаунту: свои ключи провайдеров (Маркетплейс) или серверные. */
   ai: AiProvider;
+  /** Общие серверные ключи провайдеров из .env. */
+  serverKeys: Partial<Record<ProviderId, string | undefined>>;
   secrets: SecretsRepo;
+  /** Переписка из Wazzup (WhatsApp/Telegram) — история для контекста агента. */
+  wazzup: WazzupRepo;
+  /** Комплектующие конкретной двери из её карточки с TTL 24 ч (RFD-AI-AGENT-KOMPLEKTUYUWIE). */
+  doorComponents: {
+    forProduct(
+      accountId: number,
+      productId: string,
+      url: string,
+    ): Promise<{ group: string; name: string; price: number }[]>;
+  };
+  wazzupDumps: WazzupDumpRepo;
+  modelsCache: ModelsCacheRepo;
+  evalRuns: EvalRunsRepo;
+  /** Временная схема с тестовым каталогом для прогона eval из «Песочницы». */
+  evalFixtures(): Promise<EvalFixtures>;
+  /** Скачивание вложения из чата amo (проверка адреса и размера). */
+  download: typeof downloadAttachment;
   schedule: ScheduleLead;
   alerter: Alerter;
   fetch: typeof fetch;
@@ -77,7 +107,7 @@ export interface Deps {
 }
 
 export type DepsOverrides = Partial<
-  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender'> & {
+  Pick<Deps, 'fetch' | 'redis' | 'alerter' | 'db' | 'schedule' | 'importer' | 'knowledge' | 'mailConnect' | 'mailSender' | 'evalFixtures' | 'download'> & {
     llm: LlmClient | null;
     ocr: (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null;
   }
@@ -128,13 +158,17 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
   const catalog = new CatalogRepo(db);
   const documents = new DocumentsRepo(db);
   const secrets = new SecretsRepo(db, secretBox);
-  // В тестах подменённая LLM используется и как «серверная», и для ключей аккаунтов.
-  const ai = createAiProvider(
-    (accountId) => secrets.get(accountId, 'anthropic'),
-    overrides.llm !== undefined ? (overrides.llm ? 'override' : undefined) : env.ANTHROPIC_API_KEY,
-    overrides.llm ? () => overrides.llm as LlmClient : undefined,
-  );
-  const docs = new DocumentService({ llm, llmFor: async (id) => (await ai(id))?.llm ?? null, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl) });
+  const serverKeys: Deps['serverKeys'] = { anthropic: env.ANTHROPIC_API_KEY, openai: env.OPENAI_API_KEY };
+  // В тестах подменённая LLM используется и как «серверная», и для ключей аккаунтов (Anthropic); OpenAI — адаптер на подменённом fetch.
+  const testLlm = overrides.llm;
+  const ai = createAiProvider({
+    accountKey: (accountId, provider) => secrets.get(accountId, provider),
+    serverKeys: testLlm !== undefined ? { anthropic: testLlm ? 'override' : undefined } : serverKeys,
+    make: (provider, key) => (provider === 'anthropic' && testLlm ? new AnthropicProvider(testLlm as LlmClient) : createProvider(provider, key, { fetch: fetchImpl })),
+  });
+  const llmFor = async (id: number) => (await ai(id))?.llm ?? null;
+  // RFD-AI-AGENT-RETAIL-OCR: собственное распознавание розницы при provider tesseract; контекст аккаунта — RetailDocuments.
+  const docs = new RetailDocuments(new DocumentService({ llm, llmFor, catalog, documents, ocr: overrides.ocr ?? ocrFactory(env, fetchImpl, llmFor) }));
 
   return {
     env,
@@ -150,6 +184,7 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     mailConnect,
     mailSender,
     dialog: new DialogRepo(db),
+    groupTurns: new GroupTurnsRepo(db),
     journal: new JournalRepo(db),
     catalog,
     importer: overrides.importer ?? new CatalogImporter(db),
@@ -164,7 +199,28 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     ai,
+    serverKeys,
     secrets,
+    wazzup: new WazzupRepo(db),
+    doorComponents: ((repo) => ({
+      async forProduct(accountId: number, productId: string, url: string) {
+        const cached = await repo.get(accountId, productId, 24);
+        if (cached) return cached;
+        try {
+          const items = await fetchDoorComponents(url);
+          await repo.save(accountId, productId, url, items);
+          return items;
+        } catch (err) {
+          await repo.save(accountId, productId, url, [], (err as Error).message);
+          throw err;
+        }
+      },
+    }))(new DoorComponentsRepo(db)),
+    wazzupDumps: new WazzupDumpRepo(db),
+    modelsCache: new ModelsCacheRepo(db),
+    evalRuns: new EvalRunsRepo(db),
+    evalFixtures: overrides.evalFixtures ?? (() => evalFixtures(env.DATABASE_URL, 1, process.env.MIGRATIONS_DIR)),
+    download: overrides.download ?? ((url) => downloadAttachment(url, { fetch: fetchImpl })),
     schedule,
     alerter,
     fetch: fetchImpl,
@@ -180,12 +236,13 @@ export function createDeps(env: Env, overrides: DepsOverrides = {}): Deps {
  * OCR по настройке аккаунта: Yandex Vision, если задан ключ (свой или от SpeechKit);
  * без ключа и при явном выборе — Tesseract на нашем сервере (один воркер на процесс).
  */
-export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch): (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null {
-  let tesseract: TesseractOcr | null = null;
+export function ocrFactory(env: Env, fetchImpl: typeof fetch = fetch, llmFor: RetailOcrDeps['llmFor'] = async () => null): (provider: 'off' | 'yandex' | 'tesseract') => OcrProvider | null {
+  let retail: RetailOcr | null = null;
   return (provider) => {
     if (provider === 'off') return null;
     const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
     if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID, fetchImpl);
-    return (tesseract ??= new TesseractOcr());
+    // RFD-AI-AGENT-RETAIL-OCR: своё распознавание розницы (poppler + Tesseract + модель аккаунта по картинке).
+    return (retail ??= new RetailOcr({ llmFor }));
   };
 }

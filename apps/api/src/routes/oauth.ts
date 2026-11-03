@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { AmoApiClient, normalizeAccountDomain } from '@ai-door/amo';
+import { AmoApiClient, normalizeAccountDomain } from '@core/amo';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';

@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
-import type { DialogPipeline } from '@ai-door/agent';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, DialogRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db } from '@ai-door/db';
+import type { DialogPipeline } from '@retail/agent';
+import { CatalogImporter, CatalogRepo } from '@retail/catalog';
+import { AccountsRepo, DialogRepo, JournalRepo, SettingsRepo, widgetSettingsSchema, type Db } from '@core/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { freshDb } from '../../../packages/db/test/setup.ts';
+import { freshDb } from '../../../packages/core/db/test/setup.ts';
 import { runImportFeeds, runIncoming } from '../src/jobs.ts';
 
 let db: Db;
@@ -68,12 +68,12 @@ describe('runIncoming', () => {
 describe('runPollMail', () => {
   it('опрашивает только аккаунты с включённой почтой', async () => {
     const { runPollMail } = await import('../src/jobs.ts');
-    const { MailRepo } = await import('@ai-door/mail');
-    const { SecretBox } = await import('@ai-door/shared');
+    const { MailRepo } = await import('@retail/mail');
+    const { SecretBox } = await import('@core/shared');
     const { randomBytes } = await import('node:crypto');
     await new SettingsRepo(db).save(1, 1, widgetSettingsSchema.parse({ email: { enabled: true, imapHost: 'imap.x.ru', smtpHost: 'smtp.x.ru', username: 'a@x.ru' } }));
     const mail = new MailRepo(db, new SecretBox(randomBytes(32).toString('hex')));
-    await mail.setPassword(1, 'p', 1);
+    await mail.setPassword(1, 'main', 'p', 1);
     const connected: string[] = [];
     const res = await runPollMail(
       {
@@ -89,6 +89,7 @@ describe('runPollMail', () => {
           return {
             folderState: async () => ({ uidValidity: '1', maxUid: 5 }),
             fetchAfter: async () => [],
+            fetchSince: async () => [],
             findSentFolder: async () => null,
             append: async () => undefined,
             close: async () => undefined,
@@ -105,9 +106,9 @@ describe('runPollMail', () => {
 
 describe('runRefreshOutcomes', () => {
   it('перепроверяет этапы сделок по воронке: вперёд, выиграна, удалена', async () => {
-    const { OutcomesRepo } = await import('@ai-door/db');
+    const { OutcomesRepo } = await import('@core/db');
     const { runRefreshOutcomes } = await import('../src/jobs.ts');
-    const { AmoApiClient } = await import('@ai-door/amo');
+    const { AmoApiClient } = await import('@core/amo');
     const outcomes = new OutcomesRepo(db);
     await outcomes.start(1, 501, 1, 10);
     await outcomes.start(1, 502, 1, 20);

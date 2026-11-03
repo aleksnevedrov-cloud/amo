@@ -1,12 +1,15 @@
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
-import { normalizeAccountDomain } from '@ai-door/amo';
+import { normalizeAccountDomain } from '@core/amo';
 import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify';
 import type { Deps } from './deps.ts';
 import { healthRoutes } from './routes/health.ts';
 import { legalRoutes } from './routes/legal.ts';
+import { mailFilesRoutes } from './routes/mail-files.ts';
 import { oauthRoutes } from './routes/oauth.ts';
+import { registerFormBody } from './formbody.ts';
 import { salesbotRoutes } from './routes/salesbot.ts';
+import { wazzupRoutes } from './routes/wazzup.ts';
 import { widgetRoutes } from './routes/widget.ts';
 
 export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
@@ -29,6 +32,7 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
     methods: ['GET', 'PUT', 'POST', 'DELETE'],
   });
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
+  registerFormBody(app);
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     const status = err.statusCode ?? 500;
@@ -38,8 +42,10 @@ export async function buildApp(deps: Deps, opts: FastifyServerOptions = {}) {
 
   healthRoutes(app, deps);
   legalRoutes(app);
+  mailFilesRoutes(app, deps);
   oauthRoutes(app, deps);
   widgetRoutes(app, deps);
   salesbotRoutes(app, deps);
+  wazzupRoutes(app, deps);
   return app;
 }

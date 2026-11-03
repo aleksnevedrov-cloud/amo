@@ -1,7 +1,7 @@
-import { formatCalculation, summarizeDialog } from '@ai-door/agent';
-import { AmoApiClient, type WidgetPrincipal } from '@ai-door/amo';
-import { memorySubject, memoryToText } from '@ai-door/db';
-import { calculate, exportRulesXlsx, importRulesXlsx, pricingRulesSchema, RulesImportError, type CalcInput } from '@ai-door/pricing';
+import { formatCalculation, summarizeDialog } from '@retail/agent';
+import { AmoApiClient, type WidgetPrincipal } from '@core/amo';
+import { memorySubject, memoryToText } from '@core/db';
+import { calculate, exportRulesXlsx, importRulesXlsx, pricingRulesSchema, RulesImportError, type CalcInput } from '@retail/pricing';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.ts';

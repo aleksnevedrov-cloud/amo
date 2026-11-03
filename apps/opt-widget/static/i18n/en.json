@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "Wholesale quote agent",
+    "short_description": "Commercial quote from the lead card: specification, prices, document from a template, email on click",
+    "description": "The wholesale quote agent reads the customer's request from the email and files in the lead card, breaks the specification into line items, builds a DOCX/PDF quote from a template and emails it only after the manager confirms. It never chats with customers."
+  },
+  "settings": {
+    "custom": "Settings"
+  },
+  "advanced": {
+    "title": "Wholesale quote agent: settings"
+  }
+}

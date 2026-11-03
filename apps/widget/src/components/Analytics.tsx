@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
-import type { WidgetApi } from '../api.ts';
-import { rub } from './StatusBadge.tsx';
+import type { ModelStats, WidgetApi } from '../api.ts';
+import { modelLabel, rub } from './StatusBadge.tsx';
 import { s } from './styles.ts';
 import { useLoad } from './useLoad.ts';
 
@@ -28,8 +28,8 @@ const pct = (v: number | null) => (v === null ? '—' : `${v.toFixed(0)} %`);
 export function Analytics({ api }: { api: WidgetApi }) {
   const [days, setDays] = useState<number>(30);
   const load = useCallback(async () => {
-    const [summary, billing] = await Promise.all([api.analytics(days), api.billing()]);
-    return { summary, billing: billing.months };
+    const [summary, billing, models] = await Promise.all([api.analytics(days), api.billing(), api.analyticsModels(days).catch(() => null)]);
+    return { summary, billing: billing.months, models: (models?.items ?? []) as ModelStats[] };
   }, [api, days]);
   const [state] = useLoad(load);
 
@@ -47,6 +47,39 @@ export function Analytics({ api }: { api: WidgetApi }) {
       {state.status === 'ready' && (
         <>
           <Tiles a={state.data.summary} />
+          {state.data.models.length > 0 && (
+            <div style={s.block}>
+              <div style={s.label}>По провайдеру и модели</div>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={s.muted}>
+                    <th align="left">Модель</th>
+                    <th align="right">Диалогов</th>
+                    <th align="right">Передач</th>
+                    <th align="right">Средняя стоимость</th>
+                    <th align="right">Время ответа</th>
+                    <th align="right">Резерв</th>
+                    <th align="right">Ошибок</th>
+                    <th align="right">Расход</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.data.models.map((m) => (
+                    <tr key={`${m.provider}:${m.model}`}>
+                      <td>{modelLabel(m.provider, m.model)}</td>
+                      <td align="right">{m.dialogs}</td>
+                      <td align="right">{m.handoffs}</td>
+                      <td align="right">{rub(m.avgCostPerDialogRub)}</td>
+                      <td align="right">{m.avgLatencyMs === null ? '—' : `${(m.avgLatencyMs / 1000).toFixed(1)} с`}</td>
+                      <td align="right">{m.fallbacks}</td>
+                      <td align="right">{m.errors}</td>
+                      <td align="right">{rub(m.costRub)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           {state.data.summary.handoffReasons.length > 0 && (
             <div style={s.block}>
               <div style={s.label}>Почему передавали менеджеру</div>

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ScriptedLlm, text, toolUse } from '../../../packages/agent/test/scripted-llm.ts';
+import { ScriptedLlm, text, toolUse } from '../../../packages/retail/agent/test/scripted-llm.ts';
 import { botToken, setup, widgetToken } from './helpers.ts';
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -124,6 +124,7 @@ describe('справочники amo', () => {
     expect(res.json()).toEqual({
       pipelines: [{ id: 1, name: 'Продажи', statuses: [{ id: 10, name: 'Новая', sort: 10 }] }],
       taskTypes: [{ id: 1, name: 'Связаться' }],
+      users: [],
     });
   });
 });

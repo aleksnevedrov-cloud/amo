@@ -42,7 +42,7 @@ cp .env.example .env
 - `POSTGRES_PASSWORD` — сгенерировать: `openssl rand -hex 16`; `DATABASE_URL` с этим паролем (см. docker-compose.yml)
 - `TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)`
 - `AMO_CLIENT_ID`, `AMO_CLIENT_SECRET` — из интеграции amo (раздел 5), можно заполнить позже
-- `ANTHROPIC_API_KEY` — если заказчик даст; иначе ключ вводится в виджете («Модель»)
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — если заказчик даст; иначе ключи вводятся в виджете («Модель»)
 - `YANDEX_SPEECHKIT_API_KEY`, `YANDEX_FOLDER_ID` — если есть
 - порты: если 5432/6379 на хосте заняты, в `docker-compose.yml` не публиковать их наружу (они нужны только внутри сети compose)
 
@@ -51,7 +51,7 @@ cp .env.example .env
 ```bash
 cd /opt/ai-door/src
 docker compose up -d --build            # postgres, redis, api (127.0.0.1:3000), worker
-docker compose exec api node packages/db/dist/migrate.js 2>/dev/null || docker compose run --rm api pnpm db:migrate
+docker compose exec api node packages/core/db/dist/migrate.js 2>/dev/null || docker compose run --rm api pnpm db:migrate
 curl -s http://127.0.0.1:3000/health    # {"status":"ok","checks":{"db":"ok","redis":"ok"}}
 docker compose logs --tail=50 worker    # «worker запущен»
 ```

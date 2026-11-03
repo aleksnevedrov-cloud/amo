@@ -1,0 +1,31 @@
+{
+  "name": "@core/docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@retail/agent": "workspace:*",
+    "@retail/catalog": "workspace:*",
+    "@core/db": "workspace:*",
+    "@retail/knowledge": "workspace:*",
+    "@core/llm": "workspace:*",
+    "@core/shared": "workspace:*",
+    "exceljs": "^4.4.0",
+    "mammoth": "^1.12.3",
+    "tesseract.js": "^7.0.0",
+    "unpdf": "^1.8.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

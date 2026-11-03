@@ -1,0 +1,22 @@
+{
+  "name": "@retail/ocr",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@core/db": "workspace:*",
+    "@core/docs": "workspace:*",
+    "@core/llm": "workspace:*",
+    "@retail/agent": "workspace:*",
+    "tesseract.js": "^7.0.0"
+  }
+}

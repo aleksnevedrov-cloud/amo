@@ -4,9 +4,12 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.opt.example
 *.log
 *.zip
 .DS_Store
 evals/results/
 evals/documents/files/
 dump.rdb
+.pnpm-store/
+*.tsbuildinfo

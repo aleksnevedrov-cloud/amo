@@ -1,3 +1,4 @@
+import { MAIL_CLEANUP_JOB, MAIL_CLEANUP_EVERY_MS, runMailCleanup } from './jobs.ts';
 import {
   AnthropicLlm,
   createAiProvider,
@@ -5,18 +6,30 @@ import {
   INCOMING_QUEUE,
   Orchestrator,
   scheduleLead,
+  scheduleUnanswered,
   type AmoAccess,
+  summarizeDialog,
   type IncomingJob,
-} from '@ai-door/agent';
-import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@ai-door/amo';
-import { CatalogImporter, CatalogRepo } from '@ai-door/catalog';
-import { AccountsRepo, createPool, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@ai-door/db';
-import { DocumentService, TesseractOcr, YandexVision } from '@ai-door/docs';
-import { EmailChannel, ImapMailbox, MailRepo, SmtpSender } from '@ai-door/mail';
-import { WhisperStt, YandexStt } from '@ai-door/media';
-import { PricingRepo } from '@ai-door/pricing';
-import { KnowledgeRepo } from '@ai-door/knowledge';
-import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@ai-door/shared';
+  type SweepDeps,
+  resolveRoute,
+} from '@retail/agent';
+import { AmoApiClient, AmoOAuth, continueBot, TokenService } from '@core/amo';
+import { CatalogImporter, CatalogRepo } from '@retail/catalog';
+import { AccountsRepo, createPool, DealFileLinksRepo, DialogRepo, DocumentsRepo, JournalRepo, MemoryRepo,
+  MailAttachmentsRepo,
+  WazzupDumpRepo, WazzupRepo, OutcomesRepo, PgTokenStore, SecretsRepo, SettingsRepo, SuggestionsRepo } from '@core/db';
+import { DocumentService, YandexVision } from '@core/docs';
+import { RetailDocuments, RetailOcr } from '@retail/ocr';
+import { DEAL_FILES_EVERY_MS, DEAL_FILES_JOB, deferFileToDisk, EmailChannel, ImapMailbox, MailRepo, runDealFilesAll, runDeferredMailFiles, SmtpSender } from '@retail/mail';
+import { WhisperStt, YandexStt } from '@core/media';
+import { PricingRepo } from '@retail/pricing';
+import { KnowledgeRepo } from '@retail/knowledge';
+import { amoRedirectUri, loadEnv, SecretBox, TelegramAlerter } from '@core/shared';
+import { runWazzupFiles, WAZZUP_FILES_EVERY_MS, WAZZUP_FILES_JOB } from '@retail/agent';
+import { handleReactivationReply, REACTIVATION_EVERY_MS, REACTIVATION_JOB, runReactivationAll } from '@retail/agent';
+import { reactivationDeps } from './reactivation-deps.ts';
+import { buildLocalSources } from './local-sources.ts';
+import { amoRaw, CALLS_DAY_CHECK_EVERY_MS, CALLS_DAY_JOB, CALLS_POLL_EVERY_MS, CALLS_POLL_JOB, CALLS_QUEUE, CallsRepo, DaySummariesRepo, REFUSAL_EVERY_MS, REFUSAL_JOB, RefusalsRepo, runCallsPollAll, runDaySummaryIfDue, runRefusalPollAll, type CallsDeps } from '@core/calls';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
@@ -37,7 +50,15 @@ import {
   runRefreshOutcomes,
   runIncoming,
   runPollMail,
+  runWazzupDumps,
+  WAZZUP_DUMP_EVERY_MS,
+  WAZZUP_DUMP_JOB,
   runRefreshTokens,
+  TASKS_NEW_JOB,
+  TASKS_NEW_EVERY_MS,
+  TASKS_EVENING_JOB,
+  TASKS_EVENING_EVERY_MS,
+  runTaskSweeps,
 } from './jobs.ts';
 
 const env = loadEnv();
@@ -66,24 +87,33 @@ const amoClient = async (accountId: number) => {
   return new AmoApiClient(account.accountDomain, () => tokenService.getAccessToken(accountId));
 };
 const llm = env.ANTHROPIC_API_KEY ? new AnthropicLlm(env.ANTHROPIC_API_KEY) : null;
+// Догон отказных сделок (RFD-AI-AGENT-REAKTIVATSIYA): отбор по разобранным отказам, отправка ботом-отправщиком.
+const reactivation = reactivationDeps(db, { settings, journal, dialog, amo: amoClient });
 // Ключ аккаунта (Маркетплейс) приоритетнее серверного.
 const secrets = new SecretsRepo(db, new SecretBox(env.TOKEN_ENCRYPTION_KEY));
-const ai = createAiProvider((accountId) => secrets.get(accountId, 'anthropic'), env.ANTHROPIC_API_KEY);
-// Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
-let tesseract: TesseractOcr | null = null;
-const docs = new DocumentService({
-  llm,
-  llmFor: async (id) => (await ai(id))?.llm ?? null,
-  catalog,
-  documents: new DocumentsRepo(db),
-  ocr(provider) {
-    if (provider === 'off') return null;
-    const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
-    if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID);
-    // Без ключа Yandex — Tesseract на сервере (бесплатно, только картинки).
-    return (tesseract ??= new TesseractOcr());
-  },
+const wazzupDumps = new WazzupDumpRepo(db);
+const ai = createAiProvider({
+  accountKey: (accountId, provider) => secrets.get(accountId, provider),
+  serverKeys: { anthropic: env.ANTHROPIC_API_KEY, openai: env.OPENAI_API_KEY },
 });
+// Разбор файлов клиентов (фаза 3): OCR в Yandex Vision (РФ) или Tesseract на сервере, структура — Claude.
+// RFD-AI-AGENT-RETAIL-OCR: собственное распознавание розницы (poppler + Tesseract + модель аккаунта по картинке) вместо
+// TesseractOcr из @core/docs; контекст аккаунта для него несёт обёртка RetailDocuments.
+const retailOcr = new RetailOcr({ llmFor: async (id) => (await ai(id))?.llm ?? null });
+const docs = new RetailDocuments(
+  new DocumentService({
+    llm,
+    llmFor: async (id) => (await ai(id))?.llm ?? null,
+    catalog,
+    documents: new DocumentsRepo(db),
+    ocr(provider) {
+      if (provider === 'off') return null;
+      const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
+      if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID);
+      return retailOcr;
+    },
+  }),
+);
 const emailChannel = new EmailChannel({
   settings,
   mail,
@@ -102,6 +132,156 @@ await maintenance.upsertJobScheduler(IMPORT_FEEDS_JOB, { every: IMPORT_CHECK_EVE
 await maintenance.upsertJobScheduler(POLL_MAIL_JOB, { every: POLL_MAIL_EVERY_MS }, { name: POLL_MAIL_JOB });
 await maintenance.upsertJobScheduler(REFRESH_OUTCOMES_JOB, { every: REFRESH_OUTCOMES_EVERY_MS }, { name: REFRESH_OUTCOMES_JOB });
 await maintenance.upsertJobScheduler(PURGE_UNINSTALLED_JOB, { every: PURGE_CHECK_EVERY_MS }, { name: PURGE_UNINSTALLED_JOB });
+await maintenance.upsertJobScheduler(WAZZUP_DUMP_JOB, { every: WAZZUP_DUMP_EVERY_MS }, { name: WAZZUP_DUMP_JOB });
+// Зависимости обходов автопостановки задач.
+const wazzupRepo = new WazzupRepo(db);
+
+// Звонки (RFD-AI-AGENT-CALLS-RETAIL): записи ВАТС из примечаний amo, расшифровка, итог разговоров за день.
+const callsRepo = new CallsRepo(db);
+const daySummaries = new DaySummariesRepo(db);
+const callsDeps: CallsDeps = {
+  calls: callsRepo,
+  days: daySummaries,
+  refusals: new RefusalsRepo(db),
+  journal,
+  accounts,
+  tokenService,
+  fetch,
+  filesRoot: process.env.MAIL_FILES_ROOT ?? '/data',
+  keys: { speechkit: env.YANDEX_SPEECHKIT_API_KEY ?? null, openai: env.OPENAI_API_KEY ?? null },
+  alerter,
+  settingsFor: async (accountId) => (await settings.get(accountId)).settings,
+  llmFor: async (accountId) => {
+    const a = await ai(accountId);
+    if (!a) return null;
+    const { settings: s } = await settings.get(accountId);
+    return { llm: a.llm, route: resolveRoute(s), pricing: s.billing.pricing, usdRubRate: s.billing.usdRubRate };
+  },
+  accountIds: () => settings.listAccountIds(),
+  // Локальные источники общения (Wazzup, диалог агента, вложения писем) — общая сборка с calls-demo (RFD-AI-AGENT-CALLS-DEMO-SOURCES).
+  sources: buildLocalSources(db),
+};
+
+const sweepDeps: SweepDeps = {
+  // Итог разговоров за день по сделке — из таблицы итогов (своя БД, без сетевых запросов): «Итог», «Следующий шаг».
+  callTexts: async (accountId: number, leadId: number, since: Date) => {
+    const day = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(since);
+    const g = (t: string) => day.find((x) => x.type === t)?.value ?? '';
+    const rows = (await daySummaries.forLead(accountId, leadId, `${g('year')}-${g('month')}-${g('day')}`)).filter((r) => r.business);
+    const last = rows.at(-1);
+    if (!last) return [];
+    return [`Итог: ${last.summary.summary}`, ...(last.summary.nextStep ? [`Следующий шаг: ${last.summary.nextStep}`] : [])];
+  },
+  messengerSince: async (accountId: number, leadId: number, since: Date) =>
+    (await wazzupRepo.historyByLead(accountId, leadId, since, 40)).map((m) => ({
+      role: m.direction === 'in' ? 'client' : 'manager',
+      text: m.text,
+      createdAt: m.sentAt,
+    })),
+  managerWroteSince: (accountId: number, leadId: number, since: Date) =>
+    wazzupRepo.managerWroteSinceByLead(accountId, leadId, since),
+  settings,
+  dialog,
+  journal,
+  amo: async (accountId: number) => ({ api: await amoClient(accountId) }),
+  summarize: async (accountId: number, history) => {
+    const a = await ai(accountId);
+    if (!a) return null;
+    const { settings: s } = await settings.get(accountId);
+    const res = await summarizeDialog(a.llm, s, {
+      history: history.map((m) => ({
+        role: (m.role === 'call' ? 'manager' : m.role) as 'client' | 'ai' | 'manager',
+        text: m.text,
+      })),
+    });
+    return res.text || null;
+  },
+};
+await maintenance.upsertJobScheduler(
+  MAIL_CLEANUP_JOB,
+  { every: MAIL_CLEANUP_EVERY_MS },
+  { name: MAIL_CLEANUP_JOB },
+);
+await maintenance.upsertJobScheduler(TASKS_NEW_JOB, { every: TASKS_NEW_EVERY_MS }, { name: TASKS_NEW_JOB });
+await maintenance.upsertJobScheduler(TASKS_EVENING_JOB, { every: TASKS_EVENING_EVERY_MS }, { name: TASKS_EVENING_JOB });
+
+// Очередь звонков отдельно от обслуживания: опрос с расшифровкой идёт минутами и не должен задерживать почту и задачи.
+const callsQueue = new Queue(CALLS_QUEUE, { connection });
+await callsQueue.upsertJobScheduler(CALLS_POLL_JOB, { every: CALLS_POLL_EVERY_MS }, { name: CALLS_POLL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+await callsQueue.upsertJobScheduler(CALLS_DAY_JOB, { every: CALLS_DAY_CHECK_EVERY_MS }, { name: CALLS_DAY_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Файлы Wazzup в обе стороны (RFD-AI-AGENT-WA-FILES): раз в 5 минут, тем же DocumentService, что вложения писем; не больше 2 файлов одновременно.
+await callsQueue.upsertJobScheduler(WAZZUP_FILES_JOB, { every: WAZZUP_FILES_EVERY_MS }, { name: WAZZUP_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Анализ сделки при переносе в «Отказ» (RFD-AI-AGENT-REFUSAL-ANALYSIS): события lead_status_changed раз в 5 минут.
+await callsQueue.upsertJobScheduler(REFUSAL_JOB, { every: REFUSAL_EVERY_MS }, { name: REFUSAL_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Файлы сделки и ссылки Яндекс Диска из примечаний (RFD-AI-AGENT-DEAL-FILES): события amo раз в 5 минут, разбор — очередью wazzup-files.
+await callsQueue.upsertJobScheduler(DEAL_FILES_JOB, { every: DEAL_FILES_EVERY_MS }, { name: DEAL_FILES_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+// Догон клиента после отказа (RFD-AI-AGENT-REAKTIVATSIYA): отбор и касания раз в 10 минут.
+await callsQueue.upsertJobScheduler(REACTIVATION_JOB, { every: REACTIVATION_EVERY_MS }, { name: REACTIVATION_JOB, opts: { removeOnComplete: 50, removeOnFail: 50 } });
+const callsWorker = new Worker(
+  CALLS_QUEUE,
+  async (job) => {
+    if (job.name === CALLS_POLL_JOB) {
+      const results = await runCallsPollAll(callsDeps);
+      for (const r of results) if (r.enabled && (r.inserted || r.downloaded || r.unavailable || r.failed || r.errors.length || r.transcribed?.transcribed || r.transcribed?.failed)) log.info({ ...r }, 'calls-poll: аккаунт опрошен');
+      return { accounts: results.filter((r) => r.enabled).length, inserted: results.reduce((n, r) => n + r.inserted, 0) };
+    }
+    if (job.name === WAZZUP_FILES_JOB) {
+      const files = await runWazzupFiles({ wazzup: wazzupRepo, settings, journal, documents: docs }, log);
+      // RFD-AI-AGENT-FILES-PRIORITY: вложения писем, отложенные по дневному лимиту, — тем же проходом.
+      const deferred = await runDeferredMailFiles({ attachments: new MailAttachmentsRepo(db), settings, journal, dialog, amo: amoClient, documents: docs }, log);
+      return { files, deferred };
+    }
+    if (job.name === DEAL_FILES_JOB) {
+      const results = await runDealFilesAll(
+        {
+          attachments: new MailAttachmentsRepo(db),
+          links: new DealFileLinksRepo(db),
+          settings,
+          journal,
+          sync: { get: (a, e) => callsRepo.getSync(a, e), set: (a, e, st) => callsRepo.setSync(a, e, st) },
+          amo: async (accountId) => {
+            const account = await accounts.get(accountId);
+            if (!account) throw new Error(`аккаунт ${accountId} не найден`);
+            return { api: await amoClient(accountId), get: amoRaw(account.accountDomain, () => tokenService.getAccessToken(accountId), fetch).get };
+          },
+          root: process.env.MAIL_FILES_ROOT ?? '/data',
+        },
+        log,
+      );
+      return { accounts: results.length, queued: results.reduce((n, r) => n + r.queued, 0) };
+    }
+    if (job.name === REFUSAL_JOB) {
+      const results = await runRefusalPollAll(callsDeps);
+      for (const r of results) if (r.matched || r.retried || r.errors) log.info({ ...r }, 'refusal-poll: переходы в «Отказ»');
+      return { accounts: results.length, analyzed: results.reduce((n, r) => n + r.analyzed, 0) };
+    }
+    if (job.name === REACTIVATION_JOB) {
+      const results = await runReactivationAll(reactivation);
+      for (const r of results) if (r.planned || r.sent || r.stopped || r.errors) log.info({ ...r }, 'reactivation-poll: догон после отказа');
+      return { accounts: results.length, sent: results.reduce((n, r) => n + r.sent, 0), planned: results.reduce((n, r) => n + r.planned, 0) };
+    }
+    if (job.name === CALLS_DAY_JOB) {
+      // Раз в 5 минут: у кого наступило время итога (calls.daySummaryTime) и сегодня не запускали — один запуск; иначе ничего.
+      const out: unknown[] = [];
+      for (const accountId of await callsDeps.accountIds()) {
+        try {
+          const r = await runDaySummaryIfDue(callsDeps, accountId);
+          if (r) {
+            log.info({ ...r }, 'calls-day-summary: итог дня');
+            out.push(r);
+          }
+        } catch (err) {
+          log.warn({ accountId, err: (err as Error).message }, 'calls-day-summary: сбой');
+        }
+      }
+      return { accounts: out.length };
+    }
+    throw new Error(`Неизвестная задача ${job.name}`);
+  },
+  { connection, concurrency: 1 },
+);
+callsWorker.on('failed', (job, err) => log.error({ err, job: job?.name }, 'calls: задача упала'));
+
 const maintenanceWorker = new Worker(
   MAINTENANCE_QUEUE,
   async (job) => {
@@ -109,6 +289,10 @@ const maintenanceWorker = new Worker(
     if (job.name === IMPORT_FEEDS_JOB) return runImportFeeds({ settings, catalog, importer, journal }, log);
     if (job.name === REFRESH_OUTCOMES_JOB) return runRefreshOutcomes({ outcomes, amo: amoClient }, log);
     if (job.name === PURGE_UNINSTALLED_JOB) return runPurgeUninstalled({ accounts }, env.PURGE_UNINSTALLED_AFTER_DAYS, log);
+    if (job.name === WAZZUP_DUMP_JOB) return runWazzupDumps({ dumps: wazzupDumps, secrets, journal }, log);
+    if (job.name === MAIL_CLEANUP_JOB) return runMailCleanup({ attachments: new MailAttachmentsRepo(db) }, log);
+      if (job.name === TASKS_NEW_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'new', log);
+      if (job.name === TASKS_EVENING_JOB) return runTaskSweeps({ settings, sweep: sweepDeps }, 'evening', log);
     if (job.name === POLL_MAIL_JOB) {
       return runPollMail(
         {
@@ -117,9 +301,18 @@ const maintenanceWorker = new Worker(
           dialog,
           journal,
           amo: amoClient,
-          connect: (cfg) => ImapMailbox.connect(cfg),
+          connect: (cfg, hooks) => ImapMailbox.connect(cfg, hooks),
           schedule: (j, w) => scheduleLead(incoming, j, w),
+          log,
           documents: docs,
+        // Вложения писем: файл на диск, строка в mail_attachments, копия в сделке.
+        attachments: {
+          attachments: new MailAttachmentsRepo(db),
+          journal,
+          root: process.env.MAIL_FILES_ROOT ?? '/data',
+          publicUrl: process.env.PUBLIC_URL,
+          linkSecret: process.env.MAIL_FILES_SECRET ?? process.env.TOKEN_ENCRYPTION_KEY,
+        },
         },
         log,
       );
@@ -139,21 +332,35 @@ const pipeline = new DialogPipeline({
     knowledge,
     pricing: new PricingRepo(db),
     memory: new MemoryRepo(db),
+    wazzup: new WazzupRepo(db),
     suggestions: new SuggestionsRepo(db),
+    // Ответ клиента на касание после отказа: исход определяет догон, агент на него не отвечает.
+    reactivationReply: (accountId, lead, text) => handleReactivationReply(reactivation, accountId, lead, text),
     orchestrator: llm ? new Orchestrator(llm) : null,
     llm,
     ai,
     documents: docs,
+    // RFD-AI-AGENT-DEAL-FILES: разобранные файлы сделки и ссылок Диска — в «Файлы в переписке» агента.
+    dealFiles: (accountId, leadId, since) => new MailAttachmentsRepo(db).listDealFiles(accountId, leadId, since),
+    // RFD-AI-AGENT-FILES-PRIORITY: файл, упёршийся в лимит (в т. ч. вложение письма из карточки amo через Salesbot), — на том и в очередь отложенных.
+    deferFile: async (f) => {
+      await deferFileToDisk({ attachments: new MailAttachmentsRepo(db), root: process.env.MAIL_FILES_ROOT ?? '/data' }, { accountId: f.accountId, leadId: f.leadId, filename: f.filename, mime: f.mime, bytes: f.bytes, key: f.url, error: f.error });
+    },
+    log: (fields, msg) => log.warn(fields, msg),
     outcomes,
     email: {
       reply: (a, l, meta, text) => emailChannel.reply(a, l, { ...meta, from: String(meta.from ?? '') }, text),
       managerRepliedSince: (a, addrs, since) => emailChannel.managerRepliedSince(a, addrs, since),
     },
-    stt(provider) {
+    async stt(accountId: number, provider: 'off' | 'yandex' | 'openai') {
       if (provider === 'yandex' && env.YANDEX_SPEECHKIT_API_KEY && env.YANDEX_FOLDER_ID) {
         return new YandexStt(env.YANDEX_SPEECHKIT_API_KEY, env.YANDEX_FOLDER_ID);
       }
-      if (provider === 'openai' && env.OPENAI_API_KEY) return new WhisperStt(env.OPENAI_API_KEY);
+      if (provider === 'openai') {
+        // Ключ Whisper: сначала переменная окружения, иначе ключ OpenAI, подключённый для LLM.
+        const key = env.OPENAI_API_KEY || (await secrets.get(accountId, 'openai'));
+        if (key) return new WhisperStt(key);
+      }
       return null;
     },
     async amo(accountId): Promise<AmoAccess> {
@@ -162,14 +369,22 @@ const pipeline = new DialogPipeline({
       const accessToken = () => tokenService.getAccessToken(accountId);
       return { api: new AmoApiClient(account.accountDomain, accessToken), accessToken, accountDomain: account.accountDomain };
     },
+  async onUnanswered(accountId, leadId, info) {
+    await scheduleUnanswered(incoming, { accountId, leadId, unanswered: info });
+  },
     async send(access, returnUrl, messages) {
       await continueBot(returnUrl, await access.accessToken(), messages);
     },
 });
-if (!env.ANTHROPIC_API_KEY) log.warn('ANTHROPIC_API_KEY не задан — отвечать смогут только аккаунты со своим ключом Anthropic');
+if (!env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY) log.warn('ANTHROPIC_API_KEY и OPENAI_API_KEY не заданы — отвечать смогут только аккаунты со своими ключами');
 const incomingWorker = new Worker<IncomingJob>(
   INCOMING_QUEUE,
   async (job) => {
+    if (job.data.unanswered) {
+      const r = await pipeline.checkUnanswered(job.data.accountId, job.data.leadId, job.data.unanswered);
+      log.info({ ...job.data, result: r.status }, 'без ответа: проверено');
+      return r;
+    }
     const outcome = await runIncoming(job.data, { pipeline, dialog, settings }, (j, w) => scheduleLead(incoming, j, w));
     log.info({ ...job.data, outcome: outcome.status }, 'incoming: обработано');
     return outcome;
@@ -186,8 +401,10 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
     await incomingWorker?.close();
     await maintenanceWorker.close();
+    await callsWorker.close();
     await incoming.close();
     await maintenance.close();
+    await callsQueue.close();
     await connection.quit();
     await db.end();
     process.exit(0);
