@@ -10,6 +10,7 @@ import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailRea
 import { KpRepo } from './repo.ts';
 import { KpPriceResearchRepo } from './research-repo.ts';
 import { OptSettingsRepo, resolveOptRoute, toWidgetSettings } from './settings.ts';
+import { directFetch } from './direct-fetch.ts';
 
 /**
  * Общие службы «Агента опт» для opt-api и opt-worker: БД опта, токены своей интеграции amoCRM,
@@ -43,6 +44,8 @@ export interface OptCore {
   mailRead(cfg: MailReadConfig, search: MailSearch, opts?: MailReadOptions): Promise<MailReadResult>;
   alerter: Alerter;
   fetch: typeof fetch;
+  /** DEAL-FILES-2, 2.4: прямой HTTP-клиент без прокси (node:https) — для Яндекс Диска; в тестах — та же фикстура, что fetch. */
+  directFetch: typeof fetch;
   /** Клиент amoCRM аккаунта по токенам опта; аккаунт не подключён — ошибка. */
   amoFor(accountId: number): Promise<AmoApiClient>;
   close(): Promise<void>;
@@ -51,6 +54,7 @@ export interface OptCore {
 export interface OptCoreOverrides {
   db?: Db;
   fetch?: typeof fetch;
+  directFetch?: typeof fetch;
   alerter?: Alerter;
   ai?: OptAiProvider;
   make?(provider: ProviderId, key: string): LLMProvider;
@@ -161,6 +165,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     mailRead: overrides.mailRead ?? readLatestMail,
     alerter,
     fetch: fetchImpl,
+    directFetch: overrides.directFetch ?? overrides.fetch ?? directFetch,
     async amoFor(accountId) {
       const a = await accounts.get(accountId);
       if (!a || a.uninstalledAt) throw new Error(`Аккаунт ${accountId} не подключён к «Агенту опт»`);

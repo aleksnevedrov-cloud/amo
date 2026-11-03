@@ -30,3 +30,4 @@ export * from './table-parse.ts';
 export * from './docx-spec.ts';
 export * from './yadisk.ts';
 export * from './seller-doc.ts';
+export * from './direct-fetch.ts';

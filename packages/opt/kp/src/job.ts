@@ -91,11 +91,11 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     // KP-PARSE-RETRY, п. 3: письмо прошлой сборки из ящика — полный текст, когда в этот раз ящик не читается.
     const prevLetter = prevMail?.status === 'found' && prevPayload.letterText ? { text: prevPayload.letterText, subject: prevMail.subject, from: prevMail.from ?? prevMail.searchedFrom, date: prevMail.date } : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
-    // Часть Б (OPT-DEAL-FILES): ссылки Яндекс Диска из полей сделки и примечаний читаются здесь же, через fetch ядра (в тестах — фикстура).
+    // Часть Б (OPT-DEAL-FILES): ссылки Яндекс Диска из полей сделки и примечаний читаются здесь же — прямым клиентом без прокси (DEAL-FILES-2, 2.4).
     // DEAL-FILES-2, 2.2: наша компания из настроек КП — наш счёт / КП в сделке позиций не даёт.
     const { constants } = await core.kp.getSettings(accountId);
     const seller = { name: constants.sellerName ?? null, requisites: constants.sellerRequisites ?? null };
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter, seller }, { amo, analyze, mail, yadisk: createYadiskClient(core.fetch) });
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter, seller }, { amo, analyze, mail, yadisk: createYadiskClient(core.directFetch) });
     const ms = r.payload.source.mail;
     if (ms?.status === 'skipped') {
       await core.journal.add({ accountId, leadId, kind: 'mail_fetch', summary: `Ящик не читали: ${ms.error}`, details: { userId: job.userId, status: 'skipped' } });

@@ -11,6 +11,25 @@ export const YADISK_LINK_RE = /https?:\/\/(?:yadi\.sk|disk\.yandex\.(?:ru|com|by
 export const OTHER_CLOUD_RE = /https?:\/\/(?:(?:www\.)?(?:drive|docs)\.google\.com|cloud\.mail\.ru|(?:www\.)?dropbox\.com|1drv\.ms|onedrive\.live\.com|(?:www\.)?icloud\.com)\/[^\s<>"'()\]]*/giu;
 const API = 'https://cloud-api.yandex.net/v1/disk/public/resources';
 const DOWNLOAD_HOST_RE = /(^|\.)yandex\.(net|ru|com|by|kz)$/i;
+/** DEAL-FILES-2, 2.4.3: повтор скачивания при сетевой ошибке и 5xx — 2 попытки с паузой 3 с. */
+export const DOWNLOAD_RETRIES = 2;
+export const DOWNLOAD_RETRY_DELAY_MS = 3000;
+
+/**
+ * DEAL-FILES-2, 2.4.1: сетевая ошибка с кодом и хостом — «fetch failed (ECONNRESET, downloader.disk.yandex.ru)», а не просто
+ * «fetch failed» (код — из err.cause.code undici / node:https).
+ */
+export function describeFetchError(err: unknown, url: string): string {
+  const e = err as { message?: string; cause?: { code?: string; message?: string } | null; code?: string };
+  const code = e.cause?.code ?? e.code ?? (e.cause?.message ? e.cause.message.split(' ')[0] : null) ?? null;
+  let host = url;
+  try {
+    host = new URL(url).host;
+  } catch {
+    // не URL — оставляем как есть
+  }
+  return `${e.message ?? 'ошибка сети'} (${code ?? 'без кода'}, ${host})`;
+}
 
 export interface YadiskItem {
   type: 'file' | 'dir';
@@ -67,7 +86,7 @@ async function apiJson<T>(fetchImpl: typeof fetch, url: string): Promise<T> {
   try {
     res = await fetchImpl(url, { headers: { accept: 'application/json', 'user-agent': 'ai-door-opt-agent/1.0' }, signal: AbortSignal.timeout(30_000) });
   } catch (err) {
-    throw new YadiskError(`сеть: ${(err as Error).message}`, false);
+    throw new YadiskError(`сеть: ${describeFetchError(err, url)}`, false);
   }
   if (res.ok) return (await res.json()) as T;
   const body = (await res.json().catch(() => null)) as { message?: string; description?: string; error?: string } | null;
@@ -92,24 +111,54 @@ export interface YadiskClient {
   download(publicKey: string, path: string | null, maxBytes: number): Promise<{ bytes: Uint8Array; mime: string | null }>;
 }
 
-export function createYadiskClient(fetchImpl: typeof fetch): YadiskClient {
+export interface YadiskClientOptions {
+  /** Пауза между повторами скачивания (в тестах — 0). */
+  retryDelayMs?: number;
+}
+
+/**
+ * DEAL-FILES-2, 2.4.2: все запросы к Диску — через прямой клиент без прокси (node:https; в тестах — фикстура), а не через
+ * глобальный fetch с HTTPS_PROXY: сервер в России, Диск — российский сервис.
+ */
+export function createYadiskClient(direct: typeof fetch, opts: YadiskClientOptions = {}): YadiskClient {
   return {
-    meta: (publicKey, path = null) => yadiskMeta(fetchImpl, publicKey, path),
-    download: (publicKey, path, maxBytes) => yadiskDownload(fetchImpl, publicKey, path, maxBytes),
+    meta: (publicKey, path = null) => yadiskMeta(direct, publicKey, path),
+    download: (publicKey, path, maxBytes) => yadiskDownload(direct, publicKey, path, maxBytes, opts),
   };
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** 2 повтора с паузой при сетевой ошибке (YadiskError final = false) и 5xx. */
+async function withDownloadRetry<T>(fn: () => Promise<T>, delayMs: number): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const retriable = err instanceof YadiskError && !err.final;
+      if (!retriable || attempt >= DOWNLOAD_RETRIES) throw err;
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+}
+
 /** Скачать файл по публичной ссылке (и path внутри папки): href от Диска, только домен yandex, не больше maxBytes. */
-export async function yadiskDownload(fetchImpl: typeof fetch, publicKey: string, path: string | null, maxBytes: number): Promise<{ bytes: Uint8Array; mime: string | null }> {
-  const link = await apiJson<{ href?: string }>(fetchImpl, `${API}/download?public_key=${encodeURIComponent(publicKey)}${path ? `&path=${encodeURIComponent(path)}` : ''}`);
-  if (!link.href) throw new YadiskError('Диск: не вернул ссылку на скачивание', true);
-  const host = new URL(link.href).host;
-  if (!DOWNLOAD_HOST_RE.test(host)) throw new YadiskError(`Диск: ссылка на скачивание вне домена yandex (${host})`, true);
+export async function yadiskDownload(fetchImpl: typeof fetch, publicKey: string, path: string | null, maxBytes: number, opts: YadiskClientOptions = {}): Promise<{ bytes: Uint8Array; mime: string | null }> {
+  return withDownloadRetry(async () => {
+    const link = await apiJson<{ href?: string }>(fetchImpl, `${API}/download?public_key=${encodeURIComponent(publicKey)}${path ? `&path=${encodeURIComponent(path)}` : ''}`);
+    if (!link.href) throw new YadiskError('Диск: не вернул ссылку на скачивание', true);
+    const host = new URL(link.href).host;
+    if (!DOWNLOAD_HOST_RE.test(host)) throw new YadiskError(`Диск: ссылка на скачивание вне домена yandex (${host})`, true);
+    return downloadHref(fetchImpl, link.href, maxBytes);
+  }, opts.retryDelayMs ?? DOWNLOAD_RETRY_DELAY_MS);
+}
+
+async function downloadHref(fetchImpl: typeof fetch, href: string, maxBytes: number): Promise<{ bytes: Uint8Array; mime: string | null }> {
   let res: Response;
   try {
-    res = await fetchImpl(link.href, { headers: { 'user-agent': 'ai-door-opt-agent/1.0' }, signal: AbortSignal.timeout(120_000) });
+    res = await fetchImpl(href, { headers: { 'user-agent': 'ai-door-opt-agent/1.0' }, signal: AbortSignal.timeout(120_000) });
   } catch (err) {
-    throw new YadiskError(`сеть при скачивании: ${(err as Error).message}`, false);
+    throw new YadiskError(`сеть при скачивании: ${describeFetchError(err, href)}`, false);
   }
   if (!res.ok) throw new YadiskError(`Диск: скачивание HTTP ${res.status}`, res.status === 404 || res.status === 403 || res.status === 410, res.status);
   if (Number(res.headers.get('content-length') ?? 0) > maxBytes) throw new YadiskError(`файл больше ${Math.round(maxBytes / 1024 / 1024)} МБ`, true);

@@ -291,6 +291,19 @@ opt-api при старте). Файл с тем же ключом заменя�
 (токен виджета) и подписанная ссылка `GET /widget/v1/kp/file/link` → открытый `GET /kp/file?…&t=…` на 10 минут.
 Подробно — [отчёт](kp-download-report.md).
 
+## Яндекс Диск без прокси (RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.4)
+
+Если в `.env` опта включён прокси для OpenAI (`HTTPS_PROXY`, `NODE_USE_ENV_PROXY=1`), скачивание с Диска через него не проходит.
+Клиент Диска в коде ходит напрямую (node:https, прокси не читает); дополнительно в `.env` опта добавить строку и перезапустить контейнеры:
+
+```bash
+cd /opt/agent-opt
+grep -q '^NO_PROXY=' .env || echo 'NO_PROXY=.yandex.net,.yandex.ru,.yadi.sk' >> .env
+cp src/docker-compose.opt.yml docker-compose.yml      # в compose NO_PROXY / no_proxy подставляются и без строки в .env
+docker compose up -d opt-api opt-worker
+docker compose exec opt-worker sh -c 'env | grep -i proxy; wget -qO- "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=https%3A%2F%2Fyadi.sk%2Fd%2FPj7JaZqDEJJA1Q&path=%2F" | head -c 200'
+```
+
 ## Запуск
 
 ```bash
