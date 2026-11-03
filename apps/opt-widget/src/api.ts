@@ -60,7 +60,7 @@ export interface KpLineWebInfo {
   excludedSites: string[];
 }
 
-export type QuestionType = 'incomplete' | 'model_choice' | 'analog' | 'web_price' | 'enter_price' | 'nonstandard' | 'component_door' | 'photo' | 'delivery' | 'price_validity';
+export type QuestionType = 'incomplete' | 'model_choice' | 'analog' | 'web_price' | 'enter_price' | 'nonstandard' | 'component_door' | 'photo' | 'delivery' | 'price_validity' | 'own_document';
 
 export interface KpAnswerInfo {
   option: string | null;

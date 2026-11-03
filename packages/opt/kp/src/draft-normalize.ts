@@ -49,6 +49,7 @@ export function normalizeDraftPayload(raw: unknown): KpPayload {
     required_blocks: arr<string>(p.required_blocks),
     questions: arr<string>(p.questions),
     needs_manager: arr<{ request_index: number; reason: string }>(p.needs_manager).filter((x) => x && typeof x === 'object'),
+    ...(Array.isArray(p.ownDocs) ? { ownDocs: (p.ownDocs as NonNullable<KpPayload['ownDocs']>).filter((x) => x && typeof x === 'object') } : {}),
     componentDoorGroups: obj<Record<string, number>>(p.componentDoorGroups) ?? {},
     answers: obj<NonNullable<KpPayload['answers']>>(p.answers) ?? {},
     delivery: obj<NonNullable<KpPayload['delivery']>>(p.delivery) ?? null,

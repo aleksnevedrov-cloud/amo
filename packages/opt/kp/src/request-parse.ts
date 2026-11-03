@@ -132,6 +132,16 @@ export async function localText(file: { filename: string; mime: string; bytes: U
   }
 }
 
+/** Сырой текст файла без чистки персональных данных — только для признаков продавца (DEAL-FILES-2, 2.2), в модель не идёт. */
+export async function rawText(file: { filename: string; mime: string; bytes: Uint8Array }): Promise<string> {
+  try {
+    const ex = await extract(file.bytes, file.mime, file.filename);
+    return ex.needsOcr ? '' : ex.text;
+  } catch {
+    return '';
+  }
+}
+
 const MAX_TEXT = 40_000;
 
 const SYSTEM = `Вы разбираете заявку клиента в оптовый отдел «РФ-Двери» (двери по ГОСТ, спецификации, запросы КП).

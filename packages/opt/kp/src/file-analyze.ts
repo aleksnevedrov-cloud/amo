@@ -5,7 +5,8 @@ import { categoryOf } from '@opt/kb';
 import { convertLegacyOffice, type OfficeFile } from './convert.ts';
 import { equipmentFor, equipmentSections, looksLikeRequisites, matrixPositions, pickSpecTable, readDocxBlocks, requirementsOf, specCandidates, tableRows, type DocxBlock, type DocxTable, type MatrixPosition, type SpecTable } from './docx-spec.ts';
 import type { ParsedFile } from './draft.ts';
-import { askByText, clipRaw, isRetryableParseError, localText, validateDocument, type AskResult, type ParseAttempt } from './request-parse.ts';
+import { askByText, clipRaw, isRetryableParseError, localText, rawText, validateDocument, type AskResult, type ParseAttempt } from './request-parse.ts';
+import { looksLikeSellerDoc } from './seller-doc.ts';
 import type { DocumentData } from '@core/docs';
 import { detectHeader, parseRows, parseTable, tableItems, type TableParsed, type TableParseOptions } from './table-parse.ts';
 
@@ -165,6 +166,7 @@ export async function analyzeDraftFile(d: DraftFileDeps, orig: OfficeFile): Prom
     id,
     filename: orig.filename,
     kind: t.data.kind,
+    title: t.data.title,
     positions: t.data.positions,
     questions: t.data.questions,
     requirements: t.data.requirements,
@@ -196,7 +198,9 @@ async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: st
       attempts.push({ n, via: n === 1 ? 'docs' : 'retry', ok: true, error: null, raw: null });
       // П. 2.5: картинка без позиций — фото-образец; текст скриншота разбирает модель с vision как раньше.
       const photo = /^image\//i.test(file.mime) && !r.data.positions.length;
-      return { id: r.id, filename, kind: r.kind, positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: n > 1 ? [`разобран со ${n}-й попытки`] : [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}), ...(n > 1 ? { attempts } : {}) };
+      // DEAL-FILES-2, 2.2: для счёта / КП — сырой текст файла (чистка персональных данных убирает строки с ИНН и «счёт»).
+      const text = looksLikeSellerDoc({ kind: r.kind, title: r.data.title, filename }) ? (await rawText(file)) || (r.text ?? '') : (r.text ?? '');
+      return { id: r.id, filename, kind: r.kind, title: r.data.title, text: text.slice(0, 20_000), positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: n > 1 ? [`разобран со ${n}-й попытки`] : [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}), ...(n > 1 ? { attempts } : {}) };
     } catch (err) {
       if (!isRetryableParseError(err)) throw err;
       lastError = (err as Error).message;
@@ -228,6 +232,7 @@ async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: st
         format: lt.format,
         textChars: lt.text.length,
         piiRemoved: lt.piiRemoved,
+        text: (await rawText(file)) || lt.text,
       });
     }
     lastError = a.error ?? lastError;
@@ -236,7 +241,7 @@ async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: st
 }
 
 /** Разобранное повтором или запасным путём — запись документа (как у таблиц) и ParsedFile с попытками. */
-async function recordParsed(d: DraftFileDeps, file: OfficeFile, filename: string, t0: number, data: DocumentData, attempts: ParseAttempt[], o: { model: string | null; costUsd: number; warnings: string[]; format?: string; textChars?: number; piiRemoved?: number }): Promise<ParsedFile> {
+async function recordParsed(d: DraftFileDeps, file: OfficeFile, filename: string, t0: number, data: DocumentData, attempts: ParseAttempt[], o: { model: string | null; costUsd: number; warnings: string[]; format?: string; textChars?: number; piiRemoved?: number; text?: string | null }): Promise<ParsedFile> {
   const id = await d.documents.add({
     accountId: d.accountId,
     leadId: d.leadId,
@@ -254,5 +259,5 @@ async function recordParsed(d: DraftFileDeps, file: OfficeFile, filename: string
     costUsd: o.costUsd,
     createdBy: d.userId,
   });
-  return { id, filename, kind: data.kind, positions: data.positions, questions: data.questions, requirements: data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: o.model, warnings: o.warnings, costUsd: o.costUsd, attempts };
+  return { id, filename, kind: data.kind, title: data.title, text: o.text?.slice(0, 20_000) ?? null, positions: data.positions, questions: data.questions, requirements: data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: o.model, warnings: o.warnings, costUsd: o.costUsd, attempts };
 }

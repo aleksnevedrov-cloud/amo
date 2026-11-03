@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { fieldValues, type AmoApiClient } from '@core/amo';
 import { otherCloudLinks, yadiskLinks, YadiskError, type YadiskClient } from './yadisk.ts';
+import { isOurDocument, sellerLabel, type SellerInfo } from './seller-doc.ts';
 import type { OptPosition } from './table-parse.ts';
 import { costOfUsage, type ChatRoute, type CostResult, type LlmGateway, type PricingOverrides } from '@core/llm';
 import { extractRequirements, referencePrice, suggestAnalog, type AnalogCandidate, type AnalogRequest } from './analog.ts';
@@ -230,6 +232,8 @@ export interface KpPayload {
     /** Часть Б: ссылки Яндекс Диска из полей сделки и примечаний — по каждой: имя папки / файла, взято, пропущено, ошибка. */
     yadisk?: YadiskSourceLink[];
   };
+  /** DEAL-FILES-2, 2.2: наши документы в сделке (счёт, КП) с их позициями — в черновик не идут; вопрос «взять позиции?» если заявки нет. */
+  ownDocs?: { name: string; title: string; positions: OptPosition[] }[];
   generatedAt: string;
   /** ГОСТ, ТУ и прочие требования из заявки — для подбора аналога и для менеджера. */
   requirements: string[];
@@ -290,6 +294,12 @@ export interface ParsedFile {
   id: number;
   filename: string;
   kind: string;
+  /** Название документа по модели (DEAL-FILES-2: по нему и тексту отделяется наш счёт / КП от заявки клиента). */
+  title?: string | null;
+  /** Текст документа (до 20 000 знаков) — для признаков продавца; у таблиц нет. */
+  text?: string | null;
+  /** DEAL-FILES-2, 2.2: наш документ (продавец — наша компания): позиции в черновик не берутся. */
+  ourDocument?: boolean;
   positions: OptPosition[];
   questions: string[];
   requirements: string[];
@@ -352,6 +362,8 @@ export interface KpDraftInput {
   rebuild?: boolean;
   /** Письмо прошлой сборки (полный текст из ящика) — когда ящик в этот раз не читается. */
   prevLetter?: { text: string; subject: string; from: string; date: string | null } | null;
+  /** DEAL-FILES-2, 2.2: наша компания из настроек КП (sellerName / sellerRequisites) — чтобы не брать позиции из нашего счёта. */
+  seller?: SellerInfo | null;
 }
 
 export interface KpDraftResult {
@@ -411,9 +423,12 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   }
   const mail = readMail && d.mail ? await fetchMail(d.mail, d.amo, input.leadId, card) : { source: d.mail ? mailSkipped(card, requestFiles.length) : null, files: [] as SourceFile[] };
   const limits = { maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES, maxBytes: input.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES };
+  // DEAL-FILES-2, 2.1: приоритет при дубле — «Файлы» сделки → вложение письма → Яндекс Диск; повтор определяется по SHA-256
+  // содержимого в parseFiles. Вложение письма с теми же именем и размером, что файл сделки, — тот же файл (его и загрузили в
+  // сделку): берётся из памяти письма без скачивания, но считается файлом сделки.
   const sources: SourceFile[] = [
-    ...mail.files,
-    ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, load: () => d.amo.downloadFile(f) })),
+    ...card.files.filter((f) => !mail.files.some((m) => sameFile(m, f))).map((f) => ({ name: f.name, size: f.size, mime: f.mime, origin: 'deal' as const, load: () => d.amo.downloadFile(f) })),
+    ...mail.files.map((m) => (card.files.some((f) => sameFile(m, f)) ? { ...m, origin: 'deal' as const } : m)),
   ];
   // Часть Б: файлы по ссылкам Яндекс Диска — после файлов письма и сделки (общий лимит maxFiles), дубли по имени и размеру не берутся.
   const disk = d.yadisk ? await collectYadisk(d.yadisk, card.links, sources, limits.maxBytes) : { files: [], skipped: [], summary: [] };
@@ -421,12 +436,23 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   const files = await parseFiles(d, sources, limits);
   // RFD-AI-AGENT-OPT-DEAL-FILES, часть 0: файл сделки без карточки (Files API ответил 404 и т. п.) — в «пропущено», не молча.
   files.skipped.push(...card.filesMissing, ...disk.skipped);
+  // DEAL-FILES-2, 2.2: наш счёт / КП / договор (продавец — наша компания) позиций не даёт; смета другого поставщика — с пометкой.
+  const ownDocs: NonNullable<KpPayload['ownDocs']> = [];
+  for (const f of files.parsed) {
+    if (isOurDocument(f, input.seller)) {
+      f.ourDocument = true;
+      f.warnings = [...(f.warnings ?? []), `наш документ (продавец ${sellerLabel(input.seller)}), позиции не берутся`];
+      ownDocs.push({ name: f.filename, title: f.title || f.filename, positions: f.positions });
+    } else if (f.kind === 'estimate' && f.positions.length) {
+      f.warnings = [...(f.warnings ?? []), `из сметы другого поставщика: ${f.title || f.filename}`];
+    }
+  }
   const letter = card.letter ? await parseLetter(llm, input, card.letter.text) : null;
 
   // Позиции: спецификация из файлов надёжнее пересказа в письме; письмо — запасной источник.
   // Работы и услуги — после товаров (XLSX-2, п. 3), внутри групп порядок как в файле; одинаковые названия не склеиваются (п. 4).
   // KP-LETTER-SCOPE: одна марка в нескольких файлах проекта — одна позиция; письмо называет марки или номера — только они.
-  const docRows: DocItem[] = files.parsed.flatMap((f, file) => f.positions.map((p, i) => ({ item: { ...positionToRequest(p), sourceFiles: [f.filename] }, file, no: i + 1 })));
+  const docRows: DocItem[] = files.parsed.flatMap((f, file) => (f.ourDocument ? [] : f.positions.map((p, i) => ({ item: { ...positionToRequest(p), sourceFiles: [f.filename] }, file, no: i + 1 }))));
   const fromLetter = letter?.parsed.request_items ?? [];
   const scope = docRows.length ? letterScope(card.letter?.text ?? '', docRows) : null;
   // Работы письма («доставка», «установка») при выборе по письму — тоже в позиции (после товаров).
@@ -438,8 +464,9 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
   // KP-DOCX-APPENDIX: к позиции приложена комплектация из ТЗ — менеджеру сверить её с ценой.
   for (const l of items) if (l.tzEquipment) needs.push({ request_index: l.request_index, reason: `комплектация по ТЗ: ${l.tzEquipment.slice(0, 120)}${l.tzEquipment.length > 120 ? '…' : ''} — сверьте с ценой` });
   if (!requestItems.length) {
-    needs.push({ request_index: -1, reason: card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
+    needs.push({ request_index: -1, reason: ownDocs.length && !files.parsed.some((f) => !f.ourDocument && f.positions.length) ? `в сделке только наш документ (${ownDocs.map((o) => `«${o.title}»`).join(', ')}) — взять его позиции? Вопрос в опроснике` : card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
   }
+  for (const f of files.parsed) if (!f.ourDocument && f.kind === 'estimate' && f.positions.length) needs.push({ request_index: -1, reason: `из сметы другого поставщика: ${f.title || f.filename} — позиции взяты из неё, проверьте` });
   if (scope?.by) {
     const what = scope.by === 'marks' ? `марки ${scope.selected.map((it) => it.mark).filter(Boolean).join(', ')}` : 'номера позиций';
     needs.push({ request_index: -1, reason: `письмо задаёт объём (${what}): в КП ${scope.selected.length} поз. из ${scope.selected.length + scope.rest.length} в проекте; остальные — «Ещё в проекте»` });
@@ -492,6 +519,7 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
         ...(mail.source ? { mail: mail.source } : {}),
         ...(disk.summary.length ? { yadisk: disk.summary } : {}),
       },
+      ...(ownDocs.length ? { ownDocs } : {}),
       generatedAt: new Date().toISOString(),
       requirements,
       ...(files.parsed.some((f) => f.photo) ? { photos: files.parsed.filter((f) => f.photo).map((f) => ({ name: f.filename })) } : {}),
@@ -553,15 +581,31 @@ function mailSkipped(card: Card, files: number): MailSource {
   return { status: 'skipped', messageId: null, date: null, subject: card.letter?.subject ?? '', searchedFrom: '', from: null, fromName: null, files: [], attachments: 0, taken: [], uploaded: [], skipped: [], error: `в сделке уже есть файлы заявки (${files}) — ящик не читали; новое письмо — кнопка «Проверить почту заново»`, retryAt: null, folder: null, matchedBy: null, diag: null };
 }
 
-/** Файл для разбора: из карточки (скачать) или из письма (байты уже есть). */
+/** Файл для разбора: из карточки (скачать), из письма (байты уже есть) или с Яндекс Диска. */
 interface SourceFile {
   name: string;
   size: number;
   mime: string | null;
+  /** Откуда файл (DEAL-FILES-2, 2.1: приоритет при дубле сделка → письмо → Диск и текст «повтор файла … из …»). */
+  origin: 'deal' | 'mail' | 'yadisk';
   load(): Promise<{ bytes: Uint8Array; mime: string | null }>;
 }
 
-const sameFile = (a: { name: string; size: number }, b: { name: string; size: number }) => a.name === b.name && a.size === b.size;
+const ORIGIN_LABEL: Record<SourceFile['origin'], string> = { deal: 'из «Файлов» сделки', mail: 'из вложений письма', yadisk: 'с Яндекс Диска' };
+
+/**
+ * DEAL-FILES-2, 2.1.1: ключ сравнения файла — имя без расширения, нижний регистр, ё → е, пробелы и «_» схлопнуты, плюс размер
+ * в байтах: amoCRM отдаёт имя без расширения («… (4)»), Диск — с расширением («… (4).pdf»).
+ */
+export function fileKey(f: { name: string; size: number }): string {
+  const name = f.name.trim().replace(/\.[a-z0-9]{1,5}$/i, '').toLowerCase().replace(/ё/g, 'е').replace(/[\s_]+/g, ' ').trim();
+  return `${name}|${f.size}`;
+}
+
+const sameFile = (a: { name: string; size: number }, b: { name: string; size: number }) => fileKey(a) === fileKey(b);
+
+const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
 
 /** Любая ссылка на облако в тексте — чтобы не разбирать примечания без ссылок. */
 const CLOUD_ANY_RE = /https?:\/\/(?:yadi\.sk|disk\.yandex\.|(?:www\.)?(?:drive|docs)\.google\.com|cloud\.mail\.ru|(?:www\.)?dropbox\.com|1drv\.ms|onedrive\.live\.com|(?:www\.)?icloud\.com)/iu;
@@ -592,7 +636,6 @@ async function collectYadisk(disk: YadiskClient, links: Card['links'], existing:
   const summary: YadiskSourceLink[] = [];
   const seenUrls = new Set<string>();
   const seenHosts = new Set<string>();
-  const taken = (f: { name: string; size: number }) => existing.some((e) => sameFile(e, f)) || files.some((e) => sameFile(e, f));
   let count = 0;
   for (const l of links) {
     // Б11: другие облака — пометка с доменом, по ссылке не ходим.
@@ -635,18 +678,15 @@ async function collectYadisk(disk: YadiskClient, links: Card['links'], existing:
           }
         }
         for (const c of candidates) {
-          if (taken(c)) {
-            row.skipped++;
-            skipped.push({ name: c.name, reason: 'уже есть в файлах сделки или во вложениях письма — разбор один раз' });
-            continue;
-          }
+          // Дубль по имени и размеру здесь не отсеивается: одинаковое имя может скрывать другие байты (DEAL-FILES-2, 2.1.2) —
+          // файл скачивается, повтор определяется по SHA-256 в parseFiles (с приоритетом «Файлов» сделки).
           if (c.size > maxBytes) {
             row.skipped++;
             skipped.push({ name: c.name, reason: `файл больше ${Math.round(maxBytes / 1024 / 1024)} МБ (Яндекс Диск)` });
             continue;
           }
           row.taken++;
-          files.push({ name: c.name, size: c.size, mime: c.mime, load: () => disk.download(url, c.path, maxBytes) });
+          files.push({ name: c.name, size: c.size, mime: c.mime, origin: 'yadisk', load: () => disk.download(url, c.path, maxBytes) });
         }
       } catch (err) {
         row.type = 'error';
@@ -710,7 +750,7 @@ async function fetchMail(read: NonNullable<KpDraftDeps['mail']>, amo: KpDraftDep
   for (const a of take) {
     const name = a.filename ?? `attachment-${files.length + 1}`;
     const bytes = new Uint8Array(a.content);
-    files.push({ name, size: bytes.byteLength, mime: a.contentType, load: async () => ({ bytes, mime: a.contentType }) });
+    files.push({ name, size: bytes.byteLength, mime: a.contentType, origin: 'mail', load: async () => ({ bytes, mime: a.contentType }) });
     const row: MailSourceFile = { name, size: bytes.byteLength, inline: a.inline, status: 'not_uploaded', reason: null };
     list.push(row);
     // Совпадение только по домену: письмо может быть от другого человека — в файлы сделки ничего не грузим.
@@ -800,6 +840,9 @@ async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFile
   const parsed: ParsedFile[] = [];
   const skipped: KpPayload['source']['skipped'] = [];
   const failed: FailedFile[] = [];
+  // DEAL-FILES-2, 2.1.2–2.1.4: одинаковые байты под любыми именами — один файл; повторный разбор того же содержимого в рамках
+  // одной сборки запрещён (кэш по SHA-256 на время задания). Хэш считается после скачивания, до разбора.
+  const seen = new Map<string, SourceFile>();
   let i = 0;
   for (const f of files) {
     // KP-AGENT-V2, п. 2.1: наши КП и карточки предприятий — не заявка; лимит файлов не занимают.
@@ -812,16 +855,30 @@ async function parseFiles(d: KpDraftDeps, files: SourceFile[], limits: { maxFile
       skipped.push({ name: f.name, reason: 'разбор файлов недоступен' });
       continue;
     }
-    if (i++ >= limits.maxFiles) {
-      skipped.push({ name: f.name, reason: `больше ${limits.maxFiles} файлов за раз не разбираем` });
-      continue;
-    }
     if (f.size > limits.maxBytes) {
       skipped.push({ name: f.name, reason: `файл больше ${Math.round(limits.maxBytes / 1024 / 1024)} МБ` });
       continue;
     }
+    let file: { bytes: Uint8Array; mime: string | null };
     try {
-      const file = await f.load();
+      file = await f.load();
+    } catch (err) {
+      skipped.push({ name: f.name, reason: (err as Error).message, failed: true });
+      failed.push({ name: f.name, reason: (err as Error).message, attempts: [] });
+      continue;
+    }
+    const hash = sha256(file.bytes);
+    const same = seen.get(hash);
+    if (same) {
+      skipped.push({ name: f.name, reason: `повтор файла «${same.name}» ${ORIGIN_LABEL[same.origin]}` });
+      continue;
+    }
+    seen.set(hash, f);
+    if (i++ >= limits.maxFiles) {
+      skipped.push({ name: f.name, reason: `больше ${limits.maxFiles} файлов за раз не разбираем` });
+      continue;
+    }
+    try {
       parsed.push(await d.analyze({ filename: f.name, mime: file.mime ?? f.mime ?? 'application/octet-stream', bytes: file.bytes }));
     } catch (err) {
       // KP-PARSE-RETRY: файл не выбрасывается молча — «не разобран» с причиной и попытками (журнал), в окне «Разобрать заново».
@@ -842,7 +899,7 @@ export interface FailedFile {
 /** Сводка по файлам для окна КП: разобран / пропущен / не разобран; вложения письма, которые не брали, — пропущены. */
 export function filesSummary(parsed: ParsedFile[], skipped: KpPayload['source']['skipped'], mailSkipped: { name: string; reason: string }[] = []): NonNullable<KpPayload['source']['files']> {
   return [
-    ...parsed.map((f) => (f.method === 'skipped' ? { name: f.filename, status: 'skipped' as const, positions: 0, reason: f.warnings?.[0] ?? 'не заявка' } : { name: f.filename, status: 'parsed' as const, positions: f.positions.length, reason: f.warnings?.length ? f.warnings.join('; ') : null })),
+    ...parsed.map((f) => (f.method === 'skipped' || f.ourDocument ? { name: f.filename, status: 'skipped' as const, positions: 0, reason: f.warnings?.[0] ?? 'не заявка' } : { name: f.filename, status: 'parsed' as const, positions: f.positions.length, reason: f.warnings?.length ? f.warnings.join('; ') : null })),
     ...skipped.map((x) => ({ name: x.name, status: x.failed ? ('failed' as const) : ('skipped' as const), positions: 0, reason: x.reason })),
     ...mailSkipped.map((x) => ({ name: x.name, status: 'skipped' as const, positions: 0, reason: x.reason })),
   ];
@@ -1028,7 +1085,7 @@ export const isPriceFile = (src: KpLine['priceSource']): boolean => src === 'pri
 /** ГОСТ-профиль позиции заявки по её тексту: наименование, исходная строка, остальные колонки спецификации (KP-AGENT-V2). */
 export const requestProfile = (it: Pick<KpRequestItem, 'name' | 'raw' | 'details'>): GostProfile => profileOf([it.name, it.raw, it.details ?? ''].filter(Boolean).join(' | '));
 
-function toLine(it: KpRequestItem, i: number): KpLine {
+export function toLine(it: KpRequestItem, i: number): KpLine {
   const category = it.category ?? (it.kind === 'service' ? 'service' : categoryOf(`${it.name} | ${it.raw}`));
   return { request_index: i, page_id: null, name: it.name || it.raw, size: sizeText(it), qty: it.qty, price: null, lead_time: '', discount: 0, category, ...(category === 'service' ? { kind: 'service' as const } : {}), ...(it.tzEquipment ? { tzEquipment: it.tzEquipment } : {}), ...(it.qtyUnknown ? { qtyUnknown: true } : {}), ...(it.mark ? { mark: it.mark } : {}), ...(it.letterSpec ? { letterSpec: it.letterSpec } : {}), ...(category === 'door' ? { gostProfile: lineProfile(it) } : {}) };
 }

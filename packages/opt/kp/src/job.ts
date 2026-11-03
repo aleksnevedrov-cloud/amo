@@ -92,7 +92,10 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const prevLetter = prevMail?.status === 'found' && prevPayload.letterText ? { text: prevPayload.letterText, subject: prevMail.subject, from: prevMail.from ?? prevMail.searchedFrom, date: prevMail.date } : null;
     // Каталога у опта нет — подбор аналогов (analogs) не подключён, пока заказчик не выберет источник.
     // Часть Б (OPT-DEAL-FILES): ссылки Яндекс Диска из полей сделки и примечаний читаются здесь же, через fetch ядра (в тестах — фикстура).
-    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter }, { amo, analyze, mail, yadisk: createYadiskClient(core.fetch) });
+    // DEAL-FILES-2, 2.2: наша компания из настроек КП — наш счёт / КП в сделке позиций не даёт.
+    const { constants } = await core.kp.getSettings(accountId);
+    const seller = { name: constants.sellerName ?? null, requisites: constants.sellerRequisites ?? null };
+    const r = await buildKpDraft(ai.llm, { accountId, leadId, route, pricing: settings.billing.pricing, checkMail: Boolean(job.checkMail), rebuild: Boolean(prev), prevLetter, seller }, { amo, analyze, mail, yadisk: createYadiskClient(core.fetch) });
     const ms = r.payload.source.mail;
     if (ms?.status === 'skipped') {
       await core.journal.add({ accountId, leadId, kind: 'mail_fetch', summary: `Ящик не читали: ${ms.error}`, details: { userId: job.userId, status: 'skipped' } });
@@ -134,7 +137,6 @@ export async function runDraftJob(core: OptCore, job: DraftJob, hooks: DraftJobH
     const payload = carryAnswers(carryProjectAdds(r.payload, prev ? prevPayload : null), prev ? prevPayload : null) as KpPayload;
     const draftId = await core.kp.createDraft(accountId, leadId, payload as unknown as Record<string, unknown>, job.userId);
     // Поиск цен при сборке — только если включено в настройках КП (по умолчанию выключено: поиск по кнопке «Найти цены»).
-    const { constants } = await core.kp.getSettings(accountId);
     if (constants.autoResearch && hooks.enqueueResearch) {
       const idx = researchablePositions(payload, 'all', constants.maxPositionsPerRun ?? DEFAULT_MAX_POSITIONS_PER_RUN);
       if (idx.length) await hooks.enqueueResearch(idx.map((requestIndex) => ({ accountId, draftId, requestIndex, userId: job.userId })));

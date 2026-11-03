@@ -1,5 +1,5 @@
 import { missingFields, PROFILE_LABEL, profileLine, withMarkup, type GostProfile } from '@opt/kb';
-import { isPriceFile, lineCategory, tidyName, type KpAnswer, type KpLine, type KpPayload } from './draft.ts';
+import { isPriceFile, lineCategory, positionToRequest, tidyName, toLine, type KpAnswer, type KpLine, type KpPayload } from './draft.ts';
 
 /**
  * Опросник менеджеру (KP-AGENT-V2, п. 5). Вопросы не хранятся — они выводятся из состояния черновика при каждом показе;
@@ -7,7 +7,7 @@ import { isPriceFile, lineCategory, tidyName, type KpAnswer, type KpLine, type K
  * применяется ко всем. Цена в ответе хранится уже вычисленной, поэтому ответы переносятся на новый черновик при «Собрать заново».
  * КП не собирается, пока есть открытые вопросы с флагом «блокирует».
  */
-export type QuestionType = 'incomplete' | 'model_choice' | 'analog' | 'web_price' | 'enter_price' | 'nonstandard' | 'component_door' | 'photo' | 'delivery' | 'price_validity';
+export type QuestionType = 'incomplete' | 'model_choice' | 'analog' | 'web_price' | 'enter_price' | 'nonstandard' | 'component_door' | 'photo' | 'delivery' | 'price_validity' | 'own_document';
 
 export interface KpQuestionOption {
   id: string;
@@ -186,6 +186,11 @@ export function buildQuestions(payload: Partial<KpPayload>, opts: QuestionOption
 
   // Доставка — всегда.
   const address = payload.delivery?.address ?? deliveryAddressOf(payload);
+  // DEAL-FILES-2, 2.2.4: в сделке нет заявки, есть только наш счёт / КП — спросить, брать ли его позиции.
+  if (!items.length && payload.ownDocs?.length && !answers['own_document']) {
+    const titles = payload.ownDocs.map((o) => `«${o.title}»`).join(', ');
+    push({ key: 'own_document', type: 'own_document', blocking: true, title: 'Только наш документ', text: `В сделке только наш ${payload.ownDocs.length > 1 ? 'документы' : 'счёт'} ${titles} — взять его позиции?`, requestIndexes: [], options: [{ id: 'yes', label: 'Да, взять позиции' }, { id: 'no', label: 'Нет, оставить черновик без позиций' }], askClient: null });
+  }
   push({ key: 'delivery', type: 'delivery', blocking: true, title: 'Доставка', text: `Доставка${address ? ` по адресу: ${address}` : ''} — сумма или самовывоз?`, requestIndexes: [], options: [{ id: 'delivery', label: 'Доставка (адрес и сумма)' }, { id: 'pickup', label: 'Самовывоз' }], fields: [{ name: 'address', label: 'Адрес', value: address }, { name: 'sum', label: 'Сумма доставки с НДС, ₽', value: null }], askClient: address ? null : 'Добрый день! Уточните, пожалуйста, адрес доставки.' });
 
   // Срок действия цены — если не задан в настройках.
@@ -313,6 +318,17 @@ export function applyAnswer(payload: Partial<KpPayload>, key: string, answer: Kp
     case 'photo': {
       const name = key.slice('photo:'.length);
       next.photos = (payload.photos ?? []).map((p) => (p.name !== name ? p : answer.option === 'ignore' ? { ...p, ignored: true, requestIndex: null } : { ...p, ignored: false, requestIndex: Number(answer.option?.slice(4)) }));
+      break;
+    }
+    case 'own_document': {
+      // Ответ «да» — позиции нашего документа становятся позициями заявки (как из файла клиента), с пометкой.
+      if (answer.option === 'yes' && payload.ownDocs?.length && !(payload.items ?? []).length) {
+        const requestItems = payload.ownDocs.flatMap((o) => o.positions.map((p) => ({ ...positionToRequest(p), sourceFiles: [o.name] })));
+        next.request_items = requestItems;
+        next.needs_manager = [...(payload.needs_manager ?? []).filter((n) => !(n.request_index === -1 && n.reason.includes('только наш документ'))), ...requestItems.map((_, i) => ({ request_index: i, reason: 'цена не задана' })), { request_index: -1, reason: `позиции взяты из нашего документа по решению менеджера (${payload.ownDocs.map((o) => `«${o.title}»`).join(', ')})` }];
+        next.items = requestItems.map(toLine);
+        return { payload: next, research: [], candidates };
+      }
       break;
     }
     case 'component_door':

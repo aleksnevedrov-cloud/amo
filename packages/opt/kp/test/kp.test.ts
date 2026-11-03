@@ -232,7 +232,8 @@ function fakeAmo(opts: { files?: LeadFile[]; mails?: Awaited<ReturnType<KpDraftD
     getEntityNotes: async () => [],
     downloadFile: async (f) => {
       downloaded.push(f.name);
-      return { bytes: new Uint8Array([1, 2, 3]), mime: f.mime };
+      // Содержимое разное у разных файлов: одинаковые байты DEAL-FILES-2 считает повтором (SHA-256).
+      return { bytes: new TextEncoder().encode(`${f.uuid}:${f.name}`), mime: f.mime };
     },
   };
 }

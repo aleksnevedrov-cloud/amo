@@ -3,9 +3,14 @@
 import type { LlmGateway, RoutedResponse } from '@core/llm';
 import type { OptAiProvider } from '@opt/kp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { leadFileCard, LEAD_ID, setup, widgetToken } from './helpers.ts';
+import { ACCOUNT_ID, leadFileCard, LEAD_ID, setup, widgetToken } from './helpers.ts';
 
-const DOC = (title: string) => JSON.stringify({ kind: 'request', title, summary: title, customer_type: 'b2b', openings: [], positions: [{ name: `Дверь из «${title}»`, marking: null, width_mm: 900, height_mm: 2100, qty: 1, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null }], requirements: [], questions: [], photo: null });
+/** Документ по имени файла: счёт / смета — kind estimate с двумя позициями (как у живого счёта № 126), остальное — заявка с одной дверью. */
+const DOC = (title: string) => {
+  const estimate = /сч[её]т|смета/i.test(title);
+  const pos = (name: string) => ({ name, marking: null, width_mm: 900, height_mm: 2100, qty: 1, unit: 'шт', price_rub: estimate ? 16_400 : null, material: null, color: null, fireproof: null, note: null });
+  return JSON.stringify({ kind: estimate ? 'estimate' : 'request', title: title.replace(/\.[^.]+$/, ''), summary: title, customer_type: 'b2b', openings: [], positions: estimate ? [pos('Межкомнатная дверь ДПГ (RAL 1013) 800×2000'), pos('Межкомнатная дверь ДПГ (RAL 1013) 900×2000')] : [pos(`Дверь из «${title}»`)], requirements: [], questions: [], photo: null });
+};
 const LETTER = JSON.stringify({ client: { org: 'ООО Заказчик', fio: '', email: 'client@example.ru', phone: '' }, request_items: [], required_blocks: ['price'], questions: [] });
 
 /** Шлюз: письмо — без позиций; документ — одна дверь с названием файла (чтобы видеть, какие файлы разобраны). */
@@ -29,7 +34,7 @@ function gateway() {
   return { ai, docs };
 }
 
-type Draft = { id: number; items: { name: string }[]; needsManager: { request_index: number; reason: string }[]; source: { attachments: string[]; skipped: { name: string; reason: string }[]; files?: { name: string; status: string; positions: number; reason: string | null }[]; yadisk?: { url: string; where: string; name: string; type: string; taken: number; skipped: number; error: string | null }[] } };
+type Draft = { id: number; items: { name: string }[]; needsManager: { request_index: number; reason: string }[]; survey: { key: string; type: string; blocking: boolean; text: string; options: { id: string; label: string }[] }[]; source: { attachments: string[]; skipped: { name: string; reason: string }[]; files?: { name: string; status: string; positions: number; reason: string | null }[]; yadisk?: { url: string; where: string; name: string; type: string; taken: number; skipped: number; error: string | null }[] } };
 
 describe('файлы сделки опта (RFD-AI-AGENT-OPT-DEAL-FILES, часть 0)', () => {
   const g = gateway();
@@ -58,13 +63,14 @@ describe('файлы сделки опта (RFD-AI-AGENT-OPT-DEAL-FILES, час�
     const d = await build();
     expect(d.source.attachments).toEqual(['Двери внутренние Данилково (4).txt', 'Двери наружные Данилково (4).txt', 'Счет покупателю № 126 от 3 ноября 2026 г.txt']);
     expect(d.source.skipped).toEqual([{ name: 'файл dead-beef-0000-0000-0000-000000000004', reason: 'карточка файла не получена: HTTP 404' }]);
+    // Счёт без признаков нашей компании — смета стороннего продавца: позиции берутся (две, как в фикстуре).
     expect(d.source.files?.map((f) => [f.name, f.status, f.positions])).toEqual([
       ['Двери внутренние Данилково (4).txt', 'parsed', 1],
       ['Двери наружные Данилково (4).txt', 'parsed', 1],
-      ['Счет покупателю № 126 от 3 ноября 2026 г.txt', 'parsed', 1],
+      ['Счет покупателю № 126 от 3 ноября 2026 г.txt', 'parsed', 2],
       ['файл dead-beef-0000-0000-0000-000000000004', 'skipped', 0],
     ]);
-    expect(d.items.map((i) => i.name)).toEqual(['Дверь из «Двери внутренние Данилково (4).txt»', 'Дверь из «Двери наружные Данилково (4).txt»', 'Дверь из «Счет покупателю № 126 от 3 ноября 2026 г.txt»']);
+    expect(d.items.map((i) => i.name)).toEqual(['Дверь из «Двери внутренние Данилково (4).txt»', 'Дверь из «Двери наружные Данилково (4).txt»', 'Межкомнатная дверь ДПГ (RAL 1013) 800×2000', 'Межкомнатная дверь ДПГ (RAL 1013) 900×2000']);
     // Карточки запрошены в Files API на drive_url, а не на домене аккаунта.
     const urls = ctx.amo.calls.map((c) => c.url);
     expect(urls.filter((u) => u.startsWith('https://drive-b.amocrm.ru/v1.0/files/'))).toHaveLength(4);
@@ -159,11 +165,12 @@ describe('ссылки Яндекс Диска при сборке чернов�
     disk(names);
     ctx.amo.leadFields = [{ field_id: 987_001, field_name: 'Яндекс.Диск - Ссылка на папку', values: [{ value: FOLDER }] }];
     const d = await build();
-    expect(d.source.attachments).toEqual(names);
-    expect(d.items).toHaveLength(3);
-    expect(d.source.yadisk).toEqual([{ url: FOLDER, where: 'поле «Яндекс.Диск - Ссылка на папку»', name: 'Данилково', type: 'dir', taken: 0, skipped: 3, error: null }]);
-    expect(d.source.skipped.map((x) => x.reason)).toEqual(Array(3).fill('уже есть в файлах сделки или во вложениях письма — разбор один раз'));
-    expect(ctx.amo.calls.filter((c) => c.url.startsWith('https://downloader.disk.yandex.ru/'))).toHaveLength(0);
+    expect(d.source.attachments).toEqual([...names, ...names]);
+    // Три файла сделки (счёт — две позиции), файлы Диска с теми же байтами — повторы (DEAL-FILES-2: по SHA-256 после скачивания).
+    expect(d.items).toHaveLength(4);
+    expect(d.source.yadisk).toEqual([{ url: FOLDER, where: 'поле «Яндекс.Диск - Ссылка на папку»', name: 'Данилково', type: 'dir', taken: 3, skipped: 0, error: null }]);
+    expect(d.source.skipped.map((x) => x.reason)).toEqual(names.map((n) => `повтор файла «${n}» из «Файлов» сделки`));
+    expect(ctx.amo.calls.filter((c) => c.url.startsWith('https://downloader.disk.yandex.ru/'))).toHaveLength(3);
   }, 30_000);
 
   it('404 от Диска → строка в «пропущено» с текстом Диска, черновик собран по остальному', async () => {
@@ -187,4 +194,110 @@ describe('ссылки Яндекс Диска при сборке чернов�
     expect(d.source.skipped.map((x) => [x.name, x.reason])).toEqual([['Лист 9.txt', 'больше 10 файлов за раз не разбираем'], ['Лист 10.txt', 'больше 10 файлов за раз не разбираем'], ['Лист 11.txt', 'больше 10 файлов за раз не разбираем'], ['Лист 12.txt', 'больше 10 файлов за раз не разбираем']]);
     expect(d.source.yadisk?.[0]).toMatchObject({ name: 'Данилково', taken: 12 });
   }, 60_000);
+});
+
+describe('дубли файлов и наш документ (RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.1–2.2)', () => {
+  const g = gateway();
+  let ctx: Awaited<ReturnType<typeof setup>>;
+  let headers: Record<string, string>;
+  const FOLDER = 'https://yadi.sk/d/Pj7JaZqDEJJA1Q';
+  const draft = async () => (await ctx.app.inject({ url: `/widget/v1/kp/draft?leadId=${LEAD_ID}`, headers })).json().draft as Draft;
+  const build = async () => {
+    await ctx.app.inject({ method: 'POST', url: '/widget/v1/kp/draft', headers, payload: { leadId: LEAD_ID } });
+    return draft();
+  };
+  const txt = (title: string, body = 'Заявка на двери: дверной блок 900×2100, 1 шт.') => new TextEncoder().encode(`${title}\n${body}`);
+  const diskFolder = (files: { name: string; bytes: Uint8Array }[]) => {
+    const resources: Record<string, unknown> = { [FOLDER]: { type: 'dir', name: '30038356', path: '/', _embedded: { items: files.map((f) => ({ type: 'file', name: f.name, path: `/${f.name}`, size: f.bytes.byteLength, mime_type: 'text/plain' })) } } };
+    const blobs: Record<string, { bytes: Uint8Array; mime: string }> = {};
+    for (const f of files) blobs[`${FOLDER}/${f.name}`] = { bytes: f.bytes, mime: 'text/plain' };
+    ctx.amo.yadisk = { resources, files: blobs };
+    ctx.amo.leadFields = [{ field_id: 987_001, field_name: 'Яндекс.Диск - Ссылка на папку', values: [{ value: FOLDER }] }];
+  };
+  const reset = () => {
+    ctx.amo.files = [];
+    ctx.amo.cards = {};
+    ctx.amo.blobs = {};
+    ctx.amo.leadFields = [];
+    ctx.amo.notes = [];
+    ctx.amo.contactNotes = [];
+    ctx.amo.yadisk = { resources: {}, files: {} };
+    ctx.amo.calls.length = 0;
+  };
+  const downloads = () => ctx.amo.calls.filter((c) => c.url.startsWith('https://downloader.disk.yandex.ru/')).length;
+
+  beforeAll(async () => {
+    ctx = await setup({ ai: g.ai });
+    headers = { 'x-auth-token': await widgetToken() };
+    await ctx.app.inject({ method: 'GET', url: '/oauth/amo/callback', query: { code: 'c', referer: 'aleksnevedrov.amocrm.ru', from_widget: '1' } });
+    ctx.amo.mail = { id: 5, created_at: 1_760_000_000, params: { income: true, subject: 'Заявка', text: 'Файлы в сделке и на Диске', from: 'client@example.ru' } };
+  });
+  afterAll(() => ctx.close());
+
+  // Первым в наборе: пересборка без позиций не заменяет прежний черновик с позициями (KP-REBUILD-MAIL).
+  it('в сделке только наш счёт — вопрос в опроснике «взять его позиции?»; «Да» — позиции взяты', async () => {
+    reset();
+    leadFileCard(ctx.amo, 'u-inv', 'Счет покупателю № 126.txt', txt('Счет покупателю № 126.txt', 'Поставщик: ООО "РУС-ДВЕРИ", ИНН 7700000001. Покупатель: ООО Заказчик.'), 'text/plain');
+    const d = await build();
+    expect(d.items).toEqual([]);
+    const q = d.survey.find((x) => x.type === 'own_document');
+    expect(q).toMatchObject({ key: 'own_document', blocking: true, text: 'В сделке только наш счёт «Счет покупателю № 126» — взять его позиции?', options: [{ id: 'yes', label: 'Да, взять позиции' }, { id: 'no', label: 'Нет, оставить черновик без позиций' }] });
+    expect(d.needsManager.map((n) => n.reason)).toContain('в сделке только наш документ («Счет покупателю № 126») — взять его позиции? Вопрос в опроснике');
+    const r = await ctx.app.inject({ method: 'POST', url: `/widget/v1/kp/draft/${d.id}/answer`, headers, payload: { key: 'own_document', option: 'yes' } });
+    expect(r.statusCode).toBe(200);
+    const after = r.json().draft as Draft;
+    expect(after.items.map((i) => i.name)).toEqual(['Межкомнатная дверь ДПГ (RAL 1013) 800×2000', 'Межкомнатная дверь ДПГ (RAL 1013) 900×2000']);
+    expect(after.survey.find((x) => x.type === 'own_document')).toBeUndefined();
+    expect(after.needsManager.map((n) => n.reason)).toContain('позиции взяты из нашего документа по решению менеджера («Счет покупателю № 126»)');
+  }, 30_000);
+
+  it('файл сделки «Двери внутренние Данилково (4)» (amo без расширения) и файл Диска «… (4).pdf» с теми же байтами — разобран один раз, второй «повтор»; одинаковые байты под другим именем — тоже повтор (SHA-256)', async () => {
+    reset();
+    const inner = txt('Двери внутренние Данилково (4)');
+    const outer = txt('Двери наружные Данилково (4)');
+    leadFileCard(ctx.amo, 'u-inner', 'Двери внутренние Данилково (4)', inner, 'text/plain');
+    leadFileCard(ctx.amo, 'u-outer', 'Двери наружные Данилково (4)', outer, 'text/plain');
+    diskFolder([{ name: 'Двери внутренние Данилково (4).pdf', bytes: inner }, { name: 'Копия наружных.pdf', bytes: outer }]);
+    const d = await build();
+    expect(d.items.map((i) => i.name)).toEqual(['Дверь из «Двери внутренние Данилково (4)»', 'Дверь из «Двери наружные Данилково (4)»']);
+    expect(d.source.skipped).toEqual([
+      { name: 'Двери внутренние Данилково (4).pdf', reason: 'повтор файла «Двери внутренние Данилково (4)» из «Файлов» сделки' },
+      { name: 'Копия наружных.pdf', reason: 'повтор файла «Двери наружные Данилково (4)» из «Файлов» сделки' },
+    ]);
+    // Оба файла Диска скачаны (по имени не отсеиваем — те же имя и размер могут скрывать другие байты), хэши совпали.
+    expect(downloads()).toBe(2);
+    expect(d.source.yadisk?.[0]).toMatchObject({ name: '30038356', taken: 2, skipped: 0 });
+  }, 30_000);
+
+  it('одинаковое имя и размер, разные байты — оба разобраны', async () => {
+    reset();
+    const a = txt('Заявка.txt', 'Заявка на двери: дверной блок 900×2100, 1 шт.');
+    const b = txt('Заявка.txt', 'Заявка на двери: дверной блок 800×2100, 1 шт.');
+    expect(a.byteLength).toBe(b.byteLength);
+    leadFileCard(ctx.amo, 'u-a', 'Заявка.txt', a, 'text/plain');
+    diskFolder([{ name: 'Заявка.txt', bytes: b }]);
+    const d = await build();
+    expect(d.source.skipped).toEqual([]);
+    expect(d.source.files?.filter((f) => f.status === 'parsed')).toHaveLength(2);
+    expect(downloads()).toBe(1);
+  }, 30_000);
+
+  it('наш счёт (продавец ООО «РУС-ДВЕРИ» или ИНН из настроек КП) позиций не даёт — «наш документ»; смета другого поставщика — позиции с пометкой', async () => {
+    reset();
+    await ctx.deps.kp.saveSettings(ACCOUNT_ID, { constants: { sellerName: 'ООО «РУС-ДВЕРИ»', sellerRequisites: 'ИНН 7700000001 КПП 770001001' } });
+    leadFileCard(ctx.amo, 'u-req', 'Заявка клиента.txt', txt('Заявка клиента.txt'), 'text/plain');
+    leadFileCard(ctx.amo, 'u-inv', 'Счет покупателю № 126 от 3 ноября 2026 г.txt', txt('Счет покупателю № 126 от 3 ноября 2026 г.txt', 'Поставщик: ООО "РУС-ДВЕРИ", ИНН 7700000001, КПП 770001001. Покупатель: ООО Заказчик.'), 'text/plain');
+    leadFileCard(ctx.amo, 'u-inv2', 'Счет 127.txt', txt('Счет 127.txt', 'Поставщик: Общество с ограниченной ответственностью Р.Д., ИНН 7700000001. Покупатель: ООО Заказчик.'), 'text/plain');
+    leadFileCard(ctx.amo, 'u-est', 'Смета ООО Партнёр.txt', txt('Смета ООО Партнёр.txt', 'Поставщик: ООО Партнёр, ИНН 5000000000. Двери межкомнатные.'), 'text/plain');
+    const d = await build();
+    expect(d.items.map((i) => i.name)).toEqual(['Дверь из «Заявка клиента.txt»', 'Межкомнатная дверь ДПГ (RAL 1013) 800×2000', 'Межкомнатная дверь ДПГ (RAL 1013) 900×2000']);
+    expect(d.source.files?.map((f) => [f.name, f.status, f.positions, f.reason])).toEqual([
+      ['Заявка клиента.txt', 'parsed', 1, null],
+      ['Счет покупателю № 126 от 3 ноября 2026 г.txt', 'skipped', 0, 'наш документ (продавец ООО «РУС-ДВЕРИ»), позиции не берутся'],
+      ['Счет 127.txt', 'skipped', 0, 'наш документ (продавец ООО «РУС-ДВЕРИ»), позиции не берутся'],
+      ['Смета ООО Партнёр.txt', 'parsed', 2, 'из сметы другого поставщика: Смета ООО Партнёр'],
+    ]);
+    expect(d.needsManager.some((n) => n.reason === 'из сметы другого поставщика: Смета ООО Партнёр — позиции взяты из неё, проверьте')).toBe(true);
+    expect(d.survey.find((q) => q.type === 'own_document')).toBeUndefined();
+  }, 30_000);
 });
