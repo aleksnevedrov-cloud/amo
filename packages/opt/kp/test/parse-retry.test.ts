@@ -124,6 +124,46 @@ describe('разбор заявки: повтор и запасной путь (
   });
 });
 
+describe('скан-чертёж: второй проход страницами картинками (RFD-AI-AGENT-OPT-DEAL-FILES-2, 2.3)', () => {
+  const DRAWING = JSON.stringify({ positions: [{ name: 'Дверной блок наружный деревянный, арочный верх, фрамуга', marking: 'ДН-1', width_mm: 1300, height_mm: 2400, qty: 2, note: 'распашная, остекление прозрачное' }, { name: 'Дверной блок наружный', marking: 'ДН-2', width_mm: 900, height_mm: 2100, qty: 5, note: null }] });
+  const scanDeps = (llm: LlmGateway, positions: unknown[] = [], pages = 3, textChars = 500) => {
+    const { d, docs } = deps([], llm);
+    const ocrPages = Array.from({ length: pages }, (_, i) => Buffer.from(`PNG:page-${i + 1}`));
+    d.docs = { async analyze() { return { id: 59, kind: 'request', data: { kind: 'request', title: 'Двери наружные Данилково', summary: '', customer_type: 'unknown', openings: [], positions, requirements: [], questions: [], photo: null }, provider: 'openai', model: 'gpt-5.5', costUsd: 0.02, text: 'x'.repeat(textChars), textChars, ocrPages } as never; } };
+    return { d, docs };
+  };
+
+  it('основной разбор — 0 позиций при тексте 500 знаков → страницы (из OptOcr, без повторной растеризации) уходят в модель по схеме positions; позиции с пометкой «распознано по чертежу»', async () => {
+    const g = gateway({ request_positions: [DRAWING] });
+    const { d } = scanDeps(g.llm);
+    const r = await analyzeDraftFile(d, { filename: 'Двери наружные Данилково (4).pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) });
+    expect(g.asked.map((a) => a.schema)).toEqual(['request_positions']);
+    expect(r.positions.map((p) => [p.marking, p.width_mm, p.height_mm, p.qty, p.note])).toEqual([['ДН-1', 1300, 2400, 2, 'распознано по чертежу, проверьте размеры; распашная, остекление прозрачное'], ['ДН-2', 900, 2100, 5, 'распознано по чертежу, проверьте размеры']]);
+    expect(r.drawing).toBe(true);
+    expect(r.warnings).toEqual(['позиции распознаны по чертежу (второй проход, страниц 3) — проверьте размеры']);
+    expect(r.attempts?.map((a) => [a.via, a.ok])).toEqual([['docs', true], ['drawing', true]]);
+    expect(r.costUsd).toBeGreaterThan(0.02);
+  });
+
+  it('в модель уходит не больше 8 страниц и ровно один второй проход; снова 0 позиций → «не разобран: позиции не найдены»', async () => {
+    const g = gateway({ request_positions: [JSON.stringify({ positions: [] })] });
+    const { d } = scanDeps(g.llm, [], 12);
+    await expect(analyzeDraftFile(d, { filename: 'чертёж.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) })).rejects.toThrow('позиции не найдены (второй проход по чертежу тоже не дал позиций)');
+    expect(g.asked).toHaveLength(1);
+    const req = g.llm as unknown as { chat: unknown };
+    expect(req).toBeDefined();
+  });
+
+  it('позиции есть или текста мало (< 200 знаков) или это не скан (нет страниц) — второго прохода нет', async () => {
+    const g = gateway({});
+    const pos = { name: 'Дверь', marking: null, width_mm: 900, height_mm: 2100, qty: 1, unit: 'шт', price_rub: null, material: null, color: null, fireproof: null, note: null };
+    expect((await analyzeDraftFile(scanDeps(g.llm, [pos]).d, { filename: 'a.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) })).positions).toHaveLength(1);
+    expect((await analyzeDraftFile(scanDeps(g.llm, [], 3, 50).d, { filename: 'b.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) })).positions).toHaveLength(0);
+    expect((await analyzeDraftFile(scanDeps(g.llm, [], 0, 500).d, { filename: 'c.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) })).positions).toHaveLength(0);
+    expect(g.asked).toHaveLength(0);
+  });
+});
+
 describe('вход в ящик: неверный пароль и временный отказ (KP-PARSE-RETRY, п. 4)', () => {
   const err = (o: Record<string, unknown>) => Object.assign(new Error(String(o.message ?? 'Command failed')), { authenticationFailed: true, ...o });
   it('«Command failed» без кода — временный отказ, текст сервера — в причине; AUTHENTICATIONFAILED — неверный пароль', () => {

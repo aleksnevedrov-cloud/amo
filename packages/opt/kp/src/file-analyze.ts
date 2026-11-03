@@ -5,7 +5,7 @@ import { categoryOf } from '@opt/kb';
 import { convertLegacyOffice, type OfficeFile } from './convert.ts';
 import { equipmentFor, equipmentSections, looksLikeRequisites, matrixPositions, pickSpecTable, readDocxBlocks, requirementsOf, specCandidates, tableRows, type DocxBlock, type DocxTable, type MatrixPosition, type SpecTable } from './docx-spec.ts';
 import type { ParsedFile } from './draft.ts';
-import { askByText, clipRaw, isRetryableParseError, localText, rawText, validateDocument, type AskResult, type ParseAttempt } from './request-parse.ts';
+import { askByImages, askByText, clipRaw, isRetryableParseError, localText, rawText, validateDocument, type AskResult, type ParseAttempt } from './request-parse.ts';
 import { looksLikeSellerDoc } from './seller-doc.ts';
 import type { DocumentData } from '@core/docs';
 import { detectHeader, parseRows, parseTable, tableItems, type TableParsed, type TableParseOptions } from './table-parse.ts';
@@ -200,7 +200,13 @@ async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: st
       const photo = /^image\//i.test(file.mime) && !r.data.positions.length;
       // DEAL-FILES-2, 2.2: для счёта / КП — сырой текст файла (чистка персональных данных убирает строки с ИНН и «счёт»).
       const text = looksLikeSellerDoc({ kind: r.kind, title: r.data.title, filename }) ? (await rawText(file)) || (r.text ?? '') : (r.text ?? '');
-      return { id: r.id, filename, kind: r.kind, title: r.data.title, text: text.slice(0, 20_000), positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: n > 1 ? [`разобран со ${n}-й попытки`] : [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}), ...(n > 1 ? { attempts } : {}) };
+      const base: ParsedFile = { id: r.id, filename, kind: r.kind, title: r.data.title, text: text.slice(0, 20_000), positions: r.data.positions, questions: r.data.questions, requirements: r.data.requirements, ms: Date.now() - t0, method: 'docs', chunks: 1, model: `${r.provider}/${r.model}`, warnings: n > 1 ? [`разобран со ${n}-й попытки`] : [], costUsd: r.costUsd, ...(photo ? { photo: true } : {}), ...(n > 1 ? { attempts } : {}) };
+      // DEAL-FILES-2, 2.3: скан-чертёж — заявка без позиций при распознанном тексте ≥ 200 знаков: второй проход страницами
+      // картинками (растры из OptOcr, без повторной растеризации), не больше одного на файл.
+      const pages = (r as { ocrPages?: Buffer[] }).ocrPages ?? [];
+      const ocrText = (r.textChars ?? 0) || (r.text ?? '').length;
+      if (r.kind === 'request' && !r.data.positions.length && ocrText >= 200 && pages.length) return drawingPass(d, base, pages, filename, attempts);
+      return base;
     } catch (err) {
       if (!isRetryableParseError(err)) throw err;
       lastError = (err as Error).message;
@@ -238,6 +244,27 @@ async function analyzeWithRetry(d: DraftFileDeps, file: OfficeFile, filename: st
     lastError = a.error ?? lastError;
   }
   throw new FileParseError(`${lastError}; повторы и разбор по тексту не помогли`, attempts);
+}
+
+/** Второй проход по чертежу: страницы в модель, позиции с пометкой; снова 0 позиций — файл «не разобран: позиции не найдены». */
+async function drawingPass(d: DraftFileDeps, base: ParsedFile, pages: Buffer[], filename: string, attempts: ParseAttempt[]): Promise<ParsedFile> {
+  d.onProgress?.(`${filename}: позиций нет, текст есть — второй проход по чертежу, страниц ${Math.min(pages.length, 8)}`);
+  const a = await askByImages(d.llm, d.route, { pages, filename });
+  const cost = a.res ? costOfUsage({ provider: a.res.provider, model: a.res.model }, a.res.usage, d.pricing).usd : 0;
+  const found = a.data?.positions.length ?? 0;
+  attempts.push({ n: attempts.length + 1, via: 'drawing', ok: found > 0, error: found ? null : (a.error ?? 'позиции не найдены'), raw: found ? null : clipRaw(a.raw) });
+  if (!a.data || !found) throw new FileParseError('позиции не найдены (второй проход по чертежу тоже не дал позиций)', attempts);
+  return {
+    ...base,
+    positions: a.data.positions,
+    requirements: [...new Set([...base.requirements, ...a.data.requirements])],
+    questions: [...new Set([...base.questions, ...a.data.questions])],
+    costUsd: (base.costUsd ?? 0) + cost,
+    model: a.res ? `${a.res.provider}/${a.res.model}` : base.model,
+    warnings: [...(base.warnings ?? []), `позиции распознаны по чертежу (второй проход, страниц ${Math.min(pages.length, 8)}) — проверьте размеры`],
+    drawing: true,
+    attempts,
+  };
 }
 
 /** Разобранное повтором или запасным путём — запись документа (как у таблиц) и ParsedFile с попытками. */

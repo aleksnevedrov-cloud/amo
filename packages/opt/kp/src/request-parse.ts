@@ -1,5 +1,5 @@
 import { cleanPersonalData, documentJsonSchema, documentSchema, extract, type DocumentData } from '@core/docs';
-import type { ChatRoute, LlmGateway, RoutedResponse } from '@core/llm';
+import type { ChatRoute, LlmGateway, RoutedResponse, UnifiedPart } from '@core/llm';
 
 /**
  * KP-PARSE-RETRY: заявка не теряется из-за ответа модели не по схеме. Разбор файла (@core/docs) отвергает ответ, если не
@@ -21,7 +21,7 @@ export const clipRaw = (s: string | null | undefined): string => {
 export interface ParseAttempt {
   n: number;
   /** docs — разбор @core/docs; retry — тот же разбор повторно; text+error — запрос с текстом ошибки; positions — запасной путь (только позиции по тексту). */
-  via: 'docs' | 'retry' | 'repair' | 'text+error' | 'positions';
+  via: 'docs' | 'retry' | 'repair' | 'text+error' | 'positions' | 'drawing';
   ok: boolean;
   error: string | null;
   /** Сырой ответ модели (до 4 КБ); null — ответа не было или он не перехвачен. */
@@ -209,10 +209,41 @@ export async function askByText(llm: LlmGateway, route: ChatRoute, input: { text
   return v.ok ? { data: v.data, error: null, raw, repaired: v.repaired, res } : { data: null, error: v.error, raw, repaired: [], res };
 }
 
+/**
+ * DEAL-FILES-2, 2.3: второй проход по скану-чертежу — страницы картинками (растры из OptOcr, до 8) в модель опта, ответ по той
+ * же схеме positions, что запасной путь по тексту. Позиции помечаются «распознано по чертежу, проверьте размеры».
+ */
+export const DRAWING_NOTE = 'распознано по чертежу, проверьте размеры';
+const DRAWING_TASK = 'Это спецификация или чертёж дверей. Верни позиции: марка, тип, материал, размер В×Ш мм, количество, открывание, остекление, фрамуга, требования (EI, антипаника, доводчик). Ничего не додумывай; нет данных — null.';
+
+export async function askByImages(llm: LlmGateway, route: ChatRoute, input: { pages: Buffer[]; filename: string }): Promise<AskResult> {
+  const pages = input.pages.slice(0, 8);
+  let res: RoutedResponse;
+  try {
+    res = await llm.chat(
+      {
+        system: [{ text: SYSTEM, cache: true }],
+        messages: [{ role: 'user', content: [...pages.map((png): UnifiedPart => ({ type: 'image', image: { mime: 'image/png', data: png.toString('base64') } })), { type: 'text', text: `Имя файла: ${input.filename}. Страниц: ${pages.length}.\n${DRAWING_TASK}\nВ note каждой позиции — открывание, остекление, фрамуга, требования; тип и материал — в name.` } as UnifiedPart] }],
+        maxTokens: 16_000,
+        effort: 'low',
+        outputSchema: { name: 'request_positions', schema: POSITIONS_SCHEMA as unknown as Record<string, unknown> },
+      },
+      route,
+    );
+  } catch (err) {
+    return { data: null, error: `модель не ответила: ${(err as Error).message}`, raw: '', repaired: [], res: null };
+  }
+  const raw = res.text ?? '';
+  const v = validateDocument(wrapPositions(raw, input.filename, `Позиции по чертежу (второй проход, страниц ${pages.length}).`));
+  if (!v.ok) return { data: null, error: v.error, raw, repaired: [], res };
+  const data: DocumentData = { ...v.data, positions: v.data.positions.map((p) => ({ ...p, note: [DRAWING_NOTE, p.note].filter(Boolean).join('; ') })) };
+  return { data, error: null, raw, repaired: v.repaired, res };
+}
+
 /** Ответ «только позиции» → документ-заявка с этими позициями (остальные поля пустые). */
-function wrapPositions(raw: string, filename: string): string {
+function wrapPositions(raw: string, filename: string, summary?: string): string {
   const j = tryJson(raw);
   if (!j || typeof j !== 'object' || !Array.isArray((j as { positions?: unknown }).positions)) return raw;
   const positions = ((j as { positions: Record<string, unknown>[] }).positions ?? []).map((p) => ({ unit: null, price_rub: null, material: null, color: null, fireproof: null, ...p }));
-  return JSON.stringify({ kind: 'request', title: filename.replace(/\.[^.]+$/, '').slice(0, 80), summary: `Позиции по тексту файла (запасной путь): ${positions.length}.`, customer_type: 'unknown', openings: [], positions, requirements: [], questions: [], photo: null });
+  return JSON.stringify({ kind: 'request', title: filename.replace(/\.[^.]+$/, '').slice(0, 80), summary: summary ?? `Позиции по тексту файла (запасной путь): ${positions.length}.`, customer_type: 'unknown', openings: [], positions, requirements: [], questions: [], photo: null });
 }

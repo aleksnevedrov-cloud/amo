@@ -82,7 +82,10 @@ export class OptOcr implements OcrProvider {
     const m = mime.toLowerCase().split(';')[0]?.trim() ?? '';
     if (m === 'application/pdf') return this.recognizePdf(bytes);
     if (/^image\/(jpe?g|png|webp|bmp)$/.test(m)) {
+      const ctx = ocrContext.getStore();
+      if (ctx?.pages && !ctx.pages.length) ctx.pages.push(Buffer.from(bytes));
       const page = await this.recognizeImage(Buffer.from(bytes), 1);
+      ctx?.onPage?.({ page: 1, pages: 1, byModel: false });
       return this.result([page], []);
     }
     if (/^image\/(heic|heif|tiff?)$/.test(m)) {
@@ -109,15 +112,20 @@ export class OptOcr implements OcrProvider {
       const pages: PageText[] = [];
       let modelPages = 0;
       let modelSkipped = 0;
+      const ctx = ocrContext.getStore();
       for (const [i, png] of pngs.entries()) {
         const n = i + 1;
+        // DEAL-FILES-2, 2.3: растры первых страниц — в контекст, для второго прохода по чертежу без повторной растеризации.
+        if (ctx?.pages && ctx.pages.length < MAX_MODEL_PAGES) ctx.pages.push(png);
         const page = await this.recognizeImage(png, n);
+        ctx?.onPage?.({ page: n, pages: pngs.length, byModel: false });
         if (isMeaningful(page.text)) {
           pages.push(page);
           continue;
         }
         // Чертёж, схема, таблица с рамками: Tesseract дал мало текста — страница картинкой в модель (не больше 8 на файл).
         if (modelPages < MAX_MODEL_PAGES) {
+          ctx?.onPage?.({ page: n, pages: pngs.length, byModel: true });
           const byModel = await this.recognizeByModel(png, n);
           if (byModel) {
             modelPages++;

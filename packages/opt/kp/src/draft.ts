@@ -300,6 +300,8 @@ export interface ParsedFile {
   text?: string | null;
   /** DEAL-FILES-2, 2.2: наш документ (продавец — наша компания): позиции в черновик не берутся. */
   ourDocument?: boolean;
+  /** DEAL-FILES-2, 2.3: позиции получены вторым проходом по чертежу (страницы картинками в модель). */
+  drawing?: boolean;
   positions: OptPosition[];
   questions: string[];
   requirements: string[];
@@ -467,6 +469,9 @@ export async function buildKpDraft(llm: LlmGateway, input: KpDraftInput, d: KpDr
     needs.push({ request_index: -1, reason: ownDocs.length && !files.parsed.some((f) => !f.ourDocument && f.positions.length) ? `в сделке только наш документ (${ownDocs.map((o) => `«${o.title}»`).join(', ')}) — взять его позиции? Вопрос в опроснике` : card.letter || card.files.length ? 'позиции не найдены ни в файлах, ни в письме' : 'в карточке нет ни письма, ни файлов с запросом' });
   }
   for (const f of files.parsed) if (!f.ourDocument && f.kind === 'estimate' && f.positions.length) needs.push({ request_index: -1, reason: `из сметы другого поставщика: ${f.title || f.filename} — позиции взяты из неё, проверьте` });
+  // DEAL-FILES-2, 2.3: позиции по чертежу — пометка у каждой строки.
+  const drawingFiles = new Set(files.parsed.filter((f) => f.drawing).map((f) => f.filename));
+  if (drawingFiles.size) for (const [i, it] of requestItems.entries()) if (it.sourceFiles?.some((n) => drawingFiles.has(n))) needs.push({ request_index: i, reason: 'распознано по чертежу, проверьте размеры' });
   if (scope?.by) {
     const what = scope.by === 'marks' ? `марки ${scope.selected.map((it) => it.mark).filter(Boolean).join(', ')}` : 'номера позиций';
     needs.push({ request_index: -1, reason: `письмо задаёт объём (${what}): в КП ${scope.selected.length} поз. из ${scope.selected.length + scope.rest.length} в проекте; остальные — «Ещё в проекте»` });

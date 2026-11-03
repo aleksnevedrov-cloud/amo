@@ -19,11 +19,24 @@ export interface OcrContext {
   cost: { usd: number; inputTokens: number; outputTokens: number; pages: number };
   /** Пометки о распознавании (какие страницы ушли в модель, что не распознано). */
   notes: string[];
+  /**
+   * DEAL-FILES-2, 2.3: растры страниц (PNG, до MAX_MODEL_PAGES) — для второго прохода по чертежу без повторной растеризации;
+   * OptDocuments отдаёт их в результате analyze как ocrPages.
+   */
+  pages?: Buffer[];
+  /** DEAL-FILES-2, 2.5: ход распознавания по страницам (индикатор сборки). */
+  onPage?: (p: { page: number; pages: number; byModel: boolean }) => void;
 }
 
 export const ocrContext = new AsyncLocalStorage<OcrContext>();
 
 export const emptyOcrCost = (): OcrContext['cost'] => ({ usd: 0, inputTokens: 0, outputTokens: 0, pages: 0 });
+
+/** DEAL-FILES-2, 2.5: хук хода распознавания на время сборки черновика (OptDocuments копирует его в контекст каждого файла). */
+export const ocrProgress = new AsyncLocalStorage<{ onPage: NonNullable<OcrContext['onPage']> }>();
+
+/** Результат analyze с растрами страниц скана (для второго прохода по чертежу). */
+export type DocumentResultWithPages = DocumentResult & { ocrPages?: Buffer[] };
 
 export interface DocumentsLike {
   analyze(input: AnalyzeFileInput): Promise<DocumentResult>;
@@ -33,11 +46,14 @@ export interface DocumentsLike {
 export class OptDocuments implements DocumentsLike {
   constructor(private readonly inner: DocumentsLike) {}
 
-  async analyze(input: AnalyzeFileInput): Promise<DocumentResult> {
-    const ctx: OcrContext = { accountId: input.accountId, settings: input.settings, route: input.route ?? null, cost: emptyOcrCost(), notes: [] };
+  async analyze(input: AnalyzeFileInput): Promise<DocumentResultWithPages> {
+    const progress = ocrProgress.getStore();
+    const ctx: OcrContext = { accountId: input.accountId, settings: input.settings, route: input.route ?? null, cost: emptyOcrCost(), notes: [], pages: [], ...(progress ? { onPage: progress.onPage } : {}) };
     return ocrContext.run(ctx, async () => {
       const r = await this.inner.analyze(input);
-      return ctx.cost.usd || ctx.cost.pages ? { ...r, costUsd: r.costUsd + ctx.cost.usd } : r;
+      const out: DocumentResultWithPages = ctx.cost.usd || ctx.cost.pages ? { ...r, costUsd: r.costUsd + ctx.cost.usd } : { ...r };
+      if (ctx.pages?.length) out.ocrPages = ctx.pages;
+      return out;
     });
   }
 }

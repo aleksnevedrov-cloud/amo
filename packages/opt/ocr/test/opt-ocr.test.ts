@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { widgetSettingsSchema } from '@core/db';
 import type { LlmGateway, RoutedResponse } from '@core/llm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { isMeaningful, MAX_PDF_PAGES, ocrContext, OptDocuments, OptOcr, withOcrContext, type ExecLike, type OcrContext, type TesseractWorkerLike } from '../src/index.ts';
 
 /** Фикстура «PDF»: страницы — строки; «скан» — текст, который якобы увидит Tesseract на растре. */
@@ -147,6 +147,19 @@ describe('OptOcr (RFD-AI-AGENT-OPT-DEAL-FILES, часть А)', () => {
     expect(noLlm.name).toBe('opt');
     const outside = await f.ocr.recognize(pdfOf([GARBAGE]), 'application/pdf');
     expect(outside.text).toContain('(часть страниц — чертежи, текст неполный)');
+  });
+
+  it('DEAL-FILES-2: растры страниц копятся в контексте (до 8) для второго прохода по чертежу, ход по страницам — через onPage; картинка — одна страница', async () => {
+    const f = fakes();
+    const ctx = { ...ctxOf(false), pages: [] as Buffer[], onPage: vi.fn() };
+    await inCtx(ctx, () => f.ocr.recognize(pdfOf(Array.from({ length: 10 }, (_, i) => `${MEANINGFUL} ${i}`)), 'application/pdf'));
+    expect(ctx.pages).toHaveLength(8);
+    expect(ctx.pages[0]?.toString()).toBe(`PNG:${MEANINGFUL} 0`);
+    expect(ctx.onPage).toHaveBeenCalledTimes(10);
+    expect(ctx.onPage).toHaveBeenNthCalledWith(1, { page: 1, pages: 10, byModel: false });
+    const img = { ...ctxOf(false), pages: [] as Buffer[] };
+    await inCtx(img, () => f.ocr.recognize(new TextEncoder().encode(`PNG:${MEANINGFUL}`), 'image/jpeg'));
+    expect(img.pages).toHaveLength(1);
   });
 
   it('ошибки с этапом: pdftoppm не установлен → «растеризация: …»; временный каталог убран', async () => {
