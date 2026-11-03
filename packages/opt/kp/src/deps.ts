@@ -1,6 +1,7 @@
 import { AmoApiClient, AmoOAuth, TokenService } from '@core/amo';
 import { AccountsRepo, createPool, DocumentsRepo, JournalRepo, ModelsCacheRepo, PgTokenStore, SecretsRepo, type Db } from '@core/db';
-import { DocumentService, TesseractOcr, YandexVision, type DocumentServiceDeps, type OcrProvider } from '@core/docs';
+import { DocumentService, YandexVision, type DocumentServiceDeps, type OcrProvider } from '@core/docs';
+import { emptyOcrCost, OptDocuments, OptOcr, withOcrContext } from '@opt/ocr';
 import type { LLMProvider, LlmGateway, ProviderId } from '@core/llm';
 import { amoRedirectUri, SecretBox, TelegramAlerter, type Alerter, type Env } from '@core/shared';
 import { createKbCore, createUrlFetcher, DEFAULT_EMBEDDING_MODEL, loadKbEnv, OpenAiEmbedder, type EmbedderFor, type KbCore, type UrlFetcher } from '@opt/kb';
@@ -8,7 +9,7 @@ import { createOptAi, OPT_LLM_TIMEOUT_MS, type OptAiProvider } from './llm.ts';
 import { readLatestMail, type MailReadConfig, type MailReadOptions, type MailReadResult, type MailSearch } from './mail-read.ts';
 import { KpRepo } from './repo.ts';
 import { KpPriceResearchRepo } from './research-repo.ts';
-import { OptSettingsRepo } from './settings.ts';
+import { OptSettingsRepo, resolveOptRoute, toWidgetSettings } from './settings.ts';
 
 /**
  * Общие службы «Агента опт» для opt-api и opt-worker: БД опта, токены своей интеграции amoCRM,
@@ -26,10 +27,10 @@ export interface OptCore {
   secrets: SecretsRepo;
   modelsCache: ModelsCacheRepo;
   documents: DocumentsRepo;
-  /** Разбор спецификаций из файлов сделки. */
-  docs: DocumentService;
+  /** Разбор спецификаций из файлов сделки (OptDocuments: контекст аккаунта для собственного распознавания OptOcr). */
+  docs: Pick<DocumentService, 'analyze'>;
   /** KP-PARSE-RETRY: тот же разбор с заданным шлюзом модели (шлюз с записью сырого ответа — для журнала). */
-  docsFor(llm: LlmGateway): DocumentService;
+  docsFor(llm: LlmGateway): Pick<DocumentService, 'analyze'>;
   ai: OptAiProvider;
   kp: KpRepo;
   /** Результаты поиска рыночных цен и кэш (этап 3). */
@@ -91,14 +92,19 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
       ...(overrides.make ? { make: overrides.make } : {}),
       fetch: fetchImpl,
     });
-  const ocr = overrides.ocr ?? ocrFactory(env, fetchImpl);
-  const docs = new DocumentService({
-    llm: null,
-    llmFor: async (id) => (await ai(id))?.llm ?? null,
-    catalog: NO_CATALOG,
-    documents,
-    ocr,
-  });
+  const llmFor = async (id: number) => (await ai(id))?.llm ?? null;
+  const ocr = overrides.ocr ?? ocrFactory(env, fetchImpl, llmFor);
+  // RFD-AI-AGENT-OPT-DEAL-FILES, часть А: OptDocuments даёт OptOcr контекст аккаунта (маршрут модели, photosToClaude) и прибавляет
+  // расход модели на распознавание к costUsd разбора.
+  const docs = new OptDocuments(
+    new DocumentService({
+      llm: null,
+      llmFor,
+      catalog: NO_CATALOG,
+      documents,
+      ocr,
+    }),
+  );
   const settings = new OptSettingsRepo(db);
   const journal = new JournalRepo(db);
   // База знаний: своя БД (KB_DATABASE_URL) и свой том; эмбеддинги — тем же ключом OpenAI, что чат-модель опта.
@@ -123,7 +129,12 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     db: kbDb,
     filesRoot: overrides.kbFilesRoot ?? process.env.KB_FILES_ROOT ?? '/kb-files',
     embedderFor,
-    ocrFor: async (accountId) => ocr((await settings.get(accountId)).settings.vision.provider),
+    // Часть А (А9): база знаний получает тот же OptOcr, с контекстом аккаунта — сканы прайсов тоже читаются (чертежи — моделью).
+    ocrFor: async (accountId) => {
+      const s = (await settings.get(accountId)).settings;
+      const p = ocr(s.vision.provider);
+      return p ? withOcrContext(p, () => ({ accountId, settings: toWidgetSettings(s), route: resolveOptRoute(s), cost: emptyOcrCost(), notes: [] })) : null;
+    },
     journal,
     usdRubRate: async (accountId) => (await settings.get(accountId)).settings.billing.usdRubRate,
     fetchUrl: overrides.kbFetchUrl ?? createUrlFetcher({ fetch: fetchImpl }),
@@ -141,7 +152,7 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
     modelsCache: new ModelsCacheRepo(db),
     documents,
     docs,
-    docsFor: (llm) => new DocumentService({ llm, catalog: NO_CATALOG, documents, ocr }),
+    docsFor: (llm) => new OptDocuments(new DocumentService({ llm, catalog: NO_CATALOG, documents, ocr })),
     ai,
     kp: new KpRepo(db),
     research: new KpPriceResearchRepo(db),
@@ -163,13 +174,17 @@ export function createOptCore(env: Env, overrides: OptCoreOverrides = {}): OptCo
   };
 }
 
-/** OCR по настройке: Yandex Vision при ключе, иначе Tesseract на сервере (один воркер на процесс). */
-function ocrFactory(env: Env, fetchImpl: typeof fetch): DocumentServiceDeps['ocr'] {
-  let tesseract: TesseractOcr | null = null;
+/**
+ * OCR по настройке: Yandex Vision при ключе, иначе — собственное распознавание опта OptOcr (RFD-AI-AGENT-OPT-DEAL-FILES,
+ * часть А): poppler + Tesseract на сервере (один воркер на процесс) + модель аккаунта по картинке для страниц-чертежей.
+ * Значение настройки остаётся tesseract.
+ */
+function ocrFactory(env: Env, fetchImpl: typeof fetch, llmFor: (accountId: number) => Promise<LlmGateway | null>): DocumentServiceDeps['ocr'] {
+  let own: OptOcr | null = null;
   return (provider): OcrProvider | null => {
     if (provider === 'off') return null;
     const key = env.YANDEX_VISION_API_KEY ?? env.YANDEX_SPEECHKIT_API_KEY;
     if (provider === 'yandex' && key && env.YANDEX_FOLDER_ID) return new YandexVision(key, env.YANDEX_FOLDER_ID, fetchImpl);
-    return (tesseract ??= new TesseractOcr());
+    return (own ??= new OptOcr({ llmFor }));
   };
 }

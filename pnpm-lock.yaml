@@ -653,6 +653,9 @@ importers:
       '@opt/kb':
         specifier: workspace:*
         version: link:../kb
+      '@opt/ocr':
+        specifier: workspace:*
+        version: link:../ocr
       docxtemplater:
         specifier: 3.50.0
         version: 3.50.0
@@ -687,6 +690,21 @@ importers:
       pg:
         specifier: ^8.23.0
         version: 8.23.0
+
+  packages/opt/ocr:
+    dependencies:
+      '@core/db':
+        specifier: workspace:*
+        version: link:../../core/db
+      '@core/docs':
+        specifier: workspace:*
+        version: link:../../core/docs
+      '@core/llm':
+        specifier: workspace:*
+        version: link:../../core/llm
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
 
   packages/retail/agent:
     dependencies:

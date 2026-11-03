@@ -24,6 +24,7 @@ COPY packages/retail/pricing/package.json packages/retail/pricing/
 COPY packages/retail/mail/package.json packages/retail/mail/
 COPY packages/opt/kp/package.json packages/opt/kp/
 COPY packages/opt/kb/package.json packages/opt/kb/
+COPY packages/opt/ocr/package.json packages/opt/ocr/
 COPY evals/package.json evals/
 RUN pnpm install --frozen-lockfile
 COPY . .
@@ -36,6 +37,8 @@ WORKDIR /app
 # LibreDWG — чертежи DWG → DXF в спецификациях; LibreOffice — DOCX → PDF для КП, Writer и Calc — старые .doc/.rtf/.xls из писем → DOCX/XLSX.
 RUN apk add --no-cache libredwg || true
 RUN apk add --no-cache libreoffice-writer libreoffice-calc ttf-dejavu font-noto || true
+# RFD-AI-AGENT-OPT-DEAL-FILES, часть А: растеризация сканов PDF (pdftoppm, pdfinfo) и HEIC / TIFF → PNG (ImageMagick) для OptOcr.
+RUN apk add --no-cache poppler-utils imagemagick && (apk add --no-cache imagemagick-heic || true)
 # su-exec — сброс прав в entrypoint после chown томов (дефект 2б KP-DOWNLOAD).
 RUN apk add --no-cache su-exec
 ENV NODE_ENV=production MIGRATIONS_DIR=/app/migrations KP_FILES_ROOT=/data KB_MIGRATIONS_DIR=/app/kb-migrations KB_FILES_ROOT=/kb-files
