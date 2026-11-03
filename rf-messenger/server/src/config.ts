@@ -52,6 +52,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Некорректная конфигурация окружения:\n${issues}`);
   }
+  if (parsed.data.NODE_ENV === 'production' && !parsed.data.AMO_ACCOUNT_IDS.length) {
+    throw new Error('AMO_ACCOUNT_IDS обязателен в production: без него виджет примет токен любого аккаунта amo');
+  }
   if (parsed.data.OUTBOUND_PAUSE_MAX_MS < parsed.data.OUTBOUND_PAUSE_MIN_MS) {
     throw new Error('OUTBOUND_PAUSE_MAX_MS меньше OUTBOUND_PAUSE_MIN_MS');
   }

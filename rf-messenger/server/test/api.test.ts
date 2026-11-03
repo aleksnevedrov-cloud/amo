@@ -3,7 +3,7 @@ import { Redis } from 'ioredis';
 import { SignJWT } from 'jose';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/api/app.ts';
-import { ACCOUNT, CHANNEL_SECRET, CLIENT_ID, CLIENT_SECRET, event, PUBLIC_URL, setupBridge, TEST_REDIS_URL } from './helpers.ts';
+import { ACCOUNT, CHANNEL_SECRET, CLIENT_ID, CLIENT_SECRET, event, PUBLIC_URL, setupBridge, TEST_REDIS_URL, testEnv } from './helpers.ts';
 
 let redis: Redis;
 beforeAll(() => {
@@ -172,6 +172,12 @@ describe('файлы по ссылке', () => {
     expect(ok.body).toBe('hello');
     expect(ok.headers['content-type']).toBe('application/pdf');
     expect(ok.headers['x-content-type-options']).toBe('nosniff');
+    expect(ok.headers['content-disposition']).toMatch(/^inline;/);
+
+    const html = await t.files.save({ accountId: ACCOUNT, channelId: t.channel.id, data: Buffer.from('<script>1</script>'), name: 'x.html', mime: 'text/html' });
+    const hu = new URL(t.files.signedUrl(html));
+    const hr = await app.inject({ method: 'GET', url: hu.pathname + hu.search });
+    expect(hr.headers['content-disposition']).toMatch(/^attachment;/);
 
     const forged = new URL(url);
     forged.searchParams.set('e', String(Number(url.searchParams.get('e')) + 1));
@@ -179,5 +185,21 @@ describe('файлы по ссылке', () => {
 
     const old = new URL(t.files.signedUrl(f, new Date(Date.now() - 31 * 86400_000)));
     expect((await app.inject({ method: 'GET', url: old.pathname + old.search })).statusCode).toBe(410);
+  });
+});
+
+describe('прокси и окружение', () => {
+  it('rate limit считает адрес от nginx, а не подставленный клиентом X-Forwarded-For', async () => {
+    let seen = '';
+    const probe = await buildApp({ env: t.env, store: t.store, files: t.files, bridge: t.bridge, amojo: t.amojo, box: t.box, redis });
+    probe.get('/ip-probe', async (req) => { seen = req.ip; return {}; });
+    await probe.inject({ method: 'GET', url: '/ip-probe', remoteAddress: '172.18.0.1', headers: { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' } });
+    expect(seen).toBe('5.6.7.8');
+    await probe.close();
+  });
+
+  it('production без AMO_ACCOUNT_IDS не стартует', () => {
+    expect(() => testEnv({ NODE_ENV: 'production' })).toThrow(/AMO_ACCOUNT_IDS/);
+    expect(testEnv({ NODE_ENV: 'production', AMO_ACCOUNT_IDS: '123' }).AMO_ACCOUNT_IDS).toEqual([123]);
   });
 });

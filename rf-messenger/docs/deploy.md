@@ -27,12 +27,20 @@
 ## 3. Установка
 
 ```bash
-sudo mkdir -p /opt/rf-messenger && cd /opt/rf-messenger
-# код — из папки rf-messenger репозитория (git clone / архив), без остального репозитория
-cp .env.example .env && chmod 600 .env   # заполнить: openssl rand -hex 32 для ключей
+# Код — только папка rf-messenger репозитория (sparse checkout), рабочая копия в /opt/rf-messenger/src.
+sudo mkdir -p /opt/rf-messenger && sudo chown "$USER" /opt/rf-messenger && cd /opt/rf-messenger
+git clone --filter=blob:none --sparse -b claude/new-session-vpbkn3 https://github.com/aleksnevedrov-cloud/amo src
+git -C src sparse-checkout set rf-messenger
+cd src/rf-messenger
+cp .env.example .env && chmod 600 .env
+# Заполнить: POSTGRES_PASSWORD, ENCRYPTION_KEY, FILE_URL_SECRET (openssl rand -hex 32),
+# AMO_ACCOUNT_IDS — обязателен (без него сервис не стартует), AMO_CLIENT_ID/SECRET — после создания интеграции.
 docker compose up -d --build
 docker compose ps && curl -s http://127.0.0.1:3100/health
 ```
+
+До создания интеграции «РФ-Мессенджер» `AMO_CLIENT_ID` и `AMO_CLIENT_SECRET` неизвестны: временно задать
+`AMO_CLIENT_ID` любым UUID и `AMO_CLIENT_SECRET` случайной строкой — виджет не авторизуется, пока их не заменят.
 
 ## 4. nginx и сертификат
 
@@ -52,13 +60,18 @@ server {
     location / {
         proxy_pass http://127.0.0.1:3100;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Перезаписываем, а не дописываем: сервис доверяет ровно одному прокси (trustProxy).
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
+Порядок: сначала включить только блок `listen 80` (без него и без DNS сертификат не выпустить),
+`sudo nginx -t && sudo systemctl reload nginx`, затем выпустить сертификат и добавить блок `listen 443`:
+
 ```bash
+sudo mkdir -p /var/www/letsencrypt
 sudo certbot certonly --webroot -w /var/www/letsencrypt -d chat.rf-dveri.ru
 sudo nginx -t && sudo systemctl reload nginx
 ```

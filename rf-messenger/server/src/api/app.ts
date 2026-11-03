@@ -32,13 +32,21 @@ export interface ApiDeps {
   fetch?: typeof fetch;
 }
 
+/** Типы, которые безопасно показывать в браузере; остальное (html, svg, js…) — только скачиванием. */
+export function inlineMime(mime: string): boolean {
+  const m = mime.toLowerCase();
+  if (m === 'image/svg+xml') return false;
+  return /^(image|audio|video)\//.test(m) || m === 'application/pdf';
+}
+
 /** Канал Redis: процесс коннекторов перечитывает список каналов. */
 export const CHANNELS_CHANGED = 'rfm:channels-changed';
 
 export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
   const { env, store } = deps;
   const app = Fastify({
-    trustProxy: true,
+    // Ровно один прокси перед сервисом — nginx на хосте; X-Forwarded-For от клиента не доверяем.
+    trustProxy: (_addr: string, hop: number) => hop === 0,
     bodyLimit: 1024 * 1024,
     logger: { level: env.LOG_LEVEL, redact: ['req.headers["x-auth-token"]', 'req.headers["x-signature"]'] },
     ...opts,
@@ -105,7 +113,7 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     if (!data) return reply.code(404).send({ error: 'not_found' });
     return reply
       .header('content-type', file.mime)
-      .header('content-disposition', `inline; filename*=UTF-8''${encodeURIComponent(safeFileName(file.name))}`)
+      .header('content-disposition', `${inlineMime(file.mime) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(safeFileName(file.name))}`)
       .header('x-content-type-options', 'nosniff')
       .header('content-security-policy', "default-src 'none'; sandbox")
       .header('cache-control', 'private, max-age=86400')
