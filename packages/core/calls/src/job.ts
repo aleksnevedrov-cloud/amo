@@ -230,7 +230,8 @@ export async function runDaySummaryIfDue(deps: CallsDeps, accountId: number, opt
   if (!s.callsEnabled) return null;
   const now = (opts.now ?? (() => new Date()))();
   const sync = await deps.calls.getSync(accountId, DAY_SYNC_ENTITY);
-  if (!daySummaryDue(s.daySummaryTime, sync?.lastRunAt ?? null, now)) return null;
+  // «Сегодня уже запускали» — по времени запуска, которое пишет воркер (lastUpdatedAt), а не по часам БД: одинаково на сервере и в тестах.
+  if (!daySummaryDue(s.daySummaryTime, sync?.lastUpdatedAt ?? null, now)) return null;
   // Догон: дни после последнего выполненного запуска (простой воркера) — каждый своим итогом; первый запуск — только сегодня.
   const fromDay = sync?.lastRunAt ? addDays(mskDay(sync.lastRunAt), 1) : mskDay(now);
   await deps.calls.setSync(accountId, DAY_SYNC_ENTITY, { lastUpdatedAt: now, lastError: null });

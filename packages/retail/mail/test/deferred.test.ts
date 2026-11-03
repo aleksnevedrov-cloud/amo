@@ -23,7 +23,7 @@ describe('отложенные по лимиту вложения писем', (
   let limited = true;
   const analyzed: { filename: string; priority: string; leadId: number | null; bytes: number }[] = [];
   const documents = {
-    async analyze(input: { filename: string; priority: 'deferred'; leadId: number | null; bytes: Uint8Array }) {
+    async analyze(input: { filename: string; priority: string; leadId: number | null; bytes: Uint8Array }) {
       if (limited) throw Object.assign(new Error('Достигнут дневной лимит разбора файлов (100)'), { stage: 'limit' });
       analyzed.push({ filename: input.filename, priority: input.priority, leadId: input.leadId, bytes: input.bytes.byteLength });
       return { id: analyzed.length, kind: 'request', text: input.filename === 'Запрос.docx' ? TEXT : `[Файл «${input.filename}»] смета на 2 двери`, costUsd: 0.02, model: 'test-docs' };

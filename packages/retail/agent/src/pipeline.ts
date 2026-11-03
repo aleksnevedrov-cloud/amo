@@ -37,7 +37,7 @@ import type { HistoryMessage, Orchestrator, TurnResult } from './orchestrator.ts
 import { knownTopics } from './question.ts';
 import { resolveRoute } from './route.ts';
 import { formatCalculation, summarizeDialog } from './summary.ts';
-import { formatWazzupFiles } from './wazzup-files.ts';
+import { formatDealFiles, formatWazzupFiles } from './wazzup-files.ts';
 
 export interface AmoAccess {
   api: AmoApiClient;
@@ -95,6 +95,8 @@ export interface PipelineDeps {
   /** Провайдер распознавания речи по настройкам; null — выключено или нет ключа. */
   stt?(accountId: number, provider: WidgetSettings['stt']['provider']): Promise<SttProvider | null>;
   download?: typeof downloadAttachment;
+  /** RFD-AI-AGENT-DEAL-FILES: разобранные файлы сделки и ссылок Яндекс Диска (mail_attachments) — в «Файлы в переписке». */
+  dealFiles?: (accountId: number, leadId: number, since: Date) => Promise<{ filename: string; source: string; extractedText: string | null; createdAt: Date }[]>;
   /**
    * RFD-AI-AGENT-FILES-PRIORITY: файл клиента (в т. ч. вложение письма из карточки amo через Salesbot), упёршийся в дневной
    * лимит, — на том и в очередь отложенных (mail_attachments, статус deferred): разберётся автоматически, текст уйдёт в историю
@@ -423,7 +425,7 @@ export class DialogPipeline {
     // Переписка менеджера с клиентом в мессенджере (Wazzup) — по телефону основного контакта сделки.
     this.lastMessengerCount = 0;
     this.lastFileTexts = [];
-    const messengerText = await this.messengerHistory(accountId, access, contactRef?.id ?? null, history);
+    const messengerText = await this.messengerHistory(accountId, leadId, access, contactRef?.id ?? null, history);
 
     let result: TurnResult;
     try {
@@ -568,34 +570,41 @@ export class DialogPipeline {
 
   private async messengerHistory(
     accountId: number,
+    leadId: number,
     access: AmoAccess,
     contactId: number | null,
     own: { role: string; text: string }[],
   ): Promise<string | null> {
     this.clientPhone = null;
-    if (!this.d.wazzup || !contactId) return null;
+    const since = new Date((this.d.now?.() ?? new Date()).getTime() - WAZZUP_FILES_DAYS * 86_400_000);
+    // RFD-AI-AGENT-DEAL-FILES: файлы, приложенные менеджером к сделке, и файлы по ссылкам Яндекс Диска — те же 30 дней.
+    const dealLines = formatDealFiles(this.d.dealFiles ? await this.d.dealFiles(accountId, leadId, since).catch(() => []) : []);
+    let text: string | null = null;
+    let fileLines: string[] = [];
     try {
-      const contact = await access.api.getContact(contactId);
+      const contact = this.d.wazzup && contactId ? await access.api.getContact(contactId) : null;
       const raw = contact?.custom_fields_values?.find((f) => f.field_code === 'PHONE')?.values?.[0]?.value;
       const phone = normalizePhone(typeof raw === 'string' ? raw : null);
       this.clientPhone = phone;
-      if (!phone) return null;
-      const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
-      // Файлы переписки за 30 дней (КП менеджера, фото и документы клиента) — с извлечённым текстом (RFD-AI-AGENT-WA-FILES).
-      const files = this.d.wazzup.filesByPhones ? await this.d.wazzup.filesByPhones(accountId, [phone], new Date((this.d.now?.() ?? new Date()).getTime() - WAZZUP_FILES_DAYS * 86_400_000), 30).catch(() => []) : [];
-      if (!items.length && !files.length) return null;
-      // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
-      const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
-      const { text, count } = formatWazzupHistory(items, ownTexts);
-      this.lastMessengerCount = count;
-      const fileLines = formatWazzupFiles(files);
-      this.lastFileTexts = files.map((f) => f.file.text ?? '').filter(Boolean);
-      if (!fileLines.length) return text;
-      return `${text ? `${text}\n\n` : ''}Файлы в переписке (содержимое извлечено автоматически; КП менеджера — опирайтесь на его позиции, цены и сроки):\n${fileLines.join('\n')}`;
+      if (this.d.wazzup && phone) {
+        const items = await this.d.wazzup.historyByPhone(accountId, phone, 40);
+        // Файлы переписки за 30 дней (КП менеджера, фото и документы клиента) — с извлечённым текстом (RFD-AI-AGENT-WA-FILES).
+        const files = this.d.wazzup.filesByPhones ? await this.d.wazzup.filesByPhones(accountId, [phone], since, 30).catch(() => []) : [];
+        // Исходящие, совпадающие с ответами агента, уже есть в истории диалога — не дублируем.
+        const ownTexts = new Set(own.filter((m) => m.role !== 'client').map((m) => m.text.trim()));
+        const h = formatWazzupHistory(items, ownTexts);
+        text = h.text;
+        this.lastMessengerCount = h.count;
+        fileLines = formatWazzupFiles(files);
+        this.lastFileTexts = files.map((f) => f.file.text ?? '').filter(Boolean);
+      }
     } catch (err) {
       await this.d.journal.add({ accountId, kind: 'error', summary: `Wazzup: не удалось собрать историю мессенджера: ${(err as Error).message}` }).catch(() => undefined);
-      return null;
     }
+    this.lastFileTexts = [...this.lastFileTexts, ...dealLines.texts];
+    const lines = [...fileLines, ...dealLines.lines];
+    if (!lines.length) return text;
+    return `${text ? `${text}\n\n` : ''}Файлы в переписке (содержимое извлечено автоматически; КП менеджера — опирайтесь на его позиции, цены и сроки):\n${lines.join('\n')}`;
   }
 
   private async incomingTexts(t: Turn): Promise<string[]> {

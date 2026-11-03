@@ -135,6 +135,28 @@ describe('файлы Wazzup в контексте агента (RFD-AI-AGENT-WA-
   });
 });
 
+describe('файлы сделки и ссылки Диска в контексте агента (RFD-AI-AGENT-DEAL-FILES)', () => {
+  it('разобранный файл сделки и файл по ссылке Яндекс Диска → строки в «Файлах в переписке», цифры из них проходят пост-фильтр', async () => {
+    const wz = wazzupFake([]);
+    const t = await setup([text('По проекту 12 дверей, итого 148 000 ₽ по счёту № 126.')], wz);
+    const pipeline = new DialogPipeline({
+      ...t,
+      dealFiles: async (_a, leadId) => (leadId === lead ? [
+        { filename: 'Двери наружные Данилково (4).pdf', source: 'deal_file', extractedText: '[Документ «Двери наружные Данилково (4).pdf»] 12 наружных дверей, 2100×900, сталь', createdAt: new Date('2026-11-03T09:16:00Z') },
+        { filename: 'Счет покупателю № 126.pdf', source: 'yadisk', extractedText: '[Документ «Счет покупателю № 126.pdf»] Итого к оплате 148 000 ₽', createdAt: new Date('2026-11-03T09:14:00Z') },
+        { filename: 'ещё не разобран.pdf', source: 'deal_file', extractedText: null, createdAt: new Date('2026-11-03T09:16:00Z') },
+      ] : []),
+    });
+    await t.dialog.enqueue(ACC, lead, 'Сколько дверей по проекту и какая сумма по счёту?', 'https://test.amocrm.ru/c/1', null);
+    const out: { status: string; reason?: string } = await pipeline.processLead(ACC, lead);
+    expect([out.status, out.reason]).toEqual(['replied', undefined]);
+    const all = JSON.stringify(t.llm.requests[0]!.system ?? '') + JSON.stringify(t.llm.requests[0]!.messages);
+    expect(all).toContain('Менеджер приложил файл к сделке: Двери наружные Данилково (4).pdf — [Документ «Двери наружные Данилково (4).pdf»] 12 наружных дверей, 2100×900, сталь');
+    expect(all).toContain('Файл по ссылке Яндекс Диска: Счет покупателю № 126.pdf — [Документ «Счет покупателю № 126.pdf»] Итого к оплате 148 000 ₽');
+    expect(all).not.toContain('ещё не разобран.pdf');
+  });
+});
+
 describe('вложения клиента из Wazzup (Salesbot их не передаёт)', () => {
   it('сообщение без текста → фото из вебхука разбирается, журнал note, вложение помечено использованным', async () => {
     const wz = wazzupFake([{ id: 501, contentUri: 'https://store.wazzup24.com/x/IMG_2.jpg', contentType: 'image', text: '[image]', sentAt: new Date() }]);

@@ -7,3 +7,4 @@ export * from './link.ts';
 export * from './poller.ts';
 export * from './attachments.ts';
 export * from './deferred.ts';
+export * from './deal-files.ts';

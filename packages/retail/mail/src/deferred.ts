@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { storagePathFor } from './attachments.ts';
 import type { AmoApiClient } from '@core/amo';
-import type { DialogRepo, JournalRepo, MailAttachmentsRepo, SettingsRepo, WidgetSettings } from '@core/db';
+import type { DialogRepo, JournalRepo, MailAttachmentSource, MailAttachmentsRepo, SettingsRepo, WidgetSettings } from '@core/db';
 import { DEFERRED_MARK } from './poller.ts';
 
 /**
@@ -20,7 +20,7 @@ export interface DeferredMailDeps {
   dialog: Pick<DialogRepo, 'clientMessagesMentioning' | 'updateText' | 'addMessage'>;
   amo(accountId: number): Promise<Pick<AmoApiClient, 'openLeadTasks' | 'updateTaskText'>>;
   documents: {
-    analyze(input: { accountId: number; leadId: number | null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings; priority: 'deferred' }): Promise<{ id: number; kind: string; text: string; costUsd: number; model: string }>;
+    analyze(input: { accountId: number; leadId: number | null; source: 'email'; filename: string; mime: string; bytes: Uint8Array; settings: WidgetSettings; priority: 'new' | 'backlog' | 'deferred' }): Promise<{ id: number; kind: string; text: string; costUsd: number; model: string }>;
   } | null;
   /** Чтение файла с тома (в тестах подменяется). */
   readFile?: (path: string) => Promise<Uint8Array>;
@@ -78,10 +78,18 @@ export async function runDeferredMailFiles(d: DeferredMailDeps, log: { info(obj:
         await d.journal.add({ accountId, ...(row.leadId ? { leadId: row.leadId } : {}), kind: 'error', summary: `Отложенное вложение «${row.filename}» не разобрано: файл на томе не прочитан — ${(err as Error).message}`, details: { attachmentId: row.id, path: row.storagePath } });
         continue;
       }
+      // RFD-AI-AGENT-DEAL-FILES: файл сделки / ссылка Диска — свежий (24 ч) идёт как «новый», старый — догрузка; в историю и задачу
+      // не дописывается: агент читает его из «Файлов в переписке» (mail_attachments по сделке).
+      const dealFile = row.source === 'deal_file' || row.source === 'yadisk';
+      const priority: 'new' | 'backlog' | 'deferred' = dealFile ? (Date.now() - new Date(row.createdAt).getTime() <= 24 * 60 * 60_000 ? 'new' : 'backlog') : 'deferred';
       try {
-        const res = await d.documents.analyze({ accountId, leadId: row.leadId, source: 'email', filename: row.filename, mime: row.mime, bytes, settings, priority: 'deferred' });
+        const res = await d.documents.analyze({ accountId, leadId: row.leadId, source: 'email', filename: row.filename, mime: row.mime, bytes, settings, priority });
         await d.attachments.setExtract(row.id, { text: res.text });
         r.done++;
+        if (dealFile) {
+          await d.journal.add({ accountId, ...(row.leadId ? { leadId: row.leadId } : {}), kind: 'deal_file', summary: `Разобран ${row.source === 'yadisk' ? 'файл по ссылке Яндекс Диска' : 'файл сделки'} «${row.filename}» (${res.kind}) — виден агенту в «Файлах в переписке»`, details: { documentId: res.id, model: res.model, attachmentId: row.id, source: row.source, priority, text: res.text.slice(0, 2000) }, costUsd: res.costUsd, costRub: res.costUsd * settings.billing.usdRubRate });
+          continue;
+        }
         let taskId: number | null = null;
         let context = 'в историю не дописан (сделка не привязана)';
         if (row.leadId) {
@@ -101,7 +109,7 @@ export async function runDeferredMailFiles(d: DeferredMailDeps, log: { info(obj:
         }
         r.failed++;
         await d.attachments.setExtract(row.id, { error: (err as Error).message });
-        await d.journal.add({ accountId, ...(row.leadId ? { leadId: row.leadId } : {}), kind: 'error', summary: `Отложенное вложение «${row.filename}» не разобрано: ${(err as Error).message}`, details: { attachmentId: row.id } });
+        await d.journal.add({ accountId, ...(row.leadId ? { leadId: row.leadId } : {}), kind: dealFile ? 'deal_file_error' : 'error', summary: `${dealFile ? 'Файл сделки' : 'Отложенное вложение'} «${row.filename}» не разобран: ${(err as Error).message}`, details: { attachmentId: row.id, source: row.source } });
       }
     }
   }
@@ -144,10 +152,13 @@ export interface DeferToDiskDeps {
  * команде), — на том и в очередь отложенных (mail_attachments, статус deferred). Повторно тот же файл (ключ по ссылке / uuid,
  * имени и размеру) не дублируется. Возвращает id строки и создана ли она.
  */
-export async function deferFileToDisk(d: DeferToDiskDeps, input: { accountId: number; leadId: number | null; filename: string; mime: string; bytes: Uint8Array; key: string; error: string }): Promise<{ id: number; created: boolean }> {
+/** message_id строки очереди по ключу (amo-file:<uuid>, yadisk:<key>:<path>, ссылка Salesbot) — по нему проверяется, стоит ли файл уже. */
+export const deferredKeyId = (key: string): string => `deferred:${createHash('sha1').update(key).digest('hex').slice(0, 24)}`;
+
+export async function deferFileToDisk(d: DeferToDiskDeps, input: { accountId: number; leadId: number | null; filename: string; mime: string; bytes: Uint8Array; key: string; error: string; source?: MailAttachmentSource }): Promise<{ id: number; created: boolean }> {
   const now = d.now?.() ?? new Date();
   const path = storagePathFor(d.root, input.accountId, input.filename, now);
-  const row = await d.attachments.insert({ accountId: input.accountId, leadId: input.leadId, messageUid: null, messageId: `deferred:${createHash('sha1').update(input.key).digest('hex').slice(0, 24)}`, filename: input.filename, mime: input.mime || 'application/octet-stream', sizeBytes: input.bytes.byteLength, storagePath: path });
+  const row = await d.attachments.insert({ accountId: input.accountId, leadId: input.leadId, messageUid: null, messageId: deferredKeyId(input.key), filename: input.filename, mime: input.mime || 'application/octet-stream', sizeBytes: input.bytes.byteLength, storagePath: path, source: input.source ?? 'mail' });
   if (!row.created) return row;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, input.bytes);

@@ -268,6 +268,19 @@ export const widgetSettingsSchema = z
       })
       .strict()
       .default({}),
+    /** RFD-AI-AGENT-DEAL-FILES: агент сам читает файлы сделки и ссылки Яндекс Диска из примечаний. */
+    dealFiles: z
+      .object({
+        enabled: z.boolean().default(true),
+        pipelineIds: z.array(z.number().int().positive()).max(50).default([1873498]),
+        /** Этапы, где файлы не берём: «Успешно реализовано» и «Отказ». */
+        skipStatusIds: z.array(z.number().int()).max(50).default([142, 143]),
+        yandexDisk: z.boolean().default(true),
+        maxFileMb: z.number().int().min(1).max(100).default(25),
+        maxFilesPerNote: z.number().int().min(1).max(50).default(10),
+      })
+      .strict()
+      .default({}),
     /** RFD-AI-AGENT-REFUSAL-ANALYSIS: анализ сделки при переносе в «Отказ». */
     refusal: z
       .object({

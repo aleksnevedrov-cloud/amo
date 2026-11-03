@@ -177,7 +177,12 @@ export async function collectLeadTimeline(deps: CallsDeps, amo: AmoRaw, client: 
   if (src.email && deps.sources?.mailFiles) {
     try {
       for (const f of await deps.sources.mailFiles(input.accountId, input.leadId, input.since, input.until)) {
-        const file: TimelineFile = f.text ? { name: f.name, text: f.text } : { name: f.name, text: null, note: f.status === 'failed' ? 'не разобран' : f.status === 'pending' ? 'разбор ещё идёт' : 'текста нет' };
+        const file: TimelineFile = f.text ? { name: f.name, text: f.text } : { name: f.name, text: null, note: f.status === 'failed' ? 'не разобран' : f.status === 'pending' || f.status === 'deferred' ? 'разбор ещё идёт' : 'текста нет' };
+        // RFD-AI-AGENT-DEAL-FILES: файл сделки от менеджера / по ссылке Диска — своей записью, как файл WhatsApp от менеджера.
+        if (f.source === 'deal_file' || f.source === 'yadisk') {
+          deduped.push({ id: `mailfile:${f.id}`, at: f.at, source: 'note', direction: 'out', author: 'manager', text: f.source === 'yadisk' ? 'файл по ссылке Яндекс Диска' : 'файл приложен к сделке', files: [file] });
+          continue;
+        }
         const mail = deduped.find((it) => it.source === 'email' && it.direction === 'in' && Math.abs(it.at.getTime() - f.at.getTime()) <= 10 * 60_000 && !(it.files ?? []).some((x) => x.name === f.name));
         if (mail) mail.files = [...(mail.files ?? []), file];
         else deduped.push({ id: `mailfile:${f.id}`, at: f.at, source: 'email', direction: 'in', author: 'client', subject: `вложение ${f.name}`, text: '', files: [file] });

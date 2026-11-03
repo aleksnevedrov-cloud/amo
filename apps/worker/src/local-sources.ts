@@ -32,6 +32,6 @@ export function buildLocalSources(db: Db): LocalSources {
         at: m.createdAt,
       })),
     activeLeads: async (accountId, since, until) => [...new Set([...(await wazzup.leadsActiveBetween(accountId, since, until)), ...(await dialog.leadsActiveBetween(accountId, since, until))])],
-    mailFiles: async (accountId, leadId, since, until) => (await mailAttachments.listByLeadBetween(accountId, leadId, since, until)).map((a) => ({ id: String(a.id), at: a.createdAt, messageId: a.messageId, name: a.filename, text: a.extractedText, status: a.extractStatus })),
+    mailFiles: async (accountId, leadId, since, until) => (await mailAttachments.listByLeadBetween(accountId, leadId, since, until)).map((a) => ({ id: String(a.id), at: a.createdAt, messageId: a.messageId, name: a.filename, text: a.extractedText, status: a.extractStatus, source: a.source })),
   };
 }

@@ -206,3 +206,21 @@ export function formatWazzupFiles(items: { direction: 'in' | 'out'; sentAt: Date
     return `[${when}] ${who} «${name}»${body}`;
   });
 }
+
+/**
+ * RFD-AI-AGENT-DEAL-FILES: строки о файлах сделки и ссылках Яндекс Диска для контекста агента: «Менеджер приложил файл к сделке:
+ * <имя> — <текст>», «Файл по ссылке Яндекс Диска: <имя> — <текст>»; тексты — в допустимые источники пост-фильтра.
+ */
+export function formatDealFiles(items: { filename: string; source: string; extractedText: string | null; createdAt: Date }[], maxChars = 1500): { lines: string[]; texts: string[] } {
+  const lines: string[] = [];
+  const texts: string[] = [];
+  for (const f of items) {
+    if (!f.extractedText) continue;
+    const when = new Date(f.createdAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const text = f.extractedText.replace(/\s+/g, ' ').trim();
+    const who = f.source === 'yadisk' ? 'Файл по ссылке Яндекс Диска' : 'Менеджер приложил файл к сделке';
+    lines.push(`[${when}] ${who}: ${f.filename} — ${text.length > maxChars ? `${text.slice(0, maxChars)}…` : text}`);
+    texts.push(f.extractedText);
+  }
+  return { lines, texts };
+}
