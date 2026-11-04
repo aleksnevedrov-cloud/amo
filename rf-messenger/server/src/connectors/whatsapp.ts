@@ -188,18 +188,22 @@ export class WhatsAppConnector implements Connector {
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false,
       generateHighQualityLinkPreview: false,
       getMessage: async () => undefined,
     });
     this.sock = sock;
-    if (!auth.registered) await sink.status('starting', 'Отсканируйте QR-код в настройках виджета');
+    let qrShown = false;
+    if (!auth.registered) await sink.status('starting', 'Подключение к WhatsApp…');
 
     sock.ev.on('creds.update', () => void auth.saveCreds());
 
     sock.ev.on('connection.update', (u) => {
       void (async () => {
-        if (u.qr) await this.d.onQr(u.qr);
+        if (u.qr) {
+          qrShown = true;
+          await this.d.onQr(u.qr);
+          await sink.status('starting', 'Отсканируйте QR-код в настройках виджета');
+        }
         if (u.connection === 'open') {
           this.failures = 0;
           await this.d.onQr(null);
@@ -226,7 +230,8 @@ export class WhatsAppConnector implements Connector {
             await sink.status('error', 'Сессия открыта в другом месте — проверьте «Связанные устройства» на телефоне');
             return;
           }
-          if (!auth.registered && code === DisconnectReason.timedOut) {
+          // QR показывали, но его не отсканировали. Если QR так и не пришёл — это обрыв связи, переподключаемся.
+          if (!auth.registered && qrShown && code === DisconnectReason.timedOut) {
             await this.d.onQr(null);
             await sink.status('session_ended', 'QR-код не отсканирован вовремя — нажмите «Новый QR»');
             return;

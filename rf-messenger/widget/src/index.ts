@@ -94,53 +94,141 @@ export class MessengerApi {
 const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ENTITIES[c] ?? c);
 
-const STATUS_COLOR: Record<ChannelView['status'], string> = {
-  starting: '#8a8a8a',
-  connected: '#2e9e44',
-  no_phone: '#d08a00',
-  session_ended: '#c0392b',
-  error: '#c0392b',
+/** Стили виджета: плоские карточки в духе amoCRM, все классы с префиксом rfm. */
+const CSS = `
+.rfm{font-size:14px;line-height:1.5;color:#2e3640;max-width:760px}
+.rfm *{box-sizing:border-box}
+.rfm-sec{font-size:12px;color:#8a96a3;margin:20px 0 8px;letter-spacing:.02em}
+.rfm-banner{display:flex;align-items:center;gap:12px;border-radius:10px;padding:12px 14px;margin-bottom:4px}
+.rfm-banner>svg{width:20px;height:20px;flex:none}
+.rfm-banner b{display:block;font-weight:500}
+.rfm-banner small{font-size:13px}
+.rfm-ok-bg{background:#eaf6ec;color:#256b34}
+.rfm-warn-bg{background:#fff6e5;color:#8a5a00}
+.rfm-err-bg{background:#fdecec;color:#a12b2b}
+.rfm-card{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:12px 14px}
+.rfm-list{display:flex;flex-direction:column;gap:8px}
+.rfm-ico{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;font-size:12px;font-weight:600}
+.rfm-ico svg{width:20px;height:20px}
+.rfm-wa{background:#e6f6ea;color:#1f8f3a}
+.rfm-tg{background:#e6f1fb;color:#1e6fb8}
+.rfm-off{background:#f1f3f5;color:#9aa5b1}
+.rfm-main{flex:1;min-width:0}
+.rfm-main b{display:block;font-weight:500}
+.rfm-sub{font-size:13px;color:#6b7785;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rfm-detail{font-size:12px;margin-top:2px}
+.rfm-pill{font-size:12px;padding:3px 10px;border-radius:999px;white-space:nowrap}
+.rfm-btn{font-size:13px;padding:6px 12px;border:1px solid #cfd7df;border-radius:6px;background:#fff;color:#2e3640;cursor:pointer;white-space:nowrap}
+.rfm-btn:hover{background:#f5f7f9}
+.rfm-btn-primary{background:#4c8bf5;border-color:#4c8bf5;color:#fff}
+.rfm-btn-primary:hover{background:#3b7ae6}
+.rfm-icon-btn{width:32px;height:32px;padding:0;display:flex;align-items:center;justify-content:center;color:#8a96a3}
+.rfm-icon-btn svg{width:16px;height:16px}
+.rfm-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
+.rfm-tile{display:flex;flex-direction:column;align-items:flex-start;gap:6px;background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.rfm-tile:hover{border-color:#4c8bf5}
+.rfm-tile b{font-weight:500}
+.rfm-tile small{font-size:12px;color:#6b7785}
+.rfm-tile-off{background:#f7f8fa;cursor:default}
+.rfm-tile-off:hover{border-color:#e3e8ee}
+.rfm-tile-off b{color:#6b7785}
+.rfm-qr{display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:16px;align-items:center;background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:14px;margin-top:8px}
+.rfm-qr ol{margin:6px 0 0;padding-left:18px;font-size:13px;color:#6b7785;line-height:1.8}
+.rfm-qr-img{width:200px;height:200px;border-radius:8px;background:#f5f7f9;display:flex;align-items:center;justify-content:center;color:#8a96a3;font-size:13px;text-align:center;padding:8px}
+.rfm-qr-img svg{width:100%;height:100%}
+.rfm-form{display:flex;gap:8px;margin-top:8px;background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:12px 14px;align-items:center;flex-wrap:wrap}
+.rfm-form input{flex:1;min-width:220px;height:34px;padding:0 10px;border:1px solid #cfd7df;border-radius:6px;font:inherit}
+.rfm-hint{font-size:12px;color:#8a96a3;width:100%}
+`;
+
+const ICON = {
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>',
+  send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/><path d="m10 13 4-4"/></svg>',
+  user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-6 8-6s6.5 2 8 6"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 7h12M3 12h18M3 17h9"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/></svg>',
 };
 
+/** Короткая метка статуса и её цвет. */
+export function statusPill(c: Pick<ChannelView, 'kind' | 'status'>): { text: string; cls: string } {
+  if (c.status === 'connected') return { text: 'Подключён', cls: 'rfm-ok-bg' };
+  if (c.status === 'starting') return { text: c.kind === 'whatsapp' ? 'Ждёт QR' : 'Подключается', cls: 'rfm-warn-bg' };
+  if (c.status === 'no_phone') return { text: 'Нет связи', cls: 'rfm-warn-bg' };
+  if (c.status === 'session_ended') return { text: 'Сессия завершена', cls: 'rfm-err-bg' };
+  return { text: 'Ошибка', cls: 'rfm-err-bg' };
+}
+
+function channelIcon(kind: string): string {
+  if (kind === 'whatsapp') return `<div class="rfm-ico rfm-wa">${ICON.chat}</div>`;
+  if (kind === 'telegram_bot' || kind === 'telegram_user') return `<div class="rfm-ico rfm-tg">${ICON.send}</div>`;
+  return `<div class="rfm-ico rfm-off">${ICON.more}</div>`;
+}
+
+function channelCard(c: ChannelView): string {
+  const pill = statusPill(c);
+  const detailColor = c.status === 'error' || c.status === 'session_ended' ? '#a12b2b' : '#8a5a00';
+  const detail = c.statusDetail && c.status !== 'connected' ? `<div class="rfm-detail" style="color:${detailColor}">${esc(c.statusDetail)}</div>` : '';
+  const qrBtn = c.kind === 'whatsapp' && c.status !== 'connected' ? `<button type="button" class="rfm-btn" data-rfm="qr" data-id="${c.id}">Показать QR</button>` : '';
+  return `<div class="rfm-card">
+  ${channelIcon(c.kind)}
+  <div class="rfm-main"><b>${esc(c.kindText)}</b><div class="rfm-sub">${esc(c.title)}</div>${detail}</div>
+  <span class="rfm-pill ${pill.cls}">${esc(pill.text)}</span>
+  ${qrBtn}
+  <button type="button" class="rfm-btn rfm-icon-btn" data-rfm="delete" data-id="${c.id}" aria-label="Отключить канал" title="Отключить канал">${ICON.trash}</button>
+</div>`;
+}
+
+function amojoBanner(a: StatusView['amojo']): string {
+  if (!a.configured)
+    return `<div class="rfm-banner rfm-warn-bg">${ICON.plug}<div><b>Канал чатов ещё не зарегистрирован в amoCRM</b><small>После регистрации техподдержкой amo здесь появится кнопка подключения.</small></div></div>`;
+  if (a.connected)
+    return `<div class="rfm-banner rfm-ok-bg">${ICON.plug}<div><b>amoCRM подключён</b><small>Канал чатов RFMessenger работает в этом аккаунте.</small></div></div>`;
+  return `<div class="rfm-banner rfm-warn-bg">${ICON.plug}<div style="flex:1"><b>Канал чатов не подключён к аккаунту</b><small>Без этого сообщения не попадут в сделки.</small></div><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="connect">Подключить к amoCRM</button></div>`;
+}
+
 /** Каналы следующих этапов — видны, но выключены. */
-const PLANNED = ['Telegram личный — этап 3', 'MAX, VK, Авито — этап 4'];
+const PLANNED = [
+  { icon: ICON.user, title: 'Telegram личный', note: 'Скоро' },
+  { icon: ICON.more, title: 'MAX, VK, Авито', note: 'Скоро' },
+];
 
 export function renderHtml(s: StatusView, notice: { error?: string; info?: string } = {}): string {
-  const amojo = !s.amojo.configured
-    ? '<p class="rfm-warn">Канал чатов ещё не зарегистрирован в amoCRM. После регистрации техподдержкой amo здесь появится кнопка подключения.</p>'
-    : s.amojo.connected
-      ? '<p class="rfm-ok">Канал чатов подключён к аккаунту amoCRM.</p>'
-      : '<p class="rfm-warn">Канал чатов не подключён к аккаунту. <button type="button" class="button-input" data-rfm="connect">Подключить к amoCRM</button></p>';
-  const rows = s.channels.length
-    ? s.channels
-        .map(
-          (c) => `<tr>
-  <td>${esc(c.kindText)}</td>
-  <td>${esc(c.title)}</td>
-  <td><span style="color:${STATUS_COLOR[c.status]}">● ${esc(c.statusText)}</span>${c.statusDetail ? `<br><small>${esc(c.statusDetail)}</small>` : ''}</td>
-  <td>${c.kind === 'whatsapp' && c.status !== 'connected' ? `<button type="button" class="button-input" data-rfm="qr" data-id="${c.id}">Показать QR</button> ` : ''}<button type="button" class="button-input" data-rfm="delete" data-id="${c.id}">Отключить</button></td>
-</tr>`,
-        )
-        .join('')
-    : '<tr><td colspan="4">Каналов пока нет</td></tr>';
-  return `<div class="rfm">
-<style>.rfm{font-size:14px;max-width:760px}.rfm table{width:100%;border-collapse:collapse;margin:8px 0}.rfm td,.rfm th{border-bottom:1px solid #e5e5e5;padding:6px;text-align:left;vertical-align:top}.rfm-ok{color:#2e9e44}.rfm-warn{color:#b26b00}.rfm-err{color:#c0392b}.rfm input[type=password]{width:360px;max-width:100%;padding:6px}.rfm small{color:#777}.rfm-qr svg{width:264px;height:264px;display:block;margin:8px 0}</style>
-${notice.error ? `<p class="rfm-err">${esc(notice.error)}</p>` : ''}${notice.info ? `<p class="rfm-ok">${esc(notice.info)}</p>` : ''}
-<h3>amoCRM</h3>${amojo}
-<h3>Каналы</h3>
-<table><thead><tr><th>Тип</th><th>Канал</th><th>Статус</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-<div data-rfm-qr></div>
-<h3>Подключить WhatsApp</h3>
-<p>Тестовый или рабочий номер: на телефоне WhatsApp → «Связанные устройства» → «Привязка устройства» и отсканируйте QR.</p>
-<button type="button" class="button-input button-input_blue" data-rfm="add-wa">Подключить WhatsApp</button>
-<h3>Подключить Telegram-бота</h3>
-<form data-rfm="add-bot">
-  <p>Токен от @BotFather. После сохранения токен не показывается.</p>
-  <input type="password" name="token" autocomplete="off" placeholder="123456789:AA…" required>
-  <button type="submit" class="button-input button-input_blue">Подключить</button>
-</form>
-<h3>Скоро</h3><ul>${PLANNED.map((p) => `<li><small>${esc(p)}</small></li>`).join('')}</ul>
+  const banner = notice.error
+    ? `<div class="rfm-banner rfm-err-bg" style="margin-bottom:8px"><div>${esc(notice.error)}</div></div>`
+    : notice.info
+      ? `<div class="rfm-banner rfm-ok-bg" style="margin-bottom:8px"><div>${esc(notice.info)}</div></div>`
+      : '';
+  const cards = s.channels.length
+    ? `<div class="rfm-list">${s.channels.map(channelCard).join('')}</div>`
+    : '<div class="rfm-card"><div class="rfm-main"><div class="rfm-sub">Каналов пока нет — добавьте первый ниже</div></div></div>';
+  const tiles = `<div class="rfm-tiles">
+  <button type="button" class="rfm-tile" data-rfm="add-wa"><div class="rfm-ico rfm-wa">${ICON.chat}</div><b>WhatsApp</b><small>По QR-коду</small></button>
+  <button type="button" class="rfm-tile" data-rfm="show-bot"><div class="rfm-ico rfm-tg">${ICON.send}</div><b>Telegram-бот</b><small>По токену</small></button>
+  ${PLANNED.map((p) => `<div class="rfm-tile rfm-tile-off"><div class="rfm-ico rfm-off">${p.icon}</div><b>${esc(p.title)}</b><small>${esc(p.note)}</small></div>`).join('')}
 </div>`;
+  return `<div class="rfm">
+<style>${CSS}</style>
+${banner}${amojoBanner(s.amojo)}
+<div class="rfm-sec">Каналы · ${s.channels.length}</div>
+${cards}
+<div data-rfm-qr></div>
+<div class="rfm-sec">Добавить канал</div>
+${tiles}
+<form data-rfm="add-bot" class="rfm-form" style="display:none">
+  <input type="password" name="token" autocomplete="off" placeholder="123456789:AA…" required aria-label="Токен Telegram-бота">
+  <button type="submit" class="rfm-btn rfm-btn-primary">Подключить бота</button>
+  <div class="rfm-hint">Токен выдаёт @BotFather. После сохранения он не показывается.</div>
+</form>
+</div>`;
+}
+
+/** Карточка QR WhatsApp. */
+export function renderQr(q: WaQrView): string {
+  const steps = '<ol><li>Откройте WhatsApp на телефоне</li><li>Настройки → Связанные устройства</li><li>Привязка устройства</li><li>Наведите камеру на код</li></ol>';
+  const detail = q.statusDetail ? `<div class="rfm-detail" style="color:#6b7785">${esc(q.statusDetail)}</div>` : '';
+  const img = q.svg ? q.svg : `<span>${esc(q.status === 'session_ended' ? 'Код устарел' : 'Получаем код…')}</span>`;
+  return `<div class="rfm-qr"><div><b style="font-weight:500">Подключение WhatsApp</b>${steps}${detail}<div class="rfm-hint" style="margin-top:6px">Код обновляется автоматически</div></div><div class="rfm-qr-img">${img}</div></div>`;
 }
 
 /** Страница настроек: загрузка статуса и обработка кнопок. */
@@ -177,16 +265,13 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
           stopPoll();
           return void draw({ info: `WhatsApp подключён: ${q.title}` });
         }
-        const detail = q.statusDetail ? `<br><small>${esc(q.statusDetail)}</small>` : '';
-        box.innerHTML = q.svg
-          ? `<div class="rfm-qr"><p><b>${esc(q.title)}</b>: отсканируйте QR телефоном — WhatsApp → «Связанные устройства» → «Привязка устройства».</p>${q.svg}${detail}</div>`
-          : `<div class="rfm-qr"><p>${esc(q.statusText)}…${detail}</p></div>`;
+        box.innerHTML = renderQr(q);
       } catch (err) {
-        box.innerHTML = `<p class="rfm-err">${esc((err as Error).message)}</p>`;
+        box.innerHTML = `<div class="rfm-banner rfm-err-bg" style="margin-top:8px"><div>${esc((err as Error).message)}</div></div>`;
       }
       if (Date.now() - started > 180_000) {
         stopPoll();
-        box.innerHTML = '<p class="rfm-warn">Время на сканирование вышло. Нажмите «Показать QR» ещё раз.</p>';
+        box.innerHTML = '<div class="rfm-banner rfm-warn-bg" style="margin-top:8px"><div>Время на сканирование вышло. Нажмите «Показать QR» ещё раз.</div></div>';
       }
     };
     void tick();
@@ -195,6 +280,13 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
   el.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm]');
     if (!btn) return;
+    if (btn.dataset.rfm === 'show-bot') {
+      const form = el.querySelector<HTMLFormElement>('form[data-rfm="add-bot"]');
+      if (form) {
+        form.style.display = 'flex';
+        form.querySelector('input')?.focus();
+      }
+    }
     if (btn.dataset.rfm === 'add-wa') {
       stopPoll();
       void (async () => {

@@ -1,12 +1,17 @@
+import { setDefaultResultOrder } from 'node:dns';
 import { Queue, Worker } from 'bullmq';
 import { CHANNELS_CHANGED } from './api/app.ts';
 import { Bridge, type Logger } from './bridge.ts';
 import { loadEnv } from './config.ts';
 import { ConnectorHost, defaultFactory } from './connectors/host.ts';
+import { TelegramBotConnector } from './connectors/telegram-bot.ts';
 import { WhatsAppConnector } from './connectors/whatsapp.ts';
 import { migrate } from './db.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobData, type JobName, type JobQueue } from './queue.ts';
+
+// На сервере нет рабочего IPv6: без этого запросы к Telegram/WhatsApp периодически зависают на AAAA-адресах.
+setDefaultResultOrder('ipv4first');
 
 /**
  * Процесс connectors: держит сессии каналов, принимает входящие, выполняет очередь отправки.
@@ -53,6 +58,9 @@ host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, cred
       onIdentity: (phone) => core.store.setChannelIdentity(channel.id, phone, `WhatsApp ${phone}`),
       log: (level, msg) => log[level]({ channelId: channel.id }, msg),
     });
+  }
+  if (channel.kind === 'telegram_bot' && creds.token) {
+    return new TelegramBotConnector(creds.token, { onError: (err) => log.warn({ channelId: channel.id, err: (err as Error).message }, 'telegram: ошибка опроса') });
   }
   return defaultFactory(channel, creds);
 });

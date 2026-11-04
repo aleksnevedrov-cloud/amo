@@ -1,3 +1,4 @@
+import { setDefaultResultOrder } from 'node:dns';
 import { Queue } from 'bullmq';
 import { buildApp } from './api/app.ts';
 import { Bridge } from './bridge.ts';
@@ -5,6 +6,9 @@ import { loadEnv } from './config.ts';
 import { migrate } from './db.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobQueue } from './queue.ts';
+
+// На сервере нет рабочего IPv6: без этого запросы к Telegram/WhatsApp периодически зависают на AAAA-адресах.
+setDefaultResultOrder('ipv4first');
 
 /** Процесс api: вебхук amo, API виджета, раздача файлов. Сообщения в каналы отправляет процесс connectors. */
 const env = loadEnv();
