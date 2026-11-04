@@ -29,6 +29,7 @@ export async function verifyWidgetToken(
     algorithms: ['HS256'],
     audience: opts.audience,
     clockTolerance: 30,
+    requiredClaims: ['exp'],
     ...(opts.now ? { currentDate: opts.now } : {}),
   });
   const c = claimsSchema.parse(payload);

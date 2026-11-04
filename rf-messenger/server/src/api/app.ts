@@ -131,9 +131,8 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     } catch {
       return reply.code(401).send({ error: 'Недействительный токен виджета' });
     }
-    // Токен одноразовый: повтор того же jti отклоняем.
-    const fresh = await deps.redis.set(`rfm:jti:${p.tokenId}`, '1', 'EX', 900, 'NX');
-    if (fresh !== 'OK') return reply.code(401).send({ error: 'Токен уже использован' });
+    // amoCRM переиспользует один X-Auth-Token для нескольких запросов в пределах его срока жизни,
+    // поэтому повтор jti не отклоняем; защита — подпись client_secret, aud и обязательный exp.
     if (env.AMO_ACCOUNT_IDS.length && !env.AMO_ACCOUNT_IDS.includes(p.accountId)) return reply.code(403).send({ error: 'Аккаунт не подключён к сервису' });
     if (!p.isAdmin) return reply.code(403).send({ error: 'Настройки мессенджеров доступны только администратору' });
     req.principal = p;

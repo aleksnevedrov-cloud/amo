@@ -47,7 +47,7 @@ async function token(over: Record<string, unknown> = {}) {
 const BOT_TOKEN = `123456789:${'A'.repeat(35)}`;
 
 describe('API виджета', () => {
-  it('401 без токена, с чужой подписью и при повторе токена', async () => {
+  it('401 без токена, с чужой подписью и без срока; повтор токена amo в пределах срока — 200', async () => {
     expect((await app.inject({ method: 'GET', url: '/widget/v1/status' })).statusCode).toBe(401);
     const bad = await new SignJWT({ account_id: ACCOUNT, user_id: 5, client_uuid: CLIENT_ID, is_admin: true })
       .setProtectedHeader({ alg: 'HS256' })
@@ -59,7 +59,15 @@ describe('API виджета', () => {
     expect((await app.inject({ method: 'GET', url: '/widget/v1/status', headers: { 'x-auth-token': bad } })).statusCode).toBe(401);
     const tk = await token();
     expect((await app.inject({ method: 'GET', url: '/widget/v1/status', headers: { 'x-auth-token': tk } })).statusCode).toBe(200);
-    expect((await app.inject({ method: 'GET', url: '/widget/v1/status', headers: { 'x-auth-token': tk } })).statusCode).toBe(401);
+    // amoCRM отдаёт один и тот же X-Auth-Token на несколько запросов подряд.
+    expect((await app.inject({ method: 'GET', url: '/widget/v1/status', headers: { 'x-auth-token': tk } })).statusCode).toBe(200);
+    const noExp = await new SignJWT({ account_id: ACCOUNT, user_id: 5, client_uuid: CLIENT_ID, is_admin: true })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setJti('y')
+      .setIssuer('https://a.amocrm.ru')
+      .setAudience('https://chat.example.ru')
+      .sign(new TextEncoder().encode(CLIENT_SECRET));
+    expect((await app.inject({ method: 'GET', url: '/widget/v1/status', headers: { 'x-auth-token': noExp } })).statusCode).toBe(401);
   });
 
   it('403 не администратору', async () => {
