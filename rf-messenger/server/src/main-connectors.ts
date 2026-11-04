@@ -2,7 +2,8 @@ import { Queue, Worker } from 'bullmq';
 import { CHANNELS_CHANGED } from './api/app.ts';
 import { Bridge, type Logger } from './bridge.ts';
 import { loadEnv } from './config.ts';
-import { ConnectorHost } from './connectors/host.ts';
+import { ConnectorHost, defaultFactory } from './connectors/host.ts';
+import { WhatsAppConnector } from './connectors/whatsapp.ts';
 import { migrate } from './db.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobData, type JobName, type JobQueue } from './queue.ts';
@@ -36,7 +37,25 @@ const bridge = new Bridge({
   log,
   typingMs: 1200,
 });
-host = new ConnectorHost(core.store, core.box, () => bridge, log);
+const waQrKey = (id: number) => `rfm:wa:qr:${id}`;
+host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, creds) => {
+  if (channel.kind === 'whatsapp') {
+    return new WhatsAppConnector({
+      session: {
+        load: async () => {
+          const sealed = await core.store.getChannelSession(channel.id);
+          return sealed ? core.box.decrypt(sealed) : null;
+        },
+        save: (json) => core.store.setChannelSession(channel.id, core.box.encrypt(json)),
+        clear: () => core.store.setChannelSession(channel.id, null),
+      },
+      onQr: async (qr) => void (qr ? await core.redis.set(waQrKey(channel.id), qr, 'EX', 70) : await core.redis.del(waQrKey(channel.id))),
+      onIdentity: (phone) => core.store.setChannelIdentity(channel.id, phone, `WhatsApp ${phone}`),
+      log: (level, msg) => log[level]({ channelId: channel.id }, msg),
+    });
+  }
+  return defaultFactory(channel, creds);
+});
 
 const worker = new Worker<JobData, void, JobName>(
   QUEUE_NAME,
@@ -52,7 +71,11 @@ worker.on('failed', (job, err) => log.warn({ job: job?.id, attempts: job?.attemp
 await host.syncAll();
 const sub = core.redis.duplicate();
 await sub.subscribe(CHANNELS_CHANGED);
-sub.on('message', () => void host.syncAll().catch((err: Error) => log.error({ err: err.message }, 'сверка каналов')));
+sub.on('message', (_ch, payload: string) => {
+  const restart = /^restart:(\d+)$/.exec(payload);
+  const job = restart ? host.restart(Number(restart[1])) : host.syncAll();
+  void job.catch((err: Error) => log.error({ err: err.message }, 'сверка каналов'));
+});
 // Подстраховка, если сообщение pub/sub потерялось.
 const timer = setInterval(() => void host.syncAll().catch(() => undefined), 60_000);
 log.info({}, 'connectors запущен');

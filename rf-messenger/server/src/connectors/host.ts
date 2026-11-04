@@ -34,7 +34,7 @@ export class ConnectorHost {
   async syncAll(): Promise<void> {
     const channels = await this.store.activeChannels();
     const ids = new Set(channels.map((c) => c.id));
-    for (const id of [...this.running.keys()]) if (!ids.has(id)) await this.stopOne(id);
+    for (const id of [...this.running.keys()]) if (!ids.has(id)) await this.stopOne(id, true);
     for (const c of channels) if (!this.running.has(c.id)) await this.startOne(c);
   }
 
@@ -65,10 +65,17 @@ export class ConnectorHost {
     this.log.info({ channelId: channel.id, kind: channel.kind }, 'коннектор запущен');
   }
 
-  private async stopOne(id: number): Promise<void> {
+  /** Перезапуск канала (кнопка «Новый QR» в виджете). */
+  async restart(id: number): Promise<void> {
+    await this.stopOne(id);
+    const channel = await this.store.channelById(id);
+    if (channel) await this.startOne(channel);
+  }
+
+  private async stopOne(id: number, removed = false): Promise<void> {
     const c = this.running.get(id);
     this.running.delete(id);
-    await c?.stop().catch(() => undefined);
+    await (removed && c?.logout ? c.logout() : c?.stop())?.catch(() => undefined);
     this.log.info({ channelId: id }, 'коннектор остановлен');
   }
 

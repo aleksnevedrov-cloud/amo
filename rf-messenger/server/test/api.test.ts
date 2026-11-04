@@ -150,6 +150,29 @@ describe('API виджета', () => {
   });
 });
 
+describe('WhatsApp в API виджета', () => {
+  it('создание канала без ключей, QR текущей сессии, чужой аккаунт — 404, «Новый QR» перезапускает', async () => {
+    const created = await app.inject({ method: 'POST', url: '/widget/v1/channels', headers: { 'x-auth-token': await token() }, payload: { kind: 'whatsapp' } });
+    expect(created.statusCode).toBe(201);
+    const id = (created.json() as { id: number }).id;
+
+    const empty = await app.inject({ method: 'GET', url: `/widget/v1/channels/${id}/qr`, headers: { 'x-auth-token': await token() } });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({ svg: null, status: 'starting' });
+
+    await redis.set(`rfm:wa:qr:${id}`, '2@abc,def,ghi', 'EX', 30);
+    const withQr = await app.inject({ method: 'GET', url: `/widget/v1/channels/${id}/qr`, headers: { 'x-auth-token': await token() } });
+    expect((withQr.json() as { svg: string }).svg).toMatch(/^<svg/);
+
+    const other = await app.inject({ method: 'GET', url: `/widget/v1/channels/${id}/qr`, headers: { 'x-auth-token': await token({ account_id: 4242 }) } });
+    expect(other.statusCode).toBe(404);
+
+    const restart = await app.inject({ method: 'POST', url: `/widget/v1/channels/${id}/restart`, headers: { 'x-auth-token': await token() } });
+    expect(restart.statusCode).toBe(200);
+    await redis.del(`rfm:wa:qr:${id}`);
+  });
+});
+
 describe('вебхук amo', () => {
   const sign = (raw: string) => createHmac('sha1', CHANNEL_SECRET).update(raw).digest('hex');
 

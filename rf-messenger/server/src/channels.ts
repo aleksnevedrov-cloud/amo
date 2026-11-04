@@ -1,12 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { TelegramApiError, TelegramBotApi } from './connectors/telegram-bot.ts';
 import type { ChannelKind, ChannelStatus } from './store.ts';
 
-/** Данные для подключения канала из виджета. Сейчас — Telegram-бот (этап 1). */
+/** Данные для подключения канала из виджета: Telegram-бот (этап 1), WhatsApp по QR (этап 2). */
 export const createChannelSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('telegram_bot'),
     token: z.string().trim().regex(/^\d{5,15}:[A-Za-z0-9_-]{30,60}$/, 'Неверный формат токена бота'),
+    title: z.string().trim().max(100).optional(),
+  }),
+  z.object({
+    kind: z.literal('whatsapp'),
     title: z.string().trim().max(100).optional(),
   }),
 ]);
@@ -23,6 +28,8 @@ export class ChannelValidationError extends Error {}
 
 /** Проверка ключей у самого мессенджера до сохранения. */
 export async function validateChannel(input: CreateChannelInput, opts: { fetch?: typeof fetch } = {}): Promise<ValidatedChannel> {
+  // WhatsApp: ключей нет, вход по QR. Номер станет external_id после сканирования.
+  if (input.kind === 'whatsapp') return { kind: 'whatsapp', title: input.title || 'WhatsApp (ожидает QR)', externalId: `pending-${randomUUID()}`, credentials: {} };
   try {
     const me = await new TelegramBotApi(input.token, opts).getMe();
     return { kind: 'telegram_bot', title: input.title || `@${me.username}`, externalId: String(me.id), credentials: { token: input.token } };

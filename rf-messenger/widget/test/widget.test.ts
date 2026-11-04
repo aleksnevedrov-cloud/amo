@@ -62,4 +62,31 @@ describe('виджет РФ-Мессенджер', () => {
     await mountSettings(el, api);
     expect(el.textContent).toContain('Сервис мессенджеров недоступен (HTTP 500)');
   });
+
+  it('WhatsApp: кнопка подключения, «Показать QR» до входа, QR из ответа сервера', async () => {
+    const wa: StatusView = {
+      amojo: { configured: true, connected: true },
+      channels: [{ id: 7, kind: 'whatsapp', kindText: 'WhatsApp', title: 'WhatsApp (ожидает QR)', status: 'starting', statusText: 'Подключается…', statusDetail: null, createdAt: '' }],
+    };
+    const html = renderHtml(wa);
+    expect(html).toContain('data-rfm="add-wa"');
+    expect(html).toContain('data-rfm="qr" data-id="7"');
+    expect(renderHtml({ ...wa, channels: [{ ...wa.channels[0]!, status: 'connected' }] })).not.toContain('data-rfm="qr"');
+
+    const calls: { url: string; method?: string; data?: string }[] = [];
+    const self = fakeSelf(
+      {
+        'GET /widget/v1/status': wa,
+        'POST /widget/v1/channels': { id: 7 },
+        'GET /widget/v1/channels/7/qr': { status: 'starting', statusText: 'Подключается…', statusDetail: null, title: 'WhatsApp (ожидает QR)', svg: '<svg data-test="qr"></svg>' },
+      },
+      calls,
+    );
+    const el = document.createElement('div');
+    await mountSettings(el, new MessengerApi(self, 'https://chat.example.ru'));
+    el.querySelector<HTMLElement>('[data-rfm="add-wa"]')!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.some((c) => c.method === 'POST' && JSON.parse(c.data ?? '{}').kind === 'whatsapp')).toBe(true);
+    expect(el.querySelector('[data-test="qr"]')).not.toBeNull();
+  });
 });

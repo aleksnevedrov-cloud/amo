@@ -171,6 +171,33 @@ export class Store {
     await this.db.query('UPDATE channels SET status = $2, status_detail = $3, updated_at = now() WHERE id = $1', [id, status, detail]);
   }
 
+  /** Служебное: зашифрованная сессия канала (WhatsApp, Telegram личный). */
+  async getChannelSession(id: number): Promise<string | null> {
+    const r = await this.db.query('SELECT session FROM channels WHERE id = $1 AND deleted_at IS NULL', [id]);
+    return r.rows[0]?.session ?? null;
+  }
+
+  async setChannelSession(id: number, sealed: string | null): Promise<void> {
+    await this.db.query('UPDATE channels SET session = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL', [id, sealed]);
+  }
+
+  /** Служебное: после входа в WhatsApp — номер телефона как external_id и название канала. false — номер уже подключён другим каналом. */
+  async setChannelIdentity(id: number, externalId: string, title: string): Promise<boolean> {
+    try {
+      await this.db.query('UPDATE channels SET external_id = $2, title = $3, updated_at = now() WHERE id = $1 AND deleted_at IS NULL', [id, externalId, title]);
+      return true;
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') return false;
+      throw err;
+    }
+  }
+
+  /** Канал аккаунта (для API виджета). */
+  async channelOfAccount(accountId: number, id: number): Promise<Channel | null> {
+    const r = await this.db.query('SELECT * FROM channels WHERE account_id = $1 AND id = $2 AND deleted_at IS NULL', [accountId, id]);
+    return r.rows[0] ? channelRow(r.rows[0]) : null;
+  }
+
   // --- Чаты ---
 
   async upsertChat(

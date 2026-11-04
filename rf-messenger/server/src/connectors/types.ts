@@ -47,6 +47,8 @@ export interface Connector {
   send(req: OutboundRequest): Promise<{ externalMessageId: string }>;
   typing(externalChatId: string): Promise<void>;
   download(ref: string, maxBytes: number): Promise<{ data: Buffer; mime: string }>;
+  /** Канал удалён: отвязать сессию у мессенджера (WhatsApp — «Связанные устройства»). */
+  logout?(): Promise<void>;
 }
 
 /** Ошибка отправки, которую повторять бессмысленно (клиент заблокировал бота, чат удалён). */

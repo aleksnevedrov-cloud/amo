@@ -62,7 +62,7 @@ services:
     command: ["node", "dist/connectors.js"]
     volumes:
       - files:/data/files
-    mem_limit: 256m
+    mem_limit: 512m  # этап 2: WhatsApp (Baileys) ≈ 100–200 МБ на номер
     depends_on:
       api: { condition: service_healthy }
 

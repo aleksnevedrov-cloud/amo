@@ -21,6 +21,15 @@ export interface ChannelView {
   createdAt: string;
 }
 
+export interface WaQrView {
+  status: ChannelView['status'];
+  statusText: string;
+  statusDetail: string | null;
+  title: string;
+  /** SVG QR-кода, сгенерированный нашим сервером; null — QR сейчас нет. */
+  svg: string | null;
+}
+
 export interface StatusView {
   amojo: { configured: boolean; connected: boolean };
   channels: ChannelView[];
@@ -68,6 +77,15 @@ export class MessengerApi {
   addTelegramBot(token: string) {
     return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'telegram_bot', token });
   }
+  addWhatsApp() {
+    return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'whatsapp' });
+  }
+  whatsappQr(id: number) {
+    return this.call<WaQrView>('GET', `/widget/v1/channels/${id}/qr`);
+  }
+  restartChannel(id: number) {
+    return this.call<{ restarted: boolean }>('POST', `/widget/v1/channels/${id}/restart`);
+  }
   deleteChannel(id: number) {
     return this.call<{ deleted: boolean }>('DELETE', `/widget/v1/channels/${id}`);
   }
@@ -85,7 +103,7 @@ const STATUS_COLOR: Record<ChannelView['status'], string> = {
 };
 
 /** Каналы следующих этапов — видны, но выключены. */
-const PLANNED = ['WhatsApp по QR — этап 2', 'Telegram личный — этап 3', 'MAX, VK, Авито — этап 4'];
+const PLANNED = ['Telegram личный — этап 3', 'MAX, VK, Авито — этап 4'];
 
 export function renderHtml(s: StatusView, notice: { error?: string; info?: string } = {}): string {
   const amojo = !s.amojo.configured
@@ -100,17 +118,21 @@ export function renderHtml(s: StatusView, notice: { error?: string; info?: strin
   <td>${esc(c.kindText)}</td>
   <td>${esc(c.title)}</td>
   <td><span style="color:${STATUS_COLOR[c.status]}">● ${esc(c.statusText)}</span>${c.statusDetail ? `<br><small>${esc(c.statusDetail)}</small>` : ''}</td>
-  <td><button type="button" class="button-input" data-rfm="delete" data-id="${c.id}">Отключить</button></td>
+  <td>${c.kind === 'whatsapp' && c.status !== 'connected' ? `<button type="button" class="button-input" data-rfm="qr" data-id="${c.id}">Показать QR</button> ` : ''}<button type="button" class="button-input" data-rfm="delete" data-id="${c.id}">Отключить</button></td>
 </tr>`,
         )
         .join('')
     : '<tr><td colspan="4">Каналов пока нет</td></tr>';
   return `<div class="rfm">
-<style>.rfm{font-size:14px;max-width:760px}.rfm table{width:100%;border-collapse:collapse;margin:8px 0}.rfm td,.rfm th{border-bottom:1px solid #e5e5e5;padding:6px;text-align:left;vertical-align:top}.rfm-ok{color:#2e9e44}.rfm-warn{color:#b26b00}.rfm-err{color:#c0392b}.rfm input[type=password]{width:360px;max-width:100%;padding:6px}.rfm small{color:#777}</style>
+<style>.rfm{font-size:14px;max-width:760px}.rfm table{width:100%;border-collapse:collapse;margin:8px 0}.rfm td,.rfm th{border-bottom:1px solid #e5e5e5;padding:6px;text-align:left;vertical-align:top}.rfm-ok{color:#2e9e44}.rfm-warn{color:#b26b00}.rfm-err{color:#c0392b}.rfm input[type=password]{width:360px;max-width:100%;padding:6px}.rfm small{color:#777}.rfm-qr svg{width:264px;height:264px;display:block;margin:8px 0}</style>
 ${notice.error ? `<p class="rfm-err">${esc(notice.error)}</p>` : ''}${notice.info ? `<p class="rfm-ok">${esc(notice.info)}</p>` : ''}
 <h3>amoCRM</h3>${amojo}
 <h3>Каналы</h3>
 <table><thead><tr><th>Тип</th><th>Канал</th><th>Статус</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+<div data-rfm-qr></div>
+<h3>Подключить WhatsApp</h3>
+<p>Тестовый или рабочий номер: на телефоне WhatsApp → «Связанные устройства» → «Привязка устройства» и отсканируйте QR.</p>
+<button type="button" class="button-input button-input_blue" data-rfm="add-wa">Подключить WhatsApp</button>
 <h3>Подключить Telegram-бота</h3>
 <form data-rfm="add-bot">
   <p>Токен от @BotFather. После сохранения токен не показывается.</p>
@@ -137,9 +159,65 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
       await draw({ error: (err as Error).message });
     }
   };
+  let poll: ReturnType<typeof setInterval> | null = null;
+  const stopPoll = () => {
+    if (poll) clearInterval(poll);
+    poll = null;
+  };
+  /** Показ QR WhatsApp: опрос раз в 3 с, до входа или 3 минут. */
+  const showQr = (id: number) => {
+    stopPoll();
+    const started = Date.now();
+    const tick = async () => {
+      const box = el.querySelector<HTMLElement>('[data-rfm-qr]');
+      if (!box) return stopPoll();
+      try {
+        const q = await api.whatsappQr(id);
+        if (q.status === 'connected') {
+          stopPoll();
+          return void draw({ info: `WhatsApp подключён: ${q.title}` });
+        }
+        const detail = q.statusDetail ? `<br><small>${esc(q.statusDetail)}</small>` : '';
+        box.innerHTML = q.svg
+          ? `<div class="rfm-qr"><p><b>${esc(q.title)}</b>: отсканируйте QR телефоном — WhatsApp → «Связанные устройства» → «Привязка устройства».</p>${q.svg}${detail}</div>`
+          : `<div class="rfm-qr"><p>${esc(q.statusText)}…${detail}</p></div>`;
+      } catch (err) {
+        box.innerHTML = `<p class="rfm-err">${esc((err as Error).message)}</p>`;
+      }
+      if (Date.now() - started > 180_000) {
+        stopPoll();
+        box.innerHTML = '<p class="rfm-warn">Время на сканирование вышло. Нажмите «Показать QR» ещё раз.</p>';
+      }
+    };
+    void tick();
+    poll = setInterval(() => void tick(), 3000);
+  };
   el.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm]');
     if (!btn) return;
+    if (btn.dataset.rfm === 'add-wa') {
+      stopPoll();
+      void (async () => {
+        try {
+          const { id } = await api.addWhatsApp();
+          await draw();
+          showQr(id);
+        } catch (err) {
+          await draw({ error: (err as Error).message });
+        }
+      })();
+    }
+    if (btn.dataset.rfm === 'qr') {
+      const id = Number(btn.dataset.id);
+      void (async () => {
+        try {
+          await api.restartChannel(id);
+          showQr(id);
+        } catch (err) {
+          await draw({ error: (err as Error).message });
+        }
+      })();
+    }
     if (btn.dataset.rfm === 'connect') {
       const id = amojoAccountId(w);
       if (!id) return void draw({ error: 'Не удалось определить amojo_id аккаунта' });
@@ -148,6 +226,7 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
     if (btn.dataset.rfm === 'delete') {
       const id = Number(btn.dataset.id);
       if (!w.confirm('Отключить канал? Новые сообщения из него перестанут приходить в amoCRM.')) return;
+      stopPoll();
       void run(async () => (await api.deleteChannel(id), 'Канал отключён'));
     }
   });

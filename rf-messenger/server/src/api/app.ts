@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import QRCode from 'qrcode';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import type { Redis } from 'ioredis';
 import { z } from 'zod';
@@ -207,6 +208,35 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         await deps.redis.publish(CHANNELS_CHANGED, String(channel.id));
         // Ключи в ответ не возвращаются (раздел 5 ТЗ).
         return reply.code(201).send({ id: channel.id, title: channel.title, status: channel.status });
+      });
+
+      // WhatsApp: текущий QR для сканирования (живёт ~60 с, процесс коннекторов обновляет его сам).
+      w.get<{ Params: { id: string } }>('/channels/:id/qr', async (req, reply) => {
+        const { accountId } = who(req);
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'Некорректный id' });
+        const channel = await store.channelOfAccount(accountId, id);
+        if (!channel || channel.kind !== 'whatsapp') return reply.code(404).send({ error: 'Канал не найден' });
+        const qr = await deps.redis.get(`rfm:wa:qr:${id}`);
+        return {
+          status: channel.status,
+          statusText: STATUS_TEXT[channel.status],
+          statusDetail: channel.statusDetail,
+          title: channel.title,
+          svg: qr ? await QRCode.toString(qr, { type: 'svg', margin: 1, width: 264 }) : null,
+        };
+      });
+
+      // «Новый QR»: перезапуск сессии канала в процессе коннекторов.
+      w.post<{ Params: { id: string } }>('/channels/:id/restart', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+        const { accountId } = who(req);
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'Некорректный id' });
+        const channel = await store.channelOfAccount(accountId, id);
+        if (!channel) return reply.code(404).send({ error: 'Канал не найден' });
+        await store.setChannelStatus(id, 'starting', 'Запуск…');
+        await deps.redis.publish(CHANNELS_CHANGED, `restart:${id}`);
+        return { restarted: true };
       });
 
       w.delete<{ Params: { id: string } }>('/channels/:id', async (req, reply) => {
