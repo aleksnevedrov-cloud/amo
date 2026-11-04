@@ -54,8 +54,9 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
   app.decorateRequest('rawBody', null);
   app.decorateRequest('principal', null);
 
-  // Сырое тело нужно для проверки подписи вебхука amo.
-  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body: Buffer, done) => {
+  // Сырое тело нужно для проверки подписи вебхука amo. amoCRM может прислать JSON
+  // с Content-Type, отличным от application/json, поэтому тело принимаем любого типа.
+  const parseBody = (req: FastifyRequest, body: Buffer, done: (err: Error | null, body?: unknown) => void) => {
     req.rawBody = body;
     if (!body.length) return done(null, {});
     try {
@@ -63,7 +64,9 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     } catch {
       done(Object.assign(new Error('Некорректный JSON'), { statusCode: 400 }), undefined);
     }
-  });
+  };
+  app.removeAllContentTypeParsers();
+  app.addContentTypeParser('*', { parseAs: 'buffer' }, parseBody);
 
   await app.register(cors, {
     origin: (origin, cb) => cb(null, Boolean(origin && isAmoOrigin(origin, env.AMO_ALLOWED_DOMAINS))),
@@ -92,6 +95,10 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
       const secret = env.AMOJO_CHANNEL_SECRET;
       const sig = req.headers['x-signature'];
       if (!secret || !req.rawBody || !verifyAmojoHook(secret, req.rawBody, typeof sig === 'string' ? sig : undefined)) {
+        req.log.warn(
+          { contentType: req.headers['content-type'] ?? null, bodyBytes: req.rawBody?.length ?? null, hasSignature: typeof sig === 'string' },
+          'вебхук amo: подпись не прошла проверку',
+        );
         return reply.code(401).send({ error: 'bad_signature' });
       }
       const conn = await store.getConnectionByScope(req.params.scopeId);

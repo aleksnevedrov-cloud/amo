@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { AmojoClient, AmojoMessage, AmojoMessageKind, AmojoUser, NewMessagePayload } from './amojo/client.ts';
+import { AmojoError, type AmojoClient, type AmojoMessage, type AmojoMessageKind, type AmojoUser, type NewMessagePayload } from './amojo/client.ts';
 import { PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
 import type { FileStore } from './files.ts';
 import type { JobQueue, Pacer } from './queue.ts';
@@ -143,7 +143,18 @@ export class Bridge {
       message: await this.amoMessage(msg, chat),
       silent: fromPhone,
     };
-    const r = await this.d.amojo.sendMessage(conn.scopeId, payload);
+    let r;
+    try {
+      r = await this.d.amojo.sendMessage(conn.scopeId, payload);
+    } catch (err) {
+      // 403 — канал отключён на стороне amo (например, интеграцию переустановили).
+      // Сбрасываем подключение, чтобы виджет снова показал кнопку «Подключить к amoCRM».
+      if (err instanceof AmojoError && err.status === 403) {
+        await this.d.store.deleteConnection(chat.accountId);
+        this.d.log.warn({ accountId: chat.accountId }, 'amo вернул 403: канал чатов отключён от аккаунта, нужно подключить заново');
+      }
+      throw err;
+    }
     await this.d.store.markSynced(msg.id, r.msgid);
     if (r.chatId) await this.d.store.setAmojoChatId(chat.id, r.chatId);
   }

@@ -183,4 +183,15 @@ describe('amoCRM → канал', () => {
     await t.bridge.deliverToChannel(t.queue.jobs.at(-1)!.data.messageId, false);
     expect(t.calls.at(-1)!.body).toMatchObject({ delivery_status: -1, error: 'Канал отключён' });
   });
+
+  it('amo вернул 403 — подключение канала сбрасывается, чтобы виджет предложил подключить заново', async () => {
+    const { AmojoClient } = await import('../src/amojo/client.ts');
+    const { Bridge } = await import('../src/bridge.ts');
+    const forbidden = (async () => new Response('{}', { status: 403 })) as unknown as typeof fetch;
+    const amojo = new AmojoClient({ baseUrl: 'https://amojo.amocrm.ru', channelId: 'chan-1', secret: 'x', fetch: forbidden });
+    const b = new Bridge({ store: t.store, files: t.files, amojo, queue: t.queue, pacer: { reserve: async () => 0 }, connector: () => t.connector, amoDomains: ['amocrm.ru'], log: { info: () => undefined, warn: () => undefined, error: () => undefined } });
+    await b.onInbound(t.channel, t.connector, event());
+    await expect(b.deliverToAmo(t.queue.jobs[0]!.data.messageId)).rejects.toThrow(/403/);
+    expect(await t.store.getConnection(t.channel.accountId)).toBeNull();
+  });
 });

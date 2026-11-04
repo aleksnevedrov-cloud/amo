@@ -127,6 +127,10 @@ export class Store {
     );
   }
 
+  async deleteConnection(accountId: number): Promise<void> {
+    await this.db.query('DELETE FROM amojo_connections WHERE account_id = $1', [accountId]);
+  }
+
   // --- Каналы ---
 
   async createChannel(c: { accountId: number; kind: ChannelKind; title: string; externalId: string; credentials: string }): Promise<Channel | null> {

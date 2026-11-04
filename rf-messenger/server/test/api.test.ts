@@ -167,6 +167,12 @@ describe('вебхук amo', () => {
     const ok = await post('/amojo/v1/hook/scope-xyz', sign(raw));
     expect(ok.statusCode).toBe(200);
     expect(t.queue.jobs.filter((j) => j.name === 'to-channel')).toHaveLength(1);
+
+    // amoCRM может прислать JSON с другим Content-Type — подпись всё равно проверяется по сырому телу.
+    const raw2 = JSON.stringify({ message: { conversation: { client_id: conv }, message: { id: 'amo-2', type: 'text', text: 'Ещё' } } });
+    const plain = await app.inject({ method: 'POST', url: '/amojo/v1/hook/scope-xyz', payload: raw2, headers: { 'content-type': 'text/plain', 'x-signature': sign(raw2) } });
+    expect(plain.statusCode).toBe(200);
+    expect(t.queue.jobs.filter((j) => j.name === 'to-channel')).toHaveLength(2);
   });
 });
 
