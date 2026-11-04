@@ -96,7 +96,15 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
       const sig = req.headers['x-signature'];
       if (!secret || !req.rawBody || !verifyAmojoHook(secret, req.rawBody, typeof sig === 'string' ? sig : undefined)) {
         req.log.warn(
-          { contentType: req.headers['content-type'] ?? null, bodyBytes: req.rawBody?.length ?? null, hasSignature: typeof sig === 'string' },
+          {
+            contentType: req.headers['content-type'] ?? null,
+            bodyBytes: req.rawBody?.length ?? null,
+            hasSignature: typeof sig === 'string',
+            // Временная диагностика формата подписи amo: только при DEBUG_AMOJO_HOOK=1.
+            ...(process.env.DEBUG_AMOJO_HOOK === '1'
+              ? { sig, raw: req.rawBody?.toString('base64'), hdrs: Object.keys(req.headers).join(',') }
+              : {}),
+          },
           'вебхук amo: подпись не прошла проверку',
         );
         return reply.code(401).send({ error: 'bad_signature' });
