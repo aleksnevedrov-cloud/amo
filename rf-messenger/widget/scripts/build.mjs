@@ -32,7 +32,9 @@ const script = `define([], function () {\n${bundle}\nreturn function () {\n  thi
 await writeFile(join(out, 'script.js'), script);
 
 const manifest = JSON.parse(await readFile(join(root, 'static/manifest.json'), 'utf8'));
-manifest.widget.version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
+// amoCRM кэширует script.js по версии манифеста: у каждой сборки своя версия, иначе загруженный архив не применится.
+const [major, minor] = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version.split('.');
+manifest.widget.version = `${major}.${minor}.${Math.floor(Date.now() / 60000)}`;
 await writeFile(join(out, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 await cp(join(root, 'static/i18n'), join(out, 'i18n'), { recursive: true });
 for (const [name, [w, h]] of Object.entries(LOGOS)) {
@@ -50,4 +52,5 @@ const walk = async (dir) => {
 };
 await walk(out);
 await writeFile(join(root, 'dist/widget.zip'), zipSync(files, { level: 9 }));
+console.log(`версия ${manifest.widget.version}`);
 console.log(`widget.zip собран: ${Object.keys(files).length} файлов, API ${apiUrl}, script.js ${(script.length / 1024).toFixed(0)} КБ`);
