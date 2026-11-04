@@ -8,6 +8,8 @@ import makeWASocket, {
   type proto,
 } from 'baileys';
 import type { ILogger } from 'baileys/lib/Utils/logger.js';
+import type { Agent } from 'node:https';
+import type { Dispatcher } from 'undici';
 import { createDbAuthState, type SessionStorage } from './wa-auth.ts';
 import { PermanentSendError, reconnectDelayMs, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
 
@@ -133,8 +135,15 @@ export interface WhatsAppDeps {
   /** После входа: номер телефона. false — номер уже подключён другим каналом. */
   onIdentity(phone: string): Promise<boolean>;
   log?: (level: 'warn' | 'error', msg: string) => void;
+  /**
+   * Прокси для серверов WhatsApp; не задан — напрямую.
+   * agent — веб-сокет и загрузка медиа (Baileys в Node грузит через node:https), dispatcher — скачивание медиа (fetch).
+   */
+  proxy?: { agent: Agent; dispatcher: Dispatcher };
   /** Для тестов: подмена makeWASocket. */
   makeSocket?: typeof makeWASocket;
+  /** Для тестов: подмена downloadMediaMessage. */
+  downloadMedia?: typeof downloadMediaMessage;
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -190,6 +199,7 @@ export class WhatsAppConnector implements Connector {
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
       getMessage: async () => undefined,
+      ...(this.d.proxy ? { agent: this.d.proxy.agent, fetchAgent: this.d.proxy.agent } : {}),
     });
     this.sock = sock;
     let qrShown = false;
@@ -326,7 +336,9 @@ export class WhatsAppConnector implements Connector {
     const msg = this.media.get(ref);
     if (!msg || !this.sock) throw new Error('Вложение WhatsApp уже недоступно');
     const sock = this.sock;
-    const data = await downloadMediaMessage(msg, 'buffer', {}, { logger: quietLogger(this.d.log), reuploadRequest: sock.updateMediaMessage });
+    const download = this.d.downloadMedia ?? downloadMediaMessage;
+    const options = this.d.proxy ? { options: { dispatcher: this.d.proxy.dispatcher } as RequestInit } : {};
+    const data = await download(msg, 'buffer', options, { logger: quietLogger(this.d.log), reuploadRequest: sock.updateMediaMessage });
     if (data.length > maxBytes) throw new Error('Вложение больше допустимого размера');
     const m = unwrap(msg.message);
     const mime = m ? (attachmentOf(m, ref)?.mime ?? 'application/octet-stream') : 'application/octet-stream';

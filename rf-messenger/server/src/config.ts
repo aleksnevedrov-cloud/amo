@@ -42,6 +42,12 @@ export const envSchema = z.object({
   /** Пауза между исходящими в один чат (раздел 6 ТЗ). */
   OUTBOUND_PAUSE_MIN_MS: z.coerce.number().int().min(0).default(1000),
   OUTBOUND_PAUSE_MAX_MS: z.coerce.number().int().min(0).default(3000),
+
+  /** HTTP(S)-прокси для Telegram и WhatsApp (http://логин:пароль@хост:порт). Пусто — напрямую. amoCRM всегда напрямую. */
+  MESSENGER_PROXY_URL: z
+    .string()
+    .default('')
+    .refine((s) => !s.trim() || /^https?:$/.test(URL.canParse(s.trim()) ? new URL(s.trim()).protocol : ''), 'должен быть адресом http:// или https://'),
 });
 
 export type Env = z.infer<typeof envSchema>;

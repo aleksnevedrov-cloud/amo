@@ -1,3 +1,4 @@
+import type { Dispatcher } from 'undici';
 import type { AmojoMessageKind } from '../amojo/client.ts';
 import {
   PermanentSendError,
@@ -23,15 +24,24 @@ export class TelegramApiError extends Error {
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- ответы Bot API разбираются вручную */
 
+export interface TelegramNetOptions {
+  fetch?: typeof fetch;
+  /** Прокси для api.telegram.org; не задан — напрямую. */
+  dispatcher?: Dispatcher;
+}
+
 /** Минимальный клиент Bot API на fetch, без сторонних библиотек. Токен не попадает в ошибки и логи. */
 export class TelegramBotApi {
   private readonly f: typeof fetch;
+  /** Прокси (undici ProxyAgent) — передаётся в каждый запрос к api.telegram.org. */
+  private readonly via: RequestInit;
 
   constructor(
     private readonly token: string,
-    opts: { fetch?: typeof fetch } = {},
+    opts: TelegramNetOptions = {},
   ) {
     this.f = opts.fetch ?? fetch;
+    this.via = opts.dispatcher ? ({ dispatcher: opts.dispatcher } as RequestInit) : {};
   }
 
   async call<T = any>(method: string, params: Record<string, unknown> | FormData = {}, timeoutMs = 30_000, signal?: AbortSignal): Promise<T> {
@@ -40,6 +50,7 @@ export class TelegramBotApi {
     let res: Response;
     try {
       res = await this.f(`${API}/bot${this.token}/${method}`, {
+        ...this.via,
         method: 'POST',
         ...(isForm ? { body: params } : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(params) }),
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -63,7 +74,7 @@ export class TelegramBotApi {
     const file = await this.call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId });
     if (!file.file_path) throw new Error('Файл недоступен (Bot API отдаёт файлы до 20 МБ)');
     if ((file.file_size ?? 0) > maxBytes) throw new Error('Файл больше допустимого размера');
-    const res = await this.f(`${API}/file/bot${this.token}/${file.file_path}`, { signal: AbortSignal.timeout(120_000) }).catch(() => {
+    const res = await this.f(`${API}/file/bot${this.token}/${file.file_path}`, { ...this.via, signal: AbortSignal.timeout(120_000) }).catch(() => {
       throw new TelegramApiError(0, 'network error');
     });
     if (!res.ok) throw new TelegramApiError(res.status, 'file download failed');
@@ -163,7 +174,7 @@ export class TelegramBotConnector implements Connector {
 
   constructor(
     token: string,
-    private readonly opts: { fetch?: typeof fetch; onError?: (err: unknown) => void } = {},
+    private readonly opts: TelegramNetOptions & { onError?: (err: unknown) => void } = {},
   ) {
     this.api = new TelegramBotApi(token, opts);
   }

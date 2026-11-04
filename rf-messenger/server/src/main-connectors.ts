@@ -7,6 +7,7 @@ import { ConnectorHost, defaultFactory } from './connectors/host.ts';
 import { TelegramBotConnector } from './connectors/telegram-bot.ts';
 import { WhatsAppConnector } from './connectors/whatsapp.ts';
 import { migrate } from './db.ts';
+import { createMessengerProxy, proxySecrets, redactSecrets } from './proxy.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobData, type JobName, type JobQueue } from './queue.ts';
 
@@ -21,11 +22,17 @@ const env = loadEnv();
 const core = createCore(env);
 await migrate(core.db);
 
+// Логин и пароль прокси не должны попасть в журнал, даже внутри текста ошибки.
+const secrets = proxySecrets(env.MESSENGER_PROXY_URL);
 const levels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'];
 const write = (level: string) => (obj: object, msg?: string) => {
-  if (levels.indexOf(level) <= levels.indexOf(env.LOG_LEVEL)) process.stdout.write(`${JSON.stringify({ level, time: new Date().toISOString(), msg, ...obj })}\n`);
+  if (levels.indexOf(level) <= levels.indexOf(env.LOG_LEVEL)) process.stdout.write(`${redactSecrets(JSON.stringify({ level, time: new Date().toISOString(), msg, ...obj }), secrets)}\n`);
 };
 const log: Logger = { info: write('info'), warn: write('warn'), error: write('error') };
+
+// Прокси только для Telegram и WhatsApp; amoCRM (amojo, вложения), postgres, redis — напрямую.
+const proxy = createMessengerProxy(env.MESSENGER_PROXY_URL);
+log.info({ proxy: proxy?.display ?? 'нет' }, 'исходящий прокси мессенджеров');
 
 const bull = new Queue(QUEUE_NAME, { connection: core.redis, defaultJobOptions: JOB_OPTIONS });
 const queue: JobQueue = { add: async (name, data, opts) => void (await bull.add(name, data, opts)) };
@@ -57,10 +64,14 @@ host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, cred
       onQr: async (qr) => void (qr ? await core.redis.set(waQrKey(channel.id), qr, 'EX', 70) : await core.redis.del(waQrKey(channel.id))),
       onIdentity: (phone) => core.store.setChannelIdentity(channel.id, phone, `WhatsApp ${phone}`),
       log: (level, msg) => log[level]({ channelId: channel.id }, msg),
+      ...(proxy ? { proxy: { agent: proxy.agent, dispatcher: proxy.dispatcher } } : {}),
     });
   }
   if (channel.kind === 'telegram_bot' && creds.token) {
-    return new TelegramBotConnector(creds.token, { onError: (err) => log.warn({ channelId: channel.id, err: (err as Error).message }, 'telegram: ошибка опроса') });
+    return new TelegramBotConnector(creds.token, {
+      ...(proxy ? { dispatcher: proxy.dispatcher } : {}),
+      onError: (err) => log.warn({ channelId: channel.id, err: (err as Error).message }, 'telegram: ошибка опроса'),
+    });
   }
   return defaultFactory(channel, creds);
 });
