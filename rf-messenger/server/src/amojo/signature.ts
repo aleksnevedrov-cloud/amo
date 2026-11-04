@@ -19,5 +19,11 @@ export function signAmojoRequest(
 /** Подпись вебхука amo об исходящем сообщении: X-Signature = HMAC-SHA1(секрет канала, сырое тело). */
 export function verifyAmojoHook(secret: string, rawBody: string | Buffer, signature: string | undefined): boolean {
   if (!signature || !/^[0-9a-fA-F]{40}$/.test(signature)) return false;
-  return safeEqualHex(hmacHex('sha1', secret, rawBody), signature);
+  if (safeEqualHex(hmacHex('sha1', secret, rawBody), signature)) return true;
+  // amoCRM присылает JSON с завершающим переводом строки, а подписывает тело без него
+  // (замер на боевом вебхуке 04.11.2026). Проверяем и этот вариант.
+  const buf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, 'utf8');
+  let end = buf.length;
+  while (end > 0 && (buf[end - 1] === 0x0a || buf[end - 1] === 0x0d || buf[end - 1] === 0x20)) end--;
+  return end !== buf.length && safeEqualHex(hmacHex('sha1', secret, buf.subarray(0, end)), signature);
 }

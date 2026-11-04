@@ -28,6 +28,15 @@ describe('подпись API чатов amo', () => {
     expect(verifyAmojoHook('secret', raw, good.slice(0, 20))).toBe(false);
   });
 
+  it('amoCRM: тело приходит с переводом строки в конце, подпись — без него', () => {
+    const body = '{"message":{}}';
+    const sig = createHmac('sha1', 'secret').update(body).digest('hex');
+    expect(verifyAmojoHook('secret', Buffer.from(body + '\n'), sig)).toBe(true);
+    expect(verifyAmojoHook('secret', Buffer.from(body + '\r\n'), sig)).toBe(true);
+    expect(verifyAmojoHook('other', Buffer.from(body + '\n'), sig)).toBe(false);
+    expect(verifyAmojoHook('secret', Buffer.from(body + 'x\n'), sig)).toBe(false);
+  });
+
   it('клиент подписывает запрос и передаёт scope_id при подключении', async () => {
     const calls: AmojoCall[] = [];
     const now = new Date('2026-11-03T10:00:00Z');
