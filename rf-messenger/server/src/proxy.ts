@@ -69,3 +69,40 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
   for (const s of secrets) out = out.split(s).join('***');
   return out;
 }
+
+export type ProxyRole = 'primary' | 'fallback';
+
+/**
+ * Основной и запасной прокси. Коннекторы берут текущий прокси при каждом запросе (Telegram)
+ * или при каждом подключении (WhatsApp), поэтому переключение не требует перезапуска процесса.
+ */
+export class ProxySwitch {
+  private role: ProxyRole = 'primary';
+  private readonly listeners: ((role: ProxyRole) => void)[] = [];
+
+  constructor(
+    readonly primary: MessengerProxy | null,
+    readonly fallback: MessengerProxy | null = null,
+  ) {}
+
+  get active(): ProxyRole {
+    return this.role;
+  }
+
+  /** Прокси, через который сейчас идут Telegram и WhatsApp; null — напрямую. */
+  current(): MessengerProxy | null {
+    return this.role === 'fallback' && this.fallback ? this.fallback : this.primary;
+  }
+
+  /** true — роль сменилась (подписчики уведомлены). */
+  use(role: ProxyRole): boolean {
+    if (role === this.role || (role === 'fallback' && !this.fallback)) return false;
+    this.role = role;
+    for (const fn of this.listeners) fn(role);
+    return true;
+  }
+
+  onChange(fn: (role: ProxyRole) => void): void {
+    this.listeners.push(fn);
+  }
+}

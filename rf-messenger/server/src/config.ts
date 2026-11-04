@@ -3,6 +3,11 @@ import { z } from 'zod';
 const hex32 = z.string().regex(/^[0-9a-fA-F]{64}$/, 'должен быть 32-байтовым ключом в hex (64 символа)');
 const list = (s: string) => s.split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);
 
+const proxyUrl = z
+  .string()
+  .default('')
+  .refine((s) => !s.trim() || /^https?:$/.test(URL.canParse(s.trim()) ? new URL(s.trim()).protocol : ''), 'должен быть адресом http:// или https://');
+
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -44,10 +49,13 @@ export const envSchema = z.object({
   OUTBOUND_PAUSE_MAX_MS: z.coerce.number().int().min(0).default(3000),
 
   /** HTTP(S)-прокси для Telegram и WhatsApp (http://логин:пароль@хост:порт). Пусто — напрямую. amoCRM всегда напрямую. */
-  MESSENGER_PROXY_URL: z
-    .string()
-    .default('')
-    .refine((s) => !s.trim() || /^https?:$/.test(URL.canParse(s.trim()) ? new URL(s.trim()).protocol : ''), 'должен быть адресом http:// или https://'),
+  MESSENGER_PROXY_URL: proxyUrl,
+  /** Запасной прокси: включается после 3 неудачных проверок основного подряд, обратно — после 3 удачных. Пусто — без запасного. */
+  MESSENGER_PROXY_URL_FALLBACK: proxyUrl,
+
+  /** Уведомления о сбоях прокси и каналов в Telegram. Оба пусты — уведомлений нет. */
+  ALERT_TG_BOT_TOKEN: z.string().trim().default(''),
+  ALERT_TG_CHAT_ID: z.string().trim().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -60,6 +68,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
   if (parsed.data.NODE_ENV === 'production' && !parsed.data.AMO_ACCOUNT_IDS.length) {
     throw new Error('AMO_ACCOUNT_IDS обязателен в production: без него виджет примет токен любого аккаунта amo');
+  }
+  if (Boolean(parsed.data.ALERT_TG_BOT_TOKEN) !== Boolean(parsed.data.ALERT_TG_CHAT_ID)) {
+    throw new Error('ALERT_TG_BOT_TOKEN и ALERT_TG_CHAT_ID задаются вместе');
   }
   if (parsed.data.OUTBOUND_PAUSE_MAX_MS < parsed.data.OUTBOUND_PAUSE_MIN_MS) {
     throw new Error('OUTBOUND_PAUSE_MAX_MS меньше OUTBOUND_PAUSE_MIN_MS');

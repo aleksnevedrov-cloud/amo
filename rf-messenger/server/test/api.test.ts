@@ -3,6 +3,7 @@ import { Redis } from 'ioredis';
 import { SignJWT } from 'jose';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/api/app.ts';
+import { PROXY_STATUS_KEY } from '../src/proxy-monitor.ts';
 import { ACCOUNT, CHANNEL_SECRET, CLIENT_ID, CLIENT_SECRET, event, PUBLIC_URL, setupBridge, TEST_REDIS_URL, testEnv } from './helpers.ts';
 
 let redis: Redis;
@@ -45,6 +46,18 @@ async function token(over: Record<string, unknown> = {}) {
 }
 
 const BOT_TOKEN = `123456789:${'A'.repeat(35)}`;
+
+describe('/health', () => {
+  it('поле proxy из проверки connectors, без адреса прокси', async () => {
+    await redis.del(PROXY_STATUS_KEY);
+    expect((await app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({ ok: true, proxy: 'unknown' });
+    const checkedAt = new Date().toISOString();
+    await redis.set(PROXY_STATUS_KEY, JSON.stringify({ status: 'ok', active: 'primary', checkedAt, latencyMs: 120, since: checkedAt }), 'EX', 60);
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    expect(body).toEqual({ ok: true, db: true, redis: true, amojo: true, proxy: 'ok', proxyActive: 'primary', proxyCheckedAt: checkedAt, proxyLatencyMs: 120 });
+    await redis.del(PROXY_STATUS_KEY);
+  });
+});
 
 describe('API виджета', () => {
   it('401 без токена, с чужой подписью и без срока; повтор токена amo в пределах срока — 200', async () => {

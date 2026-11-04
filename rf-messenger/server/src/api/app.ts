@@ -13,6 +13,7 @@ import type { Env } from '../config.ts';
 import type { SecretBox } from '../crypto.ts';
 import { safeFileName, type FileStore } from '../files.ts';
 import type { Store } from '../store.ts';
+import { PROXY_STATUS_KEY, readProxyStatus } from '../proxy-monitor.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -85,7 +86,8 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
   app.get('/health', async (_req, reply) => {
     const db = await store.db.query('SELECT 1').then(() => true, () => false);
     const redis = await deps.redis.ping().then(() => true, () => false);
-    return reply.code(db && redis ? 200 : 503).send({ ok: db && redis, db, redis, amojo: Boolean(deps.amojo) });
+    const proxy = readProxyStatus(redis ? await deps.redis.get(PROXY_STATUS_KEY).catch(() => null) : null);
+    return reply.code(db && redis ? 200 : 503).send({ ok: db && redis, db, redis, amojo: Boolean(deps.amojo), ...proxy });
   });
 
   // ---------- Вебхук amoCRM: исходящие сообщения ----------

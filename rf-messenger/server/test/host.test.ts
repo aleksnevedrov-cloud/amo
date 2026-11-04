@@ -35,4 +35,24 @@ describe('процесс коннекторов', () => {
     const row = await t.db.query('SELECT credentials FROM channels WHERE id = $1', [t.channel.id]);
     expect(row.rows[0].credentials).toBe('');
   });
+
+  it('смена прокси: перезапускаются только каналы WhatsApp', async () => {
+    const started: number[] = [];
+    const stopped: number[] = [];
+    const host = new ConnectorHost(t.store, t.box, () => t.bridge, silent, (ch) => {
+      started.push(ch.id);
+      const f = new FakeConnector();
+      f.stop = async () => void stopped.push(ch.id);
+      return f;
+    });
+    const wa = (await t.store.createChannel({ accountId: 31337, kind: 'whatsapp', title: 'WA', externalId: '79990000001', credentials: t.box.encrypt('{}') }))!;
+    await host.syncAll();
+    expect(started.sort()).toEqual([t.channel.id, wa.id].sort());
+
+    await host.restartKind('whatsapp');
+    expect(stopped).toEqual([wa.id]);
+    expect(started.filter((id) => id === wa.id)).toHaveLength(2);
+    expect(started.filter((id) => id === t.channel.id)).toHaveLength(1);
+    await host.stopAll();
+  });
 });

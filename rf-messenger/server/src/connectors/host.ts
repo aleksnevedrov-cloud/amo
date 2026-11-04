@@ -72,6 +72,12 @@ export class ConnectorHost {
     if (channel) await this.startOne(channel);
   }
 
+  /** Перезапуск всех каналов одного типа (WhatsApp после смены прокси). Сессии не сбрасываются. */
+  async restartKind(kind: Channel['kind']): Promise<void> {
+    const channels = await this.store.activeChannels();
+    for (const c of channels) if (c.kind === kind && this.running.has(c.id)) await this.restart(c.id);
+  }
+
   private async stopOne(id: number, removed = false): Promise<void> {
     const c = this.running.get(id);
     this.running.delete(id);

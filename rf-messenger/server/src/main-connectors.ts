@@ -4,10 +4,12 @@ import { CHANNELS_CHANGED } from './api/app.ts';
 import { Bridge, type Logger } from './bridge.ts';
 import { loadEnv } from './config.ts';
 import { ConnectorHost, defaultFactory } from './connectors/host.ts';
-import { TelegramBotConnector } from './connectors/telegram-bot.ts';
+import { AlertNotifier, collectProblems } from './alerts.ts';
+import { TelegramBotApi, TelegramBotConnector } from './connectors/telegram-bot.ts';
 import { WhatsAppConnector } from './connectors/whatsapp.ts';
 import { migrate } from './db.ts';
-import { createMessengerProxy, proxySecrets, redactSecrets } from './proxy.ts';
+import { createMessengerProxy, proxySecrets, ProxySwitch, redactSecrets } from './proxy.ts';
+import { httpProbe, PROXY_CHECK_INTERVAL_MS, ProxyMonitor } from './proxy-monitor.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobData, type JobName, type JobQueue } from './queue.ts';
 
@@ -23,7 +25,10 @@ const core = createCore(env);
 await migrate(core.db);
 
 // Логин и пароль прокси не должны попасть в журнал, даже внутри текста ошибки.
-const secrets = proxySecrets(env.MESSENGER_PROXY_URL);
+// Токен бота уведомлений — туда же.
+const secrets = [...proxySecrets(env.MESSENGER_PROXY_URL), ...proxySecrets(env.MESSENGER_PROXY_URL_FALLBACK), ...(env.ALERT_TG_BOT_TOKEN ? [env.ALERT_TG_BOT_TOKEN] : [])].sort(
+  (a, b) => b.length - a.length,
+);
 const levels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'];
 const write = (level: string) => (obj: object, msg?: string) => {
   if (levels.indexOf(level) <= levels.indexOf(env.LOG_LEVEL)) process.stdout.write(`${redactSecrets(JSON.stringify({ level, time: new Date().toISOString(), msg, ...obj }), secrets)}\n`);
@@ -31,8 +36,12 @@ const write = (level: string) => (obj: object, msg?: string) => {
 const log: Logger = { info: write('info'), warn: write('warn'), error: write('error') };
 
 // Прокси только для Telegram и WhatsApp; amoCRM (amojo, вложения), postgres, redis — напрямую.
-const proxy = createMessengerProxy(env.MESSENGER_PROXY_URL);
-log.info({ proxy: proxy?.display ?? 'нет' }, 'исходящий прокси мессенджеров');
+// Основной и запасной; Telegram берёт текущий при каждом запросе, WhatsApp — при подключении.
+const proxies = new ProxySwitch(createMessengerProxy(env.MESSENGER_PROXY_URL), createMessengerProxy(env.MESSENGER_PROXY_URL_FALLBACK));
+const dispatcher = () => proxies.current()?.dispatcher;
+const waProxy = () => proxies.current() ?? undefined;
+// Адрес прокси в журнал не пишем — только задан ли он.
+log.info({ proxy: proxies.primary ? 'задан' : 'нет', fallback: proxies.fallback ? 'задан' : 'нет', alerts: env.ALERT_TG_BOT_TOKEN ? 'включены' : 'нет' }, 'исходящий прокси мессенджеров');
 
 const bull = new Queue(QUEUE_NAME, { connection: core.redis, defaultJobOptions: JOB_OPTIONS });
 const queue: JobQueue = { add: async (name, data, opts) => void (await bull.add(name, data, opts)) };
@@ -64,12 +73,12 @@ host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, cred
       onQr: async (qr) => void (qr ? await core.redis.set(waQrKey(channel.id), qr, 'EX', 70) : await core.redis.del(waQrKey(channel.id))),
       onIdentity: (phone) => core.store.setChannelIdentity(channel.id, phone, `WhatsApp ${phone}`),
       log: (level, msg) => log[level]({ channelId: channel.id }, msg),
-      ...(proxy ? { proxy: { agent: proxy.agent, dispatcher: proxy.dispatcher } } : {}),
+      ...(proxies.primary ? { proxy: waProxy } : {}),
     });
   }
   if (channel.kind === 'telegram_bot' && creds.token) {
     return new TelegramBotConnector(creds.token, {
-      ...(proxy ? { dispatcher: proxy.dispatcher } : {}),
+      ...(proxies.primary ? { dispatcher } : {}),
       onError: (err) => log.warn({ channelId: channel.id, err: (err as Error).message }, 'telegram: ошибка опроса'),
     });
   }
@@ -97,10 +106,27 @@ sub.on('message', (_ch, payload: string) => {
 });
 // Подстраховка, если сообщение pub/sub потерялось.
 const timer = setInterval(() => void host.syncAll().catch(() => undefined), 60_000);
+
+// Смена прокси: Telegram подхватит сам, WhatsApp переподключаем с той же сессией.
+proxies.onChange(() => void host.restartKind('whatsapp').catch((err: Error) => log.error({ err: err.message }, 'переподключение WhatsApp после смены прокси')));
+
+// Проверка прокси раз в минуту и уведомления о сбоях прокси и каналов.
+const monitor = new ProxyMonitor({ sw: proxies, probe: httpProbe(), redis: core.redis, log });
+const alertApi = env.ALERT_TG_BOT_TOKEN ? new TelegramBotApi(env.ALERT_TG_BOT_TOKEN, { dispatcher, retry: { retries: 2 } }) : null;
+const alerts = alertApi
+  ? new AlertNotifier({ send: async (text) => void (await alertApi.call('sendMessage', { chat_id: env.ALERT_TG_CHAT_ID, text }, 15_000)), log })
+  : null;
+const healthTick = async () => {
+  const status = await monitor.tick();
+  if (alerts) await alerts.observe(collectProblems(status, await core.store.activeChannels()));
+};
+void healthTick().catch((err: Error) => log.error({ err: err.message }, 'проверка прокси'));
+const healthTimer = setInterval(() => void healthTick().catch((err: Error) => log.error({ err: err.message }, 'проверка прокси')), PROXY_CHECK_INTERVAL_MS);
 log.info({}, 'connectors запущен');
 
 const shutdown = async () => {
   clearInterval(timer);
+  clearInterval(healthTimer);
   await worker.close();
   await host.stopAll();
   await bull.close();

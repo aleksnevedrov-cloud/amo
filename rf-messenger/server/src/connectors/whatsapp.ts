@@ -11,7 +11,7 @@ import type { ILogger } from 'baileys/lib/Utils/logger.js';
 import type { Agent } from 'node:https';
 import type { Dispatcher } from 'undici';
 import { createDbAuthState, type SessionStorage } from './wa-auth.ts';
-import { PermanentSendError, reconnectDelayMs, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
+import { PermanentSendError, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
 
 /** Сообщения старше суток при переподключении не переносим — это история, а не новая переписка. */
 const MAX_AGE_SEC = 24 * 3600;
@@ -128,6 +128,17 @@ function quietLogger(log?: (level: 'warn' | 'error', msg: string) => void): ILog
   return l;
 }
 
+export interface WaProxy {
+  agent: Agent;
+  dispatcher: Dispatcher;
+}
+
+/** Переподключение WhatsApp после обрыва: 2–4–8–16–32–60 с, дальше раз в 60 с. Сессия при этом не сбрасывается. */
+export function waReconnectDelayMs(failures: number): number {
+  const n = Math.max(1, failures);
+  return Math.min(2000 * 2 ** (n - 1), 60_000);
+}
+
 export interface WhatsAppDeps {
   session: SessionStorage & { clear(): Promise<void> };
   /** QR для виджета: строка — показать, null — убрать. */
@@ -139,7 +150,11 @@ export interface WhatsAppDeps {
    * Прокси для серверов WhatsApp; не задан — напрямую.
    * agent — веб-сокет и загрузка медиа (Baileys в Node грузит через node:https), dispatcher — скачивание медиа (fetch).
    */
-  proxy?: { agent: Agent; dispatcher: Dispatcher };
+  proxy?: WaProxy | (() => WaProxy | undefined);
+  /** Сколько ждать открытия соединения или QR, прежде чем оборвать зависшую попытку (по умолчанию 45 с). */
+  connectWatchdogMs?: number;
+  /** Для тестов: пауза перед переподключением. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Для тестов: подмена makeWASocket. */
   makeSocket?: typeof makeWASocket;
   /** Для тестов: подмена downloadMediaMessage. */
@@ -170,6 +185,12 @@ export class WhatsAppConnector implements Connector {
 
   constructor(private readonly d: WhatsAppDeps) {}
 
+  /** Текущий прокси (основной или запасной) — берётся заново при каждом подключении и скачивании. */
+  private proxy(): WaProxy | undefined {
+    const p = this.d.proxy;
+    return typeof p === 'function' ? p() : p;
+  }
+
   async start(sink: ConnectorSink): Promise<void> {
     this.sink = sink;
     await this.connect();
@@ -190,6 +211,7 @@ export class WhatsAppConnector implements Connector {
     this.auth = await createDbAuthState(this.d.session);
     const auth = this.auth;
     const make = this.d.makeSocket ?? makeWASocket;
+    const proxy = this.proxy();
     const sock = make({
       auth: auth.state,
       logger: quietLogger(this.d.log),
@@ -199,16 +221,32 @@ export class WhatsAppConnector implements Connector {
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
       getMessage: async () => undefined,
-      ...(this.d.proxy ? { agent: this.d.proxy.agent, fetchAgent: this.d.proxy.agent } : {}),
+      ...(proxy ? { agent: proxy.agent, fetchAgent: proxy.agent } : {}),
     });
     this.sock = sock;
     let qrShown = false;
+
+    // Если прокси отказал в туннеле (например, HTTP 403), Baileys не закрывает сокет и молча висит в «connecting».
+    // Обрываем такую попытку сами — дальше обычное переподключение с паузой, сессия сохраняется.
+    const hang = (reason: string) => {
+      if (this.sock !== sock) return;
+      this.d.log?.('warn', `whatsapp: ${reason}, переподключение`);
+      sock.end(Object.assign(new Error(reason), { output: { statusCode: DisconnectReason.connectionClosed } }));
+    };
+    const watchdog = setTimeout(() => hang('нет ответа от WhatsApp'), this.d.connectWatchdogMs ?? 45_000);
+    watchdog.unref?.();
+    const ws = (sock as unknown as { ws?: { on?: (ev: string, fn: (...a: unknown[]) => void) => void } }).ws;
+    ws?.on?.('unexpected-response', (_req, res) => {
+      clearTimeout(watchdog);
+      hang(`сервер или прокси ответил HTTP ${(res as { statusCode?: number } | undefined)?.statusCode ?? '?'} при подключении`);
+    });
     if (!auth.registered) await sink.status('starting', 'Подключение к WhatsApp…');
 
     sock.ev.on('creds.update', () => void auth.saveCreds());
 
     sock.ev.on('connection.update', (u) => {
       void (async () => {
+        if (u.qr || u.connection === 'open' || u.connection === 'close') clearTimeout(watchdog);
         if (u.qr) {
           qrShown = true;
           await this.d.onQr(u.qr);
@@ -247,9 +285,11 @@ export class WhatsAppConnector implements Connector {
             return;
           }
           // Обычный обрыв или «restartRequired» после первого входа — переподключаемся.
+          // Сессию не сбрасываем: несохранённые ключи дописываем в БД, новое подключение прочитает ту же сессию.
           this.failures = code === DisconnectReason.restartRequired ? 0 : this.failures + 1;
+          await auth.flush().catch(() => undefined);
           if (this.failures > 0) await sink.status('no_phone', 'Нет связи с WhatsApp, повторное подключение');
-          await sleep(this.failures === 0 ? 500 : reconnectDelayMs(this.failures), this.abort.signal);
+          await (this.d.sleep ?? sleep)(this.failures === 0 ? 500 : waReconnectDelayMs(this.failures), this.abort.signal);
           await this.connect();
         }
       })().catch((err: Error) => this.d.log?.('error', `whatsapp connection.update: ${err.message}`));
@@ -337,7 +377,8 @@ export class WhatsAppConnector implements Connector {
     if (!msg || !this.sock) throw new Error('Вложение WhatsApp уже недоступно');
     const sock = this.sock;
     const download = this.d.downloadMedia ?? downloadMediaMessage;
-    const options = this.d.proxy ? { options: { dispatcher: this.d.proxy.dispatcher } as RequestInit } : {};
+    const proxy = this.proxy();
+    const options = proxy ? { options: { dispatcher: proxy.dispatcher } as RequestInit } : {};
     const data = await download(msg, 'buffer', options, { logger: quietLogger(this.d.log), reuploadRequest: sock.updateMediaMessage });
     if (data.length > maxBytes) throw new Error('Вложение больше допустимого размера');
     const m = unwrap(msg.message);

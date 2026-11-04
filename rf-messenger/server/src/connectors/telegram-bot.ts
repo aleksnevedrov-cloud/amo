@@ -26,31 +26,86 @@ export class TelegramApiError extends Error {
 
 export interface TelegramNetOptions {
   fetch?: typeof fetch;
-  /** Прокси для api.telegram.org; не задан — напрямую. */
-  dispatcher?: Dispatcher;
+  /** Прокси для api.telegram.org; не задан — напрямую. Функция — текущий прокси (основной или запасной) на момент запроса. */
+  dispatcher?: Dispatcher | (() => Dispatcher | undefined);
+  /** Повторы при сетевой ошибке, таймауте, 429 и 5xx. */
+  retry?: RetryOptions;
 }
+
+export interface RetryOptions {
+  /** Сколько раз повторить запрос после первой неудачи (по умолчанию 5). */
+  retries?: number;
+  /** Для тестов: пауза и источник случайности. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  random?: () => number;
+}
+
+/** Повторять имеет смысл: нет ответа (сеть, таймаут, прокси), 429 или ошибка сервера. 2xx и 4xx — не повторяем. */
+export const isRetryable = (err: unknown): err is TelegramApiError =>
+  err instanceof TelegramApiError && (err.code === 0 || err.code === 429 || err.code >= 500);
+
+/** Пауза перед повтором номер attempt (0, 1, …): 1–2–4–8–16 с ±25 %; для 429 — retry_after из ответа. */
+export function retryDelayMs(attempt: number, err: TelegramApiError, random: () => number = Math.random): number {
+  if (err.code === 429 && err.retryAfter) return err.retryAfter * 1000;
+  return Math.round(1000 * 2 ** attempt * (0.75 + random() * 0.5));
+}
+
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+  });
 
 /** Минимальный клиент Bot API на fetch, без сторонних библиотек. Токен не попадает в ошибки и логи. */
 export class TelegramBotApi {
   private readonly f: typeof fetch;
-  /** Прокси (undici ProxyAgent) — передаётся в каждый запрос к api.telegram.org. */
-  private readonly via: RequestInit;
+  private readonly dispatcher: () => Dispatcher | undefined;
+  private readonly retries: number;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  private readonly random: () => number;
 
   constructor(
     private readonly token: string,
     opts: TelegramNetOptions = {},
   ) {
     this.f = opts.fetch ?? fetch;
-    this.via = opts.dispatcher ? ({ dispatcher: opts.dispatcher } as RequestInit) : {};
+    const d = opts.dispatcher;
+    this.dispatcher = typeof d === 'function' ? d : () => d;
+    this.retries = opts.retry?.retries ?? 5;
+    this.sleep = opts.retry?.sleep ?? pause;
+    this.random = opts.retry?.random ?? Math.random;
   }
 
-  async call<T = any>(method: string, params: Record<string, unknown> | FormData = {}, timeoutMs = 30_000, signal?: AbortSignal): Promise<T> {
+  /** Прокси (undici ProxyAgent) — передаётся в каждый запрос к api.telegram.org. */
+  private via(): RequestInit {
+    const d = this.dispatcher();
+    return d ? ({ dispatcher: d } as RequestInit) : {};
+  }
+
+  /** Повтор при сбое сети, 429 и 5xx. Успешный ответ не повторяется — сообщение не уйдёт дважды. */
+  private async withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (signal?.aborted || !isRetryable(err) || attempt >= this.retries) throw err;
+        await this.sleep(retryDelayMs(attempt, err, this.random), signal);
+        if (signal?.aborted) throw err;
+      }
+    }
+  }
+
+  call<T = any>(method: string, params: Record<string, unknown> | FormData = {}, timeoutMs = 30_000, signal?: AbortSignal): Promise<T> {
+    return this.withRetry(() => this.callOnce<T>(method, params, timeoutMs, signal), signal);
+  }
+
+  private async callOnce<T>(method: string, params: Record<string, unknown> | FormData, timeoutMs: number, signal?: AbortSignal): Promise<T> {
     const isForm = params instanceof FormData;
     const timeout = AbortSignal.timeout(timeoutMs);
     let res: Response;
     try {
       res = await this.f(`${API}/bot${this.token}/${method}`, {
-        ...this.via,
+        ...this.via(),
         method: 'POST',
         ...(isForm ? { body: params } : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(params) }),
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -74,11 +129,15 @@ export class TelegramBotApi {
     const file = await this.call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId });
     if (!file.file_path) throw new Error('Файл недоступен (Bot API отдаёт файлы до 20 МБ)');
     if ((file.file_size ?? 0) > maxBytes) throw new Error('Файл больше допустимого размера');
-    const res = await this.f(`${API}/file/bot${this.token}/${file.file_path}`, { ...this.via, signal: AbortSignal.timeout(120_000) }).catch(() => {
-      throw new TelegramApiError(0, 'network error');
+    const data = await this.withRetry(async () => {
+      const res = await this.f(`${API}/file/bot${this.token}/${file.file_path}`, { ...this.via(), signal: AbortSignal.timeout(120_000) }).catch(() => {
+        throw new TelegramApiError(0, 'network error');
+      });
+      if (!res.ok) throw new TelegramApiError(res.status, 'file download failed', Number(res.headers.get('retry-after')) || null);
+      return Buffer.from(await res.arrayBuffer().catch(() => {
+        throw new TelegramApiError(0, 'network error');
+      }));
     });
-    if (!res.ok) throw new TelegramApiError(res.status, 'file download failed');
-    const data = Buffer.from(await res.arrayBuffer());
     if (data.length > maxBytes) throw new Error('Файл больше допустимого размера');
     return { data, path: file.file_path };
   }
