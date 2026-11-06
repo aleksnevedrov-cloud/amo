@@ -47,6 +47,8 @@ const KINDS = new Set<AmojoMessageKind>(['text', 'picture', 'file', 'video', 'vo
 const hookSchema = z.object({
   message: z.object({
     conversation: z.object({ client_id: z.string().optional(), id: z.string().optional() }),
+    // Кто написал из amo: id сотрудника (или бота) в API чатов.
+    sender: z.object({ id: z.string().min(1).max(100) }).passthrough().optional(),
     message: z.object({
       id: z.string(),
       type: z.string(),
@@ -162,14 +164,22 @@ export class Bridge {
     if (!conn || !this.d.amojo) throw new Error('Канал чатов amoCRM не подключён к аккаунту');
     const client = this.clientUser(chat);
     const fromPhone = msg.source === 'phone';
+    // Сообщение с телефона менеджера — исходящее: отправитель — сотрудник amoCRM (ref_id), получатель — клиент.
+    // amo принимает исходящее, только если отправитель — его пользователь: без ref_id ответ 400
+    // «receiver: exactly one origin user must be provided». Сотрудника узнаём из вебхука amo (onAmoHook).
+    let sender: NewMessagePayload['sender'] = client;
+    if (fromPhone) {
+      const ref = chat.amoOperatorRef ?? conn.amoOperatorRef;
+      if (!ref) throw new Error('Сообщение с телефона: неизвестен сотрудник amoCRM — он определится, когда менеджер напишет клиенту из amoCRM');
+      sender = { ref_id: ref };
+    }
     const ts = Math.floor(msg.createdAt.getTime() / 1000);
     const payload: NewMessagePayload = {
       timestamp: ts,
       msec_timestamp: msg.createdAt.getTime(),
       msgid: ourMsgid(msg.id),
       conversation_id: chat.conversationId,
-      // Сообщение с телефона менеджера — исходящее: отправитель — менеджер, получатель — клиент.
-      sender: fromPhone ? { id: `rfm-op-${chat.channelId}`, name: 'Менеджер (с телефона)' } : client,
+      sender,
       ...(fromPhone ? { receiver: client } : {}),
       message: await this.amoMessage(msg, chat),
       silent: fromPhone,
@@ -196,10 +206,19 @@ export class Bridge {
   async onAmoHook(accountId: number, body: unknown): Promise<HookResult> {
     const parsed = hookSchema.safeParse(body);
     if (!parsed.success) return 'ignored';
-    const { conversation, message: m } = parsed.data.message;
+    const { conversation, sender, message: m } = parsed.data.message;
     if (!conversation.client_id) return 'unknown_chat';
     const chat = await this.d.store.chatByConversation(accountId, conversation.client_id);
     if (!chat) return 'unknown_chat';
+    if (sender && sender.id !== chat.amoOperatorRef) {
+      const firstForAccount = await this.d.store.rememberAmoOperator(accountId, chat.id, sender.id);
+      // Сообщения с телефона, отклонённые amo без сотрудника, — заново в очередь (отдельный jobId: прежние задачи уже упали).
+      if (firstForAccount) {
+        for (const id of await this.d.store.pendingPhoneIds(accountId)) {
+          await this.d.queue.add('to-amo', { messageId: id }, { jobId: `to-amo-${id}-op` });
+        }
+      }
+    }
     const kind = (KINDS.has(m.type as AmojoMessageKind) ? m.type : 'text') as AmojoMessageKind;
     const media = kind !== 'text' && m.media ? { url: m.media, name: m.file_name || 'file', size: m.file_size } : null;
     const msg = await this.d.store.insertFromAmo({

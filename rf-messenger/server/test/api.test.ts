@@ -155,7 +155,7 @@ describe('API виджета', () => {
         payload: { amojoAccountId: '6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b' },
       });
       expect(r.statusCode).toBe(200);
-      expect(await u.store.getConnection(ACCOUNT)).toEqual({ amojoAccountId: '6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b', scopeId: 'scope-xyz' });
+      expect(await u.store.getConnection(ACCOUNT)).toEqual({ amojoAccountId: '6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b', scopeId: 'scope-xyz', amoOperatorRef: null });
       await a.close();
     } finally {
       await u.drop();

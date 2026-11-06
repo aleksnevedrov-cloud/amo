@@ -8,6 +8,11 @@ export interface AmojoUser {
   profile_link?: string;
 }
 
+/** Сотрудник amoCRM как отправитель исходящего: ref_id — его id в API чатов. */
+export interface AmojoAmoUser {
+  ref_id: string;
+}
+
 export type AmojoMessageKind = 'text' | 'picture' | 'file' | 'video' | 'voice' | 'audio' | 'sticker';
 
 export interface AmojoMessage {
@@ -26,7 +31,8 @@ export interface NewMessagePayload {
   /** Наш id сообщения: amo вернёт его в ответах и в reply_to. */
   msgid: string;
   conversation_id: string;
-  sender: AmojoUser;
+  /** Клиент (входящее) или сотрудник amoCRM по ref_id (исходящее с телефона менеджера). */
+  sender: AmojoUser | AmojoAmoUser;
   receiver?: AmojoUser;
   message: AmojoMessage;
   silent: boolean;

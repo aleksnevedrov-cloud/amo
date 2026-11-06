@@ -73,13 +73,43 @@ describe('канал → amoCRM', () => {
     expect(p.message).toEqual({ type: 'text', text: 'Ольга: Ответ', reply_to: { message: { msgid: `rfm-m${t.queue.jobs[0]!.data.messageId}` } } });
   });
 
-  it('сообщение с телефона менеджера уходит исходящим: отправитель — менеджер, получатель — клиент', async () => {
-    await t.bridge.onInbound(t.channel, t.connector, event({ fromMe: true, text: 'Перезвоню' }));
+  it('сообщение с телефона менеджера уходит исходящим: отправитель — сотрудник amoCRM по ref_id, получатель — клиент', async () => {
+    await t.bridge.onInbound(t.channel, t.connector, event());
     await t.bridge.deliverToAmo(t.queue.jobs[0]!.data.messageId);
+    const conv = (t.calls.at(-1)!.body.payload as { conversation_id: string }).conversation_id;
+    await t.bridge.onAmoHook(31337, hook(conv)); // менеджер написал из amo — сотрудник известен
+    await t.bridge.onInbound(t.channel, t.connector, event({ fromMe: true, externalMessageId: '2', text: 'Перезвоню' }));
+    const job = t.queue.jobs.find((j) => j.name === 'to-amo' && j.jobId !== t.queue.jobs[0]!.jobId)!;
+    await t.bridge.deliverToAmo(job.data.messageId);
     const p = t.calls.at(-1)!.body.payload as Record<string, any>;
-    expect(p.sender.name).toBe('Менеджер (с телефона)');
+    expect(p.sender).toEqual({ ref_id: 'manager' });
     expect(p.receiver.name).toBe('Иван Петров');
+    expect(p.receiver.id).toBe(`${conv}-c`);
     expect(p.silent).toBe(true);
+    expect((await t.store.messageById(job.data.messageId))?.status).toBe('synced');
+  });
+
+  it('сообщение с телефона без известного сотрудника ждёт и уходит, когда менеджер напишет из amo', async () => {
+    await t.bridge.onInbound(t.channel, t.connector, event());
+    await t.bridge.deliverToAmo(t.queue.jobs[0]!.data.messageId);
+    const conv = (t.calls.at(-1)!.body.payload as { conversation_id: string }).conversation_id;
+    await t.bridge.onInbound(t.channel, t.connector, event({ fromMe: true, externalMessageId: '2', text: 'Фото с телефона' }));
+    const phoneId = t.queue.jobs[1]!.data.messageId;
+    const before = t.calls.length;
+    await expect(t.bridge.deliverToAmo(phoneId)).rejects.toThrow(/неизвестен сотрудник amoCRM/);
+    expect(t.calls.length).toBe(before); // в amo ничего не ушло
+
+    await t.bridge.onAmoHook(31337, hook(conv));
+    const retry = t.queue.jobs.find((j) => j.jobId === `to-amo-${phoneId}-op`);
+    expect(retry?.name).toBe('to-amo');
+    await t.bridge.deliverToAmo(phoneId);
+    expect((t.calls.at(-1)!.body.payload as Record<string, any>).sender).toEqual({ ref_id: 'manager' });
+
+    // Второй вебхук от того же аккаунта повторно в очередь не ставит.
+    const n = t.queue.jobs.length;
+    await t.bridge.onAmoHook(31337, hook(conv, { id: 'amo-out-2' }));
+    expect(t.queue.jobs.filter((j) => j.jobId.endsWith('-op'))).toHaveLength(1);
+    expect(t.queue.jobs.length).toBe(n + 1); // только to-channel для нового сообщения
   });
 
   it('без подключения к amo задача падает и будет повторена', async () => {

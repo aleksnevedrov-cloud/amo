@@ -27,6 +27,8 @@ export interface Chat {
   title: string;
   contact: { username?: string; phone?: string; link?: string };
   amojoChatId: string | null;
+  /** Сотрудник amoCRM (id в API чатов), последним писавший в этот чат из amo. */
+  amoOperatorRef: string | null;
 }
 
 export interface Message {
@@ -78,6 +80,7 @@ const chatRow = (r: any): Chat => ({
   title: r.title,
   contact: r.contact ?? {},
   amojoChatId: r.amojo_chat_id,
+  amoOperatorRef: r.amo_operator_ref ?? null,
 });
 const messageRow = (r: any): Message => ({
   id: Number(r.id),
@@ -109,9 +112,26 @@ export class Store {
 
   // --- Подключение к API чатов amo ---
 
-  async getConnection(accountId: number): Promise<{ amojoAccountId: string; scopeId: string } | null> {
-    const r = await this.db.query('SELECT amojo_account_id, scope_id FROM amojo_connections WHERE account_id = $1', [accountId]);
-    return r.rows[0] ? { amojoAccountId: r.rows[0].amojo_account_id, scopeId: r.rows[0].scope_id } : null;
+  async getConnection(accountId: number): Promise<{ amojoAccountId: string; scopeId: string; amoOperatorRef: string | null } | null> {
+    const r = await this.db.query('SELECT amojo_account_id, scope_id, amo_operator_ref FROM amojo_connections WHERE account_id = $1', [accountId]);
+    return r.rows[0]
+      ? { amojoAccountId: r.rows[0].amojo_account_id, scopeId: r.rows[0].scope_id, amoOperatorRef: r.rows[0].amo_operator_ref ?? null }
+      : null;
+  }
+
+  /**
+   * Запоминает сотрудника amoCRM, написавшего в чат из amo: для этого чата и как запасной для аккаунта.
+   * Возвращает true, если у аккаунта до этого сотрудника не было.
+   */
+  async rememberAmoOperator(accountId: number, chatId: number, ref: string): Promise<boolean> {
+    await this.db.query('UPDATE chats SET amo_operator_ref = $3 WHERE account_id = $1 AND id = $2', [accountId, chatId, ref]);
+    const r = await this.db.query(
+      `UPDATE amojo_connections c SET amo_operator_ref = $2
+       FROM (SELECT amo_operator_ref AS prev FROM amojo_connections WHERE account_id = $1) old
+       WHERE c.account_id = $1 RETURNING old.prev`,
+      [accountId, ref],
+    );
+    return r.rows.length > 0 && !r.rows[0].prev;
   }
 
   async getConnectionByScope(scopeId: string): Promise<{ accountId: number } | null> {
@@ -234,6 +254,18 @@ export class Store {
    * Служебное: входящие из канала, которые не переданы в amo дольше olderThanSec секунд
    * (за последние 7 суток — старше в amo уже не нужны как новая переписка).
    */
+  /** Служебное: сообщения с телефона менеджера аккаунта, не переданные в amo (за последние 7 суток). */
+  async pendingPhoneIds(accountId: number): Promise<number[]> {
+    const r = await this.db.query(
+      `SELECT id FROM messages
+       WHERE account_id = $1 AND status = 'received' AND source = 'phone' AND amojo_msgid IS NULL
+         AND created_at > now() - interval '7 days'
+       ORDER BY id LIMIT 500`,
+      [accountId],
+    );
+    return r.rows.map((x) => Number(x.id));
+  }
+
   async stuckInboundIds(olderThanSec: number): Promise<number[]> {
     const r = await this.db.query(
       `SELECT id FROM messages
