@@ -13,7 +13,7 @@
       "email": "rf-dveri@yandex.ru"
     }
   },
-  "locations": ["settings", "advanced_settings"],
+  "locations": ["settings", "advanced_settings", "lcard-1", "ccard-1"],
   "advanced": {
     "title": "advanced.title"
   },

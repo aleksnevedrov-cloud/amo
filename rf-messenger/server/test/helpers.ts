@@ -86,6 +86,12 @@ export class FakeConnector implements Connector {
     this.sent.push(req);
     return { externalMessageId: String(1000 + this.sent.length) };
   }
+  /** Номера, «зарегистрированные» в мессенджере: номер → id чата. */
+  phones = new Map<string, string>();
+  async resolvePhone(phone: string) {
+    const id = this.phones.get(phone);
+    return id ? { externalChatId: id } : null;
+  }
   async download(ref: string) {
     const data = this.files.get(ref);
     if (!data) throw new Error('нет файла');
@@ -108,6 +114,7 @@ export function amojoFetch(calls: AmojoCall[]): typeof fetch {
     const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
     if (url.pathname.endsWith('/connect')) return json({ account_id: body.account_id, scope_id: 'scope-xyz', title: body.title });
     if (url.pathname.endsWith('/delivery_status')) return json({});
+    if (url.pathname.endsWith('/chats')) return json({ id: `amo-chat-${String(body.conversation_id)}`, user: { id: 'amo-user-1', client_id: (body.user as { id: string }).id } });
     const payload = body.payload as { msgid: string };
     return json({ new_message: { msgid: `amo-${payload.msgid}`, chat_id: 'amo-chat-1', conversation_id: 'x' } });
   }) as typeof fetch;

@@ -6,6 +6,10 @@ declare const __API_URL__: string;
 
 export interface AmoWidgetSelf {
   get_settings(): { widget_code: string; [key: string]: unknown };
+  /** Где открыт виджет: lcard — карточка сделки, ccard — карточка контакта. */
+  system?(): { area?: string };
+  /** Блок виджета в правой панели карточки. */
+  render_template?(opts: { caption: { class_name: string }; body: string; render: string }): void;
   /** amo добавляет заголовок X-Auth-Token (одноразовый JWT интеграции). */
   $authorizedAjax(opts: { url: string; method?: string; data?: string; contentType?: string; dataType?: string }): PromiseLike<unknown>;
 }
@@ -23,6 +27,8 @@ export interface ChannelView {
 
 export interface WaQrView {
   status: ChannelView['status'];
+  /** Telegram личный: включена двухэтапная проверка, нужен пароль. */
+  needPassword?: boolean;
   statusText: string;
   statusDetail: string | null;
   title: string;
@@ -32,6 +38,8 @@ export interface WaQrView {
 
 export interface StatusView {
   amojo: { configured: boolean; connected: boolean };
+  /** Доступ интеграции к amoCRM (OAuth) — нужен для «Написать первым». */
+  oauth?: { configured: boolean; connected: boolean; url: string };
   channels: ChannelView[];
 }
 
@@ -46,6 +54,12 @@ declare global {
 export function amojoAccountId(w: Window = window): string | null {
   const account = (w.APP?.constant?.('account') ?? w.AMOCRM?.constant?.('account')) as { amojo_id?: unknown } | undefined;
   return typeof account?.amojo_id === 'string' ? account.amojo_id : null;
+}
+
+export interface ComposeView {
+  channels: { id: number; kind: string; kindText: string; title: string; connected: boolean }[];
+  contacts: { id: number; name: string; phones: string[] }[];
+  error?: string;
 }
 
 export class MessengerApi {
@@ -79,6 +93,19 @@ export class MessengerApi {
   }
   addWhatsApp() {
     return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'whatsapp' });
+  }
+  addTelegramUser() {
+    return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'telegram_user' });
+  }
+  telegramPassword(id: number, password: string) {
+    return this.call<{ accepted: boolean }>('POST', `/widget/v1/channels/${id}/password`, { password });
+  }
+  compose(q: { leadId?: number; contactId?: number }) {
+    const qs = q.leadId ? `leadId=${q.leadId}` : `contactId=${q.contactId ?? 0}`;
+    return this.call<ComposeView>('GET', `/widget/v1/compose?${qs}`);
+  }
+  startChat(body: { channelId: number; contactId: number; phone: string; text: string }) {
+    return this.call<{ chatId: number; messageId: number }>('POST', '/widget/v1/chats/start', body);
   }
   whatsappQr(id: number) {
     return this.call<WaQrView>('GET', `/widget/v1/channels/${id}/qr`);
@@ -153,7 +180,7 @@ const ICON = {
 /** Короткая метка статуса и её цвет. */
 export function statusPill(c: Pick<ChannelView, 'kind' | 'status'>): { text: string; cls: string } {
   if (c.status === 'connected') return { text: 'Подключён', cls: 'rfm-ok-bg' };
-  if (c.status === 'starting') return { text: c.kind === 'whatsapp' ? 'Ждёт QR' : 'Подключается', cls: 'rfm-warn-bg' };
+  if (c.status === 'starting') return { text: c.kind === 'whatsapp' || c.kind === 'telegram_user' ? 'Ждёт QR' : 'Подключается', cls: 'rfm-warn-bg' };
   if (c.status === 'no_phone') return { text: 'Нет связи', cls: 'rfm-warn-bg' };
   if (c.status === 'session_ended') return { text: 'Сессия завершена', cls: 'rfm-err-bg' };
   return { text: 'Ошибка', cls: 'rfm-err-bg' };
@@ -169,7 +196,7 @@ function channelCard(c: ChannelView): string {
   const pill = statusPill(c);
   const detailColor = c.status === 'error' || c.status === 'session_ended' ? '#a12b2b' : '#8a5a00';
   const detail = c.statusDetail && c.status !== 'connected' ? `<div class="rfm-detail" style="color:${detailColor}">${esc(c.statusDetail)}</div>` : '';
-  const qrBtn = c.kind === 'whatsapp' && c.status !== 'connected' ? `<button type="button" class="rfm-btn" data-rfm="qr" data-id="${c.id}">Показать QR</button>` : '';
+  const qrBtn = (c.kind === 'whatsapp' || c.kind === 'telegram_user') && c.status !== 'connected' ? `<button type="button" class="rfm-btn" data-rfm="qr" data-id="${c.id}" data-kind="${esc(c.kind)}">Показать QR</button>` : '';
   return `<div class="rfm-card">
   ${channelIcon(c.kind)}
   <div class="rfm-main"><b>${esc(c.kindText)}</b><div class="rfm-sub">${esc(c.title)}</div>${detail}</div>
@@ -177,6 +204,13 @@ function channelCard(c: ChannelView): string {
   ${qrBtn}
   <button type="button" class="rfm-btn rfm-icon-btn" data-rfm="delete" data-id="${c.id}" aria-label="Отключить канал" title="Отключить канал">${ICON.trash}</button>
 </div>`;
+}
+
+function oauthBanner(o: StatusView['oauth']): string {
+  if (!o?.configured) return '';
+  if (o.connected)
+    return `<div class="rfm-banner rfm-ok-bg">${ICON.user}<div><b>Доступ к amoCRM есть</b><small>Менеджеры могут написать клиенту первыми из карточки сделки.</small></div></div>`;
+  return `<div class="rfm-banner rfm-warn-bg">${ICON.user}<div style="flex:1"><b>Нужна авторизация в amoCRM</b><small>Без неё не работает кнопка «Написать первым» в карточке сделки.</small></div><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="oauth" data-url="${esc(o.url)}">Авторизовать</button></div>`;
 }
 
 function amojoBanner(a: StatusView['amojo']): string {
@@ -188,10 +222,7 @@ function amojoBanner(a: StatusView['amojo']): string {
 }
 
 /** Каналы следующих этапов — видны, но выключены. */
-const PLANNED = [
-  { icon: ICON.user, title: 'Telegram личный', note: 'Скоро' },
-  { icon: ICON.more, title: 'MAX, VK, Авито', note: 'Скоро' },
-];
+const PLANNED = [{ icon: ICON.more, title: 'MAX, VK, Авито', note: 'Скоро' }];
 
 export function renderHtml(s: StatusView, notice: { error?: string; info?: string } = {}): string {
   const banner = notice.error
@@ -204,12 +235,13 @@ export function renderHtml(s: StatusView, notice: { error?: string; info?: strin
     : '<div class="rfm-card"><div class="rfm-main"><div class="rfm-sub">Каналов пока нет — добавьте первый ниже</div></div></div>';
   const tiles = `<div class="rfm-tiles">
   <button type="button" class="rfm-tile" data-rfm="add-wa"><div class="rfm-ico rfm-wa">${ICON.chat}</div><b>WhatsApp</b><small>По QR-коду</small></button>
+  <button type="button" class="rfm-tile" data-rfm="add-tg"><div class="rfm-ico rfm-tg">${ICON.user}</div><b>Telegram личный</b><small>По QR-коду</small></button>
   <button type="button" class="rfm-tile" data-rfm="show-bot"><div class="rfm-ico rfm-tg">${ICON.send}</div><b>Telegram-бот</b><small>По токену</small></button>
   ${PLANNED.map((p) => `<div class="rfm-tile rfm-tile-off"><div class="rfm-ico rfm-off">${p.icon}</div><b>${esc(p.title)}</b><small>${esc(p.note)}</small></div>`).join('')}
 </div>`;
   return `<div class="rfm">
 <style>${CSS}</style>
-${banner}${amojoBanner(s.amojo)}
+${banner}${amojoBanner(s.amojo)}${oauthBanner(s.oauth)}
 <div class="rfm-sec">Каналы · ${s.channels.length}</div>
 ${cards}
 <div data-rfm-qr></div>
@@ -224,11 +256,16 @@ ${tiles}
 }
 
 /** Карточка QR WhatsApp. */
-export function renderQr(q: WaQrView): string {
-  const steps = '<ol><li>Откройте WhatsApp на телефоне</li><li>Настройки → Связанные устройства</li><li>Привязка устройства</li><li>Наведите камеру на код</li></ol>';
+export function renderQr(q: WaQrView, kind = 'whatsapp'): string {
+  const tg = kind === 'telegram_user';
+  if (tg && q.needPassword)
+    return `<form class="rfm-form" data-rfm="tg-password"><b style="font-weight:500;width:100%">Пароль двухэтапной проверки Telegram</b><input type="password" name="password" autocomplete="off" required aria-label="Пароль Telegram"><button type="submit" class="rfm-btn rfm-btn-primary">Войти</button><div class="rfm-hint">${esc(q.statusDetail ?? '')}</div></form>`;
+  const steps = tg
+    ? '<ol><li>Откройте Telegram на телефоне</li><li>Настройки → Устройства</li><li>Подключить устройство</li><li>Наведите камеру на код</li></ol>'
+    : '<ol><li>Откройте WhatsApp на телефоне</li><li>Настройки → Связанные устройства</li><li>Привязка устройства</li><li>Наведите камеру на код</li></ol>';
   const detail = q.statusDetail ? `<div class="rfm-detail" style="color:#6b7785">${esc(q.statusDetail)}</div>` : '';
   const img = q.svg ? q.svg : `<span>${esc(q.status === 'session_ended' ? 'Код устарел' : 'Получаем код…')}</span>`;
-  return `<div class="rfm-qr"><div><b style="font-weight:500">Подключение WhatsApp</b>${steps}${detail}<div class="rfm-hint" style="margin-top:6px">Код обновляется автоматически</div></div><div class="rfm-qr-img">${img}</div></div>`;
+  return `<div class="rfm-qr"><div><b style="font-weight:500">Подключение ${tg ? 'Telegram' : 'WhatsApp'}</b>${steps}${detail}<div class="rfm-hint" style="margin-top:6px">Код обновляется автоматически</div></div><div class="rfm-qr-img">${img}</div></div>`;
 }
 
 /** Страница настроек: загрузка статуса и обработка кнопок. */
@@ -253,7 +290,7 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
     poll = null;
   };
   /** Показ QR WhatsApp: опрос раз в 3 с, до входа или 3 минут. */
-  const showQr = (id: number) => {
+  const showQr = (id: number, kind = 'whatsapp') => {
     stopPoll();
     const started = Date.now();
     const tick = async () => {
@@ -263,9 +300,12 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
         const q = await api.whatsappQr(id);
         if (q.status === 'connected') {
           stopPoll();
-          return void draw({ info: `WhatsApp подключён: ${q.title}` });
+          return void draw({ info: `${kind === 'telegram_user' ? 'Telegram' : 'WhatsApp'} подключён: ${q.title}` });
         }
-        box.innerHTML = renderQr(q);
+        // Поле пароля не перерисовываем, пока менеджер его вводит.
+        if (q.needPassword && (box.querySelector('form[data-rfm="tg-password"]') || Date.now() - Number(box.dataset.pwSent ?? 0) < 20_000)) return;
+        box.innerHTML = renderQr(q, kind);
+        box.dataset.id = String(id);
       } catch (err) {
         box.innerHTML = `<div class="rfm-banner rfm-err-bg" style="margin-top:8px"><div>${esc((err as Error).message)}</div></div>`;
       }
@@ -299,12 +339,37 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
         }
       })();
     }
+    if (btn.dataset.rfm === 'add-tg') {
+      stopPoll();
+      void (async () => {
+        try {
+          const { id } = await api.addTelegramUser();
+          await draw();
+          showQr(id, 'telegram_user');
+        } catch (err) {
+          await draw({ error: (err as Error).message });
+        }
+      })();
+    }
+    if (btn.dataset.rfm === 'oauth') {
+      const url = btn.dataset.url;
+      if (!url) return;
+      const popup = w.open(url, 'rfm_oauth', 'width=760,height=640');
+      // После закрытия окна авторизации — обновить статус.
+      const timer = setInterval(() => {
+        if (!popup || popup.closed) {
+          clearInterval(timer);
+          void draw();
+        }
+      }, 1000);
+    }
     if (btn.dataset.rfm === 'qr') {
       const id = Number(btn.dataset.id);
+      const kind = btn.dataset.kind ?? 'whatsapp';
       void (async () => {
         try {
           await api.restartChannel(id);
-          showQr(id);
+          showQr(id, kind);
         } catch (err) {
           await draw({ error: (err as Error).message });
         }
@@ -323,6 +388,25 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
     }
   });
   el.addEventListener('submit', (e) => {
+    const pwForm = (e.target as HTMLElement).closest<HTMLFormElement>('form[data-rfm="tg-password"]');
+    if (pwForm) {
+      e.preventDefault();
+      const input = pwForm.elements.namedItem('password') as HTMLInputElement;
+      const password = input.value;
+      input.value = '';
+      const id = Number(el.querySelector<HTMLElement>('[data-rfm-qr]')?.dataset.id);
+      void api.telegramPassword(id, password).then(
+        () => {
+          const box = el.querySelector<HTMLElement>('[data-rfm-qr]');
+          if (box) {
+            box.dataset.pwSent = String(Date.now());
+            box.innerHTML = '<div class="rfm-banner rfm-ok-bg" style="margin-top:8px"><div>Пароль отправлен, входим…</div></div>';
+          }
+        },
+        (err: Error) => void draw({ error: err.message }),
+      );
+      return;
+    }
     const form = (e.target as HTMLElement).closest<HTMLFormElement>('form[data-rfm="add-bot"]');
     if (!form) return;
     e.preventDefault();
@@ -332,6 +416,138 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
     void run(async () => (await api.addTelegramBot(token), 'Бот подключён'));
   });
   await draw();
+}
+
+// ---------- Карточка сделки и контакта: «Написать первым» ----------
+
+const CARD_CSS = `
+.rfm-card-panel{padding:4px 0}
+.rfm-first{width:100%;display:flex;align-items:center;justify-content:center;gap:6px;height:34px;border:1px solid #4c8bf5;border-radius:6px;background:#fff;color:#2f6fd6;font:inherit;font-size:13px;cursor:pointer}
+.rfm-first:hover{background:#f2f7ff}
+.rfm-first svg{width:16px;height:16px}
+.rfm-overlay{position:fixed;inset:0;background:rgba(32,42,54,.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1.5;color:#2e3640}
+.rfm-modal{background:#fff;border-radius:10px;width:min(520px,calc(100vw - 32px));padding:18px 20px;display:flex;flex-direction:column;gap:12px;max-height:calc(100vh - 32px);overflow:auto}
+.rfm-modal *{box-sizing:border-box}
+.rfm-modal h3{margin:0;font-size:16px;font-weight:500}
+.rfm-lbl{font-size:12px;color:#6b7785;margin-bottom:4px}
+.rfm-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+.rfm-opt{display:flex;align-items:center;gap:8px;border:1px solid #cfd7df;border-radius:8px;padding:8px 10px;cursor:pointer;font:inherit;font-size:13px;background:#fff;text-align:left;color:inherit}
+.rfm-opt[aria-pressed=true]{border:2px solid #4c8bf5;padding:7px 9px}
+.rfm-opt[disabled]{opacity:.55;cursor:default}
+.rfm-opt .rfm-ico{width:28px;height:28px}
+.rfm-opt .rfm-ico svg{width:16px;height:16px}
+.rfm-modal select,.rfm-modal textarea{width:100%;border:1px solid #cfd7df;border-radius:6px;font:inherit;padding:7px 10px}
+.rfm-modal textarea{min-height:90px;resize:vertical}
+.rfm-actions{display:flex;justify-content:flex-end;gap:8px}
+.rfm-err{background:#fdecec;color:#a12b2b;border-radius:8px;padding:8px 10px;font-size:13px}
+.rfm-note{font-size:12px;color:#8a96a3}
+`;
+
+/** Где открыт виджет и id карточки (сделка или контакт). null — не карточка. */
+export function cardContext(self: AmoWidgetSelf, w: Window = window): { leadId?: number; contactId?: number } | null {
+  const area = self.system?.().area ?? '';
+  const data = (w as unknown as { AMOCRM?: { data?: { current_card?: { id?: unknown } } }; APP?: { data?: { current_card?: { id?: unknown } } } });
+  const id = Number(data.APP?.data?.current_card?.id ?? data.AMOCRM?.data?.current_card?.id ?? 0);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  if (area === 'lcard') return { leadId: id };
+  if (area === 'ccard') return { contactId: id };
+  return null;
+}
+
+export function renderCardPanel(): string {
+  return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first" data-rfm="first">${ICON.send}Написать первым</button></div>`;
+}
+
+/** Окно «Написать первым». Каналы — только те, через которые можно начать переписку (WhatsApp, Telegram личный). */
+export function renderComposer(v: ComposeView, sel: { channelId?: number; contactId?: number; phone?: string }, error?: string): string {
+  const channels = v.channels
+    .map((c) => {
+      const icon = c.kind === 'whatsapp' ? `<div class="rfm-ico rfm-wa">${ICON.chat}</div>` : `<div class="rfm-ico rfm-tg">${ICON.user}</div>`;
+      const sub = c.connected ? esc(c.title) : 'Не подключён';
+      return `<button type="button" class="rfm-opt" data-rfm="pick-channel" data-id="${c.id}" aria-pressed="${c.id === sel.channelId}"${c.connected ? '' : ' disabled'}>${icon}<span><b style="font-weight:500">${esc(c.kindText)}</b><br><small>${sub}</small></span></button>`;
+    })
+    .join('');
+  const phones = v.contacts.flatMap((c) => c.phones.map((p) => ({ contactId: c.id, name: c.name, phone: p })));
+  const phoneOpts = phones
+    .map((p) => `<option value="${p.contactId}|${esc(p.phone)}"${p.contactId === sel.contactId && p.phone === sel.phone ? ' selected' : ''}>${esc(p.phone)} — ${esc(p.name)}</option>`)
+    .join('');
+  const err = error ?? v.error;
+  return `<div class="rfm-modal" role="dialog" aria-modal="true" aria-label="Написать первым">
+<h3>Написать первым</h3>
+${err ? `<div class="rfm-err">${esc(err)}</div>` : ''}
+<div><div class="rfm-lbl">Мессенджер</div>${channels ? `<div class="rfm-opts">${channels}</div>` : '<div class="rfm-note">Нет каналов WhatsApp или Telegram личного — администратору нужно подключить их в настройках виджета.</div>'}</div>
+<div><div class="rfm-lbl">Номер клиента — из контакта</div>${phones.length ? `<select name="phone">${phoneOpts}</select>` : '<div class="rfm-note">У контакта нет телефона — добавьте его в карточку.</div>'}</div>
+<div><div class="rfm-lbl">Первое сообщение</div><textarea name="text" maxlength="4000" placeholder="Добрый день! Это РФ-Двери…"></textarea></div>
+<div class="rfm-actions"><button type="button" class="rfm-btn" data-rfm="cancel">Отмена</button><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="send">Отправить</button></div>
+<div class="rfm-note">Дальше переписка идёт в чате сделки amoCRM.</div>
+</div>`;
+}
+
+/** Открывает окно поверх amoCRM и отправляет первое сообщение. */
+export async function openComposer(api: MessengerApi, ctx: { leadId?: number; contactId?: number }, doc: Document = document): Promise<void> {
+  const overlay = doc.createElement('div');
+  overlay.className = 'rfm-overlay';
+  overlay.innerHTML = `<style>${CSS}${CARD_CSS}</style><div class="rfm-modal"><div class="rfm-note">Загрузка…</div></div>`;
+  doc.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  let view: ComposeView;
+  try {
+    view = await api.compose(ctx);
+  } catch (err) {
+    view = { channels: [], contacts: [], error: (err as Error).message };
+  }
+  const firstPhone = view.contacts.find((c) => c.phones.length);
+  const firstChannel = view.channels.find((c) => c.connected);
+  const sel: { channelId?: number; contactId?: number; phone?: string } = {
+    ...(firstChannel ? { channelId: firstChannel.id } : {}),
+    ...(firstPhone ? { contactId: firstPhone.id, phone: firstPhone.phones[0] } : {}),
+  };
+  let text = '';
+  let busy = false;
+  const draw = (error?: string) => {
+    overlay.innerHTML = `<style>${CSS}${CARD_CSS}</style>${renderComposer(view, sel, error)}`;
+    const ta = overlay.querySelector<HTMLTextAreaElement>('textarea[name=text]');
+    if (ta) ta.value = text;
+  };
+  draw();
+  overlay.addEventListener('input', (e) => {
+    const t = e.target as HTMLElement;
+    if (t instanceof HTMLTextAreaElement) text = t.value;
+  });
+  overlay.addEventListener('change', (e) => {
+    const t = e.target as HTMLElement;
+    if (t instanceof HTMLSelectElement && t.name === 'phone') {
+      const [cid, ...rest] = t.value.split('|');
+      sel.contactId = Number(cid);
+      sel.phone = rest.join('|');
+    }
+  });
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) return close();
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm]');
+    if (!btn) return;
+    if (btn.dataset.rfm === 'cancel') return close();
+    if (btn.dataset.rfm === 'pick-channel') {
+      sel.channelId = Number(btn.dataset.id);
+      return draw();
+    }
+    if (btn.dataset.rfm === 'send' && !busy) {
+      if (!sel.channelId) return draw('Выберите мессенджер');
+      if (!sel.contactId || !sel.phone) return draw('Нет номера клиента');
+      if (!text.trim()) return draw('Введите текст первого сообщения');
+      busy = true;
+      btn.textContent = 'Отправляем…';
+      void api.startChat({ channelId: sel.channelId, contactId: sel.contactId, phone: sel.phone, text: text.trim() }).then(
+        () => {
+          overlay.innerHTML = `<style>${CSS}${CARD_CSS}</style><div class="rfm-modal"><h3>Сообщение отправлено</h3><div>Переписка появится в чате сделки. Если её не видно — обновите страницу.</div><div class="rfm-actions"><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="cancel">Готово</button></div></div>`;
+        },
+        (err: Error) => {
+          busy = false;
+          draw(err.message);
+        },
+      );
+    }
+  });
 }
 
 type Callbacks = Record<string, (...args: unknown[]) => unknown>;
@@ -352,7 +568,21 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
   return {
     init: safe(() => undefined),
     bind_actions: safe(() => undefined),
-    render: safe(() => undefined),
+    render: safe(() => {
+      const ctx = cardContext(self);
+      if (!ctx || !self.render_template) return;
+      self.render_template({ caption: { class_name: 'rfm-caption' }, body: '', render: renderCardPanel() });
+      // Блок виджета вставляется amo; кнопку ловим делегированием (render может вызываться повторно).
+      if (!(document.body as HTMLElement & { __rfmFirst?: boolean }).__rfmFirst) {
+        (document.body as HTMLElement & { __rfmFirst?: boolean }).__rfmFirst = true;
+        document.body.addEventListener('click', (e) => {
+          const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm="first"]');
+          if (!btn) return;
+          const c = cardContext(self);
+          if (c) void openComposer(api, c);
+        });
+      }
+    }),
     settings: safe((...args: unknown[]) => {
       const modal = args[0] as { find?: (sel: string) => { get?: (i: number) => Element | undefined } } | undefined;
       const block = modal?.find?.('.widget_settings_block')?.get?.(0);

@@ -15,6 +15,7 @@
     "@fastify/cors": "^11.3.0",
     "@fastify/rate-limit": "^10.3.0",
     "baileys": "7.0.0-rc14",
+    "big-integer": "^1.6.52",
     "bullmq": "^5.81.5",
     "fastify": "^5.12.5",
     "https-proxy-agent": "^9.1.0",
@@ -22,6 +23,7 @@
     "jose": "^6.2.12",
     "pg": "^8.23.0",
     "qrcode": "1.5.4",
+    "telegram": "2.26.22",
     "undici": "^6.29.1",
     "zod": "^3.25.76"
   },

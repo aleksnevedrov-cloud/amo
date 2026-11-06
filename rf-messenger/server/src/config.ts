@@ -53,6 +53,10 @@ export const envSchema = z.object({
   /** Запасной прокси: включается после 3 неудачных проверок основного подряд, обратно — после 3 удачных. Пусто — без запасного. */
   MESSENGER_PROXY_URL_FALLBACK: proxyUrl,
 
+  /** Telegram личный (MTProto): api_id и api_hash приложения с my.telegram.org. Пусто — канал недоступен. */
+  TELEGRAM_API_ID: z.coerce.number().int().min(0).default(0),
+  TELEGRAM_API_HASH: z.string().trim().regex(/^([0-9a-f]{32})?$/, 'должен быть 32 hex-символа').default(''),
+
   /** Уведомления о сбоях прокси и каналов в Telegram. Оба пусты — уведомлений нет. */
   ALERT_TG_BOT_TOKEN: z.string().trim().default(''),
   ALERT_TG_CHAT_ID: z.string().trim().default(''),
@@ -71,6 +75,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
   if (Boolean(parsed.data.ALERT_TG_BOT_TOKEN) !== Boolean(parsed.data.ALERT_TG_CHAT_ID)) {
     throw new Error('ALERT_TG_BOT_TOKEN и ALERT_TG_CHAT_ID задаются вместе');
+  }
+  if (Boolean(parsed.data.TELEGRAM_API_ID) !== Boolean(parsed.data.TELEGRAM_API_HASH)) {
+    throw new Error('TELEGRAM_API_ID и TELEGRAM_API_HASH задаются вместе');
   }
   if (parsed.data.OUTBOUND_PAUSE_MAX_MS < parsed.data.OUTBOUND_PAUSE_MIN_MS) {
     throw new Error('OUTBOUND_PAUSE_MAX_MS меньше OUTBOUND_PAUSE_MIN_MS');

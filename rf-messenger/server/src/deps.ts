@@ -1,4 +1,5 @@
 import { Redis } from 'ioredis';
+import { AmoRest } from './amo/rest.ts';
 import { AmojoClient } from './amojo/client.ts';
 import type { Env } from './config.ts';
 import { SecretBox } from './crypto.ts';
@@ -22,5 +23,13 @@ export function createCore(env: Env) {
     env.AMOJO_CHANNEL_ID && env.AMOJO_CHANNEL_SECRET
       ? new AmojoClient({ baseUrl: env.AMOJO_BASE_URL, channelId: env.AMOJO_CHANNEL_ID, secret: env.AMOJO_CHANNEL_SECRET })
       : null;
-  return { db, store, redis, files, amojo, box: new SecretBox(env.ENCRYPTION_KEY) };
+  const box = new SecretBox(env.ENCRYPTION_KEY);
+  const rest = new AmoRest(db, box, {
+    clientId: env.AMO_CLIENT_ID,
+    clientSecret: env.AMO_CLIENT_SECRET,
+    // Адрес перенаправления интеграции — корень сайта (https://chat.rf-dveri.ru/).
+    redirectUri: new URL('/', env.PUBLIC_URL).toString(),
+    allowedDomains: env.AMO_ALLOWED_DOMAINS,
+  });
+  return { db, store, redis, files, amojo, box, rest };
 }

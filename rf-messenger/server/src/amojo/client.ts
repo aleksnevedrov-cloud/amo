@@ -102,6 +102,19 @@ export class AmojoClient {
     await this.request('DELETE', `/v2/origin/custom/${this.opts.channelId}/disconnect`, { account_id: amojoAccountId });
   }
 
+  /**
+   * Создание чата без сообщения от клиента — чтобы написать первым. Существующий conversation_id
+   * возвращает тот же чат. Чат без сообщений в amo не виден, пока в нём нет сообщения.
+   */
+  async createChat(scopeId: string, conversationId: string, user: AmojoUser): Promise<{ chatId: string }> {
+    const r = await this.request<{ id?: string }>('POST', `/v2/origin/custom/${scopeId}/chats`, {
+      conversation_id: conversationId,
+      user: { id: user.id, name: user.name, ...(user.profile ? { profile: user.profile } : {}), ...(user.profile_link ? { profile_link: user.profile_link } : {}) },
+    });
+    if (!r.id) throw new AmojoError('amojo не вернул id чата', 502);
+    return { chatId: r.id };
+  }
+
   async sendMessage(scopeId: string, payload: NewMessagePayload): Promise<{ msgid: string; chatId: string | null }> {
     const r = await this.request<{ new_message?: { msgid?: string; chat_id?: string } }>('POST', `/v2/origin/custom/${scopeId}`, {
       event_type: 'new_message',

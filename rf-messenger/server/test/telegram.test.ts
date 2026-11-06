@@ -139,3 +139,43 @@ describe('отправка через Bot API', () => {
     expect((calls[1]?.body as { offset: number }).offset).toBe(11);
   });
 });
+
+describe('Telegram личный: разбор сообщения', async () => {
+  const { normalizeTgMessage, peerRef } = await import('../src/connectors/telegram-user.ts');
+  const now = 1_790_000_000;
+  it('личное сообщение с фото и ответом', () => {
+    const e = normalizeTgMessage(
+      { id: 10, date: now - 5, out: false, text: 'Вот дверь', replyToMsgId: 7, media: { kind: 'picture', name: 'photo.jpg', mime: 'image/jpeg' } },
+      { ref: 'u:1:2', isGroup: false, title: 'Иван', phone: '+79361472324', username: 'ivan' },
+      now,
+    );
+    expect(e).toEqual({
+      externalChatId: 'u:1:2',
+      chatTitle: 'Иван',
+      isGroup: false,
+      contact: { phone: '+79361472324', username: 'ivan', link: 'https://t.me/ivan' },
+      author: null,
+      externalMessageId: '10',
+      text: 'Вот дверь',
+      attachment: { kind: 'picture', name: 'photo.jpg', mime: 'image/jpeg', ref: 'u:1:2#10' },
+      replyToExternalId: '7',
+      timestamp: now - 5,
+      fromMe: false,
+    });
+  });
+  it('группа: автор; своё с телефона — fromMe без автора; старое и пустое — отбрасываются', () => {
+    const g = { ref: 'c:5', isGroup: true, title: 'Объект', authorId: '9', authorName: 'Ольга' };
+    expect(normalizeTgMessage({ id: 1, date: now, out: false, text: 'Привет', media: null }, g, now)?.author).toEqual({ id: '9', name: 'Ольга' });
+    const mine = normalizeTgMessage({ id: 2, date: now, out: true, text: 'Ответ', media: null }, g, now);
+    expect(mine?.fromMe).toBe(true);
+    expect(mine?.author).toBeNull();
+    expect(normalizeTgMessage({ id: 3, date: now - 2 * 86400, out: false, text: 'старое', media: null }, g, now)).toBeNull();
+    expect(normalizeTgMessage({ id: 4, date: now, out: false, text: '', media: null }, g, now)).toBeNull();
+  });
+  it('ссылка на собеседника содержит access_hash', () => {
+    expect(peerRef({ className: 'InputPeerUser', userId: 1, accessHash: 2 })).toBe('u:1:2');
+    expect(peerRef({ className: 'InputPeerChat', chatId: 3 })).toBe('c:3');
+    expect(peerRef({ className: 'InputPeerChannel', channelId: 4, accessHash: 5 })).toBe('ch:4:5');
+    expect(peerRef({ className: 'InputPeerSelf' })).toBeNull();
+  });
+});

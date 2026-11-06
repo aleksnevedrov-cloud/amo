@@ -257,3 +257,86 @@ describe('прокси и окружение', () => {
     expect(testEnv({ NODE_ENV: 'production', AMO_ACCOUNT_IDS: '123' }).AMO_ACCOUNT_IDS).toEqual([123]);
   });
 });
+
+describe('написать первым и OAuth', () => {
+  const restStub = (over: Record<string, unknown> = {}) =>
+    ({
+      connected: async () => true,
+      leadContacts: async () => [{ id: 1, name: 'Иван', phones: ['+7 936 147-23-24'] }],
+      contact: async (_a: number, id: number) => ({ id, name: 'Иван', phones: [] }),
+      exchangeCode: async (_r: string, _c: string, ok: (id: number) => boolean) => (ok(ACCOUNT) ? ACCOUNT : Promise.reject(new Error('нет'))),
+      ...over,
+    }) as unknown as import('../src/amo/rest.ts').AmoRest;
+
+  it('менеджер (не администратор): карточка и отправка доступны, настройки — нет; userId — из токена', async () => {
+    const started: unknown[] = [];
+    const a = await buildApp({
+      env: t.env, store: t.store, files: t.files, bridge: t.bridge, amojo: t.amojo, box: t.box, redis,
+      rest: restStub(),
+      startChat: async (input) => (started.push(input), { chatId: 1, messageId: 2 }),
+    });
+    const wa = await t.store.createChannel({ accountId: ACCOUNT, kind: 'whatsapp', title: 'WhatsApp +79295418663', externalId: '+79295418663', credentials: t.box.encrypt('{}') });
+    await t.store.setChannelStatus(wa!.id, 'connected', null);
+    const h = { 'x-auth-token': await token({ is_admin: false, user_id: 7 }) };
+    expect((await a.inject({ method: 'GET', url: '/widget/v1/status', headers: h })).statusCode).toBe(403);
+    expect((await a.inject({ method: 'GET', url: '/widget/v1/compose?leadId=100' })).statusCode).toBe(401);
+
+    const c = await a.inject({ method: 'GET', url: '/widget/v1/compose?leadId=100', headers: h });
+    expect(c.statusCode).toBe(200);
+    // Telegram-бот написать первым не может — в списке только WhatsApp.
+    expect(c.json()).toEqual({
+      channels: [{ id: wa!.id, kind: 'whatsapp', kindText: 'WhatsApp', title: 'WhatsApp +79295418663', connected: true }],
+      contacts: [{ id: 1, name: 'Иван', phones: ['+7 936 147-23-24'] }],
+    });
+    expect((await a.inject({ method: 'GET', url: '/widget/v1/compose', headers: h })).statusCode).toBe(400);
+
+    const body = { channelId: wa!.id, contactId: 1, phone: '+7 936 147-23-24', text: 'Добрый день', accountId: 999, userId: 1 };
+    const s = await a.inject({ method: 'POST', url: '/widget/v1/chats/start', headers: { ...h, 'content-type': 'application/json' }, payload: body });
+    expect(s.statusCode).toBe(200);
+    expect(started).toEqual([{ accountId: ACCOUNT, userId: 7, channelId: wa!.id, contactId: 1, phone: '+7 936 147-23-24', text: 'Добрый день' }]);
+    const empty = await a.inject({ method: 'POST', url: '/widget/v1/chats/start', headers: { ...h, 'content-type': 'application/json' }, payload: { ...body, text: ' ' } });
+    expect(empty.statusCode).toBe(400);
+    await a.close();
+  });
+
+  it('ошибка отправки показывается менеджеру; без OAuth — подсказка администратору', async () => {
+    const a = await buildApp({
+      env: t.env, store: t.store, files: t.files, bridge: t.bridge, amojo: t.amojo, box: t.box, redis,
+      rest: restStub({ connected: async () => false }),
+      startChat: async () => Promise.reject(new Error('Номер +79361472324 не найден в мессенджере')),
+    });
+    const h = { 'x-auth-token': await token({ is_admin: false }), 'content-type': 'application/json' };
+    expect((await a.inject({ method: 'GET', url: '/widget/v1/compose?contactId=1', headers: h })).json().error).toMatch(/Авторизовать/);
+    const r = await a.inject({ method: 'POST', url: '/widget/v1/chats/start', headers: h, payload: { channelId: 1, contactId: 1, phone: '+79361472324', text: 'x' } });
+    expect(r.statusCode).toBe(422);
+    expect(r.json().error).toMatch(/не найден/);
+    await a.close();
+  });
+
+  it('OAuth: amo перенаправляет на корень с кодом; без кода — 404 как раньше', async () => {
+    const a = await buildApp({ env: t.env, store: t.store, files: t.files, bridge: t.bridge, amojo: t.amojo, box: t.box, redis, rest: restStub() });
+    expect((await a.inject({ method: 'GET', url: '/' })).statusCode).toBe(404);
+    const ok = await a.inject({ method: 'GET', url: '/?code=abc&referer=rfdveri.amocrm.ru&state=rfm' });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.body).toContain('авторизован');
+    await a.close();
+  });
+
+  it('Telegram личный: без api_id на сервере не добавляется; пароль 2FA принимается только для своего канала', async () => {
+    const h = { 'x-auth-token': await token(), 'content-type': 'application/json' };
+    expect((await app.inject({ method: 'POST', url: '/widget/v1/channels', headers: h, payload: { kind: 'telegram_user' } })).statusCode).toBe(409);
+    const env = testEnv({ TELEGRAM_API_ID: '12345', TELEGRAM_API_HASH: 'a'.repeat(32) });
+    const a = await buildApp({ env, store: t.store, files: t.files, bridge: t.bridge, amojo: t.amojo, box: t.box, redis });
+    const created = await a.inject({ method: 'POST', url: '/widget/v1/channels', headers: h, payload: { kind: 'telegram_user' } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as number;
+    const pw = await a.inject({ method: 'POST', url: `/widget/v1/channels/${id}/password`, headers: h, payload: { password: 'secret-2fa' } });
+    expect(pw.statusCode).toBe(200);
+    const sealed = await redis.getdel(`rfm:tg:pwd:${id}`);
+    expect(sealed).not.toContain('secret-2fa');
+    expect(t.box.decrypt(sealed!)).toBe('secret-2fa');
+    expect((await a.inject({ method: 'POST', url: `/widget/v1/channels/${t.channel.id}/password`, headers: h, payload: { password: 'x' } })).statusCode).toBe(404);
+    expect(() => testEnv({ TELEGRAM_API_ID: '12345' })).toThrow(/вместе/);
+    await a.close();
+  });
+});

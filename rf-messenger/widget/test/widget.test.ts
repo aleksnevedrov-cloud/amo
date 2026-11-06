@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { amojoAccountId, MessengerApi, mountSettings, renderHtml, type AmoWidgetSelf, type StatusView } from '../src/index.ts';
+import { amojoAccountId, cardContext, MessengerApi, mountSettings, openComposer, renderComposer, renderHtml, type AmoWidgetSelf, type StatusView } from '../src/index.ts';
 
 const status: StatusView = {
   amojo: { configured: true, connected: false },
@@ -88,5 +88,50 @@ describe('виджет РФ-Мессенджер', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(calls.some((c) => c.method === 'POST' && JSON.parse(c.data ?? '{}').kind === 'whatsapp')).toBe(true);
     expect(el.querySelector('[data-test="qr"]')).not.toBeNull();
+  });
+});
+
+describe('написать первым', () => {
+  const view = {
+    channels: [
+      { id: 3, kind: 'whatsapp', kindText: 'WhatsApp', title: 'WhatsApp +79295418663', connected: true },
+      { id: 4, kind: 'telegram_user', kindText: 'Telegram', title: '<i>tg</i>', connected: false },
+    ],
+    contacts: [{ id: 1, name: 'Иван', phones: ['+7 936 147-23-24'] }],
+  };
+
+  it('карточка: сделка или контакт по области виджета', () => {
+    const w = { APP: { data: { current_card: { id: 90535 } } } } as unknown as Window;
+    const self = (area: string) => ({ get_settings: () => ({ widget_code: 'x' }), $authorizedAjax: () => Promise.resolve(), system: () => ({ area }) }) as AmoWidgetSelf;
+    expect(cardContext(self('lcard'), w)).toEqual({ leadId: 90535 });
+    expect(cardContext(self('ccard'), w)).toEqual({ contactId: 90535 });
+    expect(cardContext(self('settings'), w)).toBeNull();
+  });
+
+  it('окно: неподключённый канал недоступен, названия экранируются, номер из контакта', () => {
+    const html = renderComposer(view, { channelId: 3, contactId: 1, phone: '+7 936 147-23-24' });
+    expect(html).toContain('Не подключён');
+    expect(html).not.toContain('<i>tg</i>');
+    expect(html).toMatch(/data-id="4" aria-pressed="false" disabled/);
+    expect(html).toContain('+7 936 147-23-24 — Иван');
+  });
+
+  it('отправка: без текста — подсказка, с текстом — запрос и сообщение об успехе', async () => {
+    const calls: { url: string; method?: string; data?: string }[] = [];
+    const api = new MessengerApi(fakeSelf({ 'GET /widget/v1/compose': view, 'POST /widget/v1/chats/start': { chatId: 1, messageId: 2 } }, calls), 'https://chat.example.ru');
+    await openComposer(api, { leadId: 90535 });
+    const overlay = document.querySelector<HTMLElement>('.rfm-overlay')!;
+    expect(calls[0]!.url).toBe('https://chat.example.ru/widget/v1/compose?leadId=90535');
+    overlay.querySelector<HTMLElement>('[data-rfm="send"]')!.click();
+    expect(overlay.textContent).toContain('Введите текст');
+    const ta = overlay.querySelector<HTMLTextAreaElement>('textarea')!;
+    ta.value = 'Добрый день';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    overlay.querySelector<HTMLElement>('[data-rfm="send"]')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(JSON.parse(calls.at(-1)!.data!)).toEqual({ channelId: 3, contactId: 1, phone: '+7 936 147-23-24', text: 'Добрый день' });
+    expect(overlay.textContent).toContain('Сообщение отправлено');
+    overlay.remove();
   });
 });

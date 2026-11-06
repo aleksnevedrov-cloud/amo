@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AmojoError, type AmojoClient, type AmojoMessage, type AmojoMessageKind, type AmojoUser, type NewMessagePayload } from './amojo/client.ts';
-import { PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
+import type { AmoRest } from './amo/rest.ts';
+import { normalizePhone, PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
 import type { FileStore } from './files.ts';
 import type { JobQueue, Pacer } from './queue.ts';
 import { downloadFromAmo, type Resolver } from './safe-fetch.ts';
@@ -28,6 +29,21 @@ export interface BridgeDeps {
   resolve?: Resolver;
   /** Сколько ждать скачивания вложения из канала (по умолчанию 90 с). Дольше — сообщение уходит в amo без файла. */
   mediaTimeoutMs?: number;
+  /** REST API amoCRM (OAuth интеграции): нужен для «Написать первым». */
+  rest?: AmoRest | null;
+}
+
+/** Ошибка «Написать первым», которую показываем менеджеру как есть. */
+export class StartChatError extends Error {}
+
+export interface StartChatInput {
+  accountId: number;
+  /** Сотрудник amoCRM, нажавший «Написать первым» (из токена виджета). */
+  userId: number;
+  channelId: number;
+  contactId: number;
+  phone: string;
+  text: string;
 }
 
 /** Сообщение без задачи to-amo дольше этого срока считается зависшим и ставится в очередь заново. */
@@ -198,6 +214,63 @@ export class Bridge {
     }
     await this.d.store.markSynced(msg.id, r.msgid);
     if (r.chatId) await this.d.store.setAmojoChatId(chat.id, r.chatId);
+  }
+
+  // ---------- Написать первым ----------
+
+  /**
+   * Новая переписка по инициативе менеджера: чат в мессенджере по номеру → чат API чатов amo →
+   * привязка к контакту → первое сообщение клиенту → то же сообщение в amo как исходящее от сотрудника.
+   * Выполняется в процессе коннекторов (нужен запущенный коннектор канала).
+   */
+  async startChat(input: StartChatInput): Promise<{ chatId: number; messageId: number }> {
+    const phone = normalizePhone(input.phone);
+    if (!phone) throw new StartChatError('Некорректный номер телефона');
+    const text = input.text.trim();
+    if (!text) throw new StartChatError('Введите текст первого сообщения');
+    const channel = await this.d.store.channelOfAccount(input.accountId, input.channelId);
+    if (!channel) throw new StartChatError('Канал не найден');
+    const connector = this.d.connector(channel.id);
+    if (!connector?.resolvePhone) throw new StartChatError('Через этот канал нельзя написать первым');
+    if (channel.status !== 'connected') throw new StartChatError('Канал сейчас не подключён — проверьте его в настройках виджета');
+    const conn = await this.d.store.getConnection(input.accountId);
+    if (!conn || !this.d.amojo) throw new StartChatError('Канал чатов amoCRM не подключён к аккаунту');
+    if (!this.d.rest) throw new StartChatError('Нет доступа к amoCRM: интеграция не авторизована');
+
+    // Чат с этим номером уже был (клиент писал раньше) — продолжаем его, а не заводим второй.
+    let chat = await this.d.store.chatByPhone(channel.id, phone);
+    if (!chat) {
+      const peer = await connector.resolvePhone(phone);
+      if (!peer) throw new StartChatError(`Номер ${phone} не найден в мессенджере или скрыт настройками приватности`);
+      const contact = await this.d.rest.contact(input.accountId, input.contactId);
+      chat = await this.d.store.upsertChat(channel, { externalChatId: peer.externalChatId, isGroup: false, title: peer.title ?? contact.name, contact: { phone } });
+    }
+
+    const { chatId: amojoChatId } = await this.d.amojo.createChat(conn.scopeId, chat.conversationId, this.clientUser(chat));
+    await this.d.store.setAmojoChatId(chat.id, amojoChatId);
+    await this.d.rest.linkChat(input.accountId, amojoChatId, input.contactId);
+    const ref = await this.d.rest.userAmojoId(input.accountId, input.userId);
+    if (ref) await this.d.store.rememberAmoOperator(input.accountId, chat.id, ref);
+
+    const sent = await connector.send({ externalChatId: chat.externalChatId, text, file: null, replyToExternalId: null });
+    const msg = await this.d.store.insertFromChannel({
+      chat,
+      source: 'phone',
+      kind: 'text',
+      text,
+      author: null,
+      externalId: sent.externalMessageId,
+      replyToExternalId: null,
+    });
+    if (!msg) throw new Error('Сообщение уже было сохранено');
+    try {
+      await this.deliverToAmo(msg.id);
+    } catch (err) {
+      // Клиенту уже ушло: в amo догонит очередь.
+      this.d.log.warn({ messageId: msg.id, err: (err as Error).message }, 'первое сообщение не передано в amo сразу');
+      await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
+    }
+    return { chatId: chat.id, messageId: msg.id };
   }
 
   // ---------- amoCRM → канал ----------

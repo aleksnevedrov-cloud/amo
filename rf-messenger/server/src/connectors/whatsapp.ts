@@ -334,6 +334,14 @@ export class WhatsAppConnector implements Connector {
     await this.d.session.clear().catch(() => undefined);
   }
 
+  async resolvePhone(phone: string): Promise<{ externalChatId: string } | null> {
+    const sock = this.sock;
+    if (!sock) throw new Error('WhatsApp не подключён');
+    const digits = phone.replace(/\D/g, '');
+    const [r] = (await sock.onWhatsApp(digits)) ?? [];
+    return r?.exists && r.jid ? { externalChatId: r.jid } : null;
+  }
+
   async typing(externalChatId: string): Promise<void> {
     await this.sock?.sendPresenceUpdate('composing', externalChatId).catch(() => undefined);
   }

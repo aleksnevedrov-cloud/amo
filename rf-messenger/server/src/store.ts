@@ -234,6 +234,15 @@ export class Store {
     return chatRow(r.rows[0]);
   }
 
+  /** Служебное: личный чат канала с этим номером клиента (номер — в contact.phone). */
+  async chatByPhone(channelId: number, phone: string): Promise<Chat | null> {
+    const r = await this.db.query(
+      `SELECT * FROM chats WHERE channel_id = $1 AND NOT is_group AND contact->>'phone' = $2 ORDER BY last_message_at DESC LIMIT 1`,
+      [channelId, phone],
+    );
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
   async chatByConversation(accountId: number, conversationId: string): Promise<Chat | null> {
     const r = await this.db.query('SELECT * FROM chats WHERE account_id = $1 AND conversation_id = $2', [accountId, conversationId]);
     return r.rows[0] ? chatRow(r.rows[0]) : null;

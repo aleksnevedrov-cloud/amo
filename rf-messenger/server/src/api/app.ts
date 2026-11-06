@@ -4,10 +4,11 @@ import QRCode from 'qrcode';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import type { Redis } from 'ioredis';
 import { z } from 'zod';
+import { AmoRestError, type AmoRest } from '../amo/rest.ts';
 import type { AmojoClient } from '../amojo/client.ts';
 import { verifyAmojoHook } from '../amojo/signature.ts';
 import { isAmoOrigin, tokenAudience, verifyWidgetToken, type Principal } from '../auth.ts';
-import type { Bridge } from '../bridge.ts';
+import type { Bridge, StartChatInput } from '../bridge.ts';
 import { ChannelValidationError, createChannelSchema, KIND_TEXT, STATUS_TEXT, validateChannel } from '../channels.ts';
 import type { Env } from '../config.ts';
 import type { SecretBox } from '../crypto.ts';
@@ -32,7 +33,28 @@ export interface ApiDeps {
   redis: Redis;
   /** fetch для проверки ключей каналов (в тестах — заглушка). */
   fetch?: typeof fetch;
+  /** REST API amoCRM (OAuth интеграции). */
+  rest?: AmoRest | null;
+  /** «Написать первым»: выполняется в процессе коннекторов, api ждёт результат. */
+  startChat?: (input: StartChatInput) => Promise<{ chatId: number; messageId: number }>;
 }
+
+/** Ключи Redis: QR для входа (WhatsApp, Telegram личный) и пароль 2FA Telegram. */
+export const qrKey = (kind: string, id: number) => (kind === 'telegram_user' ? `rfm:tg:qr:${id}` : `rfm:wa:qr:${id}`);
+export const tgPasswordKey = (id: number) => `rfm:tg:pwd:${id}`;
+
+/** Каналы, через которые можно написать первым. */
+const START_KINDS = new Set(['whatsapp', 'telegram_user']);
+
+const startChatSchema = z.object({
+  channelId: z.number().int().positive(),
+  contactId: z.number().int().positive(),
+  phone: z.string().trim().min(5).max(32),
+  text: z.string().trim().min(1, 'Введите текст первого сообщения').max(4000, 'Сообщение длиннее 4000 символов'),
+});
+
+const okPage = (title: string, text: string) =>
+  `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${title}</title></head><body style="font:15px/1.5 sans-serif;padding:32px;color:#2e3640"><h2 style="font-weight:500">${title}</h2><p>${text}</p></body></html>`;
 
 /** Типы, которые безопасно показывать в браузере; остальное (html, svg, js…) — только скачиванием. */
 export function inlineMime(mime: string): boolean {
@@ -116,6 +138,25 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     },
   );
 
+  // ---------- OAuth интеграции: amo перенаправляет на адрес интеграции (корень сайта) с кодом ----------
+  app.get<{ Querystring: { code?: string; referer?: string; error?: string } }>(
+    '/',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const { code, referer } = req.query;
+      if (!code || !referer) return reply.code(404).send({ error: 'not_found' });
+      if (!deps.rest) return reply.code(503).send({ error: 'OAuth не настроен' });
+      try {
+        await deps.rest.exchangeCode(referer, code, (id) => !env.AMO_ACCOUNT_IDS.length || env.AMO_ACCOUNT_IDS.includes(id));
+      } catch (err) {
+        const status = err instanceof AmoRestError && err.status >= 400 && err.status < 500 ? err.status : 502;
+        req.log.warn({ err: (err as Error).message }, 'OAuth amoCRM не выполнен');
+        return reply.code(status).type('text/html; charset=utf-8').send(okPage('Не удалось авторизовать', (err as Error).message.replace(/[<>&]/g, '')));
+      }
+      return reply.type('text/html; charset=utf-8').send(okPage('РФ-Мессенджер авторизован в amoCRM', 'Окно можно закрыть.'));
+    },
+  );
+
   // ---------- Файлы переписки по подписанной ссылке ----------
   app.get<{ Params: { id: string; name: string }; Querystring: { e?: string; s?: string } }>('/f/:id/:name', async (req, reply) => {
     const check = deps.files.verify(req.params.id, req.query.e, req.query.s);
@@ -134,7 +175,7 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
       .send(data);
   });
 
-  // ---------- API виджета (только администратор аккаунта) ----------
+  // ---------- API виджета ----------
   const audience = tokenAudience(env.PUBLIC_URL);
   const auth = async (req: FastifyRequest, reply: FastifyReply) => {
     const token = req.headers['x-auth-token'];
@@ -148,8 +189,10 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     // amoCRM переиспользует один X-Auth-Token для нескольких запросов в пределах его срока жизни,
     // поэтому повтор jti не отклоняем; защита — подпись client_secret, aud и обязательный exp.
     if (env.AMO_ACCOUNT_IDS.length && !env.AMO_ACCOUNT_IDS.includes(p.accountId)) return reply.code(403).send({ error: 'Аккаунт не подключён к сервису' });
-    if (!p.isAdmin) return reply.code(403).send({ error: 'Настройки мессенджеров доступны только администратору' });
     req.principal = p;
+  };
+  const adminOnly = async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!req.principal?.isAdmin) return reply.code(403).send({ error: 'Настройки мессенджеров доступны только администратору' });
   };
   const who = (req: FastifyRequest): Principal => {
     if (!req.principal) throw Object.assign(new Error('Нет токена виджета'), { statusCode: 401 });
@@ -159,12 +202,22 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
   await app.register(
     async (w) => {
       w.addHook('preHandler', auth);
+      w.addHook('preHandler', adminOnly);
 
       w.get('/status', async (req) => {
         const { accountId } = who(req);
-        const [conn, channels] = await Promise.all([store.getConnection(accountId), store.listChannels(accountId)]);
+        const [conn, channels, oauth] = await Promise.all([
+          store.getConnection(accountId),
+          store.listChannels(accountId),
+          deps.rest ? deps.rest.connected(accountId) : false,
+        ]);
         return {
           amojo: { configured: Boolean(deps.amojo), connected: Boolean(conn) },
+          oauth: {
+            configured: Boolean(deps.rest),
+            connected: oauth,
+            url: `https://www.amocrm.ru/oauth?client_id=${encodeURIComponent(env.AMO_CLIENT_ID)}&state=rfm&mode=popup`,
+          },
           channels: channels.map((c) => ({
             id: c.id,
             kind: c.kind,
@@ -192,6 +245,8 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         const { accountId } = who(req);
         const input = createChannelSchema.safeParse(req.body);
         if (!input.success) return reply.code(400).send({ error: input.error.issues[0]?.message ?? 'Некорректные данные' });
+        if (input.data.kind === 'telegram_user' && !env.TELEGRAM_API_ID)
+          return reply.code(409).send({ error: 'Telegram личный не настроен на сервере: нет TELEGRAM_API_ID и TELEGRAM_API_HASH' });
         let v;
         try {
           v = await validateChannel(input.data, deps.fetch ? { fetch: deps.fetch } : {});
@@ -212,21 +267,35 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         return reply.code(201).send({ id: channel.id, title: channel.title, status: channel.status });
       });
 
-      // WhatsApp: текущий QR для сканирования (живёт ~60 с, процесс коннекторов обновляет его сам).
+      // WhatsApp и Telegram личный: текущий QR для сканирования (процесс коннекторов обновляет его сам).
       w.get<{ Params: { id: string } }>('/channels/:id/qr', async (req, reply) => {
         const { accountId } = who(req);
         const id = Number(req.params.id);
         if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'Некорректный id' });
         const channel = await store.channelOfAccount(accountId, id);
-        if (!channel || channel.kind !== 'whatsapp') return reply.code(404).send({ error: 'Канал не найден' });
-        const qr = await deps.redis.get(`rfm:wa:qr:${id}`);
+        if (!channel || (channel.kind !== 'whatsapp' && channel.kind !== 'telegram_user')) return reply.code(404).send({ error: 'Канал не найден' });
+        const qr = await deps.redis.get(qrKey(channel.kind, id));
         return {
           status: channel.status,
+          needPassword: channel.kind === 'telegram_user' && /пароль/i.test(channel.statusDetail ?? ''),
           statusText: STATUS_TEXT[channel.status],
           statusDetail: channel.statusDetail,
           title: channel.title,
           svg: qr ? await QRCode.toString(qr, { type: 'svg', margin: 1, width: 264 }) : null,
         };
+      });
+
+      // Telegram личный: пароль двухэтапной проверки для входа. Хранится 5 минут, зашифрованным; коннектор забирает и удаляет.
+      w.post<{ Params: { id: string } }>('/channels/:id/password', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+        const { accountId } = who(req);
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'Некорректный id' });
+        const body = z.object({ password: z.string().min(1).max(256) }).safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'Введите пароль' });
+        const channel = await store.channelOfAccount(accountId, id);
+        if (!channel || channel.kind !== 'telegram_user') return reply.code(404).send({ error: 'Канал не найден' });
+        await deps.redis.set(tgPasswordKey(id), deps.box.encrypt(body.data.password), 'EX', 300);
+        return { accepted: true };
       });
 
       // «Новый QR»: перезапуск сессии канала в процессе коннекторов.
@@ -248,6 +317,48 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         if (!(await store.deleteChannel(accountId, id))) return reply.code(404).send({ error: 'Канал не найден' });
         await deps.redis.publish(CHANNELS_CHANGED, String(id));
         return { deleted: true };
+      });
+    },
+    { prefix: '/widget/v1' },
+  );
+
+  // ---------- API виджета для менеджеров: «Написать первым» в карточке ----------
+  await app.register(
+    async (w) => {
+      w.addHook('preHandler', auth);
+
+      // Каналы, через которые можно написать первым, и контакты карточки с телефонами.
+      w.get<{ Querystring: { leadId?: string; contactId?: string } }>('/compose', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (req, reply) => {
+        const { accountId } = who(req);
+        const leadId = Number(req.query.leadId ?? 0);
+        const contactId = Number(req.query.contactId ?? 0);
+        if (!(Number.isInteger(leadId) && leadId >= 0 && Number.isInteger(contactId) && contactId >= 0) || (!leadId && !contactId))
+          return reply.code(400).send({ error: 'Нужен id сделки или контакта' });
+        const channels = (await store.listChannels(accountId))
+          .filter((c) => START_KINDS.has(c.kind))
+          .map((c) => ({ id: c.id, kind: c.kind, kindText: KIND_TEXT[c.kind], title: c.title, connected: c.status === 'connected' }));
+        if (!deps.rest || !(await deps.rest.connected(accountId)))
+          return { channels, contacts: [], error: 'Интеграция не авторизована в amoCRM: администратору нужно нажать «Авторизовать» в настройках виджета' };
+        try {
+          const contacts = leadId ? await deps.rest.leadContacts(accountId, leadId) : [await deps.rest.contact(accountId, contactId)];
+          return { channels, contacts };
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, 'контакты карточки не получены');
+          return { channels, contacts: [], error: err instanceof AmoRestError ? err.message : 'amoCRM не ответил' };
+        }
+      });
+
+      w.post('/chats/start', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+        const { accountId, userId } = who(req);
+        const body = startChatSchema.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: body.error.issues[0]?.message ?? 'Некорректные данные' });
+        if (!deps.startChat) return reply.code(503).send({ error: 'Сервис отправки недоступен' });
+        try {
+          return await deps.startChat({ accountId, userId, ...body.data });
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, 'написать первым: ошибка');
+          return reply.code(422).send({ error: (err as Error).message || 'Не удалось отправить' });
+        }
       });
     },
     { prefix: '/widget/v1' },

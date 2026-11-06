@@ -47,6 +47,11 @@ export interface Connector {
   send(req: OutboundRequest): Promise<{ externalMessageId: string }>;
   typing(externalChatId: string): Promise<void>;
   download(ref: string, maxBytes: number): Promise<{ data: Buffer; mime: string }>;
+  /**
+   * «Написать первым»: чат с клиентом по номеру телефона (+79991234567).
+   * null — номер не зарегистрирован в мессенджере или скрыт настройками приватности.
+   */
+  resolvePhone?(phone: string): Promise<{ externalChatId: string; title?: string } | null>;
   /** Канал удалён: отвязать сессию у мессенджера (WhatsApp — «Связанные устройства»). */
   logout?(): Promise<void>;
 }
@@ -58,4 +63,12 @@ export class PermanentSendError extends Error {}
 export function reconnectDelayMs(failures: number): number {
   const n = Math.max(1, failures);
   return Math.min(30_000 * 2 ** (n - 1), 600_000);
+}
+
+/** Номер телефона в виде +<цифры>: 8XXXXXXXXXX (Россия) → +7XXXXXXXXXX. null — не похоже на номер. */
+export function normalizePhone(raw: string): string | null {
+  let d = raw.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('8')) d = `7${d.slice(1)}`;
+  if (d.length === 10 && d.startsWith('9')) d = `7${d}`;
+  return d.length >= 10 && d.length <= 15 ? `+${d}` : null;
 }

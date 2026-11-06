@@ -1,11 +1,11 @@
 import { setDefaultResultOrder } from 'node:dns';
-import { Queue } from 'bullmq';
+import { Queue, QueueEvents } from 'bullmq';
 import { buildApp } from './api/app.ts';
 import { Bridge } from './bridge.ts';
 import { loadEnv } from './config.ts';
 import { migrate } from './db.ts';
 import { createCore } from './deps.ts';
-import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, type JobQueue } from './queue.ts';
+import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, START_JOB_OPTIONS, START_QUEUE_NAME, START_WAIT_MS, type JobQueue } from './queue.ts';
 
 // На сервере нет рабочего IPv6: без этого запросы к Telegram/WhatsApp периодически зависают на AAAA-адресах.
 setDefaultResultOrder('ipv4first');
@@ -26,12 +26,24 @@ const bridge = new Bridge({
   amoDomains: env.AMO_ALLOWED_DOMAINS,
   log: { info: () => undefined, warn: () => undefined, error: () => undefined },
 });
-const app = await buildApp({ ...core, env, bridge });
+const startQueue = new Queue(START_QUEUE_NAME, { connection: core.redis, defaultJobOptions: START_JOB_OPTIONS });
+const startEvents = new QueueEvents(START_QUEUE_NAME, { connection: core.redis.duplicate() });
+const app = await buildApp({
+  ...core,
+  env,
+  bridge,
+  startChat: async (input) => {
+    const job = await startQueue.add('start-chat', input);
+    return (await job.waitUntilFinished(startEvents, START_WAIT_MS)) as { chatId: number; messageId: number };
+  },
+});
 await app.listen({ host: env.HOST, port: env.PORT });
 
 const shutdown = async () => {
   await app.close();
   await bull.close();
+  await startQueue.close();
+  await startEvents.close();
   await core.redis.quit();
   await core.db.end();
   process.exit(0);

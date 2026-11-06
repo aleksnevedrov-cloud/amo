@@ -14,6 +14,10 @@ export const createChannelSchema = z.discriminatedUnion('kind', [
     kind: z.literal('whatsapp'),
     title: z.string().trim().max(100).optional(),
   }),
+  z.object({
+    kind: z.literal('telegram_user'),
+    title: z.string().trim().max(100).optional(),
+  }),
 ]);
 export type CreateChannelInput = z.infer<typeof createChannelSchema>;
 
@@ -30,6 +34,8 @@ export class ChannelValidationError extends Error {}
 export async function validateChannel(input: CreateChannelInput, opts: { fetch?: typeof fetch } = {}): Promise<ValidatedChannel> {
   // WhatsApp: ключей нет, вход по QR. Номер станет external_id после сканирования.
   if (input.kind === 'whatsapp') return { kind: 'whatsapp', title: input.title || 'WhatsApp (ожидает QR)', externalId: `pending-${randomUUID()}`, credentials: {} };
+  // Telegram личный: тоже вход по QR, номер аккаунта станет external_id после входа.
+  if (input.kind === 'telegram_user') return { kind: 'telegram_user', title: input.title || 'Telegram (ожидает QR)', externalId: `pending-${randomUUID()}`, credentials: {} };
   try {
     const me = await new TelegramBotApi(input.token, opts).getMe();
     return { kind: 'telegram_bot', title: input.title || `@${me.username}`, externalId: String(me.id), credentials: { token: input.token } };

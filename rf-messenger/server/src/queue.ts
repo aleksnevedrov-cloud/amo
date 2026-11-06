@@ -18,6 +18,16 @@ export const JOB_OPTIONS = {
   removeOnFail: { age: 7 * 86_400 },
 } as const;
 
+/** Очередь «Написать первым»: api ставит задачу и ждёт результат, connectors выполняет. Без повторов — иначе клиенту уйдёт дубль. */
+export const START_QUEUE_NAME = 'rfm-start-chat';
+export const START_JOB_OPTIONS = {
+  attempts: 1,
+  removeOnComplete: { age: 3600 },
+  removeOnFail: { age: 86_400 },
+} as const;
+/** Сколько api ждёт выполнения (поиск номера, amo, отправка). */
+export const START_WAIT_MS = 60_000;
+
 /** Распределение исходящих по времени: в один чат не чаще, чем раз в min–max мс (раздел 6 ТЗ). */
 export interface Pacer {
   /** Резервирует слот отправки в чат; возвращает задержку в мс до слота. */
