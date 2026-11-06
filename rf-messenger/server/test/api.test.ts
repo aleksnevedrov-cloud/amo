@@ -222,6 +222,10 @@ describe('файлы по ссылке', () => {
     expect(ok.body).toBe('hello');
     expect(ok.headers['content-type']).toBe('application/pdf');
     expect(ok.headers['x-content-type-options']).toBe('nosniff');
+    // amoCRM может проверять ссылку запросом HEAD — без авторизации, как и GET.
+    const head = await app.inject({ method: 'HEAD', url: url.pathname + url.search });
+    expect(head.statusCode).toBe(200);
+    expect(head.headers['content-type']).toBe('application/pdf');
     expect(ok.headers['content-disposition']).toMatch(/^inline;/);
 
     const html = await t.files.save({ accountId: ACCOUNT, channelId: t.channel.id, data: Buffer.from('<script>1</script>'), name: 'x.html', mime: 'text/html' });

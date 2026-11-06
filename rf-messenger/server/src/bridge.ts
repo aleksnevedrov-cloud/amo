@@ -26,6 +26,19 @@ export interface BridgeDeps {
   typingMs?: number;
   fetch?: typeof fetch;
   resolve?: Resolver;
+  /** Сколько ждать скачивания вложения из канала (по умолчанию 90 с). Дольше — сообщение уходит в amo без файла. */
+  mediaTimeoutMs?: number;
+}
+
+/** Сообщение без задачи to-amo дольше этого срока считается зависшим и ставится в очередь заново. */
+export const STUCK_INBOUND_AFTER_SEC = 300;
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what}: нет ответа за ${Math.round(ms / 1000)} с`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 const KINDS = new Set<AmojoMessageKind>(['text', 'picture', 'file', 'video', 'voice', 'audio', 'sticker']);
@@ -77,7 +90,13 @@ export class Bridge {
     if (!msg) return; // повтор события
     if (ev.attachment) {
       try {
-        const { data, mime } = await connector.download(ev.attachment.ref, this.d.files.maxBytes);
+        // Без таймаута зависшее скачивание (прокси или сервер медиа не отвечает) держало сообщение
+        // навсегда: задача to-amo не ставилась, и в amoCRM не приходило ничего.
+        const { data, mime } = await withTimeout(
+          connector.download(ev.attachment.ref, this.d.files.maxBytes),
+          this.d.mediaTimeoutMs ?? 90_000,
+          'скачивание вложения',
+        );
         const file = await this.d.files.save({
           accountId: channel.accountId,
           channelId: channel.id,
@@ -91,6 +110,18 @@ export class Bridge {
       }
     }
     await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
+  }
+
+  /**
+   * Подбирает входящие, которые сохранены, но не переданы в amo и остались без задачи
+   * (процесс перезапустился между сохранением и постановкой в очередь). Повтор безопасен:
+   * jobId тот же, а deliverToAmo не отправляет уже переданное.
+   */
+  async requeueStuckInbound(olderThanSec: number = STUCK_INBOUND_AFTER_SEC): Promise<number> {
+    const ids = await this.d.store.stuckInboundIds(olderThanSec);
+    for (const id of ids) await this.d.queue.add('to-amo', { messageId: id }, { jobId: `to-amo-${id}` });
+    if (ids.length) this.d.log.warn({ count: ids.length }, 'входящие без передачи в amo поставлены в очередь заново');
+    return ids.length;
   }
 
   private clientUser(chat: Chat): AmojoUser {

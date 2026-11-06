@@ -122,11 +122,16 @@ const healthTick = async () => {
 };
 void healthTick().catch((err: Error) => log.error({ err: err.message }, 'проверка прокси'));
 const healthTimer = setInterval(() => void healthTick().catch((err: Error) => log.error({ err: err.message }, 'проверка прокси')), PROXY_CHECK_INTERVAL_MS);
+// Входящие, оставшиеся без передачи в amo (сбой или перезапуск между сохранением и очередью), — заново в очередь.
+const requeue = () => void bridge.requeueStuckInbound().catch((err: Error) => log.error({ err: err.message }, 'повтор зависших входящих'));
+requeue();
+const requeueTimer = setInterval(requeue, 5 * 60_000);
 log.info({}, 'connectors запущен');
 
 const shutdown = async () => {
   clearInterval(timer);
   clearInterval(healthTimer);
+  clearInterval(requeueTimer);
   await worker.close();
   await host.stopAll();
   await bull.close();

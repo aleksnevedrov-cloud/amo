@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { AmojoClient } from '../src/amojo/client.ts';
-import { Bridge, type Logger } from '../src/bridge.ts';
+import { Bridge, type BridgeDeps, type Logger } from '../src/bridge.ts';
 import { loadEnv } from '../src/config.ts';
 import type { Connector, InboundEvent, OutboundRequest } from '../src/connectors/types.ts';
 import { SecretBox } from '../src/crypto.ts';
@@ -138,7 +138,7 @@ export async function setupBridge(opts: { amoFetch?: typeof fetch; connected?: b
     credentials: box.encrypt(JSON.stringify({ token: 'x' })),
   }))!;
   if (opts.connected !== false) await store.saveConnection(ACCOUNT, '6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b', 'scope-xyz');
-  const bridge = new Bridge({
+  const bridgeDeps: BridgeDeps = {
     store,
     files,
     amojo,
@@ -148,8 +148,9 @@ export async function setupBridge(opts: { amoFetch?: typeof fetch; connected?: b
     amoDomains: ['amocrm.ru'],
     log: silent,
     ...(opts.amoFetch ? { fetch: opts.amoFetch, resolve: async () => ['93.184.216.34'] } : {}),
-  });
-  return { db, drop, store, env, files, calls, amojo, queue, connector, channel, bridge, box };
+  };
+  const bridge = new Bridge(bridgeDeps);
+  return { db, drop, store, env, files, calls, amojo, queue, connector, channel, bridge, bridgeDeps, box };
 }
 
 export function event(over: Partial<InboundEvent> = {}): InboundEvent {

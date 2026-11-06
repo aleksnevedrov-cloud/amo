@@ -230,6 +230,21 @@ export class Store {
 
   // --- Сообщения ---
 
+  /**
+   * Служебное: входящие из канала, которые не переданы в amo дольше olderThanSec секунд
+   * (за последние 7 суток — старше в amo уже не нужны как новая переписка).
+   */
+  async stuckInboundIds(olderThanSec: number): Promise<number[]> {
+    const r = await this.db.query(
+      `SELECT id FROM messages
+       WHERE status = 'received' AND source IN ('client', 'phone') AND amojo_msgid IS NULL
+         AND created_at < now() - make_interval(secs => $1) AND created_at > now() - interval '7 days'
+       ORDER BY id LIMIT 500`,
+      [olderThanSec],
+    );
+    return r.rows.map((x) => Number(x.id));
+  }
+
   /** Сообщение из канала (от клиента или с телефона менеджера). null — уже было (повтор события). */
   async insertFromChannel(m: {
     chat: Chat;
