@@ -421,7 +421,14 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
 // ---------- Карточка сделки и контакта: «Написать первым» ----------
 
 const CARD_CSS = `
-.rfm-card-panel{padding:4px 0}
+.rfm-caption{background:#fff!important;padding:9px 34px 9px 12px!important;position:relative;display:flex!important;align-items:center;gap:8px;margin:0!important;width:100%!important;box-sizing:border-box!important;border-bottom:1px solid #e1e5e9;min-height:0!important;height:auto!important;line-height:0;text-align:left}
+.rfm-caption img.card-widgets__widget__caption__logo{height:20px!important;width:auto!important;max-width:150px!important;margin:0!important;object-fit:contain}
+.rfm-caption img.card-widgets__widget__caption__logo_min{display:none!important}
+.rfm-caption::after{content:'Rf Messenger';font:600 13px/1.2 'Open Sans','PT Sans',Arial,sans-serif;color:#28313d;white-space:nowrap}
+.rfm-caption .card-widgets__widget__caption__arrow{position:absolute!important;right:12px;top:50%;margin:0!important;transform:translateY(-50%);width:12px!important;height:12px!important;background:none!important}
+.rfm-caption .card-widgets__widget__caption__arrow::after{content:'';display:block;width:7px;height:7px;margin:0 0 0 1px;border-right:2px solid #8a949f;border-bottom:2px solid #8a949f;transform:rotate(45deg) translate(-2px,-2px)}
+.rfm-caption .widgets__widget__caption__arrow_top::after{transform:rotate(-135deg) translate(-2px,-2px)}
+.rfm-card-panel{padding:10px 12px;width:100%;box-sizing:border-box;background:#fff}
 .rfm-first{width:100%;display:flex;align-items:center;justify-content:center;gap:6px;height:34px;border:1px solid #4c8bf5;border-radius:6px;background:#fff;color:#2f6fd6;font:inherit;font-size:13px;cursor:pointer}
 .rfm-first:hover{background:#f2f7ff}
 .rfm-first svg{width:16px;height:16px}
