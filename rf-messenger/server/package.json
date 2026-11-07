@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "^9.4.0",
     "@fastify/rate-limit": "^10.3.0",
     "baileys": "7.0.0-rc14",
     "big-integer": "^1.6.52",

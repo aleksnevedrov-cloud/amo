@@ -3,6 +3,7 @@ import { AmojoError, type AmojoClient, type AmojoMessage, type AmojoMessageKind,
 import type { AmoRest } from './amo/rest.ts';
 import { CHAT_START_KINDS } from './channels.ts';
 import { normalizePhone, PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
+import type { ChatEvents } from './events.ts';
 import type { FileStore } from './files.ts';
 import type { JobQueue, Pacer } from './queue.ts';
 import { downloadFromAmo, type Resolver } from './safe-fetch.ts';
@@ -32,6 +33,27 @@ export interface BridgeDeps {
   mediaTimeoutMs?: number;
   /** REST API amoCRM (OAuth интеграции): нужен для «Написать первым». */
   rest?: AmoRest | null;
+  /** События для окна переписки (SSE). */
+  events?: ChatEvents;
+}
+
+/** Отправка из окна переписки в карточке: текст и/или файлы в существующий чат от имени сотрудника. */
+export interface WindowSendInput {
+  accountId: number;
+  userId: number;
+  chatId: number;
+  text: string;
+  replyToMessageId?: number | null;
+  fileIds?: string[];
+}
+
+/** Вид сообщения по MIME загруженного файла. */
+export function kindOfMime(mime: string, name = ''): Exclude<AmojoMessageKind, 'text'> {
+  const m = mime.toLowerCase();
+  if (m.startsWith('image/')) return m === 'image/webp' && /sticker/i.test(name) ? 'sticker' : 'picture';
+  if (m.startsWith('video/')) return 'video';
+  if (m.startsWith('audio/')) return /ogg|opus|webm/.test(m) ? 'voice' : 'audio';
+  return 'file';
 }
 
 /** Ошибка «Написать первым», которую показываем менеджеру как есть. */
@@ -67,8 +89,8 @@ const KINDS = new Set<AmojoMessageKind>(['text', 'picture', 'file', 'video', 'vo
 const hookSchema = z.object({
   message: z.object({
     conversation: z.object({ client_id: z.string().optional(), id: z.string().optional() }),
-    // Кто написал из amo: id сотрудника (или бота) в API чатов.
-    sender: z.object({ id: z.string().min(1).max(100) }).passthrough().optional(),
+    // Кто написал из amo: id сотрудника (или бота) в API чатов и его имя.
+    sender: z.object({ id: z.string().min(1).max(100), name: z.string().max(200).optional() }).passthrough().optional(),
     message: z.object({
       id: z.string(),
       type: z.string(),
@@ -110,6 +132,10 @@ export class Bridge {
       replyToExternalId: ev.replyToExternalId,
     });
     if (!msg) return; // повтор события
+    // Первое сообщение нового чата: подгрузить историю из мессенджера (WhatsApp, Telegram личный).
+    if ((chat as Chat & { inserted?: boolean }).inserted && connector.history) {
+      await this.d.queue.add('history', { messageId: 0, chatId: chat.id }, { jobId: `history-${chat.id}-first` }).catch(() => undefined);
+    }
     if (ev.attachment) {
       try {
         // Без таймаута зависшее скачивание (прокси или сервер медиа не отвечает) держало сообщение
@@ -132,6 +158,134 @@ export class Bridge {
       }
     }
     await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
+    await this.d.events?.publish(chat.accountId, { type: 'message', chatId: chat.id, messageId: msg.id });
+  }
+
+  /** Мессенджер сообщил, что наше сообщение доставлено или прочитано. */
+  async onDelivery(channel: Channel, externalChatId: string, externalMessageId: string, status: 'delivered' | 'read'): Promise<void> {
+    const chat = await this.d.store.chatByExternal(channel.id, externalChatId);
+    if (!chat) return;
+    const msg = await this.d.store.setStatusByExternal(chat.id, externalMessageId, status);
+    if (!msg) return;
+    await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status });
+    if (status === 'read' && msg.source === 'amo') {
+      const conn = await this.d.store.getConnection(chat.accountId);
+      if (conn && this.d.amojo && msg.amojoMsgid) await this.d.amojo.deliveryStatus(conn.scopeId, msg.amojoMsgid, 2).catch(() => undefined);
+    }
+  }
+
+  /**
+   * История переписки из мессенджера в нашу БД (последние 100 или старше самого старого известного).
+   * В окне видна вся история; в ленту amoCRM не передаётся (from_history).
+   */
+  async importHistory(chatId: number, limit = 100): Promise<number> {
+    const chat = await this.d.store.chatById(chatId);
+    if (!chat) return 0;
+    const channel = await this.d.store.channelById(chat.channelId);
+    const connector = channel ? this.d.connector(channel.id) : undefined;
+    if (!channel || !connector?.history) throw new Error('История недоступна для этого канала');
+    const oldest = await this.d.store.oldestExternalMessage(chatId);
+    const before = oldest?.externalId ? { externalMessageId: oldest.externalId, timestamp: Math.floor(oldest.createdAt.getTime() / 1000), fromMe: oldest.direction === 'out' } : null;
+    const list = await withTimeout(connector.history(chat.externalChatId, limit, before), 60_000, 'история');
+    let count = 0;
+    for (const ev of list) {
+      const msg = await this.d.store.insertFromChannel({
+        chat,
+        source: ev.fromMe ? 'phone' : 'client',
+        kind: ev.attachment?.kind ?? 'text',
+        text: ev.text,
+        author: ev.author,
+        externalId: ev.externalMessageId,
+        replyToExternalId: ev.replyToExternalId,
+        fromHistory: true,
+        createdAt: new Date(ev.timestamp * 1000),
+      });
+      if (!msg) continue;
+      count++;
+      if (ev.attachment) {
+        try {
+          const { data, mime } = await withTimeout(connector.download(ev.attachment.ref, this.d.files.maxBytes), this.d.mediaTimeoutMs ?? 90_000, 'скачивание вложения');
+          const file = await this.d.files.save({ accountId: channel.accountId, channelId: channel.id, data, name: ev.attachment.name, mime: ev.attachment.mime ?? mime });
+          await this.d.store.setMessageFile(msg.id, file.id);
+        } catch (err) {
+          this.d.log.warn({ channelId: channel.id, messageId: msg.id, err: (err as Error).message }, 'вложение истории не скачано');
+        }
+      }
+    }
+    await this.d.events?.publish(chat.accountId, { type: 'history', chatId: chat.id, count });
+    return count;
+  }
+
+  /**
+   * Отправка из окна переписки: клиенту — через коннектор, в amoCRM — как исходящее от этого сотрудника
+   * (тем же путём, что сообщения с телефона). Текст уходит подписью к первому файлу.
+   */
+  async sendFromWindow(input: WindowSendInput): Promise<{ messageIds: number[] }> {
+    const text = input.text.trim();
+    const fileIds = input.fileIds ?? [];
+    if (!text && !fileIds.length) throw new StartChatError('Пустое сообщение');
+    const chat = await this.d.store.chatOfAccount(input.accountId, input.chatId);
+    if (!chat) throw new StartChatError('Чат не найден');
+    const channel = await this.d.store.channelById(chat.channelId);
+    const connector = channel ? this.d.connector(channel.id) : undefined;
+    if (!channel || !connector) throw new StartChatError('Канал сейчас не запущен — проверьте его в настройках виджета');
+    if (channel.status !== 'connected') throw new StartChatError('Канал сейчас не подключён');
+    const quoted = input.replyToMessageId ? await this.d.store.messageById(input.replyToMessageId) : null;
+    const replyToExternalId = quoted && quoted.chatId === chat.id ? quoted.externalId : null;
+    let senderName: string | null = null;
+    if (this.d.rest) {
+      senderName = await this.d.rest.userName(input.accountId, input.userId).catch(() => null);
+      const ref = await this.d.rest.userAmojoId(input.accountId, input.userId).catch(() => null);
+      if (ref) await this.d.store.rememberAmoOperator(input.accountId, chat.id, ref);
+    }
+    const parts: { text: string; file: { id: string; data: Buffer; name: string; mime: string; kind: Exclude<AmojoMessageKind, 'text'> } | null }[] = [];
+    for (const fileId of fileIds.slice(0, 10)) {
+      const rec = await this.d.store.fileById(fileId);
+      if (!rec || rec.accountId !== input.accountId) throw new StartChatError('Файл не найден');
+      parts.push({ text: parts.length === 0 ? text : '', file: { id: rec.id, data: await this.d.files.read(rec.id), name: rec.name, mime: rec.mime, kind: kindOfMime(rec.mime, rec.name) } });
+    }
+    if (!parts.length) parts.push({ text, file: null });
+    const ids: number[] = [];
+    for (const part of parts) {
+      const sent = await connector.send({
+        externalChatId: chat.externalChatId,
+        text: part.text,
+        file: part.file ? { data: part.file.data, name: part.file.name, mime: part.file.mime, kind: part.file.kind } : null,
+        replyToExternalId: ids.length ? null : replyToExternalId,
+      });
+      const msg = await this.d.store.insertFromChannel({
+        chat,
+        source: 'phone',
+        kind: part.file?.kind ?? 'text',
+        text: part.text,
+        author: null,
+        externalId: sent.externalMessageId,
+        replyToExternalId: ids.length ? null : replyToExternalId,
+        senderName,
+        senderUserId: input.userId,
+      });
+      if (!msg) continue;
+      if (part.file) await this.d.store.setMessageFile(msg.id, part.file.id);
+      ids.push(msg.id);
+      try {
+        await this.deliverToAmo(msg.id);
+      } catch (err) {
+        this.d.log.warn({ messageId: msg.id, err: (err as Error).message }, 'сообщение из окна не передано в amo сразу');
+        await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
+      }
+      await this.d.events?.publish(chat.accountId, { type: 'message', chatId: chat.id, messageId: msg.id });
+    }
+    return { messageIds: ids };
+  }
+
+  /** Повтор недоставленного сообщения из amoCRM (кнопка «Повторить» в окне). */
+  async retryMessage(accountId: number, messageId: number): Promise<boolean> {
+    const msg = await this.d.store.messageById(messageId);
+    if (!msg || msg.accountId !== accountId || msg.source !== 'amo' || msg.status !== 'failed') return false;
+    await this.d.store.requeueMessage(msg.id);
+    await this.d.queue.add('to-channel', { messageId: msg.id }, { jobId: `to-channel-${msg.id}-retry-${Date.now()}` });
+    await this.d.events?.publish(accountId, { type: 'status', chatId: msg.chatId, messageId: msg.id, status: 'queued' });
+    return true;
   }
 
   /**
@@ -314,10 +468,12 @@ export class Bridge {
       media,
       amojoMsgid: m.id,
       replyToAmojoMsgid: m.reply_to?.message.id ?? null,
+      senderName: sender?.name ?? null,
     });
     if (!msg) return 'duplicate';
     const delay = await this.d.pacer.reserve(chat.id);
     await this.d.queue.add('to-channel', { messageId: msg.id }, { jobId: `to-channel-${msg.id}`, delay });
+    await this.d.events?.publish(accountId, { type: 'message', chatId: chat.id, messageId: msg.id });
     return 'queued';
   }
 
@@ -332,6 +488,7 @@ export class Bridge {
   private async fail(chat: Chat, msg: Message, error: string): Promise<void> {
     await this.d.store.markFailed(msg.id, error);
     await this.reportStatus(chat, msg, -1, error);
+    await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status: 'failed', error });
   }
 
   /** Задача to-channel. lastAttempt — последняя попытка очереди: при ошибке сообщение помечается недоставленным. */
@@ -370,6 +527,7 @@ export class Bridge {
       });
       await this.d.store.markSent(msg.id, sent.externalMessageId);
       await this.reportStatus(chat, msg, 1);
+      await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status: 'sent' });
     } catch (err) {
       const text = (err as Error).message;
       if (err instanceof PermanentSendError || lastAttempt) {

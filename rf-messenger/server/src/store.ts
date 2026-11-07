@@ -29,6 +29,9 @@ export interface Chat {
   amojoChatId: string | null;
   /** Сотрудник amoCRM (id в API чатов), последним писавший в этот чат из amo. */
   amoOperatorRef: string | null;
+  /** Когда менеджер последний раз открывал чат в окне переписки. */
+  readAt: Date | null;
+  lastMessageAt: Date;
 }
 
 export interface Message {
@@ -47,7 +50,25 @@ export interface Message {
   amojoMsgid: string | null;
   status: MessageStatus;
   error: string | null;
+  /** Имя сотрудника amoCRM у исходящих (из окна или вебхука amo). */
+  senderName: string | null;
+  senderUserId: number | null;
+  /** Загруженная история: в ленту amoCRM не передаётся. */
+  fromHistory: boolean;
   createdAt: Date;
+}
+
+export interface Template {
+  id: number;
+  accountId: number;
+  /** null — общий шаблон аккаунта. */
+  ownerUserId: number | null;
+  title: string;
+  text: string;
+  folder: string;
+  attachments: { fileId: string; name: string; mime: string; size: number }[];
+  useCount: number;
+  updatedAt: Date;
 }
 
 export interface FileRecord {
@@ -81,6 +102,19 @@ const chatRow = (r: any): Chat => ({
   contact: r.contact ?? {},
   amojoChatId: r.amojo_chat_id,
   amoOperatorRef: r.amo_operator_ref ?? null,
+  readAt: r.read_at ?? null,
+  lastMessageAt: r.last_message_at,
+});
+const templateRow = (r: any): Template => ({
+  id: Number(r.id),
+  accountId: Number(r.account_id),
+  ownerUserId: r.owner_user_id === null ? null : Number(r.owner_user_id),
+  title: r.title,
+  text: r.text,
+  folder: r.folder,
+  attachments: Array.isArray(r.attachments) ? r.attachments : [],
+  useCount: Number(r.use_count),
+  updatedAt: r.updated_at,
 });
 const messageRow = (r: any): Message => ({
   id: Number(r.id),
@@ -98,6 +132,9 @@ const messageRow = (r: any): Message => ({
   amojoMsgid: r.amojo_msgid,
   status: r.status,
   error: r.error,
+  senderName: r.sender_name ?? null,
+  senderUserId: r.sender_user_id === null || r.sender_user_id === undefined ? null : Number(r.sender_user_id),
+  fromHistory: Boolean(r.from_history),
   createdAt: r.created_at,
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -228,10 +265,150 @@ export class Store {
       `INSERT INTO chats (account_id, channel_id, external_chat_id, conversation_id, is_group, title, contact)
        VALUES ($1, $2::bigint, $3::text, 'rfm-' || $2::bigint::text || '-' || md5($3::text), $4, $5, $6)
        ON CONFLICT (channel_id, external_chat_id) DO UPDATE SET title = EXCLUDED.title, contact = chats.contact || EXCLUDED.contact, last_message_at = now()
-       RETURNING *`,
+       RETURNING *, (xmax = 0) AS inserted`,
       [channel.accountId, channel.id, c.externalChatId, c.isGroup, c.title, JSON.stringify(c.contact)],
     );
-    return chatRow(r.rows[0]);
+    const chat = chatRow(r.rows[0]) as Chat & { inserted: boolean };
+    chat.inserted = Boolean(r.rows[0].inserted);
+    return chat;
+  }
+
+  // --- Окно переписки ---
+
+  /** Чаты аккаунта по id чатов API amo (привязка к контакту) и по телефонам контактов. */
+  async chatsForContacts(accountId: number, amojoChatIds: readonly string[], phones: readonly string[]): Promise<Chat[]> {
+    const r = await this.db.query(
+      `SELECT * FROM chats WHERE account_id = $1 AND (amojo_chat_id = ANY($2::text[]) OR (NOT is_group AND contact->>'phone' = ANY($3::text[])))
+       ORDER BY last_message_at DESC LIMIT 100`,
+      [accountId, amojoChatIds, phones],
+    );
+    return r.rows.map(chatRow);
+  }
+
+  /** Служебное: чат канала по id чата в мессенджере. */
+  async chatByExternal(channelId: number, externalChatId: string): Promise<Chat | null> {
+    const r = await this.db.query('SELECT * FROM chats WHERE channel_id = $1 AND external_chat_id = $2', [channelId, externalChatId]);
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
+  /** Самое старое сообщение чата с id в мессенджере — точка отсчёта для истории. */
+  async oldestExternalMessage(chatId: number): Promise<Message | null> {
+    const r = await this.db.query('SELECT * FROM messages WHERE chat_id = $1 AND external_id IS NOT NULL ORDER BY created_at ASC, id ASC LIMIT 1', [chatId]);
+    return r.rows[0] ? messageRow(r.rows[0]) : null;
+  }
+
+  /** Чат аккаунта (для API окна). */
+  async chatOfAccount(accountId: number, id: number): Promise<Chat | null> {
+    const r = await this.db.query('SELECT * FROM chats WHERE account_id = $1 AND id = $2', [accountId, id]);
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
+  /** Страница сообщений чата: новые снизу, порциями по limit, старше beforeId. */
+  async messagesPage(chatId: number, beforeId: number | null, limit: number): Promise<{ messages: Message[]; hasMore: boolean }> {
+    // Порядок — по времени сообщения (история загружается позже, но старше), затем по id.
+    const r = await this.db.query(
+      `SELECT * FROM messages WHERE chat_id = $1
+         AND ($2::bigint IS NULL OR (created_at, id) < (SELECT created_at, id FROM messages WHERE id = $2))
+       ORDER BY created_at DESC, id DESC LIMIT $3`,
+      [chatId, beforeId, limit + 1],
+    );
+    const rows = r.rows.slice(0, limit).reverse().map(messageRow);
+    return { messages: rows, hasMore: r.rows.length > limit };
+  }
+
+  async searchMessages(chatId: number, q: string, limit = 50): Promise<Message[]> {
+    const pattern = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const r = await this.db.query('SELECT * FROM messages WHERE chat_id = $1 AND text ILIKE $2 ORDER BY created_at DESC, id DESC LIMIT $3', [chatId, pattern, limit]);
+    return r.rows.map(messageRow);
+  }
+
+  async messagesByIds(chatId: number, ids: readonly number[]): Promise<Message[]> {
+    if (!ids.length) return [];
+    const r = await this.db.query('SELECT * FROM messages WHERE chat_id = $1 AND id = ANY($2::bigint[])', [chatId, ids]);
+    return r.rows.map(messageRow);
+  }
+
+  /** Сводка по чатам для списка: последнее сообщение и число непрочитанных входящих. */
+  async chatSummaries(chatIds: readonly number[]): Promise<Map<number, { last: Message | null; unread: number }>> {
+    const out = new Map<number, { last: Message | null; unread: number }>();
+    if (!chatIds.length) return out;
+    const last = await this.db.query('SELECT DISTINCT ON (chat_id) * FROM messages WHERE chat_id = ANY($1::bigint[]) ORDER BY chat_id, created_at DESC, id DESC', [chatIds]);
+    const unread = await this.db.query(
+      `SELECT m.chat_id, count(*)::int AS n FROM messages m JOIN chats c ON c.id = m.chat_id
+       WHERE m.chat_id = ANY($1::bigint[]) AND m.direction = 'in' AND (c.read_at IS NULL OR m.created_at > c.read_at) GROUP BY m.chat_id`,
+      [chatIds],
+    );
+    for (const id of chatIds) out.set(id, { last: null, unread: 0 });
+    for (const r of last.rows) {
+      const e = out.get(Number(r.chat_id));
+      if (e) e.last = messageRow(r);
+    }
+    for (const r of unread.rows) {
+      const e = out.get(Number(r.chat_id));
+      if (e) e.unread = Number(r.n);
+    }
+    return out;
+  }
+
+  async markChatRead(chatId: number): Promise<void> {
+    await this.db.query('UPDATE chats SET read_at = now() WHERE id = $1', [chatId]);
+  }
+
+  /** Статус доставки от мессенджера (доставлено / прочитано) по id сообщения в канале. */
+  async setStatusByExternal(chatId: number, externalId: string, status: 'delivered' | 'read'): Promise<Message | null> {
+    const r = await this.db.query(
+      `UPDATE messages SET status = $3, updated_at = now()
+       WHERE chat_id = $1 AND direction = 'out' AND external_id = $2
+         AND status IN ('sent', 'delivered', 'synced', 'received') AND NOT (status = 'delivered' AND $3 = 'delivered')
+       RETURNING *`,
+      [chatId, externalId, status],
+    );
+    return r.rows[0] ? messageRow(r.rows[0]) : null;
+  }
+
+  async requeueMessage(id: number): Promise<void> {
+    await this.db.query("UPDATE messages SET status = 'queued', error = NULL, updated_at = now() WHERE id = $1", [id]);
+  }
+
+  // --- Шаблоны сообщений ---
+
+  /** Общие шаблоны аккаунта и личные шаблоны сотрудника: частые — сверху. */
+  async listTemplates(accountId: number, userId: number): Promise<Template[]> {
+    const r = await this.db.query(
+      'SELECT * FROM templates WHERE account_id = $1 AND (owner_user_id IS NULL OR owner_user_id = $2) ORDER BY use_count DESC, folder, title LIMIT 500',
+      [accountId, userId],
+    );
+    return r.rows.map(templateRow);
+  }
+
+  async templateById(accountId: number, id: number): Promise<Template | null> {
+    const r = await this.db.query('SELECT * FROM templates WHERE account_id = $1 AND id = $2', [accountId, id]);
+    return r.rows[0] ? templateRow(r.rows[0]) : null;
+  }
+
+  async createTemplate(t: Omit<Template, 'id' | 'useCount' | 'updatedAt'>): Promise<Template> {
+    const r = await this.db.query(
+      'INSERT INTO templates (account_id, owner_user_id, title, text, folder, attachments) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [t.accountId, t.ownerUserId, t.title, t.text, t.folder, JSON.stringify(t.attachments)],
+    );
+    return templateRow(r.rows[0]);
+  }
+
+  async updateTemplate(accountId: number, id: number, t: Pick<Template, 'title' | 'text' | 'folder' | 'attachments'>): Promise<Template | null> {
+    const r = await this.db.query(
+      'UPDATE templates SET title = $3, text = $4, folder = $5, attachments = $6, updated_at = now() WHERE account_id = $1 AND id = $2 RETURNING *',
+      [accountId, id, t.title, t.text, t.folder, JSON.stringify(t.attachments)],
+    );
+    return r.rows[0] ? templateRow(r.rows[0]) : null;
+  }
+
+  async deleteTemplate(accountId: number, id: number): Promise<boolean> {
+    const r = await this.db.query('DELETE FROM templates WHERE account_id = $1 AND id = $2', [accountId, id]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async bumpTemplate(accountId: number, id: number): Promise<void> {
+    await this.db.query('UPDATE templates SET use_count = use_count + 1 WHERE account_id = $1 AND id = $2', [accountId, id]);
   }
 
   /** Служебное: личный чат канала с этим номером клиента (номер — в contact.phone). */
@@ -276,7 +453,7 @@ export class Store {
   async pendingPhoneIds(accountId: number): Promise<number[]> {
     const r = await this.db.query(
       `SELECT id FROM messages
-       WHERE account_id = $1 AND status = 'received' AND source = 'phone' AND amojo_msgid IS NULL
+       WHERE account_id = $1 AND status = 'received' AND source = 'phone' AND amojo_msgid IS NULL AND NOT from_history
          AND created_at > now() - interval '7 days'
        ORDER BY id LIMIT 500`,
       [accountId],
@@ -287,7 +464,7 @@ export class Store {
   async stuckInboundIds(olderThanSec: number): Promise<number[]> {
     const r = await this.db.query(
       `SELECT id FROM messages
-       WHERE status = 'received' AND source IN ('client', 'phone') AND amojo_msgid IS NULL
+       WHERE status = 'received' AND source IN ('client', 'phone') AND amojo_msgid IS NULL AND NOT from_history
          AND created_at < now() - make_interval(secs => $1) AND created_at > now() - interval '7 days'
        ORDER BY id LIMIT 500`,
       [olderThanSec],
@@ -304,11 +481,17 @@ export class Store {
     author: Message['author'];
     externalId: string;
     replyToExternalId: string | null;
+    /** Исходящее из окна: кто отправил. */
+    senderName?: string | null;
+    senderUserId?: number | null;
+    /** Загруженная история: время сообщения в мессенджере, в amo не передаётся. */
+    fromHistory?: boolean;
+    createdAt?: Date;
   }): Promise<Message | null> {
     const r = await this.db.query(
-      `INSERT INTO messages (account_id, chat_id, direction, source, kind, text, author, external_id, status, reply_to_message_id)
+      `INSERT INTO messages (account_id, chat_id, direction, source, kind, text, author, external_id, status, reply_to_message_id, sender_name, sender_user_id, from_history, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'received',
-         (SELECT id FROM messages WHERE chat_id = $2 AND external_id = $9 ORDER BY id LIMIT 1))
+         (SELECT id FROM messages WHERE chat_id = $2 AND external_id = $9 ORDER BY id LIMIT 1), $10, $11, $12, COALESCE($13::timestamptz, now()))
        ON CONFLICT (chat_id, direction, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING *`,
       [
         m.chat.accountId,
@@ -320,6 +503,10 @@ export class Store {
         m.author ? JSON.stringify(m.author) : null,
         m.externalId,
         m.replyToExternalId,
+        m.senderName ?? null,
+        m.senderUserId ?? null,
+        Boolean(m.fromHistory),
+        m.createdAt ?? null,
       ],
     );
     return r.rows[0] ? messageRow(r.rows[0]) : null;
@@ -333,13 +520,14 @@ export class Store {
     media: Message['media'];
     amojoMsgid: string;
     replyToAmojoMsgid: string | null;
+    senderName?: string | null;
   }): Promise<Message | null> {
     const r = await this.db.query(
-      `INSERT INTO messages (account_id, chat_id, direction, source, kind, text, media, amojo_msgid, status, reply_to_message_id)
+      `INSERT INTO messages (account_id, chat_id, direction, source, kind, text, media, amojo_msgid, status, reply_to_message_id, sender_name)
        VALUES ($1, $2, 'out', 'amo', $3, $4, $5, $6, 'queued',
-         (SELECT id FROM messages WHERE account_id = $1 AND chat_id = $2 AND amojo_msgid = $7))
+         (SELECT id FROM messages WHERE account_id = $1 AND chat_id = $2 AND amojo_msgid = $7), $8)
        ON CONFLICT (account_id, amojo_msgid) WHERE amojo_msgid IS NOT NULL DO NOTHING RETURNING *`,
-      [m.chat.accountId, m.chat.id, m.kind, m.text, m.media ? JSON.stringify(m.media) : null, m.amojoMsgid, m.replyToAmojoMsgid],
+      [m.chat.accountId, m.chat.id, m.kind, m.text, m.media ? JSON.stringify(m.media) : null, m.amojoMsgid, m.replyToAmojoMsgid, m.senderName ?? null],
     );
     return r.rows[0] ? messageRow(r.rows[0]) : null;
   }

@@ -2,6 +2,9 @@
  * Виджет «РФ-Мессенджер»: каналы мессенджеров, их статусы и подключение (только администратор).
  * Без фреймворков: одна страница настроек, рисуется в окне интеграции и на странице advanced_settings.
  */
+import { ChatApi, openChatWindow } from './chat.ts';
+import { openTemplatesManager } from './templates-ui.ts';
+
 declare const __API_URL__: string;
 
 export interface AmoWidgetSelf {
@@ -84,7 +87,8 @@ export class MessengerApi {
     private readonly base: string,
   ) {}
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /** Запрос к нашему API с токеном amoCRM (X-Auth-Token добавляет amo). */
+  async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     try {
       return (await this.self.$authorizedAjax({
         url: new URL(path, this.base).toString(),
@@ -319,6 +323,8 @@ export function renderHtml(s: StatusView, notice: { error?: string; info?: strin
   return `<div class="rfm">
 <style>${CSS}</style>
 ${banner}${amojoBanner(s.amojo)}${oauthBanner(s.oauth)}
+<div class="rfm-sec">Шаблоны сообщений</div>
+<div class="rfm-card"><div class="rfm-main"><b>Общие шаблоны</b><div class="rfm-sub">Доступны всем менеджерам в окне переписки по «/». Личные шаблоны каждый ведёт сам: ⋮ → «Мои шаблоны».</div></div><button type="button" class="rfm-btn" data-rfm="templates">Открыть</button></div>
 <div class="rfm-sec">Каналы · ${s.channels.length}</div>
 ${cards}
 <div data-rfm-qr></div>
@@ -445,6 +451,10 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
         }
       })();
     }
+    if (btn.dataset.rfm === 'templates') {
+      w.dispatchEvent(new CustomEvent('rfm:templates', { detail: { shared: true } }));
+      return;
+    }
     if (btn.dataset.rfm === 'connect') {
       const id = amojoAccountId(w);
       if (!id) return void draw({ error: 'Не удалось определить amojo_id аккаунта' });
@@ -507,6 +517,8 @@ const CARD_CSS = `
 .rfm-card-panel{padding:10px 12px;width:100%;box-sizing:border-box;background:#fff}
 .rfm-first{width:100%;display:flex;align-items:center;justify-content:center;gap:6px;height:34px;border:1px solid #4c8bf5;border-radius:6px;background:#fff;color:#2f6fd6;font:inherit;font-size:13px;cursor:pointer}
 .rfm-first:hover{background:#f2f7ff}
+.rfm-first-primary{background:#25c25a;border-color:#25c25a;color:#fff}
+.rfm-first-primary:hover{background:#1fa94d}
 .rfm-first svg{width:16px;height:16px}
 .rfm-overlay{position:fixed;inset:0;background:rgba(32,42,54,.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1.5;color:#2e3640}
 .rfm-modal{background:#fff;border-radius:10px;width:min(520px,calc(100vw - 32px));padding:18px 20px;display:flex;flex-direction:column;gap:12px;max-height:calc(100vh - 32px);overflow:auto}
@@ -538,7 +550,7 @@ export function cardContext(self: AmoWidgetSelf, w: Window = window): { leadId?:
 }
 
 export function renderCardPanel(): string {
-  return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first" data-rfm="first">${ICON.send}Написать</button></div>`;
+  return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first rfm-first-primary" data-rfm="chat">${ICON.chat}Открыть переписку</button><button type="button" class="rfm-first" style="margin-top:6px" data-rfm="first">${ICON.send}Написать</button></div>`;
 }
 
 /**
@@ -653,6 +665,7 @@ type Callbacks = Record<string, (...args: unknown[]) => unknown>;
 
 export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL__): Callbacks {
   const api = new MessengerApi(self, apiUrl);
+  const chat = new ChatApi(api, apiUrl);
   const safe =
     (fn: (...args: unknown[]) => unknown) =>
     (...args: unknown[]) => {
@@ -664,6 +677,16 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
       }
       return true;
     };
+  // Окно шаблонов открывается по событию из настроек (общие) и из окна переписки (личные).
+  const bindTemplates = () => {
+    const flag = document.body as HTMLElement & { __rfmTpl?: boolean };
+    if (flag.__rfmTpl) return;
+    flag.__rfmTpl = true;
+    window.addEventListener('rfm:templates', (e) => {
+      const shared = Boolean((e as CustomEvent<{ shared?: boolean }>).detail?.shared);
+      void openTemplatesManager(chat, { shared, isAdmin: shared });
+    });
+  };
   return {
     init: safe(() => undefined),
     bind_actions: safe(() => undefined),
@@ -675,11 +698,14 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
       if (!(document.body as HTMLElement & { __rfmFirst?: boolean }).__rfmFirst) {
         (document.body as HTMLElement & { __rfmFirst?: boolean }).__rfmFirst = true;
         document.body.addEventListener('click', (e) => {
-          const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm="first"]');
+          const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm="first"],[data-rfm="chat"]');
           if (!btn) return;
           const c = cardContext(self);
-          if (c) void openComposer(api, c);
+          if (!c) return;
+          if (btn.dataset.rfm === 'chat') void openChatWindow(chat, { ctx: c });
+          else void openComposer(api, c);
         });
+        bindTemplates();
       }
     }),
     settings: safe((...args: unknown[]) => {
@@ -688,10 +714,12 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
       if (!block) return;
       const host = document.createElement('div');
       block.appendChild(host);
+      bindTemplates();
       void mountSettings(host, api);
     }),
     advancedSettings: safe(() => {
       const el = document.getElementById(`work-area-${self.get_settings().widget_code}`);
+      bindTemplates();
       if (el) void mountSettings(el, api);
     }),
     onSave: () => true,

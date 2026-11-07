@@ -15,7 +15,31 @@ export interface AmoContactInfo {
   id: number;
   name: string;
   phones: string[];
+  responsibleUserId?: number;
 }
+
+export interface AmoLeadInfo {
+  id: number;
+  name: string;
+  price: number;
+  responsibleUserId: number;
+  statusId: number;
+  pipelineId: number;
+  /** Пользовательские поля сделки: название → значение текстом (для переменных шаблонов). */
+  fields: Record<string, string>;
+  contactIds: number[];
+}
+
+const fieldText = (f: { values?: { value?: unknown; enum?: unknown }[] }): string =>
+  (f.values ?? [])
+    .map((v) => {
+      const val = v.value;
+      if (val === null || val === undefined) return '';
+      if (typeof val === 'number' && val > 1_000_000_000 && val < 10_000_000_000) return new Date(val * 1000).toLocaleDateString('ru-RU');
+      return String(val);
+    })
+    .filter(Boolean)
+    .join(', ');
 
 interface TokenRow {
   baseDomain: string;
@@ -164,7 +188,7 @@ export class AmoRest {
   }
 
   async contact(accountId: number, contactId: number): Promise<AmoContactInfo> {
-    const c = await this.request<{ id: number; name?: string; custom_fields_values?: { field_code?: string; values?: { value?: unknown }[] }[] | null }>(
+    const c = await this.request<{ id: number; name?: string; responsible_user_id?: number; custom_fields_values?: { field_code?: string; values?: { value?: unknown }[] }[] | null }>(
       accountId,
       'GET',
       `/api/v4/contacts/${contactId}`,
@@ -174,7 +198,63 @@ export class AmoRest {
       .flatMap((f) => f.values ?? [])
       .map((v) => String(v.value ?? '').trim())
       .filter(Boolean);
-    return { id: c.id, name: c.name || 'Без имени', phones: [...new Set(phones)] };
+    return { id: c.id, name: c.name || 'Без имени', phones: [...new Set(phones)], ...(c.responsible_user_id ? { responsibleUserId: c.responsible_user_id } : {}) };
+  }
+
+  /** Сделка с ответственным, бюджетом и полями (переменные шаблонов, права менеджера). */
+  async lead(accountId: number, leadId: number): Promise<AmoLeadInfo> {
+    const l = await this.request<{
+      id: number;
+      name?: string;
+      price?: number;
+      responsible_user_id?: number;
+      status_id?: number;
+      pipeline_id?: number;
+      custom_fields_values?: { field_name?: string; values?: { value?: unknown }[] }[] | null;
+      _embedded?: { contacts?: { id: number; is_main?: boolean }[] };
+    }>(accountId, 'GET', `/api/v4/leads/${leadId}?with=contacts`);
+    const fields: Record<string, string> = {};
+    for (const f of l.custom_fields_values ?? []) if (f.field_name) fields[f.field_name] = fieldText(f);
+    return {
+      id: l.id,
+      name: l.name ?? '',
+      price: Number(l.price ?? 0),
+      responsibleUserId: Number(l.responsible_user_id ?? 0),
+      statusId: Number(l.status_id ?? 0),
+      pipelineId: Number(l.pipeline_id ?? 0),
+      fields,
+      contactIds: (l._embedded?.contacts ?? []).sort((a, b) => Number(Boolean(b.is_main)) - Number(Boolean(a.is_main))).map((c) => c.id),
+    };
+  }
+
+  /** Сделки контакта (для «Сделки» в шапке окна). */
+  async contactLeads(accountId: number, contactId: number): Promise<{ id: number; name: string; price: number; statusId: number; pipelineId: number }[]> {
+    const c = await this.request<{ _embedded?: { leads?: { id: number }[] } }>(accountId, 'GET', `/api/v4/contacts/${contactId}?with=leads`);
+    const ids = (c._embedded?.leads ?? []).map((l) => l.id).slice(0, 20);
+    if (!ids.length) return [];
+    const r = await this.request<{ _embedded?: { leads?: { id: number; name?: string; price?: number; status_id?: number; pipeline_id?: number }[] } }>(
+      accountId,
+      'GET',
+      `/api/v4/leads?${ids.map((id) => `filter[id][]=${id}`).join('&')}`,
+    );
+    return (r._embedded?.leads ?? []).map((l) => ({ id: l.id, name: l.name ?? `Сделка #${l.id}`, price: Number(l.price ?? 0), statusId: Number(l.status_id ?? 0), pipelineId: Number(l.pipeline_id ?? 0) }));
+  }
+
+  /** Имя сотрудника amoCRM (переменная {имя_менеджера}, подпись исходящих в окне). */
+  async userName(accountId: number, userId: number): Promise<string> {
+    const u = await this.request<{ name?: string }>(accountId, 'GET', `/api/v4/users/${userId}`);
+    return u.name ?? `Сотрудник ${userId}`;
+  }
+
+  /** Чаты API чатов, привязанные к контактам: id чата amo → id контакта. */
+  async contactChats(accountId: number, contactIds: readonly number[]): Promise<{ chatId: string; contactId: number }[]> {
+    if (!contactIds.length) return [];
+    const r = await this.request<{ _embedded?: { chats?: { chat_id: string; contact_id: number }[] } }>(
+      accountId,
+      'GET',
+      `/api/v4/contacts/chats?${contactIds.map((id) => `contact_id[]=${id}`).join('&')}`,
+    );
+    return (r._embedded?.chats ?? []).map((c) => ({ chatId: c.chat_id, contactId: c.contact_id }));
   }
 
   /** Привязка чата API чатов к контакту — чат появляется в карточке контакта и его сделок. Уже привязанный к нему — без повтора. */

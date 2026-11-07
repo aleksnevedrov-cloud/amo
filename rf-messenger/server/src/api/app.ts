@@ -1,4 +1,5 @@
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import QRCode from 'qrcode';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
@@ -8,7 +9,10 @@ import { AmoRestError, type AmoRest } from '../amo/rest.ts';
 import type { AmojoClient } from '../amojo/client.ts';
 import { verifyAmojoHook } from '../amojo/signature.ts';
 import { isAmoOrigin, tokenAudience, verifyWidgetToken, type Principal } from '../auth.ts';
-import type { Bridge, StartChatInput } from '../bridge.ts';
+import type { Bridge, StartChatInput, WindowSendInput } from '../bridge.ts';
+import type { ChatEvent } from '../events.ts';
+import type { JobQueue } from '../queue.ts';
+import { chatRoutes } from './chat.ts';
 import { CHAT_START_KINDS, ChannelValidationError, createChannelSchema, KIND_TEXT, PHONE_START_KINDS, STATUS_TEXT, validateChannel } from '../channels.ts';
 import { safeEqualHex } from '../crypto.ts';
 import type { Env } from '../config.ts';
@@ -40,6 +44,10 @@ export interface ApiDeps {
   startChat?: (input: StartChatInput) => Promise<{ chatId: number; messageId: number }>;
   /** Вебхуки мессенджеров (Авито): очередь в процесс коннекторов. */
   webhooks?: { add(channelId: number, body: unknown): Promise<void> };
+  /** Окно переписки: отправка (в процессе коннекторов), очередь задач (история), события (SSE). */
+  windowSend?: (input: WindowSendInput) => Promise<{ messageIds: number[] }>;
+  queue?: JobQueue;
+  events?: { subscribe(accountId: number, fn: (ev: ChatEvent) => void): () => void };
 }
 
 /** Ключи Redis: QR для входа (WhatsApp, Telegram личный) и пароль 2FA Telegram. */
@@ -97,9 +105,11 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
 
   await app.register(cors, {
     origin: (origin, cb) => cb(null, Boolean(origin && isAmoOrigin(origin, env.AMO_ALLOWED_DOMAINS))),
-    allowedHeaders: ['content-type', 'x-auth-token'],
-    methods: ['GET', 'POST', 'DELETE'],
+    allowedHeaders: ['content-type', 'x-auth-token', 'x-rfm-session'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
   });
+  // Загрузка файлов из окна переписки (multipart); размер — MAX_FILE_MB.
+  await app.register(multipart, { limits: { fileSize: deps.files.maxBytes, files: 1, fields: 5 } });
   await app.register(rateLimit, { max: 600, timeWindow: '1 minute' });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
@@ -347,6 +357,9 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
     },
     { prefix: '/widget/v1' },
   );
+
+  // ---------- Окно переписки в карточке (чаты, сообщения, файлы, шаблоны, SSE) ----------
+  await chatRoutes(app, { ...deps, auth, who });
 
   // ---------- API виджета для менеджеров: «Написать первым» в карточке ----------
   await app.register(

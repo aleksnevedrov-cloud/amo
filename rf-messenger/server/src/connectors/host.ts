@@ -83,6 +83,7 @@ export class ConnectorHost {
       .start({
         inbound: (ev) => this.bridge().onInbound(channel, c, ev),
         status: (status, detail) => this.store.setChannelStatus(channel.id, status, detail ?? null),
+        delivery: (externalChatId, externalMessageId, status) => this.bridge().onDelivery(channel, externalChatId, externalMessageId, status),
       })
       .catch(async (err: Error) => {
         this.running.delete(channel.id);

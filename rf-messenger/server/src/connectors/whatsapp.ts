@@ -11,7 +11,7 @@ import type { ILogger } from 'baileys/lib/Utils/logger.js';
 import type { Agent } from 'node:https';
 import type { Dispatcher } from 'undici';
 import { createDbAuthState, type SessionStorage } from './wa-auth.ts';
-import { PermanentSendError, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
+import { PermanentSendError, type Connector, type ConnectorSink, type HistoryCursor, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
 
 /** Сообщения старше суток при переподключении не переносим — это история, а не новая переписка. */
 const MAX_AGE_SEC = 24 * 3600;
@@ -68,7 +68,7 @@ function attachmentOf(m: proto.IMessage, ref: string): InboundAttachment | null 
  * Сообщение Baileys → общее событие канала. null — служебное (статусы, реакции, удаление и т. п.).
  * Чистая функция: проверяется тестами без сети.
  */
-export function normalizeWaMessage(msg: WAMessage, opts: { now?: number; groupTitle?: (jid: string) => string | undefined } = {}): InboundEvent | null {
+export function normalizeWaMessage(msg: WAMessage, opts: { now?: number; groupTitle?: (jid: string) => string | undefined; ignoreAge?: boolean } = {}): InboundEvent | null {
   const key = msg.key as WAMessage['key'] & { remoteJidAlt?: string; participantAlt?: string };
   const jid = key.remoteJid;
   if (!jid || !key.id || jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast')) return null;
@@ -76,7 +76,7 @@ export function normalizeWaMessage(msg: WAMessage, opts: { now?: number; groupTi
   if (!m || m.protocolMessage || m.reactionMessage || m.senderKeyDistributionMessage && Object.keys(m).length === 1) return null;
   const ts = Number(msg.messageTimestamp ?? 0);
   const now = opts.now ?? Math.floor(Date.now() / 1000);
-  if (ts && now - ts > MAX_AGE_SEC) return null;
+  if (!opts.ignoreAge && ts && now - ts > MAX_AGE_SEC) return null;
 
   const attachment = attachmentOf(m, key.id);
   const text =
@@ -312,6 +312,57 @@ export class WhatsAppConnector implements Connector {
         }
       })().catch((err: Error) => this.d.log?.('error', `whatsapp messages.upsert: ${err.message}`));
     });
+
+    // Статусы наших сообщений: 3 — доставлено, 4 — прочитано.
+    sock.ev.on('messages.update', (updates) => {
+      void (async () => {
+        for (const u of updates) {
+          const st = u.update.status;
+          if (!u.key.fromMe || !u.key.id || !u.key.remoteJid || (st !== 3 && st !== 4)) continue;
+          await sink.delivery?.(u.key.remoteJid, u.key.id, st === 4 ? 'read' : 'delivered');
+        }
+      })().catch((err: Error) => this.d.log?.('error', `whatsapp messages.update: ${err.message}`));
+    });
+
+    // История по запросу (fetchMessageHistory) приходит пачками сюда.
+    sock.ev.on('messaging-history.set', ({ messages }) => {
+      for (const w of this.historyWaiters) w(messages);
+    });
+  }
+
+  private readonly historyWaiters = new Set<(messages: WAMessage[]) => void>();
+
+  /**
+   * История чата: WhatsApp отдаёт её по запросу относительно самого старого известного сообщения
+   * (historySyncOnDemand), пачками через messaging-history.set. Без точки отсчёта истории нет.
+   */
+  async history(externalChatId: string, limit: number, before: HistoryCursor | null): Promise<InboundEvent[]> {
+    const sock = this.sock;
+    if (!sock) throw new Error('WhatsApp не подключён');
+    if (!before) throw new Error('WhatsApp отдаёт историю только относительно уже известного сообщения');
+    const collected: WAMessage[] = [];
+    const done = new Promise<void>((resolve) => {
+      const waiter = (messages: WAMessage[]) => {
+        for (const m of messages) if (m.key.remoteJid === externalChatId) collected.push(m);
+        if (collected.length >= limit) resolve();
+      };
+      this.historyWaiters.add(waiter);
+      setTimeout(() => (this.historyWaiters.delete(waiter), resolve()), 25_000).unref?.();
+    });
+    await sock.fetchMessageHistory(Math.min(limit, 100), { remoteJid: externalChatId, id: before.externalMessageId, fromMe: before.fromMe }, before.timestamp);
+    await done;
+    const seen = new Set<string>();
+    const out: InboundEvent[] = [];
+    for (const m of collected) {
+      const id = m.key.id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const ev = normalizeWaMessage(m, { ignoreAge: true, groupTitle: (j) => this.groupTitles.get(j) });
+      if (!ev) continue;
+      if (ev.attachment) this.remember(this.media, id, m);
+      out.push(ev);
+    }
+    return out.sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   private async shutdown(logout: boolean): Promise<void> {

@@ -39,6 +39,15 @@ export interface OutboundRequest {
 export interface ConnectorSink {
   inbound(ev: InboundEvent): Promise<void>;
   status(status: ChannelStatus, detail?: string | null): Promise<void>;
+  /** Мессенджер сообщил о доставке или прочтении нашего сообщения. */
+  delivery?(externalChatId: string, externalMessageId: string, status: 'delivered' | 'read'): Promise<void>;
+}
+
+/** Точка отсчёта для истории: самое старое сообщение чата, которое у нас уже есть. */
+export interface HistoryCursor {
+  externalMessageId: string;
+  timestamp: number;
+  fromMe: boolean;
 }
 
 export interface Connector {
@@ -54,6 +63,11 @@ export interface Connector {
   resolvePhone?(phone: string): Promise<{ externalChatId: string; title?: string } | null>;
   /** Канал удалён: отвязать сессию у мессенджера (WhatsApp — «Связанные устройства»). */
   logout?(): Promise<void>;
+  /**
+   * История переписки из мессенджера (WhatsApp, Telegram личный): до limit сообщений старше before
+   * (или последних, если before нет), от старых к новым. Загруженные сообщения в amoCRM не передаются.
+   */
+  history?(externalChatId: string, limit: number, before: HistoryCursor | null): Promise<InboundEvent[]>;
 }
 
 /** Ошибка отправки, которую повторять бессмысленно (клиент заблокировал бота, чат удалён). */

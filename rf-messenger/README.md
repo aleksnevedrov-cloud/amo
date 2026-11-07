@@ -4,7 +4,7 @@
 Dockerfile и `docker compose`. Подключает мессенджеры к amoCRM через API чатов: переписка идёт
 в чате карточки сделки, менеджер отвечает из amoCRM. ТЗ — RFD-MESSENGER от 03.11.2026.
 
-Состояние: **этап 4** — MAX, VK, Авито ([отчёт](docs/stage-4-report.md)); ранее: этап 1 — каркас, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)), этап 2 — WhatsApp по QR, этап 3 — Telegram личный.
+Состояние: **окно переписки в карточке** ([отчёт и скриншоты](docs/stage-5-chat-window.md)); этап 4 — MAX, VK, Авито ([отчёт](docs/stage-4-report.md)); ранее: этап 1 — каркас, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)), этап 2 — WhatsApp по QR, этап 3 — Telegram личный.
 
 ## Состав
 
@@ -12,7 +12,9 @@ Dockerfile и `docker compose`. Подключает мессенджеры к a
 |---|---|
 | `server/src/main-api.ts` | Процесс **api**: вебхук amo `/amojo/v1/hook/:scope_id`, API виджета `/widget/v1/*`, файлы `/f/:id` |
 | `server/src/main-connectors.ts` | Процесс **connectors**: сессии каналов, входящие, очередь отправки (BullMQ) |
-| `server/src/bridge.ts` | Мост: канал → amoCRM и amoCRM → канал, цитаты, группы, статусы доставки |
+| `server/src/bridge.ts` | Мост: канал → amoCRM и amoCRM → канал, цитаты, группы, статусы доставки, отправка из окна, история |
+| `server/src/api/chat.ts` | API окна переписки: чаты карточки, сообщения, файлы, шаблоны, SSE |
+| `widget/src/chat.ts`, `templates*.ts` | Окно переписки в карточке (как у Wazzup), шаблоны с переменными |
 | `server/src/amojo/` | Клиент API чатов amoCRM, подписи HMAC-SHA1 |
 | `server/src/connectors/` | Общий интерфейс коннектора; Telegram-бот, WhatsApp (Baileys), Telegram личный (GramJS), MAX, VK, Авито — по файлу на канал; `http.ts` — общий HTTP-слой с повторами; запуск каналов (`host.ts`) |
 | `server/src/files.ts` | Файлы у нас, в amo — подписанная ссылка на 30 дней |

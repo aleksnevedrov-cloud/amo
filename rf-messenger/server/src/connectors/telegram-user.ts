@@ -5,7 +5,7 @@ import { CustomFile } from 'telegram/client/uploads.js';
 import { NewMessage, type NewMessageEvent } from 'telegram/events/index.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 import { StringSession } from 'telegram/sessions/index.js';
-import { PermanentSendError, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
+import { PermanentSendError, type Connector, type ConnectorSink, type HistoryCursor, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
 
 /** Сообщения старше суток при переподключении не переносим. */
 const MAX_AGE_SEC = 24 * 3600;
@@ -51,8 +51,8 @@ export interface TgChatInfo {
   authorId?: string;
 }
 
-export function normalizeTgMessage(m: TgMessageLike, chat: TgChatInfo, now: number = Math.floor(Date.now() / 1000)): InboundEvent | null {
-  if (m.date && now - m.date > MAX_AGE_SEC) return null;
+export function normalizeTgMessage(m: TgMessageLike, chat: TgChatInfo, now: number = Math.floor(Date.now() / 1000), ignoreAge = false): InboundEvent | null {
+  if (!ignoreAge && m.date && now - m.date > MAX_AGE_SEC) return null;
   if (!m.text && !m.media) return null;
   return {
     externalChatId: chat.ref,
@@ -309,6 +309,25 @@ export class TelegramUserConnector implements Connector {
     if (!Buffer.isBuffer(data)) throw new Error('Telegram не отдал вложение');
     if (data.length > maxBytes) throw new Error('Вложение больше допустимого размера');
     return { data, mime: mediaOf(msg)?.mime ?? 'application/octet-stream' };
+  }
+
+  /** История чата: до limit сообщений старше before (или последних), от старых к новым. */
+  async history(externalChatId: string, limit: number, before: HistoryCursor | null): Promise<InboundEvent[]> {
+    const client = this.connected();
+    const peer = inputPeer(externalChatId);
+    const list = await client.getMessages(peer, { limit: Math.min(limit, 100), ...(before ? { offsetId: Number(before.externalMessageId) || 0 } : {}) });
+    const out: InboundEvent[] = [];
+    for (const msg of list) {
+      if (!(msg instanceof Api.Message)) continue;
+      const info = await this.chatInfo(msg).catch(() => null);
+      if (!info) continue;
+      const reply = msg.replyTo instanceof Api.MessageReplyHeader ? msg.replyTo.replyToMsgId : null;
+      const e = normalizeTgMessage({ id: msg.id, date: msg.date, out: Boolean(msg.out), text: msg.message ?? '', replyToMsgId: reply ?? null, media: mediaOf(msg) }, info, undefined, true);
+      if (!e) continue;
+      if (e.attachment) this.remember(this.media, e.attachment.ref, msg);
+      out.push(e);
+    }
+    return out.sort((a, b) => a.timestamp - b.timestamp);
   }
 
   /** Написать первым: клиент по номеру добавляется в контакты аккаунта (иначе Telegram не даёт написать). */

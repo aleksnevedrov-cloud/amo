@@ -14,7 +14,8 @@ import { createMessengerProxy, proxySecrets, ProxySwitch, redactSecrets } from '
 import { httpProbe, PROXY_CHECK_INTERVAL_MS, ProxyMonitor } from './proxy-monitor.ts';
 import { createCore } from './deps.ts';
 import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, START_QUEUE_NAME, WEBHOOK_QUEUE_NAME, type JobData, type JobName, type JobQueue, type WebhookJob } from './queue.ts';
-import type { StartChatInput } from './bridge.ts';
+import type { StartChatInput, WindowSendInput } from './bridge.ts';
+import { RedisChatEvents } from './events.ts';
 
 // На сервере нет рабочего IPv6: без этого запросы к Telegram/WhatsApp периодически зависают на AAAA-адресах.
 setDefaultResultOrder('ipv4first');
@@ -61,6 +62,7 @@ const bridge = new Bridge({
   log,
   typingMs: 1200,
   rest: core.rest,
+  events: new RedisChatEvents(core.redis),
 });
 const waQrKey = (id: number) => qrKey('whatsapp', id);
 const sessionOf = (id: number) => ({
@@ -126,6 +128,7 @@ const worker = new Worker<JobData, void, JobName>(
   QUEUE_NAME,
   async (job) => {
     if (job.name === 'to-amo') return bridge.deliverToAmo(job.data.messageId);
+    if (job.name === 'history') return void (await bridge.importHistory(job.data.chatId ?? 0));
     const last = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     return bridge.deliverToChannel(job.data.messageId, last);
   },
@@ -133,11 +136,13 @@ const worker = new Worker<JobData, void, JobName>(
 );
 worker.on('failed', (job, err) => log.warn({ job: job?.id, attempts: job?.attemptsMade, err: err.message }, 'задача не выполнена'));
 // «Написать первым»: по одной задаче за раз, без повторов (повтор отправил бы клиенту дубль).
-const startWorker = new Worker<StartChatInput, { chatId: number; messageId: number }>(START_QUEUE_NAME, (job) => bridge.startChat(job.data), {
-  connection: core.redis.duplicate(),
-  concurrency: 1,
-});
-startWorker.on('failed', (job, err) => log.warn({ job: job?.id, channelId: job?.data.channelId, err: err.message }, 'написать первым: не выполнено'));
+// Сюда же — отправка из окна переписки в карточке (window-send).
+const startWorker = new Worker<StartChatInput | WindowSendInput, unknown>(
+  START_QUEUE_NAME,
+  (job) => (job.name === 'window-send' ? bridge.sendFromWindow(job.data as WindowSendInput) : bridge.startChat(job.data as StartChatInput)),
+  { connection: core.redis.duplicate(), concurrency: 2 },
+);
+startWorker.on('failed', (job, err) => log.warn({ job: job?.id, name: job?.name, err: err.message }, 'отправка из карточки: не выполнено'));
 // Вебхуки Авито: api проверил секрет и положил тело в очередь; разбирает коннектор канала.
 const webhookWorker = new Worker<WebhookJob>(
   WEBHOOK_QUEUE_NAME,

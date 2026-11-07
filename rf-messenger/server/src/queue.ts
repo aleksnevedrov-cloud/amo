@@ -1,8 +1,11 @@
 import type { Redis } from 'ioredis';
 
-export type JobName = 'to-amo' | 'to-channel';
+export type JobName = 'to-amo' | 'to-channel' | 'history';
 export interface JobData {
+  /** to-amo, to-channel — id сообщения; history — 0. */
   messageId: number;
+  /** history: загрузка истории чата из мессенджера. */
+  chatId?: number;
 }
 
 /** Очередь задач: to-amo — сообщение из канала в amoCRM, to-channel — из amoCRM в канал. */
