@@ -243,6 +243,15 @@ export class Store {
     return r.rows[0] ? chatRow(r.rows[0]) : null;
   }
 
+  /** Последние личные чаты канала (для «Написать» в VK и MAX: только тем, кто уже писал). */
+  async recentChats(accountId: number, channelId: number, limit = 50): Promise<Chat[]> {
+    const r = await this.db.query(
+      'SELECT * FROM chats WHERE account_id = $1 AND channel_id = $2 AND NOT is_group ORDER BY last_message_at DESC LIMIT $3',
+      [accountId, channelId, limit],
+    );
+    return r.rows.map(chatRow);
+  }
+
   async chatByConversation(accountId: number, conversationId: string): Promise<Chat | null> {
     const r = await this.db.query('SELECT * FROM chats WHERE account_id = $1 AND conversation_id = $2', [accountId, conversationId]);
     return r.rows[0] ? chatRow(r.rows[0]) : null;

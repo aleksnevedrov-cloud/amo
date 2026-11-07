@@ -143,3 +143,82 @@ it('кнопка в карточке подписана «Написать», ш
   expect(html).not.toContain('Написать первым');
   expect(html).toContain("content:'Rf Messenger'");
 });
+
+describe('этап 4: MAX, VK, Авито', () => {
+  const base: StatusView = { amojo: { configured: true, connected: true }, channels: [] };
+
+  it('плитки MAX, VK и Авито вместо «Скоро»; у каждой — своя форма, ключи — поля password', () => {
+    const html = renderHtml(base);
+    expect(html).not.toContain('Скоро');
+    for (const kind of ['max', 'vk', 'avito']) expect(html).toContain(`data-rfm="show-form" data-kind="${kind}"`);
+    expect(html).toMatch(/form data-rfm="add-key" data-kind="vk"[\s\S]*name="groupId"[\s\S]*type="password" name="token"/);
+    expect(html).toMatch(/data-kind="avito"[\s\S]*type="text" name="clientId"[\s\S]*type="password" name="clientSecret"/);
+  });
+
+  it('подключение VK: id сообщества и ключ уходят в API, ключ стирается из поля', async () => {
+    const calls: { url: string; method?: string; data?: string }[] = [];
+    const api = new MessengerApi(fakeSelf({ 'GET /widget/v1/status': base, 'POST /widget/v1/channels': { id: 3 } }, calls), 'https://chat.example.ru');
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    await mountSettings(el, api);
+    el.querySelector<HTMLElement>('[data-rfm="show-form"][data-kind="vk"]')!.click();
+    const form = el.querySelector<HTMLFormElement>('form[data-kind="vk"]')!;
+    expect(form.style.display).toBe('flex');
+    expect(el.querySelector<HTMLFormElement>('form[data-kind="max"]')!.style.display).toBe('none');
+    (form.elements.namedItem('groupId') as HTMLInputElement).value = ' 123 ';
+    (form.elements.namedItem('token') as HTMLInputElement).value = 'vk-key';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(JSON.parse(calls.find((c) => c.method === 'POST')!.data!)).toEqual({ kind: 'vk', groupId: '123', token: 'vk-key' });
+    expect(el.textContent).toContain('Сообщество VK подключено');
+    el.remove();
+  });
+
+  it('статусы каналов MAX/VK/Авито с текстом ошибки', () => {
+    const html = renderHtml({
+      ...base,
+      channels: [
+        { id: 1, kind: 'max', kindText: 'MAX', title: '@rfd_bot', status: 'connected', statusText: 'Подключён', statusDetail: null, createdAt: '' },
+        { id: 2, kind: 'vk', kindText: 'VK', title: 'РФ-Двери', status: 'error', statusText: 'Ошибка', statusDetail: 'VK не принял ключ доступа сообщества', createdAt: '' },
+      ],
+    });
+    expect(html).toContain('rfm-ico rfm-max');
+    expect(html).toContain('VK не принял ключ доступа сообщества');
+    expect(html).not.toContain('data-rfm="qr"');
+  });
+
+  it('«Написать»: для VK — выбор из тех, кто уже писал; отправка с chatId', async () => {
+    const view = {
+      channels: [
+        { id: 3, kind: 'whatsapp', kindText: 'WhatsApp', title: 'WA', connected: true },
+        { id: 5, kind: 'vk', kindText: 'VK', title: 'РФ-Двери', connected: true, byChat: true, chats: [{ id: 11, title: '<b>Иван</b>' }] },
+        { id: 6, kind: 'max', kindText: 'MAX', title: '@bot', connected: true, byChat: true, chats: [] },
+      ],
+      contacts: [{ id: 1, name: 'Иван', phones: ['+7 936 147-23-24'] }],
+    };
+    expect(renderComposer(view, { channelId: 5 })).toContain('&lt;b&gt;Иван&lt;/b&gt;');
+    expect(renderComposer(view, { channelId: 5 })).not.toContain('name="phone"');
+    expect(renderComposer(view, { channelId: 6 })).toContain('ещё никто не писал');
+    expect(renderComposer(view, { channelId: 3 })).toContain('name="phone"');
+
+    const calls: { url: string; method?: string; data?: string }[] = [];
+    const api = new MessengerApi(fakeSelf({ 'GET /widget/v1/compose': view, 'POST /widget/v1/chats/start': { chatId: 11, messageId: 2 } }, calls), 'https://chat.example.ru');
+    await openComposer(api, { leadId: 1 });
+    const overlay = document.querySelector<HTMLElement>('.rfm-overlay')!;
+    overlay.querySelector<HTMLElement>('[data-rfm="pick-channel"][data-id="5"]')!.click();
+    const ta = overlay.querySelector<HTMLTextAreaElement>('textarea')!;
+    ta.value = 'Добрый день';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    overlay.querySelector<HTMLElement>('[data-rfm="send"]')!.click();
+    expect(overlay.textContent).toContain('Выберите клиента');
+    const sel = overlay.querySelector<HTMLSelectElement>('select[name=chat]')!;
+    sel.value = '11';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    overlay.querySelector<HTMLElement>('[data-rfm="send"]')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(JSON.parse(calls.at(-1)!.data!)).toEqual({ channelId: 5, contactId: 1, chatId: 11, text: 'Добрый день' });
+    overlay.remove();
+  });
+});

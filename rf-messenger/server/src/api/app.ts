@@ -9,7 +9,8 @@ import type { AmojoClient } from '../amojo/client.ts';
 import { verifyAmojoHook } from '../amojo/signature.ts';
 import { isAmoOrigin, tokenAudience, verifyWidgetToken, type Principal } from '../auth.ts';
 import type { Bridge, StartChatInput } from '../bridge.ts';
-import { ChannelValidationError, createChannelSchema, KIND_TEXT, STATUS_TEXT, validateChannel } from '../channels.ts';
+import { CHAT_START_KINDS, ChannelValidationError, createChannelSchema, KIND_TEXT, PHONE_START_KINDS, STATUS_TEXT, validateChannel } from '../channels.ts';
+import { safeEqualHex } from '../crypto.ts';
 import type { Env } from '../config.ts';
 import type { SecretBox } from '../crypto.ts';
 import { safeFileName, type FileStore } from '../files.ts';
@@ -37,21 +38,23 @@ export interface ApiDeps {
   rest?: AmoRest | null;
   /** «Написать первым»: выполняется в процессе коннекторов, api ждёт результат. */
   startChat?: (input: StartChatInput) => Promise<{ chatId: number; messageId: number }>;
+  /** Вебхуки мессенджеров (Авито): очередь в процесс коннекторов. */
+  webhooks?: { add(channelId: number, body: unknown): Promise<void> };
 }
 
 /** Ключи Redis: QR для входа (WhatsApp, Telegram личный) и пароль 2FA Telegram. */
 export const qrKey = (kind: string, id: number) => (kind === 'telegram_user' ? `rfm:tg:qr:${id}` : `rfm:wa:qr:${id}`);
 export const tgPasswordKey = (id: number) => `rfm:tg:pwd:${id}`;
 
-/** Каналы, через которые можно написать первым. */
-const START_KINDS = new Set(['whatsapp', 'telegram_user']);
-
-const startChatSchema = z.object({
-  channelId: z.number().int().positive(),
-  contactId: z.number().int().positive(),
-  phone: z.string().trim().min(5).max(32),
-  text: z.string().trim().min(1, 'Введите текст первого сообщения').max(4000, 'Сообщение длиннее 4000 символов'),
-});
+const startChatSchema = z
+  .object({
+    channelId: z.number().int().positive(),
+    contactId: z.number().int().positive(),
+    phone: z.string().trim().min(5).max(32).optional(),
+    chatId: z.number().int().positive().optional(),
+    text: z.string().trim().min(1, 'Введите текст первого сообщения').max(4000, 'Сообщение длиннее 4000 символов'),
+  })
+  .refine((v) => Boolean(v.phone) !== Boolean(v.chatId), 'Нужен номер клиента или существующий чат');
 
 const okPage = (title: string, text: string) =>
   `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${title}</title></head><body style="font:15px/1.5 sans-serif;padding:32px;color:#2e3640"><h2 style="font-weight:500">${title}</h2><p>${text}</p></body></html>`;
@@ -174,6 +177,29 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
       .header('cache-control', 'private, max-age=86400')
       .send(data);
   });
+
+  // ---------- Вебхук Авито: секрет в адресе, тело — в очередь процессу коннекторов ----------
+  app.post<{ Params: { channelId: string; secret: string } }>(
+    '/hooks/avito/:channelId/:secret',
+    { config: { rateLimit: { max: 600, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const id = Number(req.params.channelId);
+      const given = req.params.secret;
+      if (!Number.isInteger(id) || id <= 0 || !/^[0-9a-f]{32,64}$/.test(given)) return reply.code(404).send({ error: 'not_found' });
+      const channel = await store.channelById(id);
+      if (!channel || channel.kind !== 'avito') return reply.code(404).send({ error: 'not_found' });
+      let secret = '';
+      try {
+        secret = String((JSON.parse(deps.box.decrypt(channel.credentials)) as { webhookSecret?: string }).webhookSecret ?? '');
+      } catch {
+        secret = '';
+      }
+      if (!secret || !safeEqualHex(secret, given)) return reply.code(401).send({ error: 'bad_secret' });
+      if (!deps.webhooks) return reply.code(503).send({ error: 'unavailable' });
+      await deps.webhooks.add(id, req.body ?? {});
+      return reply.send({ ok: true });
+    },
+  );
 
   // ---------- API виджета ----------
   const audience = tokenAudience(env.PUBLIC_URL);
@@ -334,9 +360,22 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         const contactId = Number(req.query.contactId ?? 0);
         if (!(Number.isInteger(leadId) && leadId >= 0 && Number.isInteger(contactId) && contactId >= 0) || (!leadId && !contactId))
           return reply.code(400).send({ error: 'Нужен id сделки или контакта' });
-        const channels = (await store.listChannels(accountId))
-          .filter((c) => START_KINDS.has(c.kind))
-          .map((c) => ({ id: c.id, kind: c.kind, kindText: KIND_TEXT[c.kind], title: c.title, connected: c.status === 'connected' }));
+        const all = await store.listChannels(accountId);
+        const channels = await Promise.all(
+          all
+            .filter((c) => PHONE_START_KINDS.has(c.kind) || CHAT_START_KINDS.has(c.kind))
+            .map(async (c) => ({
+              id: c.id,
+              kind: c.kind,
+              kindText: KIND_TEXT[c.kind],
+              title: c.title,
+              connected: c.status === 'connected',
+              // VK и MAX: по номеру написать нельзя — только тем, кто уже писал (выбор из чатов канала).
+              ...(CHAT_START_KINDS.has(c.kind)
+                ? { byChat: true, chats: (await store.recentChats(accountId, c.id)).map((ch) => ({ id: ch.id, title: ch.title })) }
+                : {}),
+            })),
+        );
         if (!deps.rest || !(await deps.rest.connected(accountId)))
           return { channels, contacts: [], error: 'Интеграция не авторизована в amoCRM: администратору нужно нажать «Авторизовать» в настройках виджета' };
         try {

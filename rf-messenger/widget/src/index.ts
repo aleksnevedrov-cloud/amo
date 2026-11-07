@@ -57,10 +57,26 @@ export function amojoAccountId(w: Window = window): string | null {
 }
 
 export interface ComposeView {
-  channels: { id: number; kind: string; kindText: string; title: string; connected: boolean }[];
+  channels: {
+    id: number;
+    kind: string;
+    kindText: string;
+    title: string;
+    connected: boolean;
+    /** VK и MAX: написать можно только тем, кто уже писал, — выбор из чатов канала. */
+    byChat?: boolean;
+    chats?: { id: number; title: string }[];
+  }[];
   contacts: { id: number; name: string; phones: string[] }[];
   error?: string;
 }
+
+/** Данные формы подключения канала с ключами. */
+export type ChannelCreate =
+  | { kind: 'telegram_bot'; token: string }
+  | { kind: 'max'; token: string }
+  | { kind: 'vk'; token: string; groupId: string }
+  | { kind: 'avito'; clientId: string; clientSecret: string; userId: string };
 
 export class MessengerApi {
   constructor(
@@ -89,7 +105,10 @@ export class MessengerApi {
     return this.call<{ connected: boolean }>('POST', '/widget/v1/amojo/connect', { amojoAccountId });
   }
   addTelegramBot(token: string) {
-    return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'telegram_bot', token });
+    return this.addChannel({ kind: 'telegram_bot', token });
+  }
+  addChannel(body: ChannelCreate) {
+    return this.call<{ id: number }>('POST', '/widget/v1/channels', body);
   }
   addWhatsApp() {
     return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'whatsapp' });
@@ -104,7 +123,7 @@ export class MessengerApi {
     const qs = q.leadId ? `leadId=${q.leadId}` : `contactId=${q.contactId ?? 0}`;
     return this.call<ComposeView>('GET', `/widget/v1/compose?${qs}`);
   }
-  startChat(body: { channelId: number; contactId: number; phone: string; text: string }) {
+  startChat(body: { channelId: number; contactId: number; phone?: string; chatId?: number; text: string }) {
     return this.call<{ chatId: number; messageId: number }>('POST', '/widget/v1/chats/start', body);
   }
   whatsappQr(id: number) {
@@ -140,6 +159,11 @@ const CSS = `
 .rfm-wa{background:#e6f6ea;color:#1f8f3a}
 .rfm-tg{background:#e6f1fb;color:#1e6fb8}
 .rfm-off{background:#f1f3f5;color:#9aa5b1}
+.rfm-max{background:#ebe7fb;color:#5b3fd1}
+.rfm-vk{background:#e4eefb;color:#0a5fd6}
+.rfm-av{background:#e6f4ec;color:#0f8a4b}
+.rfm-form input[type=text]{flex:1}
+.rfm-form select{flex:1;min-width:220px;height:34px;padding:0 10px;border:1px solid #cfd7df;border-radius:6px;font:inherit}
 .rfm-main{flex:1;min-width:0}
 .rfm-main b{display:block;font-weight:500}
 .rfm-sub{font-size:13px;color:#6b7785;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -189,6 +213,9 @@ export function statusPill(c: Pick<ChannelView, 'kind' | 'status'>): { text: str
 function channelIcon(kind: string): string {
   if (kind === 'whatsapp') return `<div class="rfm-ico rfm-wa">${ICON.chat}</div>`;
   if (kind === 'telegram_bot' || kind === 'telegram_user') return `<div class="rfm-ico rfm-tg">${ICON.send}</div>`;
+  if (kind === 'max') return '<div class="rfm-ico rfm-max">M</div>';
+  if (kind === 'vk') return '<div class="rfm-ico rfm-vk">VK</div>';
+  if (kind === 'avito') return '<div class="rfm-ico rfm-av">A</div>';
   return `<div class="rfm-ico rfm-off">${ICON.more}</div>`;
 }
 
@@ -221,8 +248,59 @@ function amojoBanner(a: StatusView['amojo']): string {
   return `<div class="rfm-banner rfm-warn-bg">${ICON.plug}<div style="flex:1"><b>Канал чатов не подключён к аккаунту</b><small>Без этого сообщения не попадут в сделки.</small></div><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="connect">Подключить к amoCRM</button></div>`;
 }
 
-/** Каналы следующих этапов — видны, но выключены. */
-const PLANNED = [{ icon: ICON.more, title: 'MAX, VK, Авито', note: 'Скоро' }];
+/** Формы подключения каналов по ключам: одна форма на тип, открывается плиткой. Ключи после сохранения не показываются. */
+export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: string; fields: { name: string; label: string; secret: boolean; placeholder?: string }[]; hint: string; done: string }[] = [
+  {
+    kind: 'telegram_bot',
+    title: 'Telegram-бот',
+    note: 'По токену',
+    fields: [{ name: 'token', label: 'Токен Telegram-бота', secret: true, placeholder: '123456789:AA…' }],
+    hint: 'Токен выдаёт @BotFather. После сохранения он не показывается.',
+    done: 'Бот подключён',
+  },
+  {
+    kind: 'max',
+    title: 'MAX',
+    note: 'Бот, по токену',
+    fields: [{ name: 'token', label: 'Токен бота MAX', secret: true, placeholder: 'Токен из @MasterBot' }],
+    hint: 'Токен выдаёт @MasterBot в MAX. После сохранения он не показывается.',
+    done: 'Бот MAX подключён',
+  },
+  {
+    kind: 'vk',
+    title: 'VK',
+    note: 'Сообщения сообщества',
+    fields: [
+      { name: 'groupId', label: 'id сообщества', secret: false, placeholder: 'id сообщества, например 12345678' },
+      { name: 'token', label: 'Ключ доступа сообщества', secret: true, placeholder: 'Ключ доступа сообщества' },
+    ],
+    hint: 'Ключ: Управление сообществом → Работа с API → Ключи доступа, с правами «Сообщения», «Фотографии», «Документы», «Управление сообществом». Там же включите Long Poll API и событие «Входящее сообщение».',
+    done: 'Сообщество VK подключено',
+  },
+  {
+    kind: 'avito',
+    title: 'Авито',
+    note: 'Мессенджер Авито',
+    fields: [
+      { name: 'userId', label: 'id профиля Авито', secret: false, placeholder: 'id профиля (число)' },
+      { name: 'clientId', label: 'client_id', secret: false, placeholder: 'client_id' },
+      { name: 'clientSecret', label: 'client_secret', secret: true, placeholder: 'client_secret' },
+    ],
+    hint: 'Ключи приложения — в кабинете разработчика Авито, у приложения должен быть доступ к Messenger API. После сохранения client_secret не показывается.',
+    done: 'Авито подключён',
+  },
+];
+
+function keyForm(f: (typeof KEY_FORMS)[number]): string {
+  const inputs = f.fields
+    .map((x) => `<input type="${x.secret ? 'password' : 'text'}" name="${x.name}" autocomplete="off" placeholder="${esc(x.placeholder ?? x.label)}" required aria-label="${esc(x.label)}">`)
+    .join('\n  ');
+  return `<form data-rfm="add-key" data-kind="${f.kind}" class="rfm-form" style="display:none">
+  ${inputs}
+  <button type="submit" class="rfm-btn rfm-btn-primary">Подключить</button>
+  <div class="rfm-hint">${esc(f.hint)}</div>
+</form>`;
+}
 
 export function renderHtml(s: StatusView, notice: { error?: string; info?: string } = {}): string {
   const banner = notice.error
@@ -236,8 +314,7 @@ export function renderHtml(s: StatusView, notice: { error?: string; info?: strin
   const tiles = `<div class="rfm-tiles">
   <button type="button" class="rfm-tile" data-rfm="add-wa"><div class="rfm-ico rfm-wa">${ICON.chat}</div><b>WhatsApp</b><small>По QR-коду</small></button>
   <button type="button" class="rfm-tile" data-rfm="add-tg"><div class="rfm-ico rfm-tg">${ICON.user}</div><b>Telegram личный</b><small>По QR-коду</small></button>
-  <button type="button" class="rfm-tile" data-rfm="show-bot"><div class="rfm-ico rfm-tg">${ICON.send}</div><b>Telegram-бот</b><small>По токену</small></button>
-  ${PLANNED.map((p) => `<div class="rfm-tile rfm-tile-off"><div class="rfm-ico rfm-off">${p.icon}</div><b>${esc(p.title)}</b><small>${esc(p.note)}</small></div>`).join('')}
+  ${KEY_FORMS.map((f) => `<button type="button" class="rfm-tile" data-rfm="show-form" data-kind="${f.kind}">${channelIcon(f.kind)}<b>${esc(f.title)}</b><small>${esc(f.note)}</small></button>`).join('\n  ')}
 </div>`;
   return `<div class="rfm">
 <style>${CSS}</style>
@@ -247,11 +324,7 @@ ${cards}
 <div data-rfm-qr></div>
 <div class="rfm-sec">Добавить канал</div>
 ${tiles}
-<form data-rfm="add-bot" class="rfm-form" style="display:none">
-  <input type="password" name="token" autocomplete="off" placeholder="123456789:AA…" required aria-label="Токен Telegram-бота">
-  <button type="submit" class="rfm-btn rfm-btn-primary">Подключить бота</button>
-  <div class="rfm-hint">Токен выдаёт @BotFather. После сохранения он не показывается.</div>
-</form>
+${KEY_FORMS.map(keyForm).join('\n')}
 </div>`;
 }
 
@@ -320,12 +393,9 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
   el.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-rfm]');
     if (!btn) return;
-    if (btn.dataset.rfm === 'show-bot') {
-      const form = el.querySelector<HTMLFormElement>('form[data-rfm="add-bot"]');
-      if (form) {
-        form.style.display = 'flex';
-        form.querySelector('input')?.focus();
-      }
+    if (btn.dataset.rfm === 'show-form') {
+      el.querySelectorAll<HTMLFormElement>('form[data-rfm="add-key"]').forEach((f) => (f.style.display = f.dataset.kind === btn.dataset.kind ? 'flex' : 'none'));
+      el.querySelector<HTMLInputElement>(`form[data-kind="${btn.dataset.kind}"] input`)?.focus();
     }
     if (btn.dataset.rfm === 'add-wa') {
       stopPoll();
@@ -407,13 +477,19 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
       );
       return;
     }
-    const form = (e.target as HTMLElement).closest<HTMLFormElement>('form[data-rfm="add-bot"]');
+    const form = (e.target as HTMLElement).closest<HTMLFormElement>('form[data-rfm="add-key"]');
     if (!form) return;
     e.preventDefault();
-    const input = form.elements.namedItem('token') as HTMLInputElement;
-    const token = input.value.trim();
-    input.value = '';
-    void run(async () => (await api.addTelegramBot(token), 'Бот подключён'));
+    const def = KEY_FORMS.find((f) => f.kind === form.dataset.kind);
+    if (!def) return;
+    const body: Record<string, string> = { kind: def.kind };
+    for (const f of def.fields) {
+      const input = form.elements.namedItem(f.name) as HTMLInputElement;
+      body[f.name] = input.value.trim();
+      // Ключи не остаются в поле после отправки.
+      if (f.secret) input.value = '';
+    }
+    void run(async () => (await api.addChannel(body as unknown as ChannelCreate), def.done));
   });
   await draw();
 }
@@ -465,25 +541,34 @@ export function renderCardPanel(): string {
   return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first" data-rfm="first">${ICON.send}Написать</button></div>`;
 }
 
-/** Окно «Написать первым». Каналы — только те, через которые можно начать переписку (WhatsApp, Telegram личный). */
-export function renderComposer(v: ComposeView, sel: { channelId?: number; contactId?: number; phone?: string }, error?: string): string {
+/**
+ * Окно «Написать». WhatsApp и Telegram личный — по номеру из контакта;
+ * VK и MAX — только тем, кто уже писал сообществу или боту (выбор из чатов канала); Авито — нет.
+ */
+export function renderComposer(v: ComposeView, sel: { channelId?: number; contactId?: number; phone?: string; chatId?: number }, error?: string): string {
   const channels = v.channels
     .map((c) => {
-      const icon = c.kind === 'whatsapp' ? `<div class="rfm-ico rfm-wa">${ICON.chat}</div>` : `<div class="rfm-ico rfm-tg">${ICON.user}</div>`;
+      const icon = c.kind === 'whatsapp' ? `<div class="rfm-ico rfm-wa">${ICON.chat}</div>` : c.kind === 'telegram_user' ? `<div class="rfm-ico rfm-tg">${ICON.user}</div>` : channelIcon(c.kind);
       const sub = c.connected ? esc(c.title) : 'Не подключён';
       return `<button type="button" class="rfm-opt" data-rfm="pick-channel" data-id="${c.id}" aria-pressed="${c.id === sel.channelId}"${c.connected ? '' : ' disabled'}>${icon}<span><b style="font-weight:500">${esc(c.kindText)}</b><br><small>${sub}</small></span></button>`;
     })
     .join('');
+  const current = v.channels.find((c) => c.id === sel.channelId);
   const phones = v.contacts.flatMap((c) => c.phones.map((p) => ({ contactId: c.id, name: c.name, phone: p })));
   const phoneOpts = phones
     .map((p) => `<option value="${p.contactId}|${esc(p.phone)}"${p.contactId === sel.contactId && p.phone === sel.phone ? ' selected' : ''}>${esc(p.phone)} — ${esc(p.name)}</option>`)
     .join('');
+  const chats = current?.chats ?? [];
+  const chatOpts = chats.map((c) => `<option value="${c.id}"${c.id === sel.chatId ? ' selected' : ''}>${esc(c.title)}</option>`).join('');
+  const target = current?.byChat
+    ? `<div><div class="rfm-lbl">Клиент — из тех, кто уже писал в ${esc(current.kindText)}</div>${chats.length ? `<select name="chat"><option value="">— выберите чат —</option>${chatOpts}</select>` : `<div class="rfm-note">В ${esc(current.kindText)} ещё никто не писал. Написать первым здесь нельзя — клиент должен сам начать диалог.</div>`}</div>`
+    : `<div><div class="rfm-lbl">Номер клиента — из контакта</div>${phones.length ? `<select name="phone">${phoneOpts}</select>` : '<div class="rfm-note">У контакта нет телефона — добавьте его в карточку.</div>'}</div>`;
   const err = error ?? v.error;
   return `<div class="rfm-modal" role="dialog" aria-modal="true" aria-label="Написать">
 <h3>Написать</h3>
 ${err ? `<div class="rfm-err">${esc(err)}</div>` : ''}
-<div><div class="rfm-lbl">Мессенджер</div>${channels ? `<div class="rfm-opts">${channels}</div>` : '<div class="rfm-note">Нет каналов WhatsApp или Telegram личного — администратору нужно подключить их в настройках виджета.</div>'}</div>
-<div><div class="rfm-lbl">Номер клиента — из контакта</div>${phones.length ? `<select name="phone">${phoneOpts}</select>` : '<div class="rfm-note">У контакта нет телефона — добавьте его в карточку.</div>'}</div>
+<div><div class="rfm-lbl">Мессенджер</div>${channels ? `<div class="rfm-opts">${channels}</div>` : '<div class="rfm-note">Нет каналов для отправки — администратору нужно подключить WhatsApp, Telegram личный, VK или MAX в настройках виджета.</div>'}</div>
+${target}
 <div><div class="rfm-lbl">Первое сообщение</div><textarea name="text" maxlength="4000" placeholder="Добрый день! Это РФ-Двери…"></textarea></div>
 <div class="rfm-actions"><button type="button" class="rfm-btn" data-rfm="cancel">Отмена</button><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="send">Отправить</button></div>
 <div class="rfm-note">Дальше переписка идёт в чате сделки amoCRM.</div>
@@ -505,7 +590,7 @@ export async function openComposer(api: MessengerApi, ctx: { leadId?: number; co
   }
   const firstPhone = view.contacts.find((c) => c.phones.length);
   const firstChannel = view.channels.find((c) => c.connected);
-  const sel: { channelId?: number; contactId?: number; phone?: string } = {
+  const sel: { channelId?: number; contactId?: number; phone?: string; chatId?: number } = {
     ...(firstChannel ? { channelId: firstChannel.id } : {}),
     ...(firstPhone ? { contactId: firstPhone.id, phone: firstPhone.phones[0] } : {}),
   };
@@ -528,6 +613,7 @@ export async function openComposer(api: MessengerApi, ctx: { leadId?: number; co
       sel.contactId = Number(cid);
       sel.phone = rest.join('|');
     }
+    if (t instanceof HTMLSelectElement && t.name === 'chat') sel.chatId = Number(t.value) || undefined;
   });
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) return close();
@@ -536,15 +622,21 @@ export async function openComposer(api: MessengerApi, ctx: { leadId?: number; co
     if (btn.dataset.rfm === 'cancel') return close();
     if (btn.dataset.rfm === 'pick-channel') {
       sel.channelId = Number(btn.dataset.id);
+      sel.chatId = undefined;
       return draw();
     }
     if (btn.dataset.rfm === 'send' && !busy) {
       if (!sel.channelId) return draw('Выберите мессенджер');
-      if (!sel.contactId || !sel.phone) return draw('Нет номера клиента');
+      const byChat = Boolean(view.channels.find((c) => c.id === sel.channelId)?.byChat);
+      if (byChat && !sel.chatId) return draw('Выберите клиента из списка');
+      if (!byChat && (!sel.contactId || !sel.phone)) return draw('Нет номера клиента');
       if (!text.trim()) return draw('Введите текст первого сообщения');
+      // Контакт карточки нужен и для чатов VK/MAX: чат amo привязывается к нему.
+      const contactId = sel.contactId ?? view.contacts[0]?.id;
+      if (!contactId) return draw('В карточке нет контакта — добавьте его');
       busy = true;
       btn.textContent = 'Отправляем…';
-      void api.startChat({ channelId: sel.channelId, contactId: sel.contactId, phone: sel.phone, text: text.trim() }).then(
+      void api.startChat({ channelId: sel.channelId, contactId, ...(byChat ? { chatId: sel.chatId } : { phone: sel.phone }), text: text.trim() }).then(
         () => {
           overlay.innerHTML = `<style>${CSS}${CARD_CSS}</style><div class="rfm-modal"><h3>Сообщение отправлено</h3><div>Переписка появится в чате сделки. Если её не видно — обновите страницу.</div><div class="rfm-actions"><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="cancel">Готово</button></div></div>`;
         },

@@ -28,16 +28,16 @@ const STATUS_RU: Record<ChannelStatus, string> = {
   error: 'ошибка',
 };
 
-const KIND_RU: Record<string, string> = { telegram_bot: 'Telegram-бот', whatsapp: 'WhatsApp' };
+const KIND_RU: Record<string, string> = { telegram_bot: 'Telegram-бот', whatsapp: 'WhatsApp', telegram_user: 'Telegram', max: 'MAX', vk: 'VK', avito: 'Авито' };
 
-/** Каналы, за которыми следим: Telegram-боты и WhatsApp. */
-const WATCHED = new Set(['telegram_bot', 'whatsapp']);
+/** Каналы, за которыми следим. Telegram личный — тоже, но не на этапе ожидания QR (это ручной шаг). */
+const WATCHED = new Set(['telegram_bot', 'whatsapp', 'max', 'vk', 'avito']);
 
 const fmt = (ms: number) =>
   `${new Date(ms).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК`;
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
 
-/** Текущие проблемы: прокси не отвечает; канал Telegram/WhatsApp не в статусе «подключён». */
+/** Текущие проблемы: прокси не отвечает; канал (кроме ожидающего QR) не в статусе «подключён». */
 export function collectProblems(proxy: ProxyStatus | null, channels: readonly Channel[]): Problem[] {
   const out: Problem[] = [];
   if (proxy?.status === 'fail') {

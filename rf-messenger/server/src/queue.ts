@@ -28,6 +28,19 @@ export const START_JOB_OPTIONS = {
 /** Сколько api ждёт выполнения (поиск номера, amo, отправка). */
 export const START_WAIT_MS = 60_000;
 
+/** Вебхуки мессенджеров (Авито): api принимает и ставит в очередь, connectors разбирает коннектором канала. */
+export const WEBHOOK_QUEUE_NAME = 'rfm-webhooks';
+export const WEBHOOK_JOB_OPTIONS = {
+  attempts: 5,
+  backoff: { type: 'exponential', delay: 3_000 },
+  removeOnComplete: { age: 3600, count: 5000 },
+  removeOnFail: { age: 86_400 },
+} as const;
+export interface WebhookJob {
+  channelId: number;
+  body: unknown;
+}
+
 /** Распределение исходящих по времени: в один чат не чаще, чем раз в min–max мс (раздел 6 ТЗ). */
 export interface Pacer {
   /** Резервирует слот отправки в чат; возвращает задержку в мс до слота. */

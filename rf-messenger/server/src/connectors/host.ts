@@ -1,15 +1,42 @@
 import type { Bridge, Logger } from '../bridge.ts';
 import type { SecretBox } from '../crypto.ts';
 import type { Channel, Store } from '../store.ts';
+import { AvitoConnector } from './avito.ts';
+import { MaxConnector } from './max.ts';
 import { TelegramBotConnector } from './telegram-bot.ts';
 import type { Connector } from './types.ts';
+import { VkConnector } from './vk.ts';
 
 export type ConnectorFactory = (channel: Channel, credentials: Record<string, string>) => Connector | null;
 
-export const defaultFactory: ConnectorFactory = (channel, creds) => {
-  if (channel.kind === 'telegram_bot' && creds.token) return new TelegramBotConnector(creds.token);
-  return null; // WhatsApp, Telegram личный, MAX, VK, Авито — следующие этапы
-};
+/** Адрес вебхука Авито: секрет — в адресе, по нему api узнаёт запрос Авито. */
+export const avitoWebhookUrl = (publicUrl: string, channelId: number, secret: string) => new URL(`/hooks/avito/${channelId}/${secret}`, publicUrl).toString();
+
+export interface FactoryOptions {
+  /** Публичный адрес сервиса для вебхука Авито. Пусто — Авито работает только опросом. */
+  publicUrl?: string;
+  log?: (channelId: number, level: 'warn' | 'error', msg: string) => void;
+}
+
+/** Коннекторы без внешних зависимостей процесса (MAX, VK, Авито, Telegram-бот без прокси). WhatsApp и Telegram личный — в main-connectors. */
+export function makeFactory(o: FactoryOptions = {}): ConnectorFactory {
+  return (channel, creds) => {
+    const log = (level: 'warn' | 'error', msg: string) => o.log?.(channel.id, level, msg);
+    const onError = (err: unknown) => log('warn', `${channel.kind}: ${(err as Error).message}`);
+    if (channel.kind === 'telegram_bot' && creds.token) return new TelegramBotConnector(creds.token);
+    if (channel.kind === 'max' && creds.token) return new MaxConnector(creds.token, { onError });
+    if (channel.kind === 'vk' && creds.token && creds.groupId) return new VkConnector(creds.token, Number(creds.groupId), { onError });
+    if (channel.kind === 'avito' && creds.clientId && creds.clientSecret && creds.userId) {
+      return new AvitoConnector(
+        { clientId: creds.clientId, clientSecret: creds.clientSecret, userId: Number(creds.userId) },
+        { ...(o.publicUrl && creds.webhookSecret ? { webhookUrl: avitoWebhookUrl(o.publicUrl, channel.id, creds.webhookSecret) } : {}), onError, log },
+      );
+    }
+    return null; // WhatsApp и Telegram личный создаются в main-connectors (нужны сессия, QR, прокси)
+  };
+}
+
+export const defaultFactory: ConnectorFactory = makeFactory();
 
 /**
  * Держит коннекторы всех активных каналов в процессе коннекторов.

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AmojoError, type AmojoClient, type AmojoMessage, type AmojoMessageKind, type AmojoUser, type NewMessagePayload } from './amojo/client.ts';
 import type { AmoRest } from './amo/rest.ts';
+import { CHAT_START_KINDS } from './channels.ts';
 import { normalizePhone, PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
 import type { FileStore } from './files.ts';
 import type { JobQueue, Pacer } from './queue.ts';
@@ -42,7 +43,10 @@ export interface StartChatInput {
   userId: number;
   channelId: number;
   contactId: number;
-  phone: string;
+  /** WhatsApp, Telegram личный: номер клиента. */
+  phone?: string;
+  /** VK, MAX: существующий чат с клиентом, который уже писал сообществу или боту. */
+  chatId?: number;
   text: string;
 }
 
@@ -224,26 +228,35 @@ export class Bridge {
    * Выполняется в процессе коннекторов (нужен запущенный коннектор канала).
    */
   async startChat(input: StartChatInput): Promise<{ chatId: number; messageId: number }> {
-    const phone = normalizePhone(input.phone);
-    if (!phone) throw new StartChatError('Некорректный номер телефона');
     const text = input.text.trim();
     if (!text) throw new StartChatError('Введите текст первого сообщения');
     const channel = await this.d.store.channelOfAccount(input.accountId, input.channelId);
     if (!channel) throw new StartChatError('Канал не найден');
     const connector = this.d.connector(channel.id);
-    if (!connector?.resolvePhone) throw new StartChatError('Через этот канал нельзя написать первым');
+    if (!connector) throw new StartChatError('Канал сейчас не запущен — проверьте его в настройках виджета');
     if (channel.status !== 'connected') throw new StartChatError('Канал сейчас не подключён — проверьте его в настройках виджета');
     const conn = await this.d.store.getConnection(input.accountId);
     if (!conn || !this.d.amojo) throw new StartChatError('Канал чатов amoCRM не подключён к аккаунту');
     if (!this.d.rest) throw new StartChatError('Нет доступа к amoCRM: интеграция не авторизована');
 
-    // Чат с этим номером уже был (клиент писал раньше) — продолжаем его, а не заводим второй.
-    let chat = await this.d.store.chatByPhone(channel.id, phone);
-    if (!chat) {
-      const peer = await connector.resolvePhone(phone);
-      if (!peer) throw new StartChatError(`Номер ${phone} не найден в мессенджере или скрыт настройками приватности`);
-      const contact = await this.d.rest.contact(input.accountId, input.contactId);
-      chat = await this.d.store.upsertChat(channel, { externalChatId: peer.externalChatId, isGroup: false, title: peer.title ?? contact.name, contact: { phone } });
+    let chat: Chat | null;
+    if (input.chatId) {
+      // VK и MAX: написать можно только тому, кто уже писал сообществу или боту, — чат выбран из существующих.
+      if (!CHAT_START_KINDS.has(channel.kind)) throw new StartChatError('Через этот канал можно написать только по номеру телефона');
+      chat = await this.d.store.chatById(input.chatId);
+      if (!chat || chat.accountId !== input.accountId || chat.channelId !== channel.id || chat.isGroup) throw new StartChatError('Чат не найден');
+    } else {
+      if (!connector.resolvePhone) throw new StartChatError('Через этот канал нельзя написать первым по номеру');
+      const phone = normalizePhone(input.phone ?? '');
+      if (!phone) throw new StartChatError('Некорректный номер телефона');
+      // Чат с этим номером уже был (клиент писал раньше) — продолжаем его, а не заводим второй.
+      chat = await this.d.store.chatByPhone(channel.id, phone);
+      if (!chat) {
+        const peer = await connector.resolvePhone(phone);
+        if (!peer) throw new StartChatError(`Номер ${phone} не найден в мессенджере или скрыт настройками приватности`);
+        const contact = await this.d.rest.contact(input.accountId, input.contactId);
+        chat = await this.d.store.upsertChat(channel, { externalChatId: peer.externalChatId, isGroup: false, title: peer.title ?? contact.name, contact: { phone } });
+      }
     }
 
     const { chatId: amojoChatId } = await this.d.amojo.createChat(conn.scopeId, chat.conversationId, this.clientUser(chat));

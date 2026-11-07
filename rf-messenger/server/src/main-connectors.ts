@@ -4,7 +4,8 @@ import { CHANNELS_CHANGED, qrKey, tgPasswordKey } from './api/app.ts';
 import { TelegramUserConnector } from './connectors/telegram-user.ts';
 import { Bridge, type Logger } from './bridge.ts';
 import { loadEnv } from './config.ts';
-import { ConnectorHost, defaultFactory } from './connectors/host.ts';
+import { ConnectorHost, makeFactory } from './connectors/host.ts';
+import type { AvitoConnector } from './connectors/avito.ts';
 import { AlertNotifier, collectProblems } from './alerts.ts';
 import { TelegramBotApi, TelegramBotConnector } from './connectors/telegram-bot.ts';
 import { WhatsAppConnector } from './connectors/whatsapp.ts';
@@ -12,7 +13,7 @@ import { migrate } from './db.ts';
 import { createMessengerProxy, proxySecrets, ProxySwitch, redactSecrets } from './proxy.ts';
 import { httpProbe, PROXY_CHECK_INTERVAL_MS, ProxyMonitor } from './proxy-monitor.ts';
 import { createCore } from './deps.ts';
-import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, START_QUEUE_NAME, type JobData, type JobName, type JobQueue } from './queue.ts';
+import { JOB_OPTIONS, QUEUE_NAME, RedisPacer, START_QUEUE_NAME, WEBHOOK_QUEUE_NAME, type JobData, type JobName, type JobQueue, type WebhookJob } from './queue.ts';
 import type { StartChatInput } from './bridge.ts';
 
 // На сервере нет рабочего IPv6: без этого запросы к Telegram/WhatsApp периодически зависают на AAAA-адресах.
@@ -80,6 +81,7 @@ const waitTgPassword = async (id: number): Promise<string | null> => {
   }
   return null;
 };
+const baseFactory = makeFactory({ publicUrl: env.PUBLIC_URL, log: (channelId, level, msg) => log[level]({ channelId }, msg) });
 host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, creds) => {
   if (channel.kind === 'whatsapp') {
     return new WhatsAppConnector({
@@ -116,7 +118,8 @@ host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, cred
       onError: (err) => log.warn({ channelId: channel.id, err: (err as Error).message }, 'telegram: ошибка опроса'),
     });
   }
-  return defaultFactory(channel, creds);
+  // MAX, VK, Авито — российские сервисы, идут напрямую, без прокси.
+  return baseFactory(channel, creds);
 });
 
 const worker = new Worker<JobData, void, JobName>(
@@ -135,6 +138,17 @@ const startWorker = new Worker<StartChatInput, { chatId: number; messageId: numb
   concurrency: 1,
 });
 startWorker.on('failed', (job, err) => log.warn({ job: job?.id, channelId: job?.data.channelId, err: err.message }, 'написать первым: не выполнено'));
+// Вебхуки Авито: api проверил секрет и положил тело в очередь; разбирает коннектор канала.
+const webhookWorker = new Worker<WebhookJob>(
+  WEBHOOK_QUEUE_NAME,
+  async (job) => {
+    const c = host.get(job.data.channelId) as (AvitoConnector & { onWebhook?: (b: unknown) => Promise<void> }) | undefined;
+    if (!c?.onWebhook) throw new Error('Коннектор канала не запущен');
+    await c.onWebhook(job.data.body);
+  },
+  { connection: core.redis.duplicate(), concurrency: 2 },
+);
+webhookWorker.on('failed', (job, err) => log.warn({ job: job?.id, channelId: job?.data.channelId, err: err.message }, 'вебхук не обработан'));
 
 await host.syncAll();
 const sub = core.redis.duplicate();
@@ -174,6 +188,7 @@ const shutdown = async () => {
   clearInterval(requeueTimer);
   await worker.close();
   await startWorker.close();
+  await webhookWorker.close();
   await host.stopAll();
   await bull.close();
   await sub.quit();

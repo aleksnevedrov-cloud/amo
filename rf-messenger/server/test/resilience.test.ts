@@ -395,14 +395,15 @@ describe('уведомления о сбоях', () => {
     return { n, sent, at: (min: number) => void (now = T0 + min * MIN), failSend: (v: boolean) => void (fail = v) };
   }
 
-  it('проблемы: прокси fail; каналы Telegram/WhatsApp не connected; остальное не трогаем', () => {
+  it('проблемы: прокси fail; каналы не connected (кроме Telegram личного в ожидании QR); MAX, VK, Авито — тоже', () => {
     const proxy: ProxyStatus = { status: 'fail', active: 'fallback', checkedAt: '', latencyMs: 1, since: '' };
     const p = collectProblems(proxy, [
       channel({ id: 1 }),
       channel({ id: 3, kind: 'whatsapp', title: 'WhatsApp (ожидает QR)', status: 'starting', statusDetail: 'Отсканируйте QR-код' }),
       channel({ id: 5, kind: 'max' as Channel['kind'], status: 'error' }),
+      channel({ id: 6, kind: 'telegram_user' as Channel['kind'], status: 'starting' }),
     ]);
-    expect(p.map((x) => x.key)).toEqual(['proxy', 'channel:3']);
+    expect(p.map((x) => x.key)).toEqual(['proxy', 'channel:3', 'channel:5']);
     expect(p[0]!.title).toMatch(/запасной/);
     expect(p[1]!.title).toBe('Канал «WhatsApp (ожидает QR)» (id 3, WhatsApp)');
     expect(p[1]!.detail).toBe('Статус: подключается — Отсканируйте QR-код');

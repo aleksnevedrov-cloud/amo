@@ -4,7 +4,7 @@
 Dockerfile и `docker compose`. Подключает мессенджеры к amoCRM через API чатов: переписка идёт
 в чате карточки сделки, менеджер отвечает из amoCRM. ТЗ — RFD-MESSENGER от 03.11.2026.
 
-Состояние: **этап 1** — каркас, БД, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)).
+Состояние: **этап 4** — MAX, VK, Авито ([отчёт](docs/stage-4-report.md)); ранее: этап 1 — каркас, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)), этап 2 — WhatsApp по QR, этап 3 — Telegram личный.
 
 ## Состав
 
@@ -14,7 +14,7 @@ Dockerfile и `docker compose`. Подключает мессенджеры к a
 | `server/src/main-connectors.ts` | Процесс **connectors**: сессии каналов, входящие, очередь отправки (BullMQ) |
 | `server/src/bridge.ts` | Мост: канал → amoCRM и amoCRM → канал, цитаты, группы, статусы доставки |
 | `server/src/amojo/` | Клиент API чатов amoCRM, подписи HMAC-SHA1 |
-| `server/src/connectors/` | Общий интерфейс коннектора, Telegram-бот (Bot API, long polling), запуск каналов |
+| `server/src/connectors/` | Общий интерфейс коннектора; Telegram-бот, WhatsApp (Baileys), Telegram личный (GramJS), MAX, VK, Авито — по файлу на канал; `http.ts` — общий HTTP-слой с повторами; запуск каналов (`host.ts`) |
 | `server/src/files.ts` | Файлы у нас, в amo — подписанная ссылка на 30 дней |
 | `server/src/queue.ts` | Очередь и пауза 1–3 с между исходящими в один чат |
 | `server/migrations/` | Схема PostgreSQL (только вперёд) |
