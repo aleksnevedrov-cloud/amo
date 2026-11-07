@@ -210,7 +210,7 @@ function oauthBanner(o: StatusView['oauth']): string {
   if (!o?.configured) return '';
   if (o.connected)
     return `<div class="rfm-banner rfm-ok-bg">${ICON.user}<div><b>Доступ к amoCRM есть</b><small>Менеджеры могут написать клиенту первыми из карточки сделки.</small></div></div>`;
-  return `<div class="rfm-banner rfm-warn-bg">${ICON.user}<div style="flex:1"><b>Нужна авторизация в amoCRM</b><small>Без неё не работает кнопка «Написать первым» в карточке сделки.</small></div><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="oauth" data-url="${esc(o.url)}">Авторизовать</button></div>`;
+  return `<div class="rfm-banner rfm-warn-bg">${ICON.user}<div style="flex:1"><b>Нужна авторизация в amoCRM</b><small>Без неё не работает кнопка «Написать» в карточке сделки.</small></div><button type="button" class="rfm-btn rfm-btn-primary" data-rfm="oauth" data-url="${esc(o.url)}">Авторизовать</button></div>`;
 }
 
 function amojoBanner(a: StatusView['amojo']): string {
@@ -462,7 +462,7 @@ export function cardContext(self: AmoWidgetSelf, w: Window = window): { leadId?:
 }
 
 export function renderCardPanel(): string {
-  return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first" data-rfm="first">${ICON.send}Написать первым</button></div>`;
+  return `<div class="rfm-card-panel"><style>${CARD_CSS}</style><button type="button" class="rfm-first" data-rfm="first">${ICON.send}Написать</button></div>`;
 }
 
 /** Окно «Написать первым». Каналы — только те, через которые можно начать переписку (WhatsApp, Telegram личный). */
@@ -479,8 +479,8 @@ export function renderComposer(v: ComposeView, sel: { channelId?: number; contac
     .map((p) => `<option value="${p.contactId}|${esc(p.phone)}"${p.contactId === sel.contactId && p.phone === sel.phone ? ' selected' : ''}>${esc(p.phone)} — ${esc(p.name)}</option>`)
     .join('');
   const err = error ?? v.error;
-  return `<div class="rfm-modal" role="dialog" aria-modal="true" aria-label="Написать первым">
-<h3>Написать первым</h3>
+  return `<div class="rfm-modal" role="dialog" aria-modal="true" aria-label="Написать">
+<h3>Написать</h3>
 ${err ? `<div class="rfm-err">${esc(err)}</div>` : ''}
 <div><div class="rfm-lbl">Мессенджер</div>${channels ? `<div class="rfm-opts">${channels}</div>` : '<div class="rfm-note">Нет каналов WhatsApp или Telegram личного — администратору нужно подключить их в настройках виджета.</div>'}</div>
 <div><div class="rfm-lbl">Номер клиента — из контакта</div>${phones.length ? `<select name="phone">${phoneOpts}</select>` : '<div class="rfm-note">У контакта нет телефона — добавьте его в карточку.</div>'}</div>

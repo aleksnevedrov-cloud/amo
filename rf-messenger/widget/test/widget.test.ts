@@ -135,3 +135,11 @@ describe('написать первым', () => {
     overlay.remove();
   });
 });
+
+it('кнопка в карточке подписана «Написать», шапка — «Rf Messenger»', async () => {
+  const { renderCardPanel } = await import('../src/index.ts');
+  const html = renderCardPanel();
+  expect(html).toMatch(/data-rfm="first">.*Написать<\/button>/);
+  expect(html).not.toContain('Написать первым');
+  expect(html).toContain("content:'Rf Messenger'");
+});
