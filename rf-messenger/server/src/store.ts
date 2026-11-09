@@ -1,7 +1,7 @@
 import type { Db } from './db.ts';
 import type { AmojoMessageKind } from './amojo/client.ts';
 
-export type ChannelKind = 'telegram_bot' | 'whatsapp' | 'telegram_user' | 'max' | 'vk' | 'avito';
+export type ChannelKind = 'telegram_bot' | 'whatsapp' | 'telegram_user' | 'max' | 'vk' | 'avito' | 'max_phone';
 export type ChannelStatus = 'starting' | 'connected' | 'no_phone' | 'session_ended' | 'error';
 export type MessageStatus = 'received' | 'synced' | 'queued' | 'sent' | 'delivered' | 'read' | 'failed';
 
@@ -283,6 +283,27 @@ export class Store {
       [accountId, amojoChatIds, phones],
     );
     return r.rows.map(chatRow);
+  }
+
+  /** Сколько новых переписок начато первыми за сутки по каналу (чаты без входящих): лимит раздела 6 ТЗ. */
+  async newChatsStartedToday(channelId: number): Promise<number> {
+    const r = await this.db.query(
+      `SELECT count(*)::int AS n FROM chats c
+       WHERE c.channel_id = $1 AND c.created_at > now() - interval '1 day'
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.direction = 'in')`,
+      [channelId],
+    );
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
+  /** Сообщение канала по id в мессенджере — «не доставлено». */
+  async failByExternal(chatId: number, externalId: string, error: string): Promise<Message | null> {
+    const r = await this.db.query(
+      `UPDATE messages SET status = 'failed', error = $3, updated_at = now()
+       WHERE chat_id = $1 AND direction = 'out' AND external_id = $2 AND status <> 'failed' RETURNING *`,
+      [chatId, externalId, error.slice(0, 500)],
+    );
+    return r.rows[0] ? messageRow(r.rows[0]) : null;
   }
 
   /** Служебное: чат канала по id чата в мессенджере. */

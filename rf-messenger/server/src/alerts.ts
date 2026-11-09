@@ -28,10 +28,10 @@ const STATUS_RU: Record<ChannelStatus, string> = {
   error: 'ошибка',
 };
 
-const KIND_RU: Record<string, string> = { telegram_bot: 'Telegram-бот', whatsapp: 'WhatsApp', telegram_user: 'Telegram', max: 'MAX', vk: 'VK', avito: 'Авито' };
+const KIND_RU: Record<string, string> = { telegram_bot: 'Telegram-бот', whatsapp: 'WhatsApp', telegram_user: 'Telegram', max: 'MAX', vk: 'VK', avito: 'Авито', max_phone: 'MAX по номеру' };
 
 /** Каналы, за которыми следим. Telegram личный — тоже, но не на этапе ожидания QR (это ручной шаг). */
-const WATCHED = new Set(['telegram_bot', 'whatsapp', 'max', 'vk', 'avito']);
+const WATCHED = new Set(['telegram_bot', 'whatsapp', 'max', 'vk', 'avito', 'max_phone']);
 
 const fmt = (ms: number) =>
   `${new Date(ms).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК`;

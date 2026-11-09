@@ -15,6 +15,7 @@ import type { JobQueue } from '../queue.ts';
 import { chatRoutes } from './chat.ts';
 import { CHAT_START_KINDS, ChannelValidationError, createChannelSchema, KIND_TEXT, PHONE_START_KINDS, STATUS_TEXT, validateChannel } from '../channels.ts';
 import { safeEqualHex } from '../crypto.ts';
+import { webhookTokenMatches } from '../connectors/max-greenapi.ts';
 import type { Env } from '../config.ts';
 import type { SecretBox } from '../crypto.ts';
 import { safeFileName, type FileStore } from '../files.ts';
@@ -51,7 +52,9 @@ export interface ApiDeps {
 }
 
 /** Ключи Redis: QR для входа (WhatsApp, Telegram личный) и пароль 2FA Telegram. */
-export const qrKey = (kind: string, id: number) => (kind === 'telegram_user' ? `rfm:tg:qr:${id}` : `rfm:wa:qr:${id}`);
+export const qrKey = (kind: string, id: number) => (kind === 'telegram_user' ? `rfm:tg:qr:${id}` : kind === 'max_phone' ? `rfm:max:qr:${id}` : `rfm:wa:qr:${id}`);
+/** Каналы со входом по QR. */
+export const QR_KINDS: ReadonlySet<string> = new Set(['whatsapp', 'telegram_user', 'max_phone']);
 export const tgPasswordKey = (id: number) => `rfm:tg:pwd:${id}`;
 
 const startChatSchema = z
@@ -188,6 +191,28 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
       .send(data);
   });
 
+  // ---------- Вебхук GREEN-API (MAX по номеру): секрет в заголовке Authorization, тело — в очередь ----------
+  app.post<{ Params: { channelId: string } }>(
+    '/hooks/greenapi/:channelId',
+    { config: { rateLimit: { max: 1200, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const id = Number(req.params.channelId);
+      if (!Number.isInteger(id) || id <= 0) return reply.code(404).send({ error: 'not_found' });
+      const channel = await store.channelById(id);
+      if (!channel || channel.kind !== 'max_phone') return reply.code(404).send({ error: 'not_found' });
+      let secret = '';
+      try {
+        secret = String((JSON.parse(deps.box.decrypt(channel.credentials)) as { webhookSecret?: string }).webhookSecret ?? '');
+      } catch {
+        secret = '';
+      }
+      if (!webhookTokenMatches(req.headers.authorization, secret)) return reply.code(401).send({ error: 'bad_token' });
+      if (!deps.webhooks) return reply.code(503).send({ error: 'unavailable' });
+      await deps.webhooks.add(id, req.body ?? {});
+      return reply.send({ ok: true });
+    },
+  );
+
   // ---------- Вебхук Авито: секрет в адресе, тело — в очередь процессу коннекторов ----------
   app.post<{ Params: { channelId: string; secret: string } }>(
     '/hooks/avito/:channelId/:secret',
@@ -309,15 +334,17 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
         const id = Number(req.params.id);
         if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'Некорректный id' });
         const channel = await store.channelOfAccount(accountId, id);
-        if (!channel || (channel.kind !== 'whatsapp' && channel.kind !== 'telegram_user')) return reply.code(404).send({ error: 'Канал не найден' });
+        if (!channel || !QR_KINDS.has(channel.kind)) return reply.code(404).send({ error: 'Канал не найден' });
         const qr = await deps.redis.get(qrKey(channel.kind, id));
+        // GREEN-API отдаёт готовую картинку (data:image/png;base64,…), WhatsApp и Telegram — строку для кодирования.
+        const svg = !qr ? null : qr.startsWith('data:image/') ? `<img src="${qr}" alt="QR" style="width:100%;height:100%;object-fit:contain">` : await QRCode.toString(qr, { type: 'svg', margin: 1, width: 264 });
         return {
           status: channel.status,
           needPassword: channel.kind === 'telegram_user' && /пароль/i.test(channel.statusDetail ?? ''),
           statusText: STATUS_TEXT[channel.status],
           statusDetail: channel.statusDetail,
           title: channel.title,
-          svg: qr ? await QRCode.toString(qr, { type: 'svg', margin: 1, width: 264 }) : null,
+          svg,
         };
       });
 

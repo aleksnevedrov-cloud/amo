@@ -4,7 +4,8 @@ import { CHANNELS_CHANGED, qrKey, tgPasswordKey } from './api/app.ts';
 import { TelegramUserConnector } from './connectors/telegram-user.ts';
 import { Bridge, type Logger } from './bridge.ts';
 import { loadEnv } from './config.ts';
-import { ConnectorHost, makeFactory } from './connectors/host.ts';
+import { ConnectorHost, greenApiWebhookUrl, makeFactory } from './connectors/host.ts';
+import { MaxGreenApiConnector } from './connectors/max-greenapi.ts';
 import type { AvitoConnector } from './connectors/avito.ts';
 import { AlertNotifier, collectProblems } from './alerts.ts';
 import { TelegramBotApi, TelegramBotConnector } from './connectors/telegram-bot.ts';
@@ -114,6 +115,18 @@ host = new ConnectorHost(core.store, core.box, () => bridge, log, (channel, cred
       log: (level, msg) => log[level]({ channelId: channel.id }, msg),
     });
   }
+  if (channel.kind === 'max_phone' && creds.idInstance && creds.apiTokenInstance) {
+    const key = qrKey('max_phone', channel.id);
+    return new MaxGreenApiConnector(
+      { idInstance: creds.idInstance, apiTokenInstance: creds.apiTokenInstance, ...(creds.apiUrl ? { apiUrl: creds.apiUrl } : {}), ...(creds.mediaUrl ? { mediaUrl: creds.mediaUrl } : {}) },
+      {
+        onQr: async (dataUrl) => void (dataUrl ? await core.redis.set(key, dataUrl, 'EX', 70) : await core.redis.del(key)),
+        onIdentity: (phone) => core.store.setChannelIdentity(channel.id, phone, `MAX ${phone}`),
+        ...(creds.webhookSecret ? { webhookUrl: greenApiWebhookUrl(env.PUBLIC_URL, channel.id), webhookToken: creds.webhookSecret } : {}),
+        log: (level, msg) => log[level]({ channelId: channel.id }, msg),
+      },
+    );
+  }
   if (channel.kind === 'telegram_bot' && creds.token) {
     return new TelegramBotConnector(creds.token, {
       ...(proxies.primary ? { dispatcher } : {}),
@@ -147,6 +160,7 @@ startWorker.on('failed', (job, err) => log.warn({ job: job?.id, name: job?.name,
 const webhookWorker = new Worker<WebhookJob>(
   WEBHOOK_QUEUE_NAME,
   async (job) => {
+    // Авито и GREEN-API (MAX по номеру): у обоих коннекторов есть onWebhook.
     const c = host.get(job.data.channelId) as (AvitoConnector & { onWebhook?: (b: unknown) => Promise<void> }) | undefined;
     if (!c?.onWebhook) throw new Error('Коннектор канала не запущен');
     await c.onWebhook(job.data.body);

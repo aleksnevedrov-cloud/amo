@@ -9,6 +9,9 @@ import { VkConnector } from './vk.ts';
 
 export type ConnectorFactory = (channel: Channel, credentials: Record<string, string>) => Connector | null;
 
+/** Адрес вебхука GREEN-API (MAX по номеру): секрет — в заголовке Authorization. */
+export const greenApiWebhookUrl = (publicUrl: string, channelId: number) => new URL(`/hooks/greenapi/${channelId}`, publicUrl).toString();
+
 /** Адрес вебхука Авито: секрет — в адресе, по нему api узнаёт запрос Авито. */
 export const avitoWebhookUrl = (publicUrl: string, channelId: number, secret: string) => new URL(`/hooks/avito/${channelId}/${secret}`, publicUrl).toString();
 
@@ -84,6 +87,7 @@ export class ConnectorHost {
         inbound: (ev) => this.bridge().onInbound(channel, c, ev),
         status: (status, detail) => this.store.setChannelStatus(channel.id, status, detail ?? null),
         delivery: (externalChatId, externalMessageId, status) => this.bridge().onDelivery(channel, externalChatId, externalMessageId, status),
+        sendFailed: (externalChatId, externalMessageId, reason) => this.bridge().onSendFailed(channel, externalChatId, externalMessageId, reason),
         readUpTo: (peerKey, maxMessageId) => this.bridge().onReadUpTo(channel, peerKey, maxMessageId),
       })
       .catch(async (err: Error) => {

@@ -72,6 +72,9 @@ export interface StartChatInput {
   text: string;
 }
 
+/** Не больше стольких первых сообщений новым номерам в сутки на канал (раздел 6 ТЗ). */
+export const NEW_CHATS_PER_DAY = 20;
+
 /** Сообщение без задачи to-amo дольше этого срока считается зависшим и ставится в очередь заново. */
 export const STUCK_INBOUND_AFTER_SEC = 300;
 
@@ -185,6 +188,16 @@ export class Bridge {
       await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status: 'read' });
       if (conn && this.d.amojo && msg.source === 'amo' && msg.amojoMsgid) await this.d.amojo.deliveryStatus(conn.scopeId, msg.amojoMsgid, 2).catch(() => undefined);
     }
+  }
+
+  /** Мессенджер сообщил, что наше сообщение не доставлено: статус «ошибка» в окне и в amoCRM. */
+  async onSendFailed(channel: Channel, externalChatId: string, externalMessageId: string, reason: string): Promise<void> {
+    const chat = await this.d.store.chatByExternal(channel.id, externalChatId);
+    if (!chat) return;
+    const msg = await this.d.store.failByExternal(chat.id, externalMessageId, reason);
+    if (!msg) return;
+    await this.reportStatus(chat, msg, -1, reason);
+    await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status: 'failed', error: reason });
   }
 
   /**
@@ -419,6 +432,10 @@ export class Bridge {
       // Чат с этим номером уже был (клиент писал раньше) — продолжаем его, а не заводим второй.
       chat = await this.d.store.chatByPhone(channel.id, phone);
       if (!chat) {
+        // Раздел 6 ТЗ: не больше 20 первых сообщений новым номерам в сутки на номер — защита от блокировки.
+        if ((await this.d.store.newChatsStartedToday(channel.id)) >= NEW_CHATS_PER_DAY) {
+          throw new StartChatError(`Лимит первых сообщений новым номерам: ${NEW_CHATS_PER_DAY} в сутки на канал. Попробуйте завтра`);
+        }
         const peer = await connector.resolvePhone(phone);
         if (!peer) throw new StartChatError(`Номер ${phone} не найден в мессенджере или скрыт настройками приватности`);
         const contact = await this.d.rest.contact(input.accountId, input.contactId);

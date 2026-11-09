@@ -46,6 +46,8 @@ export interface ConnectorSink {
    * peerKey — начало id чата без access_hash: u:<id>, c:<id>, ch:<id>.
    */
   readUpTo?(peerKey: string, maxMessageId: number): Promise<void>;
+  /** Мессенджер сообщил, что наше сообщение не доставлено (нет аккаунта, отказ сервера). */
+  sendFailed?(externalChatId: string, externalMessageId: string, reason: string): Promise<void>;
 }
 
 /** Точка отсчёта для истории: самое старое сообщение чата, которое у нас уже есть. */

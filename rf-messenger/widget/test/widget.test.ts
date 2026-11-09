@@ -222,3 +222,47 @@ describe('этап 4: MAX, VK, Авито', () => {
     overlay.remove();
   });
 });
+
+describe('MAX по номеру (GREEN-API)', () => {
+  it('плитка и форма: idInstance открыто, apiTokenInstance скрыт; после сохранения без входа — QR с подсказкой про устройства и пароль', async () => {
+    const base: StatusView = { amojo: { configured: true, connected: true }, channels: [] };
+    const html = renderHtml(base);
+    expect(html).toContain('data-rfm="show-form" data-kind="max_phone"');
+    expect(html).toMatch(/data-kind="max_phone"[\s\S]*type="text" name="idInstance"[\s\S]*type="password" name="apiTokenInstance"/);
+    const calls: { url: string; method?: string; data?: string }[] = [];
+    const api = new MessengerApi(
+      fakeSelf(
+        {
+          'GET /widget/v1/status': base,
+          'POST /widget/v1/channels': { id: 9, status: 'starting' },
+          'GET /widget/v1/channels/9/qr': { status: 'session_ended', statusText: 'Сессия завершена', statusDetail: 'Отсканируйте QR', title: 'MAX (ожидает QR)', svg: '<img src="data:image/png;base64,QUJD" data-test="qr">' },
+        },
+        calls,
+      ),
+      'https://chat.example.ru',
+    );
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    await mountSettings(el, api);
+    el.querySelector<HTMLElement>('[data-rfm="show-form"][data-kind="max_phone"]')!.click();
+    const form = el.querySelector<HTMLFormElement>('form[data-kind="max_phone"]')!;
+    (form.elements.namedItem('idInstance') as HTMLInputElement).value = '1101000001';
+    (form.elements.namedItem('apiTokenInstance') as HTMLInputElement).value = 'x'.repeat(50);
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(JSON.parse(calls.find((c) => c.method === 'POST')!.data!)).toEqual({ kind: 'max_phone', idInstance: '1101000001', apiTokenInstance: 'x'.repeat(50) });
+    expect(el.querySelector('[data-test="qr"]')).not.toBeNull();
+    expect(el.textContent).toContain('Устройства → Подключить устройство');
+    expect(el.textContent).toContain('Пароль для входа в MAX должен быть отключён');
+    el.remove();
+  });
+
+  it('карточка канала max_phone: «Ждёт QR» и кнопка «Показать QR» до входа', () => {
+    const html = renderHtml({
+      amojo: { configured: true, connected: true },
+      channels: [{ id: 9, kind: 'max_phone', kindText: 'MAX по номеру', title: 'MAX (GREEN-API 1101000001, ожидает QR)', status: 'starting', statusText: 'Подключается…', statusDetail: null, createdAt: '' }],
+    });
+    expect(html).toContain('Ждёт QR');
+    expect(html).toContain('data-rfm="qr" data-id="9" data-kind="max_phone"');
+  });
+});

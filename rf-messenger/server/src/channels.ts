@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AvitoApi } from './connectors/avito.ts';
+import { GreenApi } from './connectors/max-greenapi.ts';
 import { ApiError } from './connectors/http.ts';
 import { MaxApi } from './connectors/max.ts';
 import { TelegramApiError, TelegramBotApi } from './connectors/telegram-bot.ts';
@@ -31,6 +32,12 @@ export const createChannelSchema = z.discriminatedUnion('kind', [
     kind: z.literal('vk'),
     token: z.string().trim().min(20, 'Введите ключ доступа сообщества').max(300),
     groupId: z.coerce.number().int().positive('Введите id сообщества (число)'),
+    title: z.string().trim().max(100).optional(),
+  }),
+  z.object({
+    kind: z.literal('max_phone'),
+    idInstance: z.string().trim().regex(/^\d{6,12}$/, 'idInstance — число из личного кабинета GREEN-API'),
+    apiTokenInstance: z.string().trim().regex(/^[A-Za-z0-9]{20,80}$/, 'apiTokenInstance — ключ из личного кабинета GREEN-API'),
     title: z.string().trim().max(100).optional(),
   }),
   z.object({
@@ -84,6 +91,27 @@ export async function validateChannel(input: CreateChannelInput, opts: { fetch?:
     }
   }
 
+  if (input.kind === 'max_phone') {
+    try {
+      const api = new GreenApi({ idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance }, net);
+      const { stateInstance } = await api.getStateInstance();
+      const acc = stateInstance === 'authorized' ? await api.getAccountSettings().catch(() => null) : null;
+      const phone = acc?.phone ? `+${String(acc.phone).replace(/\D/g, '')}` : null;
+      return {
+        kind: 'max_phone',
+        title: input.title || (phone ? `MAX ${phone}` : `MAX (GREEN-API ${input.idInstance}, ожидает QR)`),
+        externalId: phone ?? `ga-${input.idInstance}`,
+        // Секрет вебхука уходит в GREEN-API как webhookUrlToken и сверяется с заголовком Authorization.
+        credentials: { idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance, webhookSecret: randomBytes(24).toString('hex') },
+      };
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403 || err.status === 404 || err.status === 400)) {
+        throw new ChannelValidationError('GREEN-API не принял idInstance или apiTokenInstance — проверьте их в console.green-api.com');
+      }
+      throw new ChannelValidationError('Не удалось проверить инстанс: нет связи с GREEN-API');
+    }
+  }
+
   if (input.kind === 'avito') {
     try {
       const api = new AvitoApi({ clientId: input.clientId, clientSecret: input.clientSecret, userId: input.userId }, net);
@@ -129,9 +157,10 @@ export const KIND_TEXT: Record<ChannelKind, string> = {
   max: 'MAX',
   vk: 'VK',
   avito: 'Авито',
+  max_phone: 'MAX по номеру',
 };
 
 /** Каналы, где можно написать первым по номеру телефона. */
-export const PHONE_START_KINDS: ReadonlySet<ChannelKind> = new Set(['whatsapp', 'telegram_user']);
+export const PHONE_START_KINDS: ReadonlySet<ChannelKind> = new Set(['whatsapp', 'telegram_user', 'max_phone']);
 /** Каналы, где написать можно только тем, кто уже писал боту или сообществу (выбор из существующих чатов). */
 export const CHAT_START_KINDS: ReadonlySet<ChannelKind> = new Set(['vk', 'max']);

@@ -79,6 +79,7 @@ export type ChannelCreate =
   | { kind: 'telegram_bot'; token: string }
   | { kind: 'max'; token: string }
   | { kind: 'vk'; token: string; groupId: string }
+  | { kind: 'max_phone'; idInstance: string; apiTokenInstance: string }
   | { kind: 'avito'; clientId: string; clientSecret: string; userId: string };
 
 export class MessengerApi {
@@ -112,7 +113,7 @@ export class MessengerApi {
     return this.addChannel({ kind: 'telegram_bot', token });
   }
   addChannel(body: ChannelCreate) {
-    return this.call<{ id: number }>('POST', '/widget/v1/channels', body);
+    return this.call<{ id: number; status?: string }>('POST', '/widget/v1/channels', body);
   }
   addWhatsApp() {
     return this.call<{ id: number }>('POST', '/widget/v1/channels', { kind: 'whatsapp' });
@@ -205,10 +206,13 @@ const ICON = {
   plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/></svg>',
 };
 
+/** Каналы со входом по QR. */
+export const QR_KINDS: ReadonlySet<string> = new Set(['whatsapp', 'telegram_user', 'max_phone']);
+
 /** Короткая метка статуса и её цвет. */
 export function statusPill(c: Pick<ChannelView, 'kind' | 'status'>): { text: string; cls: string } {
   if (c.status === 'connected') return { text: 'Подключён', cls: 'rfm-ok-bg' };
-  if (c.status === 'starting') return { text: c.kind === 'whatsapp' || c.kind === 'telegram_user' ? 'Ждёт QR' : 'Подключается', cls: 'rfm-warn-bg' };
+  if (c.status === 'starting') return { text: QR_KINDS.has(c.kind) ? 'Ждёт QR' : 'Подключается', cls: 'rfm-warn-bg' };
   if (c.status === 'no_phone') return { text: 'Нет связи', cls: 'rfm-warn-bg' };
   if (c.status === 'session_ended') return { text: 'Сессия завершена', cls: 'rfm-err-bg' };
   return { text: 'Ошибка', cls: 'rfm-err-bg' };
@@ -217,7 +221,7 @@ export function statusPill(c: Pick<ChannelView, 'kind' | 'status'>): { text: str
 function channelIcon(kind: string): string {
   if (kind === 'whatsapp') return `<div class="rfm-ico rfm-wa">${ICON.chat}</div>`;
   if (kind === 'telegram_bot' || kind === 'telegram_user') return `<div class="rfm-ico rfm-tg">${ICON.send}</div>`;
-  if (kind === 'max') return '<div class="rfm-ico rfm-max">M</div>';
+  if (kind === 'max' || kind === 'max_phone') return '<div class="rfm-ico rfm-max">M</div>';
   if (kind === 'vk') return '<div class="rfm-ico rfm-vk">VK</div>';
   if (kind === 'avito') return '<div class="rfm-ico rfm-av">A</div>';
   return `<div class="rfm-ico rfm-off">${ICON.more}</div>`;
@@ -227,7 +231,7 @@ function channelCard(c: ChannelView): string {
   const pill = statusPill(c);
   const detailColor = c.status === 'error' || c.status === 'session_ended' ? '#a12b2b' : '#8a5a00';
   const detail = c.statusDetail && c.status !== 'connected' ? `<div class="rfm-detail" style="color:${detailColor}">${esc(c.statusDetail)}</div>` : '';
-  const qrBtn = (c.kind === 'whatsapp' || c.kind === 'telegram_user') && c.status !== 'connected' ? `<button type="button" class="rfm-btn" data-rfm="qr" data-id="${c.id}" data-kind="${esc(c.kind)}">Показать QR</button>` : '';
+  const qrBtn = QR_KINDS.has(c.kind) && c.status !== 'connected' ? `<button type="button" class="rfm-btn" data-rfm="qr" data-id="${c.id}" data-kind="${esc(c.kind)}">Показать QR</button>` : '';
   return `<div class="rfm-card">
   ${channelIcon(c.kind)}
   <div class="rfm-main"><b>${esc(c.kindText)}</b><div class="rfm-sub">${esc(c.title)}</div>${detail}</div>
@@ -269,6 +273,17 @@ export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: stri
     fields: [{ name: 'token', label: 'Токен бота MAX', secret: true, placeholder: 'Токен из @MasterBot' }],
     hint: 'Токен выдаёт @MasterBot в MAX. После сохранения он не показывается.',
     done: 'Бот MAX подключён',
+  },
+  {
+    kind: 'max_phone',
+    title: 'MAX по номеру',
+    note: 'Личный номер, через GREEN-API',
+    fields: [
+      { name: 'idInstance', label: 'idInstance', secret: false, placeholder: 'idInstance из console.green-api.com' },
+      { name: 'apiTokenInstance', label: 'apiTokenInstance', secret: true, placeholder: 'apiTokenInstance' },
+    ],
+    hint: 'Инстанс MAX создаётся в console.green-api.com. После сохранения ключ не показывается; если инстанс ещё не вошёл в MAX — появится QR-код.',
+    done: 'MAX по номеру подключён',
   },
   {
     kind: 'vk',
@@ -339,12 +354,15 @@ export function renderQr(q: WaQrView, kind = 'whatsapp'): string {
   const tg = kind === 'telegram_user';
   if (tg && q.needPassword)
     return `<form class="rfm-form" data-rfm="tg-password"><b style="font-weight:500;width:100%">Пароль двухэтапной проверки Telegram</b><input type="password" name="password" autocomplete="off" required aria-label="Пароль Telegram"><button type="submit" class="rfm-btn rfm-btn-primary">Войти</button><div class="rfm-hint">${esc(q.statusDetail ?? '')}</div></form>`;
+  const mx = kind === 'max_phone';
   const steps = tg
     ? '<ol><li>Откройте Telegram на телефоне</li><li>Настройки → Устройства</li><li>Подключить устройство</li><li>Наведите камеру на код</li></ol>'
-    : '<ol><li>Откройте WhatsApp на телефоне</li><li>Настройки → Связанные устройства</li><li>Привязка устройства</li><li>Наведите камеру на код</li></ol>';
+    : mx
+      ? '<ol><li>Откройте MAX на телефоне</li><li>Настройки → Устройства → Подключить устройство</li><li>Пароль для входа в MAX должен быть отключён</li><li>Наведите камеру на код</li></ol>'
+      : '<ol><li>Откройте WhatsApp на телефоне</li><li>Настройки → Связанные устройства</li><li>Привязка устройства</li><li>Наведите камеру на код</li></ol>';
   const detail = q.statusDetail ? `<div class="rfm-detail" style="color:#6b7785">${esc(q.statusDetail)}</div>` : '';
   const img = q.svg ? q.svg : `<span>${esc(q.status === 'session_ended' ? 'Код устарел' : 'Получаем код…')}</span>`;
-  return `<div class="rfm-qr"><div><b style="font-weight:500">Подключение ${tg ? 'Telegram' : 'WhatsApp'}</b>${steps}${detail}<div class="rfm-hint" style="margin-top:6px">Код обновляется автоматически</div></div><div class="rfm-qr-img">${img}</div></div>`;
+  return `<div class="rfm-qr"><div><b style="font-weight:500">Подключение ${tg ? 'Telegram' : mx ? 'MAX' : 'WhatsApp'}</b>${steps}${detail}<div class="rfm-hint" style="margin-top:6px">Код обновляется автоматически</div></div><div class="rfm-qr-img">${img}</div></div>`;
 }
 
 /** Страница настроек: загрузка статуса и обработка кнопок. */
@@ -379,7 +397,7 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
         const q = await api.whatsappQr(id);
         if (q.status === 'connected') {
           stopPoll();
-          return void draw({ info: `${kind === 'telegram_user' ? 'Telegram' : 'WhatsApp'} подключён: ${q.title}` });
+          return void draw({ info: `${kind === 'telegram_user' ? 'Telegram' : kind === 'max_phone' ? 'MAX' : 'WhatsApp'} подключён: ${q.title}` });
         }
         // Поле пароля не перерисовываем, пока менеджер его вводит.
         if (q.needPassword && (box.querySelector('form[data-rfm="tg-password"]') || Date.now() - Number(box.dataset.pwSent ?? 0) < 20_000)) return;
@@ -498,6 +516,19 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
       body[f.name] = input.value.trim();
       // Ключи не остаются в поле после отправки.
       if (f.secret) input.value = '';
+    }
+    if (def.kind === 'max_phone') {
+      stopPoll();
+      void (async () => {
+        try {
+          const { id, status } = await api.addChannel(body as unknown as ChannelCreate);
+          await draw(status === 'connected' ? { info: def.done } : {});
+          if (status !== 'connected') showQr(id, 'max_phone');
+        } catch (err) {
+          await draw({ error: (err as Error).message });
+        }
+      })();
+      return;
     }
     void run(async () => (await api.addChannel(body as unknown as ChannelCreate), def.done));
   });

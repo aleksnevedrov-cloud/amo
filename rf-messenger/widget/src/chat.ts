@@ -184,8 +184,8 @@ export function dayLabel(iso: string, now: Date = new Date()): string {
 
 export const timeLabel = (iso: string) => new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
-export const KIND_ICON: Record<string, string> = { whatsapp: 'W', telegram_bot: 'T', telegram_user: 'T', max: 'M', vk: 'VK', avito: 'A' };
-const KIND_CLASS: Record<string, string> = { whatsapp: 'rfm-wa', telegram_bot: 'rfm-tg', telegram_user: 'rfm-tg', max: 'rfm-max', vk: 'rfm-vk', avito: 'rfm-av' };
+export const KIND_ICON: Record<string, string> = { whatsapp: 'W', telegram_bot: 'T', telegram_user: 'T', max: 'M', max_phone: 'M', vk: 'VK', avito: 'A' };
+const KIND_CLASS: Record<string, string> = { whatsapp: 'rfm-wa', telegram_bot: 'rfm-tg', telegram_user: 'rfm-tg', max: 'rfm-max', max_phone: 'rfm-max', vk: 'rfm-vk', avito: 'rfm-av' };
 export const kindBadge = (kind: string) => `<span class="rfm-cw-badge ${KIND_CLASS[kind] ?? 'rfm-off'}" title="${esc(kind)}">${KIND_ICON[kind] ?? '?'}</span>`;
 
 /** Подпись статуса исходящего. */
