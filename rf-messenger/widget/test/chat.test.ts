@@ -71,6 +71,10 @@ describe('лента сообщений', () => {
     expect(html).toContain('rfm-cw-out');
     expect(html).toContain('<div class="rfm-cw-who">Мария</div>');
     expect(html).toContain('rfm-cw-st-read');
+    // Время и галочки внутри пузыря: у текста — место под них, у вложения без текста — отдельной строкой.
+    expect(html).toContain('Ответ<span class="rfm-cw-sp rfm-cw-sp-st" aria-hidden="true"></span>');
+    expect(html).toContain('Старое<span class="rfm-cw-sp" aria-hidden="true"></span>');
+    expect(html.match(/rfm-cw-meta rfm-cw-meta-block/g)).toHaveLength(2);
     expect(html).toContain('data-cw="retry" data-id="3"');
     expect(html).toContain('rfm-cw-quote');
     expect(html).toContain('<img src="https://chat.example.ru/f/x"');

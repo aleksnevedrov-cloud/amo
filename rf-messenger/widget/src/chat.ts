@@ -231,8 +231,8 @@ export function messageHtml(m: MessageView, opts: { isGroup?: boolean } = {}): s
   const err = m.status === 'failed' && m.error ? `<div class="rfm-cw-err">${esc(m.error)}</div>` : '';
   return `<div class="rfm-cw-msg ${out ? 'rfm-cw-out' : 'rfm-cw-in'}${m.fromHistory ? ' rfm-cw-hist' : ''}" data-id="${m.id}" data-at="${esc(m.at)}">
 <div class="rfm-cw-bubble">
-${who ? `<div class="rfm-cw-who">${esc(who)}</div>` : ''}${quote}${attachmentHtml(m)}${m.text ? `<div class="rfm-cw-text">${richText(m.text)}</div>` : ''}
-<div class="rfm-cw-meta"><span>${timeLabel(m.at)}</span>${st.text ? `<span class="rfm-cw-st ${st.cls}" title="${st.title}">${st.text}</span>` : ''}</div>${err}${retry}
+${who ? `<div class="rfm-cw-who">${esc(who)}</div>` : ''}${quote}${attachmentHtml(m)}<div class="rfm-cw-content">${m.text ? `<div class="rfm-cw-text">${richText(m.text)}<span class="rfm-cw-sp${st.text ? ' rfm-cw-sp-st' : ''}" aria-hidden="true"></span></div>` : ''}
+<div class="rfm-cw-meta${m.text ? '' : ' rfm-cw-meta-block'}"><span>${timeLabel(m.at)}</span>${st.text ? `<span class="rfm-cw-st ${st.cls}" title="${st.title}">${st.text}</span>` : ''}</div></div>${err}${retry}
 <button type="button" class="rfm-cw-reply" data-cw="reply" data-id="${m.id}" title="Ответить">↩</button>
 </div></div>`;
 }
@@ -306,18 +306,24 @@ export const CW_CSS = `
 .rfm-cw-btn-primary{background:#4c8bf5;border-color:#4c8bf5;color:#fff}
 .rfm-cw-body{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:4px;background:#eef1f5}
 .rfm-cw-loading{text-align:center;color:#8a96a3;font-size:12px;padding:6px}
-.rfm-cw-day{display:flex;justify-content:center;margin:8px 0 4px}
-.rfm-cw-day span{background:#dfe5ec;color:#55606c;font-size:11px;padding:2px 10px;border-radius:999px}
-.rfm-cw-msg{display:flex;max-width:100%}
+.rfm-cw-day{display:flex;justify-content:center;margin:10px 0 6px;position:sticky;top:0;z-index:1}
+.rfm-cw-day span{background:rgba(0,0,0,.22);color:#fff;font-size:12px;font-weight:500;padding:3px 10px;border-radius:999px}
+.rfm-cw-msg{display:flex;max-width:100%;margin:1px 0}
 .rfm-cw-in{justify-content:flex-start}.rfm-cw-out{justify-content:flex-end}
-.rfm-cw-bubble{position:relative;max-width:78%;background:#fff;border-radius:10px;padding:6px 10px 4px;box-shadow:0 1px 1px rgba(0,0,0,.05);word-wrap:break-word;overflow-wrap:anywhere}
-.rfm-cw-out .rfm-cw-bubble{background:#dcf3e1}
+.rfm-cw-bubble{position:relative;max-width:78%;background:#fff;border-radius:14px 14px 14px 4px;padding:6px 10px 6px;box-shadow:0 1px 1px rgba(0,0,0,.08);word-wrap:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.38}
+.rfm-cw-out .rfm-cw-bubble{background:#e3f6d2;border-radius:14px 14px 4px 14px}
 .rfm-cw-hist .rfm-cw-bubble{opacity:.92}
-.rfm-cw-who{font-size:11px;font-weight:600;color:#2f6fd6;margin-bottom:2px}
+.rfm-cw-who{font-size:12px;font-weight:600;color:#2f6fd6;margin-bottom:2px}
 .rfm-cw-in .rfm-cw-who{color:#c0592b}
+.rfm-cw-out .rfm-cw-who{color:#3a8a3e}
 .rfm-cw-text a{color:#2f6fd6}
-.rfm-cw-meta{display:flex;justify-content:flex-end;gap:6px;font-size:10px;color:#8a96a3;margin-top:2px}
-.rfm-cw-st-read{color:#2f6fd6}.rfm-cw-st-fail{color:#c0392b;font-weight:700}.rfm-cw-st-wait{opacity:.7}
+.rfm-cw-content{position:relative}
+.rfm-cw-sp{display:inline-block;width:36px;height:1px}.rfm-cw-sp-st{width:54px}
+.rfm-cw-meta{position:absolute;right:-2px;bottom:-3px;display:flex;align-items:center;gap:3px;font-size:11px;line-height:1;color:#8e99a4;white-space:nowrap;user-select:none}
+.rfm-cw-meta-block{position:static;justify-content:flex-end;margin-top:3px}
+.rfm-cw-out .rfm-cw-meta{color:#5fa565}
+.rfm-cw-st{font-size:12px;letter-spacing:-3px;padding-right:3px}
+.rfm-cw-st-read{color:#3a9bec}.rfm-cw-st-fail{color:#c0392b;font-weight:700;letter-spacing:0}.rfm-cw-st-wait{opacity:.7}
 .rfm-cw-err{font-size:11px;color:#c0392b;margin-top:2px}
 .rfm-cw-retry{border:0;background:transparent;color:#2f6fd6;font-size:11px;padding:0;text-decoration:underline}
 .rfm-cw-reply{position:absolute;top:2px;right:-30px;width:26px;height:26px;border:0;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);display:none;font-size:13px;color:#5f6b78}
@@ -332,12 +338,20 @@ export const CW_CSS = `
 .rfm-cw-file{display:flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid #e1e5e9;border-radius:8px;background:#fafbfc;color:inherit;text-decoration:none;font-size:12px}
 .rfm-cw-file small{color:#8a96a3}
 .rfm-cw-file-missing{color:#8a96a3;font-style:italic}
-.rfm-cw-foot{flex:none;background:#fff;border-top:1px solid #e1e5e9;padding:6px 8px}
-.rfm-cw-row{display:flex;align-items:flex-end;gap:4px}
-.rfm-cw-ta{flex:1;min-height:36px;max-height:160px;resize:none;border:1px solid #cfd7df;border-radius:8px;padding:8px 10px;font:inherit;line-height:1.4}
-.rfm-cw-ta:focus{outline:none;border-color:#4c8bf5}
-.rfm-cw-send{width:36px;height:36px;border:0;border-radius:50%;background:#4c8bf5;color:#fff;font-size:16px;display:flex;align-items:center;justify-content:center}
+.rfm-cw-foot{flex:none;background:#fff;border-top:1px solid #e1e5e9;padding:8px 10px}
+.rfm-cw-row{display:flex;align-items:flex-end;gap:6px}
+.rfm-cw-clip{width:38px;height:38px;font-size:18px;color:#8e99a4}
+.rfm-cw-field{flex:1;min-width:0;display:flex;align-items:flex-end;gap:2px;background:#f1f3f5;border:1px solid transparent;border-radius:20px;padding:2px 4px}
+.rfm-cw-field:focus-within{border-color:#b9cdf0;background:#fff}
+.rfm-cw-field .rfm-cw-ib{width:32px;height:32px;border-radius:50%;flex:none;color:#8e99a4}
+.rfm-cw-slash{font-weight:700}
+.rfm-cw-ta{flex:1;min-width:0;min-height:32px;max-height:160px;resize:none;border:0;background:transparent;padding:7px 4px;font:inherit;font-size:14px;line-height:1.3}
+.rfm-cw-ta:focus{outline:none}
+.rfm-cw-round{width:38px;height:38px;flex:none;border:0;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px}
+.rfm-cw-mic{background:transparent;color:#8e99a4}.rfm-cw-mic:hover{background:#eef2f6}
+.rfm-cw-send{display:none;background:#4c8bf5;color:#fff}
 .rfm-cw-send:disabled{background:#c5d5f3}
+.rfm-cw-typing .rfm-cw-send{display:flex}.rfm-cw-typing .rfm-cw-mic{display:none}
 .rfm-cw-replybar,.rfm-cw-warn{display:flex;align-items:center;gap:8px;font-size:12px;padding:6px 8px;border-radius:6px;margin-bottom:6px}
 .rfm-cw-replybar{background:#eef3fb;border-left:3px solid #4c8bf5}
 .rfm-cw-replybar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -431,13 +445,15 @@ export function frameHtml(): string {
 <div class="rfm-cw-body" data-cw-body><div class="rfm-cw-loading">Загрузка…</div></div>
 <div class="rfm-cw-foot" data-cw-foot style="display:none">
   <div data-cw-reply></div><div data-cw-warn></div><div class="rfm-cw-chips" data-cw-chips></div>
-  <div class="rfm-cw-row">
-    <button type="button" class="rfm-cw-ib" data-cw="attach" title="Вложение (фото, файл)">📎</button>
-    <button type="button" class="rfm-cw-ib" data-cw="slash" title="Шаблоны">/</button>
-    <button type="button" class="rfm-cw-ib" data-cw="emoji" title="Эмодзи">😊</button>
-    <textarea class="rfm-cw-ta" data-cw-ta rows="1" placeholder="Введите сообщение…"></textarea>
-    <button type="button" class="rfm-cw-ib" data-cw="mic" title="Голосовое сообщение">🎤</button>
-    <button type="button" class="rfm-cw-send" data-cw="send" title="Отправить (Enter)">➤</button>
+  <div class="rfm-cw-row" data-cw-row>
+    <button type="button" class="rfm-cw-ib rfm-cw-clip" data-cw="attach" title="Вложение (фото, файл)">📎</button>
+    <div class="rfm-cw-field">
+      <button type="button" class="rfm-cw-ib" data-cw="emoji" title="Эмодзи">😊</button>
+      <textarea class="rfm-cw-ta" data-cw-ta rows="1" placeholder="Сообщение"></textarea>
+      <button type="button" class="rfm-cw-ib rfm-cw-slash" data-cw="slash" title="Шаблоны">/</button>
+    </div>
+    <button type="button" class="rfm-cw-round rfm-cw-mic" data-cw="mic" title="Голосовое сообщение">🎤</button>
+    <button type="button" class="rfm-cw-round rfm-cw-send" data-cw="send" title="Отправить (Enter)">➤</button>
   </div>
   <input type="file" data-cw-file multiple style="display:none">
 </div>
@@ -509,11 +525,16 @@ export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() 
           `<div class="rfm-cw-chip">${f.mime.startsWith('image/') ? `<img src="${esc(f.url)}" alt="">` : '📄'}<span>${esc(f.name)}</span><button type="button" data-cw="unchip" data-i="${i}" title="Убрать">×</button></div>`,
       )
       .join('');
+    syncSendMode();
   };
   const renderReply = () => {
     q('[data-cw-reply]').innerHTML = replyTo
       ? `<div class="rfm-cw-replybar">↩ <span><b>${esc(replyTo.direction === 'out' ? (replyTo.senderName ?? 'Менеджер') : current?.title ?? 'Клиент')}:</b> ${esc(replyTo.text || `[${replyTo.kind}]`)}</span><button type="button" class="rfm-cw-ib" data-cw="unreply" title="Отменить ответ">×</button></div>`
       : '';
+  };
+  /** Как в Telegram: пустое поле — микрофон, есть текст или вложение — кнопка отправки. */
+  const syncSendMode = () => {
+    q('[data-cw-row]').classList.toggle('rfm-cw-typing', ta.value.trim() !== '' || attachments.length > 0);
   };
   const checkVariables = () => {
     const missing = unresolvedVariables(ta.value);
@@ -938,6 +959,7 @@ ${current?.contact.phone ? '<button type="button" data-cw="copy">Скопиро�
       case 'emo': {
         const s = ta.selectionStart ?? ta.value.length;
         ta.value = ta.value.slice(0, s) + (btn.dataset.e ?? '') + ta.value.slice(ta.selectionEnd ?? s);
+        syncSendMode();
         ta.focus();
         return;
       }
@@ -966,6 +988,7 @@ ${current?.contact.phone ? '<button type="button" data-cw="copy">Скопиро�
     if (sq !== null) void showTemplates(sq);
     else if (pop.querySelector('.rfm-cw-pop-item')) closePop();
     checkVariables();
+    syncSendMode();
   });
   ta.addEventListener('keydown', (e) => {
     const items = pop.querySelectorAll<HTMLElement>('[data-cw="tpl"]');
