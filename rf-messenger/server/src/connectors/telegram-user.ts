@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import bigInt from 'big-integer';
 import { Api, TelegramClient } from 'telegram';
 import { CustomFile } from 'telegram/client/uploads.js';
-import { NewMessage, type NewMessageEvent } from 'telegram/events/index.js';
+import { NewMessage, Raw, type NewMessageEvent } from 'telegram/events/index.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 import { StringSession } from 'telegram/sessions/index.js';
 import { PermanentSendError, type Connector, type ConnectorSink, type HistoryCursor, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
@@ -29,6 +29,16 @@ export function inputPeer(ref: string): Api.TypeInputPeer {
   if (kind === 'c' && id) return new Api.InputPeerChat({ chatId: bigInt(id) });
   if (kind === 'ch' && id && hash) return new Api.InputPeerChannel({ channelId: bigInt(id), accessHash: bigInt(hash) });
   throw new PermanentSendError('Неизвестный чат Telegram');
+}
+
+/** Прочтение наших сообщений собеседником: ключ чата (u:/c:/ch:<id>) и последний прочитанный id. */
+export function readOutbox(u: { className: string; peer?: { className: string; userId?: unknown; chatId?: unknown }; channelId?: unknown; maxId?: number }): { peerKey: string; maxId: number } | null {
+  if (typeof u.maxId !== 'number') return null;
+  if (u.className === 'UpdateReadChannelOutbox' && u.channelId != null) return { peerKey: `ch:${String(u.channelId)}`, maxId: u.maxId };
+  if (u.className !== 'UpdateReadHistoryOutbox' || !u.peer) return null;
+  if (u.peer.className === 'PeerUser' && u.peer.userId != null) return { peerKey: `u:${String(u.peer.userId)}`, maxId: u.maxId };
+  if (u.peer.className === 'PeerChat' && u.peer.chatId != null) return { peerKey: `c:${String(u.peer.chatId)}`, maxId: u.maxId };
+  return null;
 }
 
 /** Минимум сообщения Telegram, нужный для разбора (проверяется тестами без сети). */
@@ -200,6 +210,14 @@ export class TelegramUserConnector implements Connector {
       return;
     }
     client.addEventHandler((ev: NewMessageEvent) => void this.onMessage(ev).catch((err: Error) => this.d.log?.('error', `telegram: входящее: ${err.message}`)), new NewMessage({}));
+    // Синие ✓✓: собеседник прочитал наши сообщения. «Доставлено» Telegram не сообщает.
+    client.addEventHandler(
+      (u: Api.TypeUpdate) => {
+        const r = readOutbox(u as unknown as Parameters<typeof readOutbox>[0]);
+        if (r) void sink.readUpTo?.(r.peerKey, r.maxId).catch((err: Error) => this.d.log?.('error', `telegram: прочтение: ${err.message}`));
+      },
+      new Raw({ types: [Api.UpdateReadHistoryOutbox, Api.UpdateReadChannelOutbox] }),
+    );
     // Новое сообщение из Telegram придёт только после первого запроса обновлений.
     await client.getDialogs({ limit: 1 }).catch(() => undefined);
     await sink.status('connected');

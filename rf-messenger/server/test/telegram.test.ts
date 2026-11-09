@@ -141,8 +141,14 @@ describe('отправка через Bot API', () => {
 });
 
 describe('Telegram личный: разбор сообщения', async () => {
-  const { normalizeTgMessage, peerRef } = await import('../src/connectors/telegram-user.ts');
+  const { normalizeTgMessage, peerRef, readOutbox } = await import('../src/connectors/telegram-user.ts');
   const now = 1_790_000_000;
+  it('прочтение наших сообщений: ключ чата без access_hash и последний прочитанный id', () => {
+    expect(readOutbox({ className: 'UpdateReadHistoryOutbox', peer: { className: 'PeerUser', userId: 555 }, maxId: 31 })).toEqual({ peerKey: 'u:555', maxId: 31 });
+    expect(readOutbox({ className: 'UpdateReadHistoryOutbox', peer: { className: 'PeerChat', chatId: 9 }, maxId: 4 })).toEqual({ peerKey: 'c:9', maxId: 4 });
+    expect(readOutbox({ className: 'UpdateReadChannelOutbox', channelId: 77, maxId: 12 })).toEqual({ peerKey: 'ch:77', maxId: 12 });
+    expect(readOutbox({ className: 'UpdateReadHistoryInbox', peer: { className: 'PeerUser', userId: 555 }, maxId: 31 })).toBeNull();
+  });
   it('личное сообщение с фото и ответом', () => {
     const e = normalizeTgMessage(
       { id: 10, date: now - 5, out: false, text: 'Вот дверь', replyToMsgId: 7, media: { kind: 'picture', name: 'photo.jpg', mime: 'image/jpeg' } },

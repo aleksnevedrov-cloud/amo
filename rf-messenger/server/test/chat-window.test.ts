@@ -253,6 +253,27 @@ describe('окно переписки: отправка, прочитаннос�
     expect(t.calls.at(-1)!.body).toMatchObject({ msgid: 'amo-out-1', delivery_status: 2 });
   });
 
+  it('Telegram: «прочитано до id» красит синим все наши сообщения до него, чат находится без access_hash', async () => {
+    const chat = await clientChat(1);
+    await t.db.query("UPDATE chats SET external_chat_id = 'u:42:987654' WHERE id = $1", [chat.id]);
+    const conv = chat.conversationId;
+    const ids: number[] = [];
+    for (const [i, text] of ['Первое', 'Второе', 'Третье'].entries()) {
+      await bridge.onAmoHook(ACCOUNT, { message: { conversation: { client_id: conv }, message: { id: `amo-tg-${i}`, type: 'text', text } } });
+      const job = t.queue.jobs.filter((j) => j.name === 'to-channel').at(-1)!;
+      await bridge.deliverToChannel(job.data.messageId, false);
+      ids.push(job.data.messageId);
+    }
+    const ext = await Promise.all(ids.map(async (id) => Number((await t.store.messageById(id))!.externalId)));
+    await bridge.onReadUpTo(t.channel, 'u:42', ext[1]!);
+    const st = await Promise.all(ids.map(async (id) => (await t.store.messageById(id))!.status));
+    expect(st).toEqual(['read', 'read', 'sent']);
+    expect(published.flatMap((e) => (e.type === 'status' && e.status === 'read' ? [e.messageId] : []))).toEqual(expect.arrayContaining([ids[0], ids[1]]));
+    expect(t.calls.filter((c) => (c.body as { delivery_status?: number }).delivery_status === 2)).toHaveLength(2);
+    await bridge.onReadUpTo(t.channel, 'u:43', ext[2]!); // чужой чат — ничего не меняется
+    expect((await t.store.messageById(ids[2]!))!.status).toBe('sent');
+  });
+
   it('повтор недоставленного сообщения из amo', async () => {
     const chat = await clientChat(1);
     await bridge.onAmoHook(ACCOUNT, { message: { conversation: { client_id: chat.conversationId }, message: { id: 'amo-out-2', type: 'text', text: 'Не дошло' } } });

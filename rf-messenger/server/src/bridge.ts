@@ -174,6 +174,19 @@ export class Bridge {
     }
   }
 
+  /** Собеседник прочитал наши сообщения до maxMessageId (Telegram). */
+  async onReadUpTo(channel: Channel, peerKey: string, maxMessageId: number): Promise<void> {
+    const chat = await this.d.store.chatByPeerKey(channel.id, peerKey);
+    if (!chat) return;
+    const read = await this.d.store.markReadUpTo(chat.id, maxMessageId);
+    if (!read.length) return;
+    const conn = read.some((m) => m.source === 'amo' && m.amojoMsgid) ? await this.d.store.getConnection(chat.accountId) : null;
+    for (const msg of read) {
+      await this.d.events?.publish(chat.accountId, { type: 'status', chatId: chat.id, messageId: msg.id, status: 'read' });
+      if (conn && this.d.amojo && msg.source === 'amo' && msg.amojoMsgid) await this.d.amojo.deliveryStatus(conn.scopeId, msg.amojoMsgid, 2).catch(() => undefined);
+    }
+  }
+
   /**
    * История переписки из мессенджера в нашу БД (последние 100 или старше самого старого известного).
    * В окне видна вся история; в ленту amoCRM не передаётся (from_history).

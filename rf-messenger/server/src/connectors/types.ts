@@ -41,6 +41,11 @@ export interface ConnectorSink {
   status(status: ChannelStatus, detail?: string | null): Promise<void>;
   /** Мессенджер сообщил о доставке или прочтении нашего сообщения. */
   delivery?(externalChatId: string, externalMessageId: string, status: 'delivered' | 'read'): Promise<void>;
+  /**
+   * Собеседник прочитал все наши сообщения до maxMessageId включительно (Telegram сообщает так, а не по одному).
+   * peerKey — начало id чата без access_hash: u:<id>, c:<id>, ch:<id>.
+   */
+  readUpTo?(peerKey: string, maxMessageId: number): Promise<void>;
 }
 
 /** Точка отсчёта для истории: самое старое сообщение чата, которое у нас уже есть. */

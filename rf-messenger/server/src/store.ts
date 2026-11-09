@@ -366,6 +366,27 @@ export class Store {
     return r.rows[0] ? messageRow(r.rows[0]) : null;
   }
 
+  /** Чат канала по началу id без access_hash (u:<id> совпадает с u:<id>:<hash>). */
+  async chatByPeerKey(channelId: number, peerKey: string): Promise<Chat | null> {
+    const r = await this.db.query(
+      "SELECT * FROM chats WHERE channel_id = $1 AND (external_chat_id = $2 OR external_chat_id LIKE $2 || ':%') ORDER BY id LIMIT 1",
+      [channelId, peerKey],
+    );
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
+  /** Все наши сообщения чата с числовым id в мессенджере не больше maxId — прочитаны. */
+  async markReadUpTo(chatId: number, maxId: number): Promise<Message[]> {
+    const r = await this.db.query(
+      `UPDATE messages SET status = 'read', updated_at = now()
+       WHERE chat_id = $1 AND direction = 'out' AND external_id ~ '^[0-9]{1,18}$' AND external_id::bigint <= $2
+         AND status IN ('sent', 'delivered', 'synced', 'received')
+       RETURNING *`,
+      [chatId, maxId],
+    );
+    return r.rows.map(messageRow);
+  }
+
   async requeueMessage(id: number): Promise<void> {
     await this.db.query("UPDATE messages SET status = 'queued', error = NULL, updated_at = now() WHERE id = $1", [id]);
   }
