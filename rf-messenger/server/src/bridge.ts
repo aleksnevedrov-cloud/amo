@@ -72,9 +72,6 @@ export interface StartChatInput {
   text: string;
 }
 
-/** Не больше стольких первых сообщений новым номерам в сутки на канал (раздел 6 ТЗ). */
-export const NEW_CHATS_PER_DAY = 20;
-
 /** Сообщение без задачи to-amo дольше этого срока считается зависшим и ставится в очередь заново. */
 export const STUCK_INBOUND_AFTER_SEC = 300;
 
@@ -432,10 +429,6 @@ export class Bridge {
       // Чат с этим номером уже был (клиент писал раньше) — продолжаем его, а не заводим второй.
       chat = await this.d.store.chatByPhone(channel.id, phone);
       if (!chat) {
-        // Раздел 6 ТЗ: не больше 20 первых сообщений новым номерам в сутки на номер — защита от блокировки.
-        if ((await this.d.store.newChatsStartedToday(channel.id)) >= NEW_CHATS_PER_DAY) {
-          throw new StartChatError(`Лимит первых сообщений новым номерам: ${NEW_CHATS_PER_DAY} в сутки на канал. Попробуйте завтра`);
-        }
         const peer = await connector.resolvePhone(phone);
         if (!peer) throw new StartChatError(`Номер ${phone} не найден в мессенджере или скрыт настройками приватности`);
         const contact = await this.d.rest.contact(input.accountId, input.contactId);

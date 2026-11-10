@@ -285,17 +285,6 @@ export class Store {
     return r.rows.map(chatRow);
   }
 
-  /** Сколько новых переписок начато первыми за сутки по каналу (чаты без входящих): лимит раздела 6 ТЗ. */
-  async newChatsStartedToday(channelId: number): Promise<number> {
-    const r = await this.db.query(
-      `SELECT count(*)::int AS n FROM chats c
-       WHERE c.channel_id = $1 AND c.created_at > now() - interval '1 day'
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.direction = 'in')`,
-      [channelId],
-    );
-    return Number(r.rows[0]?.n ?? 0);
-  }
-
   /** Сообщение канала по id в мессенджере — «не доставлено». */
   async failByExternal(chatId: number, externalId: string, error: string): Promise<Message | null> {
     const r = await this.db.query(

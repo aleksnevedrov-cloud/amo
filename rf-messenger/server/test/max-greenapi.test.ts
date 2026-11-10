@@ -4,7 +4,7 @@ import { Redis } from 'ioredis';
 import { SignJWT } from 'jose';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/api/app.ts';
-import { Bridge, NEW_CHATS_PER_DAY } from '../src/bridge.ts';
+import { Bridge } from '../src/bridge.ts';
 import { validateChannel } from '../src/channels.ts';
 import { greenApiWebhookUrl } from '../src/connectors/host.ts';
 import { channelStatusOf, desiredSettings, greenApiHosts, MaxGreenApiConnector, normalizeGreenNotification, settingsDiffer, webhookTokenMatches } from '../src/connectors/max-greenapi.ts';
@@ -312,20 +312,20 @@ describe('GREEN-API: маршрут вебхука и лимит первых с
     await app.close();
   });
 
-  it('«Написать»: не больше 20 первых сообщений новым номерам в сутки на канал', async () => {
+  it('«Написать»: 25 первых сообщений подряд на один канал уходят без отказа (суточного лимита нет)', async () => {
     const rest = { contact: async () => ({ id: 1, name: 'Иван', phones: [] }), linkChat: async () => undefined, userAmojoId: async () => 'op-1' } as unknown as import('../src/amo/rest.ts').AmoRest;
     const connector = new FakeConnector();
     const bridge = new Bridge({ ...t.bridgeDeps, rest, connector: () => connector });
     await t.store.setChannelStatus(t.channel.id, 'connected');
     await t.db.query("UPDATE channels SET kind = 'max_phone' WHERE id = $1", [t.channel.id]);
-    for (let i = 0; i < NEW_CHATS_PER_DAY; i++) {
+    for (let i = 0; i < 25; i++) {
       const phone = `+7936000${String(i).padStart(4, '0')}`;
       connector.phones.set(phone, `1000${i}`);
-      await bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone, text: 'Добрый день' });
+      await expect(bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone, text: 'Добрый день' })).resolves.toBeTruthy();
     }
-    connector.phones.set('+79369999999', '99999');
-    await expect(bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone: '+79369999999', text: 'x' })).rejects.toThrow(/Лимит первых сообщений.*20 в сутки/);
-    // Чат, где клиент уже писал, лимитом не ограничен.
+    expect(connector.sent).toHaveLength(25);
+    expect(await t.store.recentChats(ACCOUNT, t.channel.id, 100)).toHaveLength(25);
+    // Чат, где клиент уже писал, продолжается без создания второго.
     await bridge.onInbound(t.channel, connector, event({ externalChatId: '42', contact: { phone: '+79361472324' } }));
     await expect(bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone: '+79361472324', text: 'ок' })).resolves.toBeTruthy();
   });
