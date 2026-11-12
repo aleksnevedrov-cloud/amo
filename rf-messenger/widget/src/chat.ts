@@ -18,8 +18,12 @@ export interface ChatListItem {
   isGroup: boolean;
   contact: { phone?: string; username?: string; link?: string };
   unread: number;
+  /** Красный счётчик — входящие без ответа; серый — закрыто последним ответом или «Отвечать не нужно». */
+  unanswered?: number;
+  answered?: number;
+  pinned?: boolean;
   lastAt: string;
-  last: { text: string; kind: string; direction: 'in' | 'out' } | null;
+  last: { text: string; kind: string; direction: 'in' | 'out'; fileName?: string | null } | null;
   historyAvailable: boolean;
 }
 
@@ -59,7 +63,8 @@ export interface UploadedFile {
 export type ChatEvent =
   | { type: 'message'; chatId: number; messageId: number }
   | { type: 'status'; chatId: number; messageId: number; status: string; error?: string | null }
-  | { type: 'history'; chatId: number; count: number };
+  | { type: 'history'; chatId: number; count: number }
+  | { type: 'counters'; chatId: number; unanswered: number; answered: number; lastAt?: string };
 
 /** API окна: JSON — через токен amoCRM ($authorizedAjax), файлы и SSE — по сеансу. */
 export class ChatApi {
@@ -79,9 +84,39 @@ export class ChatApi {
   resetSession(): void {
     this.sessionToken = null;
   }
-  chats(ctx: { leadId?: number; contactId?: number }) {
-    const qs = ctx.leadId ? `leadId=${ctx.leadId}` : `contactId=${ctx.contactId ?? 0}`;
+  chats(ctx: { leadId?: number; contactId?: number; chatId?: number }) {
+    const qs = ctx.chatId ? `chatId=${ctx.chatId}` : ctx.leadId ? `leadId=${ctx.leadId}` : `contactId=${ctx.contactId ?? 0}`;
     return this.api.call<ChatsView>('GET', `/chat/v1/chats?${qs}`);
+  }
+  // ---- Раздел «Rf Messenger» ----
+  inbox(q: { filter?: string; channelId?: number | null; q?: string; before?: number | null }) {
+    const p = new URLSearchParams();
+    if (q.filter) p.set('filter', q.filter);
+    if (q.channelId) p.set('channelId', String(q.channelId));
+    if (q.q) p.set('q', q.q);
+    if (q.before) p.set('before', String(q.before));
+    return this.api.call<{ me: { userId: number; isAdmin: boolean }; chats: ChatListItem[]; hasMore: boolean; unansweredChats: number }>('GET', `/inbox/v1/chats?${p}`);
+  }
+  inboxCounters() {
+    return this.api.call<{ unansweredChats: number }>('GET', '/inbox/v1/counters');
+  }
+  inboxChannels() {
+    return this.api.call<{ channels: { id: number; kind: string; kindText: string; title: string; connected: boolean }[] }>('GET', '/inbox/v1/channels');
+  }
+  noReply(chatId: number) {
+    return this.api.call<{ ok: boolean; answered: number; unansweredChats: number }>('POST', `/inbox/v1/chats/${chatId}/no-reply`);
+  }
+  pin(chatId: number, pinned: boolean) {
+    return this.api.call<{ ok: boolean }>('POST', `/inbox/v1/chats/${chatId}/pin`, { pinned });
+  }
+  searchContacts(q: string) {
+    return this.api.call<{ contacts: { id: number; name: string; phones: string[] }[] }>('GET', `/inbox/v1/contacts/search?q=${encodeURIComponent(q)}`);
+  }
+  linkContact(chatId: number, contactId: number) {
+    return this.api.call<{ ok: boolean }>('POST', `/inbox/v1/chats/${chatId}/link-contact`, { contactId });
+  }
+  createLead(chatId: number, body: { contactId?: number; name?: string } = {}) {
+    return this.api.call<{ ok: boolean; contactId: number; leadId: number }>('POST', `/inbox/v1/chats/${chatId}/lead`, body);
   }
   messages(chatId: number, before?: number) {
     return this.api.call<{ messages: MessageView[]; hasMore: boolean }>('GET', `/chat/v1/chats/${chatId}/messages${before ? `?before=${before}` : ''}`);
@@ -140,11 +175,12 @@ export class ChatApi {
   }
 
   /** Живые события по SSE. */
-  async events(chatIds: number[], onEvent: (ev: ChatEvent) => void, w: Window = window): Promise<() => void> {
+  async events(chatIds: number[], onEvent: (ev: ChatEvent) => void, w: Window = window, scope?: 'inbox'): Promise<() => void> {
     const token = await this.session();
     const url = new URL('/chat/v1/events', this.base);
     url.searchParams.set('session', token);
     url.searchParams.set('chats', chatIds.join(','));
+    if (scope) url.searchParams.set('scope', scope);
     const ES = (w as unknown as { EventSource?: typeof EventSource }).EventSource;
     if (!ES) return () => undefined;
     const es = new ES(url.toString());
@@ -397,6 +433,13 @@ export const CW_CSS = `
 .rfm-cw-compose{padding:16px;overflow:auto}
 .rfm-cw-compose .rfm-modal{width:100%;box-shadow:none;border:1px solid #e1e5e9}
 .rfm-cw-mark{outline:2px solid #ffb84d;border-radius:10px}
+.rfm-cw-embed{position:static!important;width:100%!important;height:100%!important;box-shadow:none;min-width:0}
+.rfm-cw-embed .rfm-cw-tab{display:none}
+.rfm-cw-noreply{display:flex;justify-content:center;padding:6px 0 2px}
+.rfm-cw-noreply button{background:#e5484d;color:#fff;border:0;border-radius:999px;padding:7px 16px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;box-shadow:0 2px 6px rgba(229,72,77,.3)}
+.rfm-cw-noreply button i{font-style:normal;background:#fff;color:#e5484d;border-radius:999px;padding:0 7px;font-size:11px}
+.rfm-cw-contactbox{padding:8px;display:flex;flex-direction:column;gap:6px}
+.rfm-cw-contactbox input{height:30px;border:1px solid #cfd7df;border-radius:6px;padding:0 10px;font:inherit}
 .rfm-cw-drop{outline:3px dashed #4c8bf5;outline-offset:-6px}
 `;
 
@@ -423,11 +466,16 @@ export function placeWindow(win: HTMLElement, column: HTMLElement | null, w: Win
 }
 
 export interface OpenOptions {
-  ctx: { leadId?: number; contactId?: number };
+  ctx: { leadId?: number; contactId?: number; chatId?: number };
   doc?: Document;
   win?: Window;
   /** Открыть сразу этот чат. */
   chatId?: number;
+  /** Раздел «Rf Messenger»: окно встраивается в этот элемент (без вкладки закрытия и ☰), события SSE ведёт раздел. */
+  embed?: HTMLElement;
+  /** Раздел сообщает о смене счётчиков чата и об отправке (чтобы обновить список). */
+  onCounters?: (chatId: number, unanswered: number, answered: number) => void;
+  onSent?: (chatId: number) => void;
 }
 
 /** Разметка каркаса окна. */
@@ -438,7 +486,8 @@ export function frameHtml(): string {
   <button type="button" class="rfm-cw-ib" data-cw="list" title="Все чаты контакта">☰</button>
   <div class="rfm-cw-title" data-cw-title><b>Переписка</b><small>Загрузка…</small></div>
   <button type="button" class="rfm-cw-ib" data-cw="search" title="Поиск по переписке">🔍</button>
-  <button type="button" class="rfm-cw-btn" data-cw="deals">Сделки</button>
+  <button type="button" class="rfm-cw-ib" data-cw="contact" title="Добавить или привязать контакт" style="display:none">👤+</button>
+  <button type="button" class="rfm-cw-btn" data-cw="deals">Сделки ▾</button>
   <button type="button" class="rfm-cw-ib" data-cw="menu" title="Ещё">⋮</button>
 </div>
 <div data-cw-search></div>
@@ -466,18 +515,27 @@ type Recorder = { stop(): void; state: string; ondataavailable: ((e: { data: Blo
 export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() => void> {
   const doc = o.doc ?? document;
   const w = o.win ?? window;
-  const prev = doc.querySelector<HTMLElement>('.rfm-cw');
-  prev?.remove();
+  const embed = o.embed ?? null;
+  if (!embed) doc.querySelector<HTMLElement>('.rfm-cw')?.remove();
   const win = doc.createElement('div');
-  win.className = 'rfm-cw';
+  win.className = embed ? 'rfm-cw rfm-cw-embed' : 'rfm-cw';
   win.innerHTML = frameHtml();
-  doc.body.appendChild(win);
-  const column = findRightColumn(doc);
-  placeWindow(win, column, w);
-  const reposition = () => placeWindow(win, column, w);
-  w.addEventListener('resize', reposition);
-  w.addEventListener('scroll', reposition, true);
-  const ro = typeof ResizeObserver !== 'undefined' && column ? new ResizeObserver(reposition) : null;
+  if (embed) {
+    embed.innerHTML = '';
+    embed.appendChild(win);
+    win.querySelector<HTMLElement>('[data-cw="list"]')?.style.setProperty('display', 'none');
+    win.querySelector<HTMLElement>('[data-cw="contact"]')?.style.setProperty('display', '');
+  } else doc.body.appendChild(win);
+  const column = embed ? null : findRightColumn(doc);
+  const reposition = () => {
+    if (!embed) placeWindow(win, column, w);
+  };
+  reposition();
+  if (!embed) {
+    w.addEventListener('resize', reposition);
+    w.addEventListener('scroll', reposition, true);
+  }
+  const ro = !embed && typeof ResizeObserver !== 'undefined' && column ? new ResizeObserver(reposition) : null;
   ro?.observe(column as Element);
 
   const q = <T extends HTMLElement>(sel: string) => win.querySelector<T>(sel) as T;
@@ -513,7 +571,9 @@ export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() 
     if (!current) return;
     const prevH = body.scrollHeight;
     const prevTop = body.scrollTop;
-    body.innerHTML = (hasMore ? '<div class="rfm-cw-loading" data-cw-more>Прокрутите вверх, чтобы загрузить ещё</div>' : '') + messagesHtml(messages, { isGroup: current.isGroup }) + (!messages.length ? '<div class="rfm-cw-empty">Сообщений пока нет — напишите первым</div>' : '');
+    const unanswered = current.unanswered ?? current.unread ?? 0;
+    const noReply = unanswered > 0 ? `<div class="rfm-cw-noreply"><button type="button" data-cw="noreply" title="Закрыть неотвеченные без ответа">Отвечать не нужно <i>${unanswered}</i></button></div>` : '';
+    body.innerHTML = (hasMore ? '<div class="rfm-cw-loading" data-cw-more>Прокрутите вверх, чтобы загрузить ещё</div>' : '') + messagesHtml(messages, { isGroup: current.isGroup }) + (!messages.length ? '<div class="rfm-cw-empty">Сообщений пока нет — напишите первым</div>' : '') + noReply;
     if (keepScroll) body.scrollTop = body.scrollHeight - prevH + prevTop;
     else body.scrollTop = body.scrollHeight;
   };
@@ -557,9 +617,7 @@ export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() 
       messages = page.messages;
       hasMore = page.hasMore;
       renderBody();
-      void chat.read(c.id).then(() => {
-        c.unread = 0;
-      });
+      // Открытие чата ≠ ответ: счётчик «неотвеченных» не меняется (правило раздела «Rf Messenger»).
     } catch (err) {
       body.innerHTML = `<div class="rfm-cw-empty">${esc((err as Error).message)}</div>`;
     }
@@ -646,51 +704,62 @@ export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() 
     };
   };
 
+  /** Событие SSE (своё или переданное разделом): новые сообщения, счётчики, статусы. */
+  const handleEvent = (ev: ChatEvent) => {
+    if (closed) return;
+    const item = view?.chats.find((c) => c.id === ev.chatId);
+    if (ev.type === 'message' || ev.type === 'history') {
+      if (current && current.id === ev.chatId) {
+        void chat.messages(current.id).then((page) => {
+          const known = new Set(messages.map((m) => m.id));
+          const fresh = page.messages.filter((m) => !known.has(m.id));
+          if (ev.type === 'history') {
+            messages = page.messages;
+            hasMore = page.hasMore;
+            renderBody();
+            toast(ev.count ? `Загружено сообщений из истории: ${ev.count}` : 'Новых сообщений в истории нет');
+            return;
+          }
+          if (!fresh.length) return;
+          const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+          messages = [...messages, ...fresh];
+          renderBody(!atBottom);
+        });
+      }
+    }
+    if (ev.type === 'counters') {
+      if (item) {
+        item.unanswered = ev.unanswered;
+        item.answered = ev.answered;
+        item.unread = ev.unanswered;
+      }
+      if (current && current.id === ev.chatId) {
+        current.unanswered = ev.unanswered;
+        current.answered = ev.answered;
+        current.unread = ev.unanswered;
+        const bar = body.querySelector<HTMLElement>('.rfm-cw-noreply');
+        if (ev.unanswered === 0) bar?.remove();
+        else renderBody(true);
+      }
+      o.onCounters?.(ev.chatId, ev.unanswered, ev.answered);
+    }
+    if (ev.type === 'status') {
+      const m = messages.find((x) => x.id === ev.messageId);
+      if (m) {
+        m.status = ev.status;
+        m.error = ev.error ?? null;
+        const el = body.querySelector<HTMLElement>(`.rfm-cw-msg[data-id="${m.id}"]`);
+        if (el) el.outerHTML = messageHtml(m, { isGroup: current?.isGroup });
+      }
+    }
+  };
+
+  /** Во встроенном режиме событиями управляет раздел: он вызывает handleEvent. */
   const subscribe = async () => {
     stopEvents?.();
     stopEvents = null;
-    if (!view?.chats.length) return;
-    stopEvents = await chat
-      .events(
-        view.chats.map((c) => c.id),
-        (ev) => {
-          if (closed) return;
-          const item = view?.chats.find((c) => c.id === ev.chatId);
-          if (ev.type === 'message' || ev.type === 'history') {
-            if (current && current.id === ev.chatId) {
-              void chat.messages(current.id).then((page) => {
-                const known = new Set(messages.map((m) => m.id));
-                const fresh = page.messages.filter((m) => !known.has(m.id));
-                if (ev.type === 'history') {
-                  messages = page.messages;
-                  hasMore = page.hasMore;
-                  renderBody();
-                  toast(ev.count ? `Загружено сообщений из истории: ${ev.count}` : 'Новых сообщений в истории нет');
-                  return;
-                }
-                if (!fresh.length) return;
-                const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
-                messages = [...messages, ...fresh];
-                renderBody(!atBottom);
-                if (current) void chat.read(current.id);
-              });
-            } else if (item && ev.type === 'message') {
-              item.unread++;
-            }
-          }
-          if (ev.type === 'status') {
-            const m = messages.find((x) => x.id === ev.messageId);
-            if (m) {
-              m.status = ev.status;
-              m.error = ev.error ?? null;
-              const el = body.querySelector<HTMLElement>(`.rfm-cw-msg[data-id="${m.id}"]`);
-              if (el) el.outerHTML = messageHtml(m, { isGroup: current?.isGroup });
-            }
-          }
-        },
-        w,
-      )
-      .catch(() => null);
+    if (!view?.chats.length || embed) return;
+    stopEvents = await chat.events(view.chats.map((c) => c.id), handleEvent, w).catch(() => null);
   };
 
   const load = async (chatId?: number) => {
@@ -716,13 +785,25 @@ export async function openChatWindow(chat: ChatApi, o: OpenOptions): Promise<() 
 
   const showDeals = async () => {
     const cid = view?.contacts[0]?.id;
-    if (!cid) return toast('У карточки нет контакта');
+    const create = embed ? '<button type="button" data-cw="new-deal"><b>+ Создать сделку</b></button>' : '';
+    if (!cid) {
+      pop.innerHTML = `<div class="rfm-cw-menu" style="min-width:280px"><div class="rfm-cw-pop-head">Сделки</div><div class="rfm-cw-empty">${embed ? 'Чат ещё не привязан к контакту' : 'У карточки нет контакта'}</div>${create}</div>`;
+      return;
+    }
     try {
       const { leads } = await chat.contactLeads(cid);
-      pop.innerHTML = `<div class="rfm-cw-menu" style="min-width:280px"><div class="rfm-cw-pop-head">Сделки контакта</div>${leads.length ? leads.map((l) => `<button type="button" data-cw="deal" data-id="${l.id}"><b>#${l.id}</b> ${esc(l.name)}${l.price ? ` · ${l.price.toLocaleString('ru-RU')} ₽` : ''}</button>`).join('') : '<div class="rfm-cw-empty">Сделок нет</div>'}</div>`;
+      pop.innerHTML = `<div class="rfm-cw-menu" style="min-width:280px"><div class="rfm-cw-pop-head">Сделки контакта</div>${leads.length ? leads.map((l) => `<button type="button" data-cw="deal" data-id="${l.id}"><b>#${l.id}</b> ${esc(l.name)}${l.price ? ` · ${l.price.toLocaleString('ru-RU')} ₽` : ''}</button>`).join('') : '<div class="rfm-cw-empty">Сделок нет</div>'}${create}</div>`;
     } catch (err) {
       toast((err as Error).message, 'err');
     }
+  };
+
+  /** 👤+: привязать существующий контакт (поиск по имени или номеру) или создать сделку с новым контактом. */
+  const showContactBox = () => {
+    pop.innerHTML = `<div class="rfm-cw-menu" style="min-width:300px"><div class="rfm-cw-pop-head">Контакт amoCRM</div>
+<div class="rfm-cw-contactbox"><input type="search" placeholder="Имя или номер контакта" data-cw-cq><div data-cw-cfound></div>
+<button type="button" class="rfm-cw-btn" data-cw="find-contact">Найти</button><button type="button" class="rfm-cw-btn rfm-cw-btn-primary" data-cw="new-deal">Создать сделку с новым контактом</button></div></div>`;
+    pop.querySelector<HTMLInputElement>('[data-cw-cq]')?.focus();
   };
 
   const showMenu = () => {
@@ -787,6 +868,12 @@ ${current?.contact.phone ? '<button type="button" data-cw="copy">Скопиро�
       renderReply();
       renderChips();
       toast('');
+      if (current) {
+        current.answered = (current.unanswered ?? current.unread ?? 0) || current.answered;
+        current.unanswered = 0;
+        current.unread = 0;
+        o.onSent?.(current.id);
+      }
       renderBody();
     } catch (err) {
       toast((err as Error).message, 'err');
@@ -870,6 +957,51 @@ ${current?.contact.phone ? '<button type="button" data-cw="copy">Скопиро�
         return showCompose();
       case 'deals':
         return void showDeals();
+      case 'contact':
+        return showContactBox();
+      case 'find-contact': {
+        const q = pop.querySelector<HTMLInputElement>('[data-cw-cq]')?.value.trim() ?? '';
+        const found = pop.querySelector<HTMLElement>('[data-cw-cfound]');
+        if (!found) return;
+        if (q.length < 2) return void (found.innerHTML = '<div class="rfm-cw-empty">Введите хотя бы 2 символа</div>');
+        void chat.searchContacts(q).then(
+          (r) => void (found.innerHTML = r.contacts.length ? r.contacts.map((c) => `<button type="button" data-cw="link-contact" data-id="${c.id}"><b>${esc(c.name)}</b> <small>${esc(c.phones.join(', '))}</small></button>`).join('') : '<div class="rfm-cw-empty">Не найдено</div>'),
+          (err: Error) => void (found.innerHTML = `<div class="rfm-cw-empty">${esc(err.message)}</div>`),
+        );
+        return;
+      }
+      case 'link-contact':
+        if (!current) return;
+        closePop();
+        void chat.linkContact(current.id, id).then(() => load(current?.id), (err: Error) => toast(err.message, 'err'));
+        return;
+      case 'new-deal':
+        if (!current) return;
+        closePop();
+        void chat.createLead(current.id).then(
+          (r) => {
+            toast(`Сделка #${r.leadId} создана`);
+            w.open(`/leads/detail/${r.leadId}`, '_blank');
+            void load(current?.id);
+          },
+          (err: Error) => toast(err.message, 'err'),
+        );
+        return;
+      case 'noreply':
+        if (!current) return;
+        void chat.noReply(current.id).then(
+          (r) => {
+            if (current) {
+              current.answered = r.answered;
+              current.unanswered = 0;
+              current.unread = 0;
+              o.onCounters?.(current.id, 0, r.answered);
+            }
+            renderBody(true);
+          },
+          (err: Error) => toast(err.message, 'err'),
+        );
+        return;
       case 'deal':
         w.open(`/leads/detail/${id}`, '_blank');
         return closePop();
@@ -1048,6 +1180,7 @@ ${current?.contact.phone ? '<button type="button" data-cw="copy">Скопиро�
     win.remove();
   }
 
-  await load(o.chatId);
+  await load(o.chatId ?? o.ctx.chatId);
+  (close as typeof close & { handleEvent?: (ev: ChatEvent) => void }).handleEvent = (ev) => handleEvent(ev);
   return close;
 }

@@ -7,7 +7,7 @@ import type { WindowSendInput } from '../bridge.ts';
 import { CHAT_START_KINDS, KIND_TEXT, PHONE_START_KINDS } from '../channels.ts';
 import { normalizePhone } from '../connectors/types.ts';
 import type { ChatEvent } from '../events.ts';
-import type { Chat, Message, Template } from '../store.ts';
+import type { Channel, Chat, Message, Template } from '../store.ts';
 import type { ApiDeps } from './app.ts';
 
 /**
@@ -100,6 +100,28 @@ const sendSchema = z.object({
 
 const templateView = (t: Template) => ({ id: t.id, title: t.title, text: t.text, folder: t.folder, attachments: t.attachments, shared: t.ownerUserId === null, useCount: t.useCount });
 
+/** Чат для списков окна и раздела: канал, последнее сообщение, счётчики «неотвеченных». */
+export function chatView(c: Chat, ch: Channel | undefined, s: { last: Message | null; unread: number } | undefined) {
+  return {
+    id: c.id,
+    channelId: c.channelId,
+    kind: ch?.kind ?? 'unknown',
+    kindText: ch ? KIND_TEXT[ch.kind] : '',
+    channelTitle: ch?.title ?? '',
+    channelConnected: ch?.status === 'connected',
+    title: c.title,
+    isGroup: c.isGroup,
+    contact: c.contact,
+    unread: c.unanswered,
+    unanswered: c.unanswered,
+    answered: c.answered,
+    pinned: c.pinned,
+    lastAt: (s?.last?.createdAt ?? c.lastMessageAt).toISOString(),
+    last: s?.last ? { text: s.last.text, kind: s.last.kind, direction: s.last.direction, fileName: s.last.fileId ? s.last.kind : null } : null,
+    historyAvailable: ch?.kind === 'whatsapp' || ch?.kind === 'telegram_user',
+  };
+}
+
 export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Promise<void> {
   const { store, redis, auth, who } = deps;
 
@@ -153,16 +175,36 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
       });
 
       // ---------- Чаты карточки ----------
-      w.get<{ Querystring: { leadId?: string; contactId?: string } }>('/chats', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (req, reply) => {
+      w.get<{ Querystring: { leadId?: string; contactId?: string; chatId?: string } }>('/chats', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (req, reply) => {
         const p = who(req);
         const leadId = Number(req.query.leadId ?? 0);
         const contactId = Number(req.query.contactId ?? 0);
-        if (!(Number.isInteger(leadId) && leadId >= 0 && Number.isInteger(contactId) && contactId >= 0) || (!leadId && !contactId)) return reply.code(400).send({ error: 'Нужен id сделки или контакта' });
+        const directChatId = Number(req.query.chatId ?? 0);
+        if (!(Number.isInteger(leadId) && leadId >= 0 && Number.isInteger(contactId) && contactId >= 0 && Number.isInteger(directChatId) && directChatId >= 0) || (!leadId && !contactId && !directChatId))
+          return reply.code(400).send({ error: 'Нужен id сделки, контакта или чата' });
         const rest = restOr503(reply);
         if (!rest) return;
         let contactIds: number[] = [];
         let lead: Awaited<ReturnType<typeof rest.lead>> | null = null;
         try {
+          if (directChatId) {
+            // Раздел «Rf Messenger»: чат открыт из общего списка — все сотрудники видят все чаты (п. 26).
+            const chat = await store.chatOfAccount(p.accountId, directChatId);
+            if (!chat) return reply.code(404).send({ error: 'Чат не найден' });
+            await grant(p, [chat.id]);
+            contactIds = chat.amojoChatId ? (await rest.chatContacts(p.accountId, chat.amojoChatId).catch(() => [])).slice(0, 3) : [];
+            const contacts = [];
+            for (const id of contactIds) contacts.push(await rest.contact(p.accountId, id).catch(() => null));
+            const channels = await store.listChannels(p.accountId);
+            const summaries = await store.chatSummaries([chat.id]);
+            return {
+              me: { userId: p.userId, isAdmin: p.isAdmin },
+              lead: null,
+              contacts: contacts.filter((c): c is NonNullable<typeof c> => Boolean(c)),
+              chats: [chatView(chat, channels.find((x) => x.id === chat.channelId), summaries.get(chat.id))],
+              startChannels: [],
+            };
+          }
           if (leadId) {
             lead = await rest.lead(p.accountId, leadId);
             if (!p.isAdmin && lead.responsibleUserId !== p.userId) return reply.code(403).send({ error: 'Переписка доступна ответственному по сделке и администратору' });
@@ -196,25 +238,7 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
             me: { userId: p.userId, isAdmin: p.isAdmin },
             lead: lead ? { id: lead.id, name: lead.name, price: lead.price } : null,
             contacts,
-            chats: chats.map((c) => {
-              const ch = channels.find((x) => x.id === c.channelId);
-              const s = summaries.get(c.id);
-              return {
-                id: c.id,
-                channelId: c.channelId,
-                kind: ch?.kind ?? 'unknown',
-                kindText: ch ? KIND_TEXT[ch.kind] : '',
-                channelTitle: ch?.title ?? '',
-                channelConnected: ch?.status === 'connected',
-                title: c.title,
-                isGroup: c.isGroup,
-                contact: c.contact,
-                unread: s?.unread ?? 0,
-                lastAt: (s?.last?.createdAt ?? c.lastMessageAt).toISOString(),
-                last: s?.last ? { text: s.last.text, kind: s.last.kind, direction: s.last.direction } : null,
-                historyAvailable: ch?.kind === 'whatsapp' || ch?.kind === 'telegram_user',
-              };
-            }),
+            chats: chats.map((c) => chatView(c, channels.find((x) => x.id === c.channelId), summaries.get(c.id))),
             startChannels,
           };
         } catch (err) {
@@ -253,7 +277,6 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
         const input: WindowSendInput = { accountId: p.accountId, userId: p.userId, chatId: chat.id, text: body.data.text, replyToMessageId: body.data.replyToMessageId ?? null, fileIds: body.data.fileIds };
         try {
           const r = await deps.windowSend(input);
-          await store.markChatRead(chat.id);
           return { messages: await messageViews(deps, chat.id, await store.messagesByIds(chat.id, r.messageIds)) };
         } catch (err) {
           req.log.warn({ chatId: chat.id, err: (err as Error).message }, 'отправка из окна: ошибка');
@@ -389,7 +412,7 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
     return { id: file.id, name: file.name, mime: file.mime, size: file.size, url: deps.files.signedUrl(file) };
   });
 
-  app.get<{ Querystring: { session?: string; chats?: string } }>('/chat/v1/events', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.get<{ Querystring: { session?: string; chats?: string; scope?: string } }>('/chat/v1/events', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const p = await principalFromSession(req.query.session);
     if (!p) return reply.code(401).send({ error: 'Сеанс окна истёк — обновите страницу' });
     if (!deps.events) return reply.code(503).send({ error: 'События недоступны' });
@@ -400,6 +423,8 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
       .slice(0, 50);
     const allowed = new Set<number>();
     for (const id of wanted) if (await canAccess(p, await store.chatOfAccount(p.accountId, id))) allowed.add(id);
+    // Раздел «Rf Messenger»: все сотрудники видят все чаты аккаунта (п. 26) — события по всем чатам.
+    const all = p.isAdmin || req.query.scope === 'inbox';
     reply.hijack();
     const raw = reply.raw;
     raw.writeHead(200, {
@@ -411,7 +436,7 @@ export async function chatRoutes(app: FastifyInstance, deps: ChatRouteDeps): Pro
     });
     raw.write(`event: ready\ndata: ${JSON.stringify({ chats: [...allowed] })}\n\n`);
     const send = (ev: ChatEvent) => {
-      if (p.isAdmin || allowed.has(ev.chatId)) raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+      if (all || allowed.has(ev.chatId)) raw.write(`data: ${JSON.stringify(ev)}\n\n`);
     };
     const unsubscribe = deps.events.subscribe(p.accountId, send);
     const heartbeat = setInterval(() => raw.write(': ping\n\n'), 25_000);

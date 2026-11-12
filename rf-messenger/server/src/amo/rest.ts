@@ -324,6 +324,43 @@ export class AmoRest {
     return !LEAD_CLOSED_STATUSES.has(statusId);
   }
 
+  /** Контакты, к которым привязан чат API чатов. */
+  async chatContacts(accountId: number, amojoChatId: string): Promise<number[]> {
+    const r = await this.request<{ _embedded?: { chats?: { contact_id: number }[] } }>(accountId, 'GET', `/api/v4/contacts/chats?chat_id[]=${encodeURIComponent(amojoChatId)}`);
+    return (r._embedded?.chats ?? []).map((c) => c.contact_id);
+  }
+
+  /** Поиск контактов по имени или номеру (для «Привязать контакт»). */
+  async searchContacts(accountId: number, q: string): Promise<AmoContactInfo[]> {
+    const r = await this.request<{ _embedded?: { contacts?: { id: number; name?: string; custom_fields_values?: { field_code?: string; values?: { value?: unknown }[] }[] | null }[] } }>(
+      accountId,
+      'GET',
+      `/api/v4/contacts?query=${encodeURIComponent(q.trim().slice(0, 100))}&limit=20`,
+    );
+    return (r._embedded?.contacts ?? []).map((c) => ({
+      id: c.id,
+      name: c.name || 'Без имени',
+      phones: (c.custom_fields_values ?? []).filter((f) => f.field_code === 'PHONE').flatMap((f) => f.values ?? []).map((v) => String(v.value ?? '').trim()).filter(Boolean),
+    }));
+  }
+
+  /** Новый контакт с телефоном (для «Создать сделку» из чата без контакта). */
+  async createContact(accountId: number, name: string, phone: string | null): Promise<number> {
+    const body = [{ name: name.slice(0, 200), ...(phone ? { custom_fields_values: [{ field_code: 'PHONE', values: [{ value: phone, enum_code: 'WORK' }] }] } : {}) }];
+    const r = await this.request<{ _embedded?: { contacts?: { id: number }[] } }>(accountId, 'POST', '/api/v4/contacts', body);
+    const id = r._embedded?.contacts?.[0]?.id;
+    if (!id) throw new AmoRestError('amoCRM не вернул id контакта', 502);
+    return id;
+  }
+
+  /** Новая сделка у контакта (воронка и этап — по умолчанию аккаунта). */
+  async createLead(accountId: number, name: string, contactId: number): Promise<number> {
+    const r = await this.request<{ _embedded?: { leads?: { id: number }[] } }>(accountId, 'POST', '/api/v4/leads', [{ name: name.slice(0, 200), _embedded: { contacts: [{ id: contactId }] } }]);
+    const id = r._embedded?.leads?.[0]?.id;
+    if (!id) throw new AmoRestError('amoCRM не вернул id сделки', 502);
+    return id;
+  }
+
   /** Чаты API чатов, привязанные к контактам: id чата amo → id контакта. */
   async contactChats(accountId: number, contactIds: readonly number[]): Promise<{ chatId: string; contactId: number }[]> {
     if (!contactIds.length) return [];

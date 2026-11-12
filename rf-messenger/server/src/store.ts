@@ -32,6 +32,15 @@ export interface Chat {
   /** Когда менеджер последний раз открывал чат в окне переписки. */
   readAt: Date | null;
   lastMessageAt: Date;
+  /** Красный счётчик: входящие без ответа. */
+  unanswered: number;
+  /** Серый счётчик: сколько закрыто последним ответом или кнопкой «Отвечать не нужно». */
+  answered: number;
+  closedBy: 'reply' | 'button' | null;
+  closedByUserId: number | null;
+  closedAt: Date | null;
+  pinned: boolean;
+  lastInboundAt: Date | null;
 }
 
 export interface Message {
@@ -104,6 +113,13 @@ const chatRow = (r: any): Chat => ({
   amoOperatorRef: r.amo_operator_ref ?? null,
   readAt: r.read_at ?? null,
   lastMessageAt: r.last_message_at,
+  unanswered: Number(r.unanswered ?? 0),
+  answered: Number(r.answered ?? 0),
+  closedBy: r.closed_by ?? null,
+  closedByUserId: r.closed_by_user_id === null || r.closed_by_user_id === undefined ? null : Number(r.closed_by_user_id),
+  closedAt: r.closed_at ?? null,
+  pinned: Boolean(r.pinned),
+  lastInboundAt: r.last_inbound_at ?? null,
 });
 const templateRow = (r: any): Template => ({
   id: Number(r.id),
@@ -343,11 +359,8 @@ export class Store {
     const out = new Map<number, { last: Message | null; unread: number }>();
     if (!chatIds.length) return out;
     const last = await this.db.query('SELECT DISTINCT ON (chat_id) * FROM messages WHERE chat_id = ANY($1::bigint[]) ORDER BY chat_id, created_at DESC, id DESC', [chatIds]);
-    const unread = await this.db.query(
-      `SELECT m.chat_id, count(*)::int AS n FROM messages m JOIN chats c ON c.id = m.chat_id
-       WHERE m.chat_id = ANY($1::bigint[]) AND m.direction = 'in' AND (c.read_at IS NULL OR m.created_at > c.read_at) GROUP BY m.chat_id`,
-      [chatIds],
-    );
+    // «Непрочитанное» — это неотвеченное: открытие чата ничего не меняет (правило раздела «Rf Messenger»).
+    const unread = await this.db.query('SELECT id AS chat_id, unanswered AS n FROM chats WHERE id = ANY($1::bigint[])', [chatIds]);
     for (const id of chatIds) out.set(id, { last: null, unread: 0 });
     for (const r of last.rows) {
       const e = out.get(Number(r.chat_id));
@@ -362,6 +375,84 @@ export class Store {
 
   async markChatRead(chatId: number): Promise<void> {
     await this.db.query('UPDATE chats SET read_at = now() WHERE id = $1', [chatId]);
+  }
+
+  // --- Раздел «Rf Messenger»: неотвеченные ---
+
+  /** Входящее от клиента: чат наверх, красный счётчик +1, серый обнуляется. */
+  async noteInbound(chatId: number, at: Date = new Date()): Promise<Chat | null> {
+    const r = await this.db.query(
+      `UPDATE chats SET unanswered = unanswered + 1, answered = 0, last_inbound_at = $2, last_message_at = GREATEST(last_message_at, $2) WHERE id = $1 RETURNING *`,
+      [chatId, at],
+    );
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
+  /**
+   * Ответ менеджера (из раздела, карточки, чата amoCRM, с телефона) или кнопка «Отвечать не нужно»:
+   * неотвеченные закрываются, их число становится серым счётчиком. Без неотвеченных ничего не меняется
+   * (null), кроме last_message_at для ответа.
+   */
+  async noteAnswered(chatId: number, by: 'reply' | 'button', opts: { messageId?: number | null; userId?: number | null; at?: Date } = {}): Promise<Chat | null> {
+    const at = opts.at ?? new Date();
+    if (by === 'reply') await this.db.query('UPDATE chats SET last_message_at = GREATEST(last_message_at, $2) WHERE id = $1', [chatId, at]);
+    const r = await this.db.query(
+      `UPDATE chats SET answered = unanswered, unanswered = 0, closed_by = $2, closed_by_user_id = $3, closed_message_id = $4, closed_at = $5
+       WHERE id = $1 AND unanswered > 0 RETURNING *`,
+      [chatId, by, opts.userId ?? null, opts.messageId ?? null, at],
+    );
+    return r.rows[0] ? chatRow(r.rows[0]) : null;
+  }
+
+  async setPinned(accountId: number, chatId: number, pinned: boolean): Promise<boolean> {
+    const r = await this.db.query('UPDATE chats SET pinned = $3 WHERE account_id = $1 AND id = $2', [accountId, chatId, pinned]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** Число чатов с красным счётчиком — для значка в левом меню. */
+  async unansweredChats(accountId: number): Promise<number> {
+    const r = await this.db.query('SELECT count(*)::int AS n FROM chats WHERE account_id = $1 AND unanswered > 0', [accountId]);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
+  /**
+   * Список чатов раздела: закреплённые сверху, затем по времени последнего сообщения.
+   * filter: all | unanswered | mine (чаты, где этот сотрудник писал: по id или amojo-ссылке); q — имя, номер, ник или текст сообщений.
+   * Курсор — id чата последней строки предыдущей страницы (last_message_at берётся из него).
+   */
+  async inboxChats(
+    accountId: number,
+    o: { filter: 'all' | 'unanswered' | 'mine'; channelId?: number | null; q?: string; beforeChatId?: number | null; limit: number; userId: number; userRef?: string | null },
+  ): Promise<Chat[]> {
+    const params: unknown[] = [accountId];
+    const where: string[] = ['c.account_id = $1'];
+    if (o.filter === 'unanswered') where.push('c.unanswered > 0');
+    if (o.filter === 'mine') {
+      params.push(o.userId, o.userRef ?? '');
+      where.push(`(c.amo_operator_ref = $${params.length} OR EXISTS (SELECT 1 FROM messages mm WHERE mm.chat_id = c.id AND mm.sender_user_id = $${params.length - 1}))`);
+    }
+    if (o.channelId) {
+      params.push(o.channelId);
+      where.push(`c.channel_id = $${params.length}`);
+    }
+    const q = (o.q ?? '').trim();
+    if (q) {
+      params.push(`%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`, q.replace(/\D/g, ''));
+      const text = `$${params.length - 1}`;
+      const digits = `$${params.length}`;
+      where.push(
+        `(c.title ILIKE ${text} OR c.contact->>'username' ILIKE ${text}
+          OR (${digits} <> '' AND length(${digits}) >= 4 AND regexp_replace(coalesce(c.contact->>'phone', ''), '\\D', '', 'g') LIKE '%' || ${digits} || '%')
+          OR EXISTS (SELECT 1 FROM messages mm WHERE mm.chat_id = c.id AND mm.text ILIKE ${text}))`,
+      );
+    }
+    if (o.beforeChatId) {
+      params.push(o.beforeChatId);
+      where.push(`(c.pinned, c.last_message_at, c.id) < (SELECT pinned, last_message_at, id FROM chats WHERE id = $${params.length})`);
+    }
+    params.push(o.limit);
+    const r = await this.db.query(`SELECT c.* FROM chats c WHERE ${where.join(' AND ')} ORDER BY c.pinned DESC, c.last_message_at DESC, c.id DESC LIMIT $${params.length}`, params);
+    return r.rows.map(chatRow);
   }
 
   /** Статус доставки от мессенджера (доставлено / прочитано) по id сообщения в канале. */

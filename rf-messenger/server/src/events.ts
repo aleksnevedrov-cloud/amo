@@ -5,7 +5,9 @@ import type { MessageStatus } from './store.ts';
 export type ChatEvent =
   | { type: 'message'; chatId: number; messageId: number }
   | { type: 'status'; chatId: number; messageId: number; status: MessageStatus; error?: string | null }
-  | { type: 'history'; chatId: number; count: number };
+  | { type: 'history'; chatId: number; count: number }
+  /** Счётчики «неотвеченных» чата изменились (входящее, ответ, «Отвечать не нужно»). */
+  | { type: 'counters'; chatId: number; unanswered: number; answered: number; lastAt?: string };
 
 export interface ChatEvents {
   publish(accountId: number, ev: ChatEvent): Promise<void>;

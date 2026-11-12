@@ -234,18 +234,21 @@ describe('окно переписки: отправка, прочитаннос�
     expect(kindOfMime('application/pdf')).toBe('file');
   });
 
-  it('открытый чат помечается прочитанным; статусы доставки из мессенджера доходят до окна и в amo', async () => {
+  it('открытие чата не меняет «неотвеченные»; ответ закрывает; статусы доставки из мессенджера доходят до окна и в amo', async () => {
     const chat = await clientChat(2);
     const h = await admin();
     expect((await app.inject({ method: 'GET', url: `/chat/v1/chats?leadId=${LEAD}`, headers: h })).json().chats[0].unread).toBe(2);
+    // Открытие ≠ прочитано (правило раздела «Rf Messenger»): счётчик остаётся.
     await app.inject({ method: 'POST', url: `/chat/v1/chats/${chat.id}/read`, headers: h });
-    expect((await app.inject({ method: 'GET', url: `/chat/v1/chats?leadId=${LEAD}`, headers: h })).json().chats[0].unread).toBe(0);
+    expect((await app.inject({ method: 'GET', url: `/chat/v1/chats?leadId=${LEAD}`, headers: h })).json().chats[0]).toMatchObject({ unread: 2, unanswered: 2, answered: 0 });
 
     // Ответ из amo → отправлен → мессенджер сообщил «прочитано».
     const conv = chat.conversationId;
     await bridge.onAmoHook(ACCOUNT, { message: { conversation: { client_id: conv }, sender: { id: 'amojo-user-7', name: 'Мария' }, message: { id: 'amo-out-1', type: 'text', text: 'Ок' } } });
     const out = t.queue.jobs.find((j) => j.name === 'to-channel')!;
     await bridge.deliverToChannel(out.data.messageId, false);
+    // Ответ из чата amoCRM закрыл неотвеченные: красный 0, серый 2.
+    expect((await app.inject({ method: 'GET', url: `/chat/v1/chats?leadId=${LEAD}`, headers: h })).json().chats[0]).toMatchObject({ unread: 0, unanswered: 0, answered: 2 });
     await bridge.onDelivery(t.channel, '42', String(1000 + connector.sent.length), 'read');
     const msg = await t.store.messageById(out.data.messageId);
     expect(msg?.status).toBe('read');

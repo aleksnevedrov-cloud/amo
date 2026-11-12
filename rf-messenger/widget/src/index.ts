@@ -3,14 +3,17 @@
  * Без фреймворков: одна страница настроек, рисуется в окне интеграции и на странице advanced_settings.
  */
 import { ChatApi, openChatWindow } from './chat.ts';
+import { mountInbox } from './inbox.ts';
 import { openTemplatesManager } from './templates-ui.ts';
 
 declare const __API_URL__: string;
 
 export interface AmoWidgetSelf {
   get_settings(): { widget_code: string; [key: string]: unknown };
-  /** Где открыт виджет: lcard — карточка сделки, ccard — карточка контакта. */
+  /** Где открыт виджет: lcard — карточка сделки, ccard — карточка контакта, код раздела — страница левого меню. */
   system?(): { area?: string };
+  /** Счётчик у пункта левого меню (amoCRM, left_menu). */
+  set_badge?(count: number | string): void;
   /** Блок виджета в правой панели карточки. */
   render_template?(opts: { caption: { class_name: string }; body: string; render: string }): void;
   /** amo добавляет заголовок X-Auth-Token (одноразовый JWT интеграции). */
@@ -697,6 +700,53 @@ export async function openComposer(api: MessengerApi, ctx: { leadId?: number; co
 
 type Callbacks = Record<string, (...args: unknown[]) => unknown>;
 
+/** Код раздела левого меню (manifest.json → left_menu). */
+export const INBOX_MENU_CODE = 'rfm_inbox';
+export const INBOX_CSS_HOST = 'rfm-inbox-host';
+
+/** Контейнер страницы раздела: рабочая область amo, иначе своя на всю ширину. */
+export function inboxHost(doc: Document, widgetCode: string): HTMLElement {
+  const existing = doc.getElementById(INBOX_CSS_HOST);
+  if (existing) return existing;
+  const host = doc.createElement('div');
+  host.id = INBOX_CSS_HOST;
+  host.className = 'rfm-inbox-host';
+  const area = doc.getElementById(`work-area-${widgetCode}`) ?? doc.querySelector<HTMLElement>('#work-area-' + INBOX_MENU_CODE) ?? doc.querySelector<HTMLElement>('.work-area, #work_area, .content__top ~ .list, #page_holder .content') ?? null;
+  if (area) {
+    area.innerHTML = '';
+    area.appendChild(host);
+    host.style.cssText = 'height:calc(100vh - 60px);min-height:480px';
+  } else {
+    doc.body.appendChild(host);
+    host.style.cssText = 'position:fixed;left:60px;top:0;right:0;bottom:0;z-index:50;background:#fff;min-width:1220px';
+  }
+  return host;
+}
+
+/** Значок у пункта меню: amo set_badge, иначе свой элемент у ссылки раздела. */
+export function setMenuBadge(self: AmoWidgetSelf, count: number, doc: Document = document): void {
+  if (typeof self.set_badge === 'function') {
+    try {
+      self.set_badge(count > 0 ? count : '');
+      return;
+    } catch {
+      /* старый amo без set_badge */
+    }
+  }
+  const link = doc.querySelector<HTMLElement>(`[href*="${INBOX_MENU_CODE}"], [data-entity="${INBOX_MENU_CODE}"], .nav__menu__item[data-code="${INBOX_MENU_CODE}"]`);
+  if (!link) return;
+  let b = link.querySelector<HTMLElement>('.rfm-menu-badge');
+  if (!b) {
+    b = doc.createElement('span');
+    b.className = 'rfm-menu-badge';
+    b.style.cssText = 'position:absolute;top:4px;right:6px;min-width:16px;height:16px;border-radius:8px;background:#e5484d;color:#fff;font:600 10px/16px Arial,sans-serif;text-align:center;padding:0 4px';
+    link.style.position = link.style.position || 'relative';
+    link.appendChild(b);
+  }
+  b.textContent = count > 99 ? '99+' : String(count);
+  b.style.display = count > 0 ? '' : 'none';
+}
+
 export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL__): Callbacks {
   const api = new MessengerApi(self, apiUrl);
   const chat = new ChatApi(api, apiUrl);
@@ -721,10 +771,31 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
       void openTemplatesManager(chat, { shared, isAdmin: shared });
     });
   };
+  // Значок у пункта меню: счётчик чатов с красным числом, опрос раз в 60 с (SSE — на самой странице раздела).
+  let stopInbox: (() => void) | null = null;
+  const startBadge = () => {
+    const flag = window as Window & { __rfmBadge?: boolean };
+    if (flag.__rfmBadge) return;
+    flag.__rfmBadge = true;
+    const tick = () => void chat.inboxCounters().then((r) => setMenuBadge(self, r.unansweredChats)).catch(() => undefined);
+    tick();
+    window.setInterval(tick, 60_000);
+  };
+  const renderInbox = () => {
+    const host = inboxHost(document, self.get_settings().widget_code);
+    stopInbox?.();
+    void mountInbox(chat, host, { onBadge: (n) => setMenuBadge(self, n) }).then((stop) => (stopInbox = stop));
+  };
   return {
-    init: safe(() => undefined),
+    init: safe(() => startBadge()),
     bind_actions: safe(() => undefined),
     render: safe(() => {
+      const area = self.system?.().area ?? '';
+      if (area === INBOX_MENU_CODE || area === `${INBOX_MENU_CODE}_page` || area === 'left_menu') {
+        bindTemplates();
+        renderInbox();
+        return;
+      }
       const ctx = cardContext(self);
       if (!ctx || !self.render_template) return;
       self.render_template({ caption: { class_name: 'rfm-caption' }, body: '', render: renderCardPanel() });
@@ -757,6 +828,9 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
       if (el) void mountSettings(el, api);
     }),
     onSave: () => true,
-    destroy: safe(() => undefined),
+    destroy: safe(() => {
+      stopInbox?.();
+      stopInbox = null;
+    }),
   };
 }

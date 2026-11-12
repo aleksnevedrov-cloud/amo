@@ -226,6 +226,24 @@ export class Bridge {
     }
     await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
     await this.d.events?.publish(chat.accountId, { type: 'message', chatId: chat.id, messageId: msg.id });
+    // Правило счётчиков: входящее — красный +1; ответ с телефона — закрывает неотвеченные.
+    await this.noteCounters(chat, ev.fromMe ? { by: 'reply', messageId: msg.id } : null, msg.createdAt);
+  }
+
+  /** Обновить счётчики «неотвеченных» и разослать их в окна. null — входящее от клиента. */
+  private async noteCounters(chat: Chat, answer: { by: 'reply' | 'button'; messageId?: number | null; userId?: number | null } | null, at: Date = new Date()): Promise<Chat | null> {
+    const updated = answer ? await this.d.store.noteAnswered(chat.id, answer.by, { messageId: answer.messageId ?? null, userId: answer.userId ?? null, at }) : await this.d.store.noteInbound(chat.id, at);
+    if (updated) await this.d.events?.publish(chat.accountId, { type: 'counters', chatId: chat.id, unanswered: updated.unanswered, answered: updated.answered, lastAt: updated.lastMessageAt.toISOString() });
+    return updated;
+  }
+
+  /** Кнопка «Отвечать не нужно»: неотвеченные закрываются без ответа; кто и когда — в БД и в журнал. */
+  async noReply(accountId: number, chatId: number, userId: number): Promise<{ answered: number } | null> {
+    const chat = await this.d.store.chatOfAccount(accountId, chatId);
+    if (!chat) return null;
+    const updated = await this.noteCounters(chat, { by: 'button', userId });
+    this.d.log.info({ chatId, userId, closed: updated?.answered ?? 0, closedBy: 'button' }, 'нажата «Отвечать не нужно»');
+    return { answered: updated?.answered ?? chat.answered };
   }
 
   /** Мессенджер сообщил, что наше сообщение доставлено или прочитано. */
@@ -357,6 +375,8 @@ export class Bridge {
       if (!msg) continue;
       if (part.file) await this.d.store.setMessageFile(msg.id, part.file.id);
       ids.push(msg.id);
+      // Ответ из окна (карточка или раздел «Rf Messenger») закрывает неотвеченные.
+      await this.noteCounters(chat, { by: 'reply', messageId: msg.id, userId: input.userId });
       try {
         await this.deliverToAmo(msg.id);
       } catch (err) {
@@ -570,6 +590,8 @@ export class Bridge {
     const delay = await this.d.pacer.reserve(chat.id);
     await this.d.queue.add('to-channel', { messageId: msg.id }, { jobId: `to-channel-${msg.id}`, delay });
     await this.d.events?.publish(accountId, { type: 'message', chatId: chat.id, messageId: msg.id });
+    // Ответ из чата amoCRM (менеджер или Salesbot) закрывает неотвеченные.
+    await this.noteCounters(chat, { by: 'reply', messageId: msg.id });
     return 'queued';
   }
 

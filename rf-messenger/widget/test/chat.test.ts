@@ -134,7 +134,7 @@ const chatsView: ChatsView = {
 describe('окно переписки', () => {
   const tick = () => new Promise((r) => setTimeout(r, 5));
 
-  it('открывается поверх правой колонки, показывает последний активный чат, помечает прочитанным, Esc закрывает', async () => {
+  it('открывается поверх правой колонки, показывает последний активный чат, открытие НЕ помечает прочитанным, Esc закрывает', async () => {
     document.body.innerHTML = '<div class="card-holder"><div class="card-holder__left" style="width:400px">поля</div><div class="card-holder__right" style="width:600px;height:500px">лента</div></div>';
     const calls: { url: string; method?: string; data?: string }[] = [];
     const self = fakeSelf(
@@ -155,7 +155,8 @@ describe('окно переписки', () => {
     expect(win.querySelector('[data-cw-title]')!.textContent).toContain('Иван Петров');
     expect(win.querySelectorAll('.rfm-cw-msg')).toHaveLength(2);
     expect(win.querySelector('.rfm-cw-who')!.textContent).toBe('Мария');
-    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/chats/11/read'))).toBe(true);
+    // Правило счётчиков: открытие ничего не меняет — /read не вызывается.
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/chats/11/read'))).toBe(false);
     // ☰ — список чатов контакта.
     win.querySelector<HTMLElement>('[data-cw="list"]')!.click();
     expect(win.querySelectorAll('[data-cw="open"]')).toHaveLength(2);

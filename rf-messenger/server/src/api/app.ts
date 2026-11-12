@@ -13,6 +13,7 @@ import type { Bridge, StartChatInput, WindowSendInput } from '../bridge.ts';
 import type { ChatEvent } from '../events.ts';
 import type { JobQueue } from '../queue.ts';
 import { chatRoutes } from './chat.ts';
+import { inboxRoutes } from './inbox.ts';
 import { CHAT_START_KINDS, ChannelValidationError, createChannelSchema, KIND_TEXT, PHONE_START_KINDS, STATUS_TEXT, validateChannel } from '../channels.ts';
 import { safeEqualHex } from '../crypto.ts';
 import { webhookTokenMatches } from '../connectors/max-greenapi.ts';
@@ -387,6 +388,7 @@ export async function buildApp(deps: ApiDeps, opts: FastifyServerOptions = {}) {
 
   // ---------- Окно переписки в карточке (чаты, сообщения, файлы, шаблоны, SSE) ----------
   await chatRoutes(app, { ...deps, auth, who });
+  await inboxRoutes(app, { ...deps, auth, who });
 
   // ---------- API виджета для менеджеров: «Написать первым» в карточке ----------
   await app.register(
