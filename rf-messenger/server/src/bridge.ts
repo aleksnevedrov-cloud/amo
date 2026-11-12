@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AmojoError, type AmojoClient, type AmojoMessage, type AmojoMessageKind, type AmojoUser, type NewMessagePayload } from './amojo/client.ts';
-import type { AmoRest } from './amo/rest.ts';
+import { chooseContact, exactPhoneMatches, phoneTail, phoneTail4 } from './amo/contact-match.ts';
+import { AmoRestError, type AmoRest } from './amo/rest.ts';
 import { CHAT_START_KINDS } from './channels.ts';
 import { normalizePhone, PermanentSendError, type Connector, type InboundEvent } from './connectors/types.ts';
 import type { ChatEvents } from './events.ts';
@@ -35,6 +36,10 @@ export interface BridgeDeps {
   rest?: AmoRest | null;
   /** События для окна переписки (SSE). */
   events?: ChatEvents;
+  /** Поиск контакта по номеру: таймаут (5 с) и срок кэша (10 мин). */
+  contactLookupTimeoutMs?: number;
+  contactCacheTtlMs?: number;
+  now?: () => number;
 }
 
 /** Отправка из окна переписки в карточке: текст и/или файлы в существующий чат от имени сотрудника. */
@@ -111,6 +116,68 @@ const ourMsgid = (id: number) => `rfm-m${id}`;
 /** Мост: события каналов ↔ API чатов amoCRM. */
 export class Bridge {
   constructor(private readonly d: BridgeDeps) {}
+
+  /** Очередь по чату: передача в amo для одного чата идёт строго по одному (ответ клиента не обгонит привязку). */
+  private readonly chatLocks = new Map<number, Promise<unknown>>();
+  private perChat<T>(chatId: number, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chatLocks.get(chatId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.chatLocks.set(chatId, settled);
+    void settled.then(() => {
+      if (this.chatLocks.get(chatId) === settled) this.chatLocks.delete(chatId);
+    });
+    return run;
+  }
+
+  /** Кэш поиска контакта по номеру: аккаунт + последние 10 цифр → id контакта или null, 10 минут. */
+  private readonly contactCache = new Map<string, { contactId: number | null; at: number }>();
+
+  /**
+   * Новый чат без привязки в amoCRM: до первого сообщения ищем контакт по номеру собеседника и привязываем чат к нему,
+   * чтобы amo не завёл дубль контакта и заявку в неразобранном. Возвращает, что сделано (для журнала и тестов).
+   */
+  async linkNewChatToContact(chat: Chat, conn: { scopeId: string }): Promise<'skipped' | 'none' | 'linked' | 'failed'> {
+    if (chat.amojoChatId || chat.isGroup) return 'skipped';
+    const phone = chat.contact.phone;
+    const tail = phone ? phoneTail(phone) : null;
+    if (!phone || !tail || !this.d.rest || !this.d.amojo) return 'skipped';
+    const now = (this.d.now ?? Date.now)();
+    const key = `${chat.accountId}:${tail}`;
+    const cached = this.contactCache.get(key);
+    let contactId: number | null;
+    let reason = 'из кэша';
+    try {
+      if (cached && now - cached.at < (this.d.contactCacheTtlMs ?? 600_000)) {
+        contactId = cached.contactId;
+      } else {
+        const candidates = await withTimeout(this.d.rest.contactsByPhone(chat.accountId, phone), this.d.contactLookupTimeoutMs ?? 5000, 'поиск контакта');
+        const choice = chooseContact(exactPhoneMatches(candidates, phone));
+        contactId = choice?.contact.id ?? null;
+        reason = choice?.reason ?? 'контакт не найден';
+        this.contactCache.set(key, { contactId, at: now });
+      }
+    } catch (err) {
+      this.d.log.warn({ chatId: chat.id, phone: phoneTail4(phone), err: (err as Error).message }, 'поиск контакта по номеру не выполнен — сообщение уйдёт без привязки');
+      return 'failed';
+    }
+    if (!contactId) return 'none';
+    try {
+      const { chatId: amojoChatId } = await this.d.amojo.createChat(conn.scopeId, chat.conversationId, this.clientUser(chat));
+      await this.d.store.setAmojoChatId(chat.id, amojoChatId);
+      chat.amojoChatId = amojoChatId;
+      await this.d.rest.linkChat(chat.accountId, amojoChatId, contactId);
+      this.d.log.info({ chatId: chat.id, contactId, phone: phoneTail4(phone), reason }, 'чат привязан к контакту amoCRM по номеру');
+      return 'linked';
+    } catch (err) {
+      // 409 — чат уже привязан к другому контакту в amo: оставляем как есть.
+      this.d.log.warn({ chatId: chat.id, contactId, err: (err as Error).message, status: err instanceof AmoRestError ? err.status : undefined }, 'привязка чата к контакту не выполнена — сообщение уйдёт без привязки');
+      return 'failed';
+    }
+  }
 
   // ---------- Канал → amoCRM ----------
 
@@ -351,14 +418,20 @@ export class Bridge {
     return message;
   }
 
-  /** Задача to-amo. Повторный запуск безопасен: уже переданное сообщение не отправляется снова. */
-  async deliverToAmo(messageId: number): Promise<void> {
+  /** Задача to-amo. Повторный запуск безопасен: уже переданное сообщение не отправляется снова. По одному чату — строго по очереди. */
+  deliverToAmo(messageId: number): Promise<void> {
+    return this.d.store.messageById(messageId).then((msg) => (msg ? this.perChat(msg.chatId, () => this.deliverToAmoNow(messageId)) : undefined));
+  }
+
+  private async deliverToAmoNow(messageId: number): Promise<void> {
     const msg = await this.d.store.messageById(messageId);
     if (!msg || msg.source === 'amo' || msg.amojoMsgid) return;
     const chat = await this.d.store.chatById(msg.chatId);
     if (!chat) return;
     const conn = await this.d.store.getConnection(chat.accountId);
     if (!conn || !this.d.amojo) throw new Error('Канал чатов amoCRM не подключён к аккаунту');
+    // Новый чат: сначала привязка к существующему контакту по номеру (если найдётся), потом сообщение.
+    await this.linkNewChatToContact(chat, conn);
     const client = this.clientUser(chat);
     const fromPhone = msg.source === 'phone';
     // Сообщение с телефона менеджера — исходящее: отправитель — сотрудник amoCRM (ref_id), получатель — клиент.

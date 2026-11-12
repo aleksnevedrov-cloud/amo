@@ -4,7 +4,7 @@
 Dockerfile и `docker compose`. Подключает мессенджеры к amoCRM через API чатов: переписка идёт
 в чате карточки сделки, менеджер отвечает из amoCRM. ТЗ — RFD-MESSENGER от 03.11.2026.
 
-Состояние: **MAX по номеру через GREEN-API** ([отчёт](docs/stage-6-max-greenapi.md)); окно переписки в карточке ([отчёт и скриншоты](docs/stage-5-chat-window.md)); этап 4 — MAX, VK, Авито ([отчёт](docs/stage-4-report.md)); ранее: этап 1 — каркас, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)), этап 2 — WhatsApp по QR, этап 3 — Telegram личный.
+Состояние: **привязка новых чатов к контактам по номеру** ([отчёт](docs/stage-7-contact-link.md)); MAX по номеру через GREEN-API ([отчёт](docs/stage-6-max-greenapi.md)); окно переписки в карточке ([отчёт и скриншоты](docs/stage-5-chat-window.md)); этап 4 — MAX, VK, Авито ([отчёт](docs/stage-4-report.md)); ранее: этап 1 — каркас, API чатов amoCRM, виджет, Telegram-бот ([отчёт](docs/stage-1-report.md)), этап 2 — WhatsApp по QR, этап 3 — Telegram личный.
 
 ## Состав
 

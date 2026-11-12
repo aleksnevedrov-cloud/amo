@@ -1,5 +1,30 @@
 import type { Db } from '../db.ts';
 import type { SecretBox } from '../crypto.ts';
+import { LEAD_CLOSED_STATUSES, phoneTail, type ContactCandidate } from './contact-match.ts';
+
+/** Лимит amoCRM — не больше 7 запросов в секунду на интеграцию: общая очередь на процесс. */
+export class RateLimiter {
+  private readonly times: number[] = [];
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly perSecond: number,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  ) {}
+
+  /** Ждёт слот; вызовы выстраиваются в порядке обращения. */
+  acquire(): Promise<void> {
+    const next = this.chain.then(async () => {
+      const windowStart = this.now() - 1000;
+      while (this.times.length && (this.times[0] ?? 0) <= windowStart) this.times.shift();
+      if (this.times.length >= this.perSecond) await this.sleep(Math.max(1, (this.times[0] ?? 0) + 1000 - this.now()));
+      this.times.push(this.now());
+    });
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+}
 
 /** Ошибка REST API amoCRM: status — HTTP-код ответа (0 — нет связи или нет доступа). */
 export class AmoRestError extends Error {
@@ -72,13 +97,15 @@ export function amoHost(raw: string, allowed: readonly string[]): string | null 
  */
 export class AmoRest {
   private readonly f: typeof fetch;
+  private readonly limiter: RateLimiter;
 
   constructor(
     private readonly db: Db,
     private readonly box: SecretBox,
-    private readonly opts: { clientId: string; clientSecret: string; redirectUri: string; allowedDomains: readonly string[]; fetch?: typeof fetch },
+    private readonly opts: { clientId: string; clientSecret: string; redirectUri: string; allowedDomains: readonly string[]; fetch?: typeof fetch; limiter?: RateLimiter },
   ) {
     this.f = opts.fetch ?? fetch;
+    this.limiter = opts.limiter ?? new RateLimiter(7);
   }
 
   private async tokenRequest(host: string, body: Record<string, string>): Promise<Required<TokenResponse>> {
@@ -160,6 +187,7 @@ export class AmoRest {
 
   private async request<T>(accountId: number, method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     const t = await this.token(accountId);
+    await this.limiter.acquire();
     const res = await this.f(`https://${t.baseDomain}${path}`, {
       method,
       headers: { authorization: `Bearer ${t.accessToken}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -244,6 +272,56 @@ export class AmoRest {
   async userName(accountId: number, userId: number): Promise<string> {
     const u = await this.request<{ name?: string }>(accountId, 'GET', `/api/v4/users/${userId}`);
     return u.name ?? `Сотрудник ${userId}`;
+  }
+
+  /**
+   * Контакты с таким телефоном: GET /contacts?query=<10 цифр>&with=leads, затем точное сравнение последних
+   * 10 цифр с полем «Телефон» (query у amoCRM нечёткий). Сделки контактов — одним запросом по id (статус и updated_at).
+   */
+  async contactsByPhone(accountId: number, phone: string): Promise<ContactCandidate[]> {
+    const tail = phoneTail(phone);
+    if (!tail) return [];
+    const r = await this.request<{
+      _embedded?: {
+        contacts?: {
+          id: number;
+          name?: string;
+          updated_at?: number;
+          custom_fields_values?: { field_code?: string; values?: { value?: unknown }[] }[] | null;
+          _embedded?: { leads?: { id: number }[] };
+        }[];
+      };
+    }>(accountId, 'GET', `/api/v4/contacts?query=${encodeURIComponent(tail)}&with=leads&limit=50`);
+    const contacts = (r._embedded?.contacts ?? []).map((c) => ({
+      id: c.id,
+      name: c.name ?? '',
+      phones: (c.custom_fields_values ?? []).filter((f) => f.field_code === 'PHONE').flatMap((f) => f.values ?? []).map((v) => String(v.value ?? '')),
+      updatedAt: Number(c.updated_at ?? 0),
+      leadIds: (c._embedded?.leads ?? []).map((l) => l.id),
+    }));
+    const matched = contacts.filter((c) => c.phones.some((p) => phoneTail(p) === tail));
+    const leadIds = [...new Set(matched.flatMap((c) => c.leadIds))].slice(0, 50);
+    const leads = new Map<number, { id: number; statusId: number; updatedAt: number }>();
+    if (leadIds.length) {
+      const lr = await this.request<{ _embedded?: { leads?: { id: number; status_id?: number; updated_at?: number }[] } }>(
+        accountId,
+        'GET',
+        `/api/v4/leads?${leadIds.map((id) => `filter[id][]=${id}`).join('&')}&limit=50`,
+      );
+      for (const l of lr._embedded?.leads ?? []) leads.set(l.id, { id: l.id, statusId: Number(l.status_id ?? 0), updatedAt: Number(l.updated_at ?? 0) });
+    }
+    return matched.map((c) => ({
+      id: c.id,
+      name: c.name,
+      phones: c.phones,
+      updatedAt: c.updatedAt,
+      leads: c.leadIds.map((id) => leads.get(id)).filter((l): l is { id: number; statusId: number; updatedAt: number } => Boolean(l)),
+    }));
+  }
+
+  /** Открыта ли сделка по статусу (142 — успешно, 143 — закрыто). */
+  static isOpenLead(statusId: number): boolean {
+    return !LEAD_CLOSED_STATUSES.has(statusId);
   }
 
   /** Чаты API чатов, привязанные к контактам: id чата amo → id контакта. */

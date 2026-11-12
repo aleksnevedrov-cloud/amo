@@ -57,6 +57,7 @@ function restStub(over: Partial<Record<keyof AmoRest, unknown>> = {}): AmoRest {
     lead: async (_a: number, id: number) => ({ id, name: 'Дверь входная', price: 25000, responsibleUserId: MANAGER, statusId: 1, pipelineId: 1, fields: { 'Дата доставки': '15.11.2026' }, contactIds: [CONTACT] }),
     contact: async (_a: number, id: number) => ({ id, name: 'Иван Петров', phones: ['+7 (936) 147-23-24'], responsibleUserId: MANAGER }),
     contactChats: async () => [{ chatId: 'amo-chat-1', contactId: CONTACT }],
+    contactsByPhone: async () => [],
     contactLeads: async () => [{ id: LEAD, name: 'Дверь входная', price: 25000, statusId: 1, pipelineId: 1 }],
     userName: async (_a: number, id: number) => (id === MANAGER ? 'Мария Менеджер' : 'Админ'),
     userAmojoId: async () => 'amojo-user-7',
