@@ -18,13 +18,13 @@ export interface GreenApiCredentials {
   mediaUrl?: string;
 }
 
-/** Хосты GREEN-API по номеру инстанса: 1101xxxxxx → https://1101.api.green-api.com и https://1101.media.green-api.com. */
-export function greenApiHosts(idInstance: string, over: { apiUrl?: string; mediaUrl?: string } = {}): { api: string; media: string } {
-  const prefix = /^\d{4}/.exec(idInstance)?.[0];
-  return {
-    api: (over.apiUrl || (prefix ? `https://${prefix}.api.green-api.com` : 'https://api.green-api.com')).replace(/\/+$/, ''),
-    media: (over.mediaUrl || (prefix ? `https://${prefix}.media.green-api.com` : 'https://media.green-api.com')).replace(/\/+$/, ''),
-  };
+/** Хосты GREEN-API по умолчанию — как в личном кабинете для инстансов MAX (apiUrl = mediaUrl = https://api.green-api.com). */
+export const GREEN_API_DEFAULT_HOST = 'https://api.green-api.com';
+
+/** Хосты API: из ключей канала (apiUrl / mediaUrl из кабинета), иначе общий хост. По idInstance ничего не вычисляется. */
+export function greenApiHosts(_idInstance: string, over: { apiUrl?: string; mediaUrl?: string } = {}): { api: string; media: string } {
+  const api = (over.apiUrl || GREEN_API_DEFAULT_HOST).replace(/\/+$/, '');
+  return { api, media: (over.mediaUrl || over.apiUrl || GREEN_API_DEFAULT_HOST).replace(/\/+$/, '') };
 }
 
 export type InstanceState = 'notAuthorized' | 'authorized' | 'blocked' | 'starting' | 'suspended' | 'pendingPassword' | string;

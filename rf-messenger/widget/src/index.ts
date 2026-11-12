@@ -79,7 +79,7 @@ export type ChannelCreate =
   | { kind: 'telegram_bot'; token: string }
   | { kind: 'max'; token: string }
   | { kind: 'vk'; token: string; groupId: string }
-  | { kind: 'max_phone'; idInstance: string; apiTokenInstance: string }
+  | { kind: 'max_phone'; idInstance: string; apiTokenInstance: string; apiUrl?: string }
   | { kind: 'avito'; clientId: string; clientSecret: string; userId: string };
 
 export class MessengerApi {
@@ -257,7 +257,7 @@ function amojoBanner(a: StatusView['amojo']): string {
 }
 
 /** Формы подключения каналов по ключам: одна форма на тип, открывается плиткой. Ключи после сохранения не показываются. */
-export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: string; fields: { name: string; label: string; secret: boolean; placeholder?: string }[]; hint: string; done: string }[] = [
+export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: string; fields: { name: string; label: string; secret: boolean; placeholder?: string; optional?: boolean }[]; hint: string; done: string }[] = [
   {
     kind: 'telegram_bot',
     title: 'Telegram-бот',
@@ -281,8 +281,9 @@ export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: stri
     fields: [
       { name: 'idInstance', label: 'idInstance', secret: false, placeholder: 'idInstance из console.green-api.com' },
       { name: 'apiTokenInstance', label: 'apiTokenInstance', secret: true, placeholder: 'apiTokenInstance' },
+      { name: 'apiUrl', label: 'apiUrl (необязательно)', secret: false, placeholder: 'apiUrl из кабинета, по умолчанию https://api.green-api.com', optional: true },
     ],
-    hint: 'Инстанс MAX создаётся в console.green-api.com. После сохранения ключ не показывается; если инстанс ещё не вошёл в MAX — появится QR-код.',
+    hint: 'Инстанс MAX создаётся в console.green-api.com. apiUrl нужен только если в кабинете он отличается от https://api.green-api.com. После сохранения ключ не показывается; если инстанс ещё не вошёл в MAX — появится QR-код.',
     done: 'MAX по номеру подключён',
   },
   {
@@ -312,7 +313,7 @@ export const KEY_FORMS: { kind: ChannelCreate['kind']; title: string; note: stri
 
 function keyForm(f: (typeof KEY_FORMS)[number]): string {
   const inputs = f.fields
-    .map((x) => `<input type="${x.secret ? 'password' : 'text'}" name="${x.name}" autocomplete="off" placeholder="${esc(x.placeholder ?? x.label)}" required aria-label="${esc(x.label)}">`)
+    .map((x) => `<input type="${x.secret ? 'password' : 'text'}" name="${x.name}" autocomplete="off" placeholder="${esc(x.placeholder ?? x.label)}"${x.optional ? '' : ' required'} aria-label="${esc(x.label)}">`)
     .join('\n  ');
   return `<form data-rfm="add-key" data-kind="${f.kind}" class="rfm-form" style="display:none">
   ${inputs}
@@ -513,9 +514,11 @@ export async function mountSettings(el: HTMLElement, api: MessengerApi, w: Windo
     const body: Record<string, string> = { kind: def.kind };
     for (const f of def.fields) {
       const input = form.elements.namedItem(f.name) as HTMLInputElement;
-      body[f.name] = input.value.trim();
+      const value = input.value.trim();
       // Ключи не остаются в поле после отправки.
       if (f.secret) input.value = '';
+      if (f.optional && !value) continue;
+      body[f.name] = value;
     }
     if (def.kind === 'max_phone') {
       stopPoll();

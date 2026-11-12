@@ -38,6 +38,13 @@ export const createChannelSchema = z.discriminatedUnion('kind', [
     kind: z.literal('max_phone'),
     idInstance: z.string().trim().regex(/^\d{6,12}$/, 'idInstance — число из личного кабинета GREEN-API'),
     apiTokenInstance: z.string().trim().regex(/^[A-Za-z0-9]{20,80}$/, 'apiTokenInstance — ключ из личного кабинета GREEN-API'),
+    /** apiUrl из кабинета; пусто — https://api.green-api.com. Только https и домен green-api.com. */
+    apiUrl: z
+      .string()
+      .trim()
+      .max(200)
+      .optional()
+      .refine((v) => !v || /^https:\/\/([a-z0-9-]+\.)*green-api\.com\/?$/i.test(v), 'apiUrl должен быть вида https://api.green-api.com или https://NNNN.api.green-api.com'),
     title: z.string().trim().max(100).optional(),
   }),
   z.object({
@@ -93,7 +100,7 @@ export async function validateChannel(input: CreateChannelInput, opts: { fetch?:
 
   if (input.kind === 'max_phone') {
     try {
-      const api = new GreenApi({ idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance }, net);
+      const api = new GreenApi({ idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance, ...(input.apiUrl ? { apiUrl: input.apiUrl } : {}) }, net);
       const { stateInstance } = await api.getStateInstance();
       const acc = stateInstance === 'authorized' ? await api.getAccountSettings().catch(() => null) : null;
       const phone = acc?.phone ? `+${String(acc.phone).replace(/\D/g, '')}` : null;
@@ -102,7 +109,7 @@ export async function validateChannel(input: CreateChannelInput, opts: { fetch?:
         title: input.title || (phone ? `MAX ${phone}` : `MAX (GREEN-API ${input.idInstance}, ожидает QR)`),
         externalId: phone ?? `ga-${input.idInstance}`,
         // Секрет вебхука уходит в GREEN-API как webhookUrlToken и сверяется с заголовком Authorization.
-        credentials: { idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance, webhookSecret: randomBytes(24).toString('hex') },
+        credentials: { idInstance: input.idInstance, apiTokenInstance: input.apiTokenInstance, ...(input.apiUrl ? { apiUrl: input.apiUrl } : {}), webhookSecret: randomBytes(24).toString('hex') },
       };
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403 || err.status === 404 || err.status === 400)) {

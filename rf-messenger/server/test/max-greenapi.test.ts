@@ -83,8 +83,10 @@ describe('GREEN-API (MAX по номеру): разбор уведомлений
   });
 
   it('хосты по idInstance, настройки инстанса и токен вебхука', () => {
-    expect(greenApiHosts('1101000001')).toEqual({ api: 'https://1101.api.green-api.com', media: 'https://1101.media.green-api.com' });
-    expect(greenApiHosts('1101000001', { apiUrl: 'https://custom.example/' }).api).toBe('https://custom.example');
+    // Как в кабинете GREEN-API для MAX: apiUrl = mediaUrl = https://api.green-api.com; по idInstance ничего не вычисляется.
+    expect(greenApiHosts('310022797820')).toEqual({ api: 'https://api.green-api.com', media: 'https://api.green-api.com' });
+    expect(greenApiHosts('310022797820', { apiUrl: 'https://7103.api.green-api.com/' })).toEqual({ api: 'https://7103.api.green-api.com', media: 'https://7103.api.green-api.com' });
+    expect(greenApiHosts('1', { apiUrl: 'https://a.green-api.com', mediaUrl: 'https://m.green-api.com' }).media).toBe('https://m.green-api.com');
     const d = desiredSettings('https://chat.example.ru/hooks/greenapi/5', 'secret1');
     expect(d).toMatchObject({ webhookUrl: 'https://chat.example.ru/hooks/greenapi/5', webhookUrlToken: 'Bearer secret1', incomingWebhook: 'yes', outgoingMessageWebhook: 'yes', outgoingAPIMessageWebhook: 'no', outgoingWebhook: 'yes', stateWebhook: 'yes' });
     expect(settingsDiffer({ ...d, delaySendMessagesMilliseconds: 1000 }, d)).toBe(false);
@@ -122,10 +124,10 @@ describe('GREEN-API: подключение, QR, отправка', () => {
     const c = new MaxGreenApiConnector(CREDS, { ...deps(), fetch: gaFetch(calls, () => ({ idMessage: '1763115112345' })) });
     const r = await c.send({ externalChatId: '10000000', text: 'Цена 15 000 ₽', file: null, replyToExternalId: '116' });
     expect(r.externalMessageId).toBe('1763115112345');
-    expect(calls[0]!.url).toBe(`https://1101.api.green-api.com/waInstance1101000001/sendMessage/${CREDS.apiTokenInstance}`);
+    expect(calls[0]!.url).toBe(`https://api.green-api.com/waInstance1101000001/sendMessage/${CREDS.apiTokenInstance}`);
     expect(calls[0]!.body).toEqual({ chatId: '10000000', message: 'Цена 15 000 ₽', quotedMessageId: '116' });
     await c.send({ externalChatId: '10000000', text: 'Фото', file: { data: Buffer.from('jpg'), name: 'a.jpg', mime: 'image/jpeg', kind: 'picture' }, replyToExternalId: null });
-    expect(calls[1]!.url).toContain('https://1101.media.green-api.com/waInstance1101000001/sendFileByUpload/');
+    expect(calls[1]!.url).toContain('https://api.green-api.com/waInstance1101000001/sendFileByUpload/');
     expect(calls[1]!.body).toMatchObject({ chatId: '10000000', fileName: 'a.jpg', caption: 'Фото' });
 
     const bad = new MaxGreenApiConnector(CREDS, { ...deps(), fetch: gaFetch([], () => new Response('{"message":"Your account is suspended"}', { status: 403 })), retry: { sleep: noSleep } });
@@ -256,6 +258,14 @@ describe('GREEN-API: подключение, QR, отправка', () => {
     expect(fresh.title).toContain('ожидает QR');
     expect(fresh.externalId).toBe('ga-1101000001');
     await expect(validateChannel({ kind: 'max_phone', ...CREDS }, { fetch: gaFetch([], () => new Response('{}', { status: 401 })) })).rejects.toThrow('GREEN-API не принял idInstance или apiTokenInstance');
+    // Необязательный apiUrl из кабинета сохраняется в ключах и используется в запросах; чужой домен не принимается.
+    const urls: string[] = [];
+    const withHost = await validateChannel({ kind: 'max_phone', ...CREDS, apiUrl: 'https://7103.api.green-api.com' }, { fetch: gaFetch([], (_m, _b, u) => (urls.push(u.origin), { stateInstance: 'notAuthorized' })) });
+    expect(withHost.credentials.apiUrl).toBe('https://7103.api.green-api.com');
+    expect(urls[0]).toBe('https://7103.api.green-api.com');
+    const { createChannelSchema } = await import('../src/channels.ts');
+    expect(createChannelSchema.safeParse({ kind: 'max_phone', ...CREDS, apiUrl: 'https://evil.example' }).success).toBe(false);
+    expect(createChannelSchema.safeParse({ kind: 'max_phone', ...CREDS, apiUrl: '' }).success).toBe(true);
   });
 });
 
