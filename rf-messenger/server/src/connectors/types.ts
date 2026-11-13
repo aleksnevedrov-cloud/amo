@@ -71,7 +71,7 @@ export interface Connector {
   /** Канал удалён: отвязать сессию у мессенджера (WhatsApp — «Связанные устройства»). */
   logout?(): Promise<void>;
   /**
-   * История переписки из мессенджера (WhatsApp, Telegram личный): до limit сообщений старше before
+   * История переписки из мессенджера (WhatsApp, Telegram личный, MAX по номеру): до limit сообщений старше before
    * (или последних, если before нет), от старых к новым. Загруженные сообщения в amoCRM не передаются.
    */
   history?(externalChatId: string, limit: number, before: HistoryCursor | null): Promise<InboundEvent[]>;

@@ -1,6 +1,6 @@
 import { ApiError, fileForm, HttpClient, pause, type HttpOptions } from './http.ts';
 import { splitText } from './telegram-bot.ts';
-import { PermanentSendError, reconnectDelayMs, type Connector, type ConnectorSink, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
+import { PermanentSendError, reconnectDelayMs, type Connector, type ConnectorSink, type HistoryCursor, type InboundAttachment, type InboundEvent, type OutboundRequest } from './types.ts';
 
 /**
  * MAX по номеру телефона через GREEN-API (API MAX, v3): инстанс GREEN-API привязан к номеру телефона
@@ -91,6 +91,10 @@ export class GreenApi {
   sendFileByUpload(chatId: string, data: Buffer, fileName: string, mime: string, caption: string, quotedMessageId?: string | null): Promise<{ idMessage: string }> {
     const form = fileForm('file', data, fileName, mime, { chatId, fileName, ...(caption ? { caption } : {}), ...(quotedMessageId ? { quotedMessageId } : {}) });
     return this.call('sendFileByUpload', form, { media: true, timeoutMs: 180_000 });
+  }
+  /** Последние count сообщений чата (MAX отдаёт до 5000 сообщений за 3 месяца). */
+  getChatHistory(chatId: string, count: number): Promise<unknown[]> {
+    return this.call('getChatHistory', { chatId, count }, { timeoutMs: 60_000 });
   }
   sendTyping(chatId: string): Promise<unknown> {
     return this.call('sendTyping', { chatId, typingTime: 3000 }, { timeoutMs: 10_000 });
@@ -219,6 +223,41 @@ export function normalizeGreenNotification(body: any): GreenNotification {
       fromMe,
     },
   };
+}
+
+/**
+ * Сообщение из getChatHistory → тот же вид, что у уведомления, и общий разбор.
+ * В истории и исходящие через наш API (sendByApi) — это ответы менеджеров из amoCRM; повтор отсеет база по id.
+ */
+export function normalizeGreenHistoryItem(m: any): InboundEvent | null {
+  if (!m || typeof m !== 'object') return null;
+  const quoted = typeof m.quotedMessage?.stanzaId === 'string' ? m.quotedMessage.stanzaId : undefined;
+  const text = String(m.textMessage ?? m.extendedTextMessage?.text ?? '');
+  const body = {
+    typeWebhook: m.type === 'outgoing' ? 'outgoingMessageReceived' : 'incomingMessageReceived',
+    idMessage: m.idMessage,
+    timestamp: m.timestamp,
+    senderData: {
+      chatId: m.chatId,
+      chatType: m.chatType,
+      chatName: m.chatName ?? '',
+      sender: m.senderId ?? '',
+      senderName: m.senderName ?? '',
+      senderContactName: m.senderContactName ?? '',
+      senderPhoneNumber: m.senderPhoneNumber,
+    },
+    messageData: {
+      typeMessage: m.typeMessage,
+      textMessageData: { textMessage: text },
+      extendedTextMessageData: { text, ...(quoted ? { stanzaId: quoted } : {}) },
+      fileMessageData: { downloadUrl: m.downloadUrl, caption: m.caption ?? '', fileName: m.fileName ?? '', mimeType: m.mimeType ?? '' },
+      locationMessageData: m.location ?? m.locationMessageData ?? {},
+      contactMessageData: m.contact ?? m.contactMessageData ?? {},
+      ...(quoted ? { quotedMessage: { stanzaId: quoted } } : {}),
+    },
+  };
+  const r = normalizeGreenNotification(body);
+  return r.kind === 'message' ? r.event : null;
 }
 
 /** Состояние инстанса → статус канала и текст для виджета. */
@@ -464,6 +503,25 @@ export class MaxGreenApiConnector implements Connector {
 
   download(ref: string, maxBytes: number): Promise<{ data: Buffer; mime: string }> {
     return this.api.http.download(ref, maxBytes);
+  }
+
+  /**
+   * История чата: GREEN-API отдаёт только последние N сообщений, без «старше чем», поэтому берём с запасом
+   * и отсекаем то, что не старше уже известного сообщения. Результат — от старых к новым, не больше limit.
+   */
+  async history(externalChatId: string, limit: number, before: HistoryCursor | null): Promise<InboundEvent[]> {
+    const count = Math.min(5000, before ? limit + 500 : limit);
+    const raw = await this.api.getChatHistory(externalChatId, count);
+    const seen = new Set<string>();
+    const out: InboundEvent[] = [];
+    for (const item of Array.isArray(raw) ? raw : []) {
+      const ev = normalizeGreenHistoryItem(item);
+      if (!ev || ev.externalChatId !== externalChatId || seen.has(ev.externalMessageId)) continue;
+      if (before && (ev.timestamp > before.timestamp || ev.externalMessageId === before.externalMessageId)) continue;
+      seen.add(ev.externalMessageId);
+      out.push(ev);
+    }
+    return out.sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   /** «Написать первым»: checkAccount по номеру → chatId. null — на номере нет MAX. */

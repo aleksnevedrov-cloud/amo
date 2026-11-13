@@ -7,7 +7,7 @@ import { buildApp } from '../src/api/app.ts';
 import { Bridge } from '../src/bridge.ts';
 import { validateChannel } from '../src/channels.ts';
 import { greenApiWebhookUrl } from '../src/connectors/host.ts';
-import { channelStatusOf, desiredSettings, greenApiHosts, MaxGreenApiConnector, normalizeGreenNotification, settingsDiffer, webhookTokenMatches } from '../src/connectors/max-greenapi.ts';
+import { channelStatusOf, desiredSettings, greenApiHosts, MaxGreenApiConnector, normalizeGreenHistoryItem, normalizeGreenNotification, settingsDiffer, webhookTokenMatches } from '../src/connectors/max-greenapi.ts';
 import { PermanentSendError, type ConnectorSink, type InboundEvent } from '../src/connectors/types.ts';
 import { ACCOUNT, CLIENT_ID, CLIENT_SECRET, event, FakeConnector, setupBridge, TEST_REDIS_URL } from './helpers.ts';
 
@@ -249,6 +249,26 @@ describe('GREEN-API: подключение, QR, отправка', () => {
     await expect(c.resolvePhone('+4915112345678')).rejects.toThrow(/только номера РФ/);
   });
 
+  it('история чата: getChatHistory → сообщения от старых к новым; «старше известного» отсекается; чужие чаты и реакции — мимо', async () => {
+    const item = (id: string, ts: number, over: Record<string, unknown> = {}) => ({ type: 'incoming', idMessage: id, timestamp: ts, typeMessage: 'textMessage', chatId: '10000000', chatType: 'user', senderId: '10000000', senderName: 'Иван', textMessage: `т${id}`, ...over });
+    expect(normalizeGreenHistoryItem(item('1', 100))).toMatchObject({ externalChatId: '10000000', externalMessageId: '1', text: 'т1', fromMe: false, timestamp: 100 });
+    expect(normalizeGreenHistoryItem(item('2', 101, { type: 'outgoing', sendByApi: true }))).toMatchObject({ fromMe: true, text: 'т2' });
+    expect(normalizeGreenHistoryItem(item('3', 102, { typeMessage: 'imageMessage', textMessage: undefined, caption: 'Фото', downloadUrl: 'https://sw-media-1101.storage.yandexcloud.net/a.jpg', mimeType: 'image/jpeg' }))).toMatchObject({ text: 'Фото', attachment: { kind: 'picture', mime: 'image/jpeg' } });
+    expect(normalizeGreenHistoryItem(item('4', 103, { typeMessage: 'extendedTextMessage', textMessage: undefined, extendedTextMessage: { text: 'ссылка' }, quotedMessage: { stanzaId: '2' } }))).toMatchObject({ text: 'ссылка', replyToExternalId: '2' });
+    expect(normalizeGreenHistoryItem(item('5', 104, { typeMessage: 'reactionMessage' }))).toBeNull();
+
+    const calls: Call[] = [];
+    const list = [item('9', 109), item('8', 108), item('7', 107, { type: 'outgoing' }), item('6', 106), item('x', 105, { chatId: '20000000' }), item('5', 104, { typeMessage: 'reactionMessage' })];
+    const c = new MaxGreenApiConnector(CREDS, { ...deps(), fetch: gaFetch(calls, () => list) });
+    const last = await c.history('10000000', 2, null);
+    expect(calls[0]!.url).toBe(`https://api.green-api.com/waInstance1101000001/getChatHistory/${CREDS.apiTokenInstance}`);
+    expect(calls[0]!.body).toEqual({ chatId: '10000000', count: 2 });
+    expect(last.map((e) => e.externalMessageId)).toEqual(['8', '9']);
+    const older = await c.history('10000000', 10, { externalMessageId: '8', timestamp: 108, fromMe: false });
+    expect(calls[1]!.body).toEqual({ chatId: '10000000', count: 510 });
+    expect(older.map((e) => [e.externalMessageId, e.fromMe])).toEqual([['6', false], ['7', true]]);
+  });
+
   it('подключение из виджета: проверка инстанса; авторизованный — сразу номер в названии', async () => {
     const authorized = gaFetch([], (m) => (m === 'getStateInstance' ? { stateInstance: 'authorized' } : { phone: '79099724272' }));
     const v = await validateChannel({ kind: 'max_phone', ...CREDS }, { fetch: authorized });
@@ -335,6 +355,14 @@ describe('GREEN-API: маршрут вебхука и лимит первых с
     }
     expect(connector.sent).toHaveLength(25);
     expect(await t.store.recentChats(ACCOUNT, t.channel.id, 100)).toHaveLength(25);
+    expect(t.queue.jobs.filter((j) => j.name === 'history')).toHaveLength(0); // у FakeConnector нет истории
+    // Канал с историей: новый чат из «Написать» → задача подгрузки прежней переписки, повторное «Написать» — без неё.
+    (connector as FakeConnector & { history?: unknown }).history = async () => [];
+    connector.phones.set('+79360009999', '19999');
+    const r = await bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone: '+79360009999', text: 'Добрый день' });
+    expect(t.queue.jobs.filter((j) => j.name === 'history').map((j) => j.data.chatId)).toEqual([r.chatId]);
+    await bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone: '+79360009999', text: 'Ещё' });
+    expect(t.queue.jobs.filter((j) => j.name === 'history')).toHaveLength(1);
     // Чат, где клиент уже писал, продолжается без создания второго.
     await bridge.onInbound(t.channel, connector, event({ externalChatId: '42', contact: { phone: '+79361472324' } }));
     await expect(bridge.startChat({ accountId: ACCOUNT, userId: 5, channelId: t.channel.id, contactId: 1, phone: '+79361472324', text: 'ок' })).resolves.toBeTruthy();

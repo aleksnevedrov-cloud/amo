@@ -199,7 +199,7 @@ export class Bridge {
       replyToExternalId: ev.replyToExternalId,
     });
     if (!msg) return; // повтор события
-    // Первое сообщение нового чата: подгрузить историю из мессенджера (WhatsApp, Telegram личный).
+    // Первое сообщение нового чата: подгрузить историю из мессенджера (WhatsApp, Telegram личный, MAX по номеру).
     if ((chat as Chat & { inserted?: boolean }).inserted && connector.history) {
       await this.d.queue.add('history', { messageId: 0, chatId: chat.id }, { jobId: `history-${chat.id}-first` }).catch(() => undefined);
     }
@@ -552,6 +552,10 @@ export class Bridge {
       // Клиенту уже ушло: в amo догонит очередь.
       this.d.log.warn({ messageId: msg.id, err: (err as Error).message }, 'первое сообщение не передано в amo сразу');
       await this.d.queue.add('to-amo', { messageId: msg.id }, { jobId: `to-amo-${msg.id}` });
+    }
+    // Новый чат из «Написать»: подгрузить прежнюю переписку из мессенджера, как для чата, начатого клиентом.
+    if ((chat as Chat & { inserted?: boolean }).inserted && connector.history) {
+      await this.d.queue.add('history', { messageId: 0, chatId: chat.id }, { jobId: `history-${chat.id}-first` }).catch(() => undefined);
     }
     return { chatId: chat.id, messageId: msg.id };
   }

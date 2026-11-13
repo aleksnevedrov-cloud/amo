@@ -118,7 +118,7 @@ export function chatView(c: Chat, ch: Channel | undefined, s: { last: Message | 
     pinned: c.pinned,
     lastAt: (s?.last?.createdAt ?? c.lastMessageAt).toISOString(),
     last: s?.last ? { text: s.last.text, kind: s.last.kind, direction: s.last.direction, fileName: s.last.fileId ? s.last.kind : null } : null,
-    historyAvailable: ch?.kind === 'whatsapp' || ch?.kind === 'telegram_user',
+    historyAvailable: ch?.kind === 'whatsapp' || ch?.kind === 'telegram_user' || ch?.kind === 'max_phone',
   };
 }
 
