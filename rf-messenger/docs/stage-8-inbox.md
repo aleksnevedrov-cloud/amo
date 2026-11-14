@@ -57,3 +57,13 @@ curl -s -o /dev/null -w "%{http_code}\n" https://chat.rf-dveri.ru/inbox/v1/count
 
 Откат: `git checkout 6dd09bd && docker compose build api connectors && docker compose up -d api connectors`;
 колонки миграции 006 старому коду не мешают, удалять не нужно. Виджет — загрузить предыдущий `widget.zip`.
+
+## Дополнение: кнопка «Сохранить» в окне настроек
+
+`placeSaveButton` (`widget/src/index.ts`) вызывается из `settings()` и переносит **штатный** элемент amoCRM
+`.js-widget-save` в правый верхний угол окна: под «Редактировать» (та же ширина, отступ 8 px), без неё — на её место
+(`top:16px; right:24px`). Кнопка не подменяется: обработчики amo и состояние активна/неактивна сохраняются; для
+`type=submit` вне формы выставляется атрибут `form`. Пустая строка `.widget_settings_block__controls` скрывается,
+описание и баннеры поднимаются. Если разметка не распознана — кнопка остаётся на месте. Тест: `widget/test/widget.test.ts`
+(«кнопка «Сохранить» в окне настроек»). Скриншоты: `11-settings-save-before.png`, `12-settings-save-after.png`,
+`13-settings-save-no-edit.png`. Серверная часть не менялась — достаточно загрузить новый `widget.zip`.

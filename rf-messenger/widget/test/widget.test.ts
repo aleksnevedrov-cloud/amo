@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { amojoAccountId, cardContext, MessengerApi, mountSettings, openComposer, renderComposer, renderHtml, type AmoWidgetSelf, type StatusView } from '../src/index.ts';
+import { amojoAccountId, cardContext, MessengerApi, mountSettings, openComposer, placeSaveButton, renderComposer, renderHtml, type AmoWidgetSelf, type StatusView } from '../src/index.ts';
 
 const status: StatusView = {
   amojo: { configured: true, connected: false },
@@ -264,5 +264,50 @@ describe('MAX по номеру (GREEN-API)', () => {
     });
     expect(html).toContain('Ждёт QR');
     expect(html).toContain('data-rfm="qr" data-id="9" data-kind="max_phone"');
+  });
+});
+
+describe('кнопка «Сохранить» в окне настроек', () => {
+  const modal = (withEdit: boolean) => {
+    document.body.innerHTML = `<div class="modal"><div class="modal-body">
+<div class="widget-settings__desc-space"><div class="tabs">Описание · Ключи и доступы · Выданные доступы</div>${withEdit ? '<button type="button" class="js-widget-edit button-input" style="width:140px">Редактировать</button>' : ''}</div>
+<form class="widget_settings_block"><div class="widget_settings_block__descr">Канал чатов мессенджеров РФ-Двери</div>
+<div class="widget_settings_block__controls"><button type="submit" class="button-input button-input_blue js-widget-save button-input-disabled">Сохранить</button></div></form>
+</div></div>`;
+    return document.querySelector<HTMLElement>('.widget_settings_block')!;
+  };
+
+  it('переносится под «Редактировать»: та же ширина, отступ 8 px, строка кнопки скрыта, состояние и форма сохранены', () => {
+    const block = modal(true);
+    const edit = document.querySelector<HTMLElement>('.js-widget-edit')!;
+    Object.defineProperty(edit, 'offsetWidth', { value: 140 });
+    expect(placeSaveButton(block)).toBe(true);
+    const save = document.querySelector<HTMLButtonElement>('.js-widget-save')!;
+    const holder = save.parentElement!;
+    expect(holder.className).toBe('rfm-save-holder');
+    expect(edit.nextElementSibling).toBe(holder);
+    expect(edit.parentElement!.className).toBe('rfm-save-col');
+    expect(holder.style.marginTop).toBe('8px');
+    expect(holder.style.width).toBe('140px');
+    expect(save.style.width).toBe('100%');
+    expect(save.classList.contains('button-input-disabled')).toBe(true);
+    expect(save.getAttribute('form')).toBe(block.id);
+    expect(block.id).not.toBe('');
+    expect(document.querySelector<HTMLElement>('.widget_settings_block__controls')!.style.display).toBe('none');
+    // Повторный вызов ничего не дублирует.
+    expect(placeSaveButton(block)).toBe(true);
+    expect(document.querySelectorAll('.rfm-save-holder')).toHaveLength(1);
+  });
+
+  it('без «Редактировать» встаёт в правый верхний угол; без штатной кнопки — ничего не трогает', () => {
+    const block = modal(false);
+    expect(placeSaveButton(block)).toBe(true);
+    const holder = document.querySelector<HTMLElement>('.rfm-save-holder')!;
+    expect(holder.style.position).toBe('absolute');
+    expect(holder.style.right).toBe('24px');
+    expect(holder.parentElement!.className).toBe('widget-settings__desc-space');
+    expect(holder.querySelector('.js-widget-save')).not.toBeNull();
+    document.body.innerHTML = '<div class="widget_settings_block"></div>';
+    expect(placeSaveButton(document.querySelector<HTMLElement>('.widget_settings_block')!)).toBe(false);
   });
 });

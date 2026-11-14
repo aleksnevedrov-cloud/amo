@@ -700,6 +700,88 @@ export async function openComposer(api: MessengerApi, ctx: { leadId?: number; co
 
 type Callbacks = Record<string, (...args: unknown[]) => unknown>;
 
+/** Селекторы штатной кнопки «Сохранить» и кнопки «Редактировать» в окне настроек amoCRM. */
+export const SAVE_BUTTON_SELECTORS = ['.js-widget-save', '.widget_settings_block__controls button', '.widget_settings_block__controls input[type=submit]', '.widget_settings_block__controls .button-input'];
+export const EDIT_BUTTON_SELECTORS = ['.js-widget-edit', '.widget-settings__edit-button', '.js-integration-edit', '[data-action="edit"]'];
+
+const visible = (el: HTMLElement) => !(el.hidden || el.style.display === 'none');
+
+function findEditButton(root: ParentNode): HTMLElement | null {
+  for (const sel of EDIT_BUTTON_SELECTORS) {
+    const el = root.querySelector<HTMLElement>(sel);
+    if (el) return el;
+  }
+  // Запасной вариант — по надписи.
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('button, a.button-input, .button-input'))) {
+    if (/^\s*Редактировать\s*$/i.test(el.textContent ?? '')) return el;
+  }
+  return null;
+}
+
+/**
+ * Переносит штатную кнопку «Сохранить» amoCRM в правый верхний угол окна настроек: под «Редактировать»
+ * (тот же правый край и ширина, отступ 8 px), а если её нет — на её место. Сам элемент не подменяется:
+ * обработчики amo, активное/неактивное состояние и отправка формы работают как раньше.
+ * Возвращает false, если кнопка не найдена (тогда ничего не трогаем).
+ */
+export function placeSaveButton(block: HTMLElement, doc: Document = document): boolean {
+  const root = block.closest<HTMLElement>('.modal-body, .modal, .widget-settings, .widget_settings_block__wrap') ?? doc.body;
+  if (root.querySelector('.rfm-save-holder')) return true;
+  let save: HTMLElement | null = null;
+  for (const sel of SAVE_BUTTON_SELECTORS) {
+    save = root.querySelector<HTMLElement>(sel);
+    if (save) break;
+  }
+  if (!save) return false;
+  const controls = save.closest<HTMLElement>('.widget_settings_block__controls') ?? (save.parentElement === block ? null : save.parentElement);
+  const form = save.closest('form');
+  const holder = doc.createElement('div');
+  holder.className = 'rfm-save-holder';
+  holder.style.cssText = 'display:flex;justify-content:flex-end;box-sizing:border-box';
+
+  const edit = findEditButton(root);
+  if (edit && edit.parentElement) {
+    const cs = doc.defaultView?.getComputedStyle(edit);
+    const width = edit.offsetWidth || edit.getBoundingClientRect().width;
+    if (cs && (cs.position === 'absolute' || cs.position === 'fixed')) {
+      // Кнопка «Редактировать» позиционирована абсолютно — встаём под неё по тем же координатам.
+      edit.insertAdjacentElement('afterend', holder);
+      holder.style.position = cs.position;
+      holder.style.right = cs.right;
+      holder.style.top = `${edit.offsetTop + edit.offsetHeight + 8}px`;
+    } else {
+      // Обычный поток: колонка «Редактировать» + «Сохранить» на месте кнопки «Редактировать».
+      const col = doc.createElement('div');
+      col.className = 'rfm-save-col';
+      col.style.cssText = `display:inline-flex;flex-direction:column;align-items:stretch;vertical-align:top;margin-left:auto;${cs?.float && cs.float !== 'none' ? `float:${cs.float};` : ''}`;
+      edit.insertAdjacentElement('beforebegin', col);
+      col.append(edit, holder);
+      holder.style.marginTop = '8px';
+    }
+    if (width) holder.style.width = `${width}px`;
+  } else {
+    // «Редактировать» нет (открыл не владелец интеграции): правый верхний угол окна.
+    const anchor = root.querySelector<HTMLElement>('.widget-settings__desc-space, .modal-body__inner, .widget_settings_block__descr') ?? root;
+    if (doc.defaultView && doc.defaultView.getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
+    anchor.insertAdjacentElement('afterbegin', holder);
+    holder.style.position = 'absolute';
+    holder.style.top = '16px';
+    holder.style.right = '24px';
+  }
+  // Кнопка типа submit должна остаться привязанной к своей форме и вне её.
+  if (form && !holder.closest('form')) {
+    if (!form.id) form.id = 'rfm-settings-form';
+    save.setAttribute('form', form.id);
+  }
+  holder.appendChild(save);
+  save.style.width = '100%';
+  save.style.boxSizing = 'border-box';
+  save.style.margin = '0';
+  // Освободившуюся строку убираем, чтобы описание и баннеры поднялись.
+  if (controls && controls !== block && !Array.from(controls.children).some((c) => visible(c as HTMLElement))) controls.style.display = 'none';
+  return true;
+}
+
 /** Код раздела левого меню (manifest.json → left_menu). */
 export const INBOX_MENU_CODE = 'rfm_inbox';
 export const INBOX_CSS_HOST = 'rfm-inbox-host';
@@ -815,8 +897,13 @@ export function createCallbacks(self: AmoWidgetSelf, apiUrl: string = __API_URL_
     }),
     settings: safe((...args: unknown[]) => {
       const modal = args[0] as { find?: (sel: string) => { get?: (i: number) => Element | undefined } } | undefined;
-      const block = modal?.find?.('.widget_settings_block')?.get?.(0);
+      const block = modal?.find?.('.widget_settings_block')?.get?.(0) as HTMLElement | undefined;
       if (!block) return;
+      try {
+        placeSaveButton(block);
+      } catch {
+        // Разметка amo изменилась — кнопка остаётся на штатном месте.
+      }
       const host = document.createElement('div');
       block.appendChild(host);
       bindTemplates();
